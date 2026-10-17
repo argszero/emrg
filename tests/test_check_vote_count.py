@@ -117,15 +117,11 @@ def _pinned_cycle_records(mod, tmp_path, monkeypatch):
     the reading host's time zone — a verdict that is green here and red anywhere else,
     which is the defect class this whole family of guards exists to catch. An empty
     directory narrows the window to the *voting cycle's own start*: a fact of the
-    fixture, not of the host. A test that wants the wider window writes the previous
-    cycle's record into a directory it names (`--cycles-log`). The environment override
-    is cleared for the same reason — it would otherwise reach the reading too.
+    fixture, not of the host. A test that needs a *later* cycle's record — the window's
+    far bound — writes it into a directory it names (`--cycles-log`). The environment
+    override is cleared for the same reason — it would otherwise reach the reading too.
     """
     monkeypatch.delenv("EMRG_CYCLES_LOG", raising=False)
-    # The dispatch corpus is the window's other half and has its own override, honoured
-    # ahead of the records' sibling: left set on a host that names one, every test below
-    # would resolve its boundary from that corpus instead of the one it wrote.
-    monkeypatch.delenv("EMRG_SESSIONS_DIR", raising=False)
     empty = tmp_path / "no-cycle-records"
     empty.mkdir()
     monkeypatch.setattr(mod.review_queue(), "DEFAULT_CYCLES_LOGS", (empty,))
@@ -2076,8 +2072,8 @@ def test_the_default_budget_asks_exactly_once(mod, monkeypatch, capsys):
 # --- who may cast a vote: the head's own window ----------------------------
 #
 # The clause `cast-vote.py` refuses to **post** on, read on the counting side (issue
-# #1408: "a cycle abstains on a head it pushed, and on the head pushed by the cycle
-# immediately before it"). The counter is the only instrument a cycle consults before
+# #1408: "a cycle abstains on a head it pushed", read against that cycle's own run).
+# The counter is the only instrument a cycle consults before
 # merging, so a vote that must not have been cast has to read as not counting - and a
 # vote posted straight with `gh pr review` (the form the template tells a Committer to
 # use) never passes the poster's refusal at all.
@@ -2127,7 +2123,7 @@ def test_a_vote_cast_inside_the_voting_cycles_own_window_does_not_count(
     out = capsys.readouterr().out
     assert rc == 1, out
     assert "SHORT 0/3" in out, out
-    assert "VOID cyc20260911-080000 - cast inside the window" in out, out
+    assert "VOID cyc20260911-080000 - cast inside the run this vote's cycle treats as its own" in out, out
 
     # (b) the same vote from a cycle that started after it: nothing else changed
     outside = FakeGh([_approve("cyc20260911-110000", vote_at)], push_time=pushed)
@@ -2135,7 +2131,7 @@ def test_a_vote_cast_inside_the_voting_cycles_own_window_does_not_count(
     out = capsys.readouterr().out
     assert rc == 0, out
     assert "READY 1/1" in out, out
-    assert "inside the window" not in out, out
+    assert "cast inside the run this vote's cycle treats as its own" not in out, out
 
 
 def test_a_vote_on_a_head_pushed_by_a_later_cycle_counts(mod, monkeypatch, capsys, tmp_path):
@@ -2163,7 +2159,7 @@ def test_a_vote_on_a_head_pushed_by_a_later_cycle_counts(mod, monkeypatch, capsy
     out = capsys.readouterr().out
     assert rc == 0, out
     assert "READY 1/1" in out, out
-    assert "inside the window" not in out, out
+    assert "cast inside the run this vote's cycle treats as its own" not in out, out
 
     # the control: the same vote, the same push, and a corpus that holds no later cycle —
     # so the span has no far bound to stop it, which is the reading #2334 corrects
@@ -2174,7 +2170,7 @@ def test_a_vote_on_a_head_pushed_by_a_later_cycle_counts(mod, monkeypatch, capsy
               ["1", "--min-votes", "1", "--cycles-log", str(empty)])
     out = capsys.readouterr().out
     assert rc == 1, out
-    assert "VOID cyc20260911-080000 - cast inside the window" in out, out
+    assert "VOID cyc20260911-080000 - cast inside the run this vote's cycle treats as its own" in out, out
 
 
 def test_a_vote_on_a_head_another_instance_pushed_inside_the_window_counts(
@@ -2203,7 +2199,7 @@ def test_a_vote_on_a_head_another_instance_pushed_inside_the_window_counts(
     rc = _run(mod, monkeypatch, mine)
     out = capsys.readouterr().out
     assert rc == 1, out
-    assert f"VOID {cycle} - cast inside the window" in out, out
+    assert f"VOID {cycle} - cast inside the run this vote's cycle treats as its own" in out, out
 
     # (b) the peer pushed it: the same instant is not this instance's own work
     theirs = FakeGh([_approve(cycle, vote_at)], push_time=pushed, pusher=OTHER_LOGIN)
@@ -2211,7 +2207,7 @@ def test_a_vote_on_a_head_another_instance_pushed_inside_the_window_counts(
     out = capsys.readouterr().out
     assert rc == 0, out
     assert "READY 1/1" in out, out
-    assert "inside the window" not in out, out
+    assert "cast inside the run this vote's cycle treats as its own" not in out, out
     # …and the line says *which* datum decided, because a reader who cannot see it
     # cannot tell an exemption the identity produced from the clock's ordinary answer,
     # and those two are corrected in opposite directions (the review on #1900 asked for
@@ -2224,7 +2220,7 @@ def test_a_vote_on_a_head_another_instance_pushed_inside_the_window_counts(
     rc = _run(mod, monkeypatch, unknown)
     out = capsys.readouterr().out
     assert rc == 1, out
-    assert f"VOID {cycle} - cast inside the window" in out, out
+    assert f"VOID {cycle} - cast inside the run this vote's cycle treats as its own" in out, out
 
     # (d) **this host's other login** - the hole the review on #1900 measured, on
     # 2026-10-08. A host can push under more than one account: GitHub attributes a push
@@ -2242,7 +2238,7 @@ def test_a_vote_on_a_head_another_instance_pushed_inside_the_window_counts(
     rc = _run(mod, monkeypatch, other_mine)
     out = capsys.readouterr().out
     assert rc == 1, f"arm (d), this host's second login: {out}"
-    assert f"VOID {cycle} - cast inside the window" in out, out
+    assert f"VOID {cycle} - cast inside the run this vote's cycle treats as its own" in out, out
 
     # (e) …and the same login stops being this host's once the remote names someone
     # else, which is the direction the exemption exists for. One input changes between
@@ -2253,7 +2249,7 @@ def test_a_vote_on_a_head_another_instance_pushed_inside_the_window_counts(
     out = capsys.readouterr().out
     assert rc == 0, f"arm (e), a stranger's remote: {out}"
     assert "READY 1/1" in out, out
-    assert "inside the window" not in out, out
+    assert "cast inside the run this vote's cycle treats as its own" not in out, out
 
 
 def test_a_remote_url_names_its_account_in_every_form_it_is_written(mod):
@@ -2397,160 +2393,12 @@ def test_no_family_parser_binds_a_long_option_by_prefix(name, argv, monkeypatch)
     assert caught.code == 2
 
 
-def test_the_previous_cycles_window_applies_too(mod, monkeypatch, capsys, tmp_path):
-    """The wider end of the same window: the cycle *before* this one is this cycle.
-
-    A head pushed while the previous cycle ran is that cycle's own, because every cycle
-    on a host is the same instance running again. The narrow reading (this cycle's own
-    start, which is all the test above needs) lets the vote through here, and the rule
-    does not - so the previous cycle's record is written into a directory the test names
-    (`--cycles-log`), where the reading is the fixture's and not the host's corpus.
-    """
-    corpus = tmp_path / "cycles"
-    corpus.mkdir()
-    (corpus / "cycle-20260911-090000.md").write_text("# a cycle record\n", encoding="utf-8")
-    argv = ["1", "--cycles-log", str(corpus)]
-    vote_at = _push(2026, 9, 11, 10, 30)
-
-    # (a) pushed at 09:30: after the previous cycle began, before this one did
-    wide = FakeGh(
-        [_approve("cyc20260911-100000", vote_at)], push_time=_push(2026, 9, 11, 9, 30)
-    )
-    rc = _run(mod, monkeypatch, wide, argv)
-    out = capsys.readouterr().out
-    assert rc == 1, out
-    assert "VOID cyc20260911-100000" in out, out
-    assert "cyc20260911-090000" in out, "the reason must name the window it applied"
-
-    # (b) the same corpus, the push moved before the previous cycle's start
-    narrow = FakeGh(
-        [_approve("cyc20260911-100000", vote_at)], push_time=_push(2026, 9, 11, 8, 30)
-    )
-    rc = _run(mod, monkeypatch, narrow, argv)
-    out = capsys.readouterr().out
-    assert "1/3 valid votes" in out, out
-    assert "inside the window" not in out, out
 
 
-def test_an_unreadable_corpus_does_not_credit_the_vote_the_readable_one_voids(
-    mod, monkeypatch, capsys, tmp_path
-):
-    """Issue #2275: two answers that render alike must not answer alike.
-
-    "no cycle record before this cycle in <dir>" is a **measurement** — the corpus was
-    listed and holds nothing earlier — and the narrower window that follows is the intended
-    reading (`_pinned_cycle_records` is that same state). A corpus that could not be listed
-    answers nothing, and the window falls back to the narrow one all the same; the vote below
-    is then *credited* where the readable corpus voids it. Measured 2026-10-15 on #2271 with
-    `EMRG_CYCLES_LOG=/nonexistent`: `2/3` with the vote `OK - counts`, against `1/3` and
-    `VOID` from the real corpus.
-
-    Both arms are the same vote, head and pusher, and differ only in whether the corpus can
-    be listed — so a counter that refused every window fails the second assertion and one
-    that never measured fails the third.
-    """
-    corpus = tmp_path / "cycles"
-    corpus.mkdir()
-    (corpus / "cycle-20260911-090000.md").write_text("# a cycle record\n", encoding="utf-8")
-    vote_at = _push(2026, 9, 11, 10, 30)
-    # Inside the previous cycle's start (09:00), before the voting cycle's (10:00) — the
-    # one shape where the wide and narrow windows disagree.
-    pushed = _push(2026, 9, 11, 9, 30)
-    gh = FakeGh([_approve("cyc20260911-100000", vote_at)], push_time=pushed)
-
-    # (a) the corpus that can be listed: the clause voids the vote
-    rc = _run(mod, monkeypatch, gh, ["1", "--cycles-log", str(corpus)])
-    out = capsys.readouterr().out
-    assert rc == 1, out
-    assert "SHORT 0/3" in out, out
-    assert "VOID cyc20260911-100000" in out, out
-    assert "cyc20260911-090000" in out, "the reason must name the window it applied"
-
-    # (b) the same vote, the same head, a corpus that cannot be listed at all: no boundary
-    #     was measured, so the narrow one may not stand in for it
-    rc = _run(mod, monkeypatch, gh, ["1", "--cycles-log", str(tmp_path / "gone")])
-    out = capsys.readouterr().out
-    assert rc == 1, out
-    assert "SHORT 0/3" in out, out
-    assert "OK   cyc20260911-100000" not in out, (
-        f"a vote was credited on a window nobody measured: {out}"
-    )
-    assert "could not be read" in out and "2275" in out, out
 
 
-def test_the_counter_reads_the_window_the_queue_reads(mod, monkeypatch, capsys, tmp_path):
-    """Issue #2218 at the counter: the same clause, resolved from **both** corpora.
-
-    `<repo>/.emrg/memory` holds a record for the cycle two back; the session histories
-    beside it record every *dispatch*. A cycle was dispatched between them and wrote no
-    record — it died before §4 — so the cycle immediately before this one is the
-    record-less one, and a head it did **not** push is votable. Read from the records
-    alone the boundary lands a whole cycle earlier and the vote below is voided; the
-    queue, which resolves from both corpora, calls the same head votable (issue #2218:
-    the records-only boundary is too early for 20 of the corpus's 350 records).
-
-    That difference is a count a cycle acts on before merging, so both ends are pinned
-    here: the same corpus with the push moved *into* the record-less cycle's own window
-    must still void it — a counter that stopped applying the clause would pass the first
-    half alone.
-    """
-    records = tmp_path / "records"
-    records.mkdir()
-    (records / "cycle-20260911-090000.md").write_text("# a cycle record\n", encoding="utf-8")
-    sessions = tmp_path / "sessions" / "emrg-evolution-emrg-task"
-    sessions.mkdir(parents=True)
-    (sessions / "history_260911.jsonl").write_text(
-        json.dumps({
-            "type": "message",
-            "role": "user",
-            "content": "## Evolution Cycle\n\nyou are cycle cyc20260911-093000 of x",
-            "timestamp": "2026-09-11T09:30:00",
-        }) + "\n",
-        encoding="utf-8",
-    )
-    vote = _approve("cyc20260911-100000", _push(2026, 9, 11, 10, 30))
-    argv = ["1", "--cycles-log", str(records)]
-
-    # (a) pushed at 09:15: after the record's cycle began, before the record-less one did
-    counted = FakeGh([vote], push_time=_push(2026, 9, 11, 9, 15))
-    _run(mod, monkeypatch, counted, argv)
-    out = capsys.readouterr().out
-    assert "1/3 valid votes" in out, out
-    assert "VOID" not in out, out
-    assert "inside the window" not in out, out
-
-    # (b) the control: 09:45 is the record-less cycle's own work, which *is* the cycle
-    # immediately before this one - the case the clause exists to protect.
-    inside = FakeGh([vote], push_time=_push(2026, 9, 11, 9, 45))
-    rc = _run(mod, monkeypatch, inside, argv)
-    out = capsys.readouterr().out
-    assert rc == 1, out
-    assert "VOID cyc20260911-100000" in out, out
-    assert "cyc20260911-093000" in out, "the reason must name the window it applied"
 
 
-def test_the_void_reason_names_the_window_it_inferred_and_its_blind_spot(mod, tmp_path):
-    """Issue #2214 at the counter: same clause, same reader, one more carrier.
-
-    This counter has no `--prev-cycle`, so every window it draws is *inferred* from the
-    records - the state the note describes is not an option here but the only case. It
-    matters because the output is a count a cycle acts on: a window too wide voids a vote
-    that stands and reports `0/3` where the clause's own boundary reports `1/3`, and the
-    merge decision follows the count. The instant is named so the width is inspectable
-    rather than taken on trust.
-    """
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    (corpus / "cycle-20260911-090000.md").write_text("x", encoding="utf-8")
-    counted, why = mod.own_head_window(
-        "cyc20260911-100000",
-        push_time=_push(2026, 9, 11, 9, 30),
-        push_time_exact=True,
-        cycles_log=str(corpus),
-    )
-    assert counted is True, why
-    assert "at or after 2026-09-11T09:00:00" in why, why
-    assert "issue #2214" in why, why
 
 
 def test_the_void_reason_does_not_claim_another_tools_refusal(mod, tmp_path):
@@ -2570,15 +2418,18 @@ def test_the_void_reason_does_not_claim_another_tools_refusal(mod, tmp_path):
     """
     corpus = tmp_path / "corpus"
     corpus.mkdir()
-    (corpus / "cycle-20260911-090000.md").write_text("x", encoding="utf-8")
+    # The record of the cycle that *follows* the voting one, so the span has a far end
+    # and the push below falls inside it: the clause's own text is what this arm is about,
+    # and a push outside the window would leave it unvoiced.
+    (corpus / "cycle-20260911-110000.md").write_text("x", encoding="utf-8")
     log = str(corpus)
-    inside = _push(2026, 9, 11, 9, 30)  # inside the window the cycle above opens
+    inside = _push(2026, 9, 11, 10, 30)  # inside the voting cycle's own run
 
     counted, why = mod.own_head_window(
         "cyc20260911-100000", push_time=inside, push_time_exact=True, cycles_log=log
     )
     assert counted is True, why
-    assert "cast inside the window" in why, why  # the clause is still named
+    assert "cast inside the run this vote's cycle treats as its own" in why, why  # the clause is still named
     assert "counts for nobody" in why, why  # …with this tool's verdict
     assert "refuses to post" not in why, why  # …and not another tool's action
 
@@ -2602,6 +2453,9 @@ def test_a_vote_by_another_instance_is_not_voided_by_this_hosts_window(
         was pushed …, at or after 2026-10-05T08:07:17+08:00 (previous cycle
         cyc20261005-080717)
 
+    (the wording then; the clause's own text now reads `cast inside the run this vote's
+    cycle treats as its own`, and the near bound is the voting cycle's own start)
+
     and `gh api repos/argszero/emrg/pulls/1851/reviews` attributes both to `pm25coder`,
     whose cycle measures its host as Windows - the cycles of another instance, on a
     host whose records are not the ones this counter reads. The window is drawn from
@@ -2622,7 +2476,7 @@ def test_a_vote_by_another_instance_is_not_voided_by_this_hosts_window(
     rc = _run(mod, monkeypatch, mine)
     out = capsys.readouterr().out
     assert rc == 1, out
-    assert f"VOID {cycle} - cast inside the window" in out, out
+    assert f"VOID {cycle} - cast inside the run this vote's cycle treats as its own" in out, out
 
     theirs = FakeGh(
         [_approve(cycle, vote_at, author=OTHER_LOGIN)], push_time=pushed
@@ -2631,7 +2485,7 @@ def test_a_vote_by_another_instance_is_not_voided_by_this_hosts_window(
     out = capsys.readouterr().out
     assert rc == 0, out
     assert "READY 1/1" in out, out
-    assert "inside the window" not in out, (
+    assert "cast inside the run this vote's cycle treats as its own" not in out, (
         "a vote by another instance is not this host's self-review, so the clause its "
         "window carries is not asked of it"
     )
@@ -2725,7 +2579,7 @@ def test_a_head_with_no_ci_run_leaves_the_clause_unapplied(mod, monkeypatch, cap
     out = capsys.readouterr().out
     assert rc == 1, out
     assert "BLOCKED 3/3 valid votes" in out, out
-    assert "inside the window" not in out, out
+    assert "cast inside the run this vote's cycle treats as its own" not in out, out
 
 
 def test_the_pusher_is_the_actor_of_the_run_whose_time_was_read(mod, monkeypatch):
@@ -2756,13 +2610,16 @@ def test_the_counter_voids_exactly_the_votes_cast_vote_refuses_to_post(mod, monk
     Sharing the machinery is not the claim; sharing the *verdict* is. If a later change
     reaches one tool and not the other, the hole re-opens on whichever side was left
     behind - a vote nobody may post, or a vote counted that its own poster refused. So
-    the same (cycle, head) pairs are put to both, and both ends of the boundary are
-    covered: before the window, the previous cycle's end, this cycle's own end, and a
-    cycle further back.
+    the same (cycle, head) pairs are put to both, and **both** ends of the window are
+    covered: at this cycle's own start, inside its run, at the following cycle's start,
+    one second before it began, and two cycles back.
     """
     corpus = tmp_path / "cycles"
     corpus.mkdir()
-    (corpus / "cycle-20260911-090000.md").write_text("# a cycle record\n", encoding="utf-8")
+    # The record of the cycle that follows the voting one: it is what closes the span at
+    # the far end, so the "at or after the far end" arm below is a reading rather than an
+    # open window's accident.
+    (corpus / "cycle-20260911-110000.md").write_text("# a cycle record\n", encoding="utf-8")
     log = str(corpus)
     counter, cast_vote = mod, _cast_vote()
     # The identity half is asked through `gh api user`, and neither end is driven through
@@ -2775,12 +2632,12 @@ def test_the_counter_voids_exactly_the_votes_cast_vote_refuses_to_post(mod, monk
         monkeypatch.setattr(owner, "_own_logins", frozenset({SELF_LOGIN}))
 
     cases = (
-        # (push instant, inside the window?)
-        (_push(2026, 9, 11, 9, 0), True),     # exactly the previous cycle's start
-        (_push(2026, 9, 11, 9, 30), True),    # the previous cycle's window
-        (_push(2026, 9, 11, 10, 30), True),   # this cycle's own window
-        (_push(2026, 9, 11, 8, 30), False),   # before both ends of the window
-        (_push(2026, 9, 11, 7, 30), False),   # before the cycle that precedes it
+        # (push instant, inside the window of `cyc20260911-100000`?)
+        (_push(2026, 9, 11, 10, 0), True),    # exactly this cycle's own start
+        (_push(2026, 9, 11, 10, 30), True),   # inside this cycle's own run
+        (_push(2026, 9, 11, 11, 0), False),   # at the following cycle's start — its work
+        (_push(2026, 9, 11, 9, 59), False),   # one second before this cycle began
+        (_push(2026, 9, 11, 7, 30), False),   # two cycles back, another actor's work
     )
     for pushed, inside in cases:
         refused, _ = cast_vote.own_head_window(

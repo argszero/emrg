@@ -73,13 +73,21 @@ number, the four spellings this family writes. The argument is the discriminator
 what keeps the clause off prose: "update `VERSION_SOURCES` in `scripts/bump-version.py`"
 ends at the file name and is not a thing to run, while `scripts/check-vote-count.py <PR>` is.
 
-What the clause reads on this tree, measured 2026-10-15: **41** command-shaped mentions, in
+What the clause reads on this tree, measured 2026-10-17: **40** command-shaped mentions, in
 nine tools - `bump-version.py` 2, `cast-vote.py` 8, `check-merge-freshness.py` 8,
 `check-merge-sequence.py` 1, `check-release-published.py` 1, `check-stacked-prs.py` 1,
-`check-vote-count.py` 1, `review-queue.py` 18, `run-mutation-arm.py` 1. The newest arrived the
-way the three before it did - through a *remedy*: `review-queue.py`'s row for a head pushed
-below a window whose boundary the record corpus could not measure, whose cure is the counter's
-own report (cycle `cyc20261015-030526`). Before that the newest was
+`check-vote-count.py` 1, `review-queue.py` 17, `run-mutation-arm.py` 1. This is the first
+reading on which the number went **down**, by exactly one, and it went down the same way the
+sentences above went up: a *printed remedy* is a printed command either way.
+`review-queue.py` carried a second `abstain` branch - a head pushed below a window whose
+lower bound the record corpus could not measure, whose printed remedy named
+`scripts/check-vote-count.py <pr>` and offered `--prev-cycle <id>` as the caller's way to
+supply the boundary - and both the branch and the flag went with the widened lower bound
+(cycle `cyc20261017-062633`, on the host's ruling that only a head the voting cycle itself
+pushed is abstained on), so `review-queue.py` reads **17** where it read **18**. A count that
+only ever rises would be a count nobody deletes from. That same row had itself been the
+newest arrival before it, added the way the three before that did - through a *remedy*: its
+cure was the counter's own report (cycle `cyc20261015-030526`). Before that the newest was
 `check-vote-count.py`'s cure for a head with no CI run, which names the re-trigger in
 `check-merge-freshness.py`'s own spelling
 (`bash scripts/re-trigger-ci.sh <branch>`), added the same day as the per-cause cures above it

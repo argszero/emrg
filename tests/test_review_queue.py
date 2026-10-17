@@ -53,10 +53,22 @@ HEAD = "a" * 40
 MASTER = "c" * 40
 PUSH_TIME = "2026-09-17T10:00:00Z"
 CYCLE = "cyc20260917-221117"
-#: The cycle immediately before `CYCLE`: it started at 21:59:29 in the host's own
-#: zone, 11m48s before `CYCLE`. A cycle id *is* its local start time, so this pair is
-#: what the abstention window's two ends are pinned against.
+#: A cycle id that started 11m48s before `CYCLE`, in the host's own zone. A cycle id *is*
+#: its local start time, and since 2026-10-16 the window's near bound is each cycle's own
+#: start: a push strictly before 22:11:17 belongs to whoever made it — the previous cycle
+#: included — so `CYCLE` may vote there, while a push from 22:11:17 on is its own work and
+#: it must abstain. It is also the filler record in the corpora below, whose only job is
+#: to be an *earlier* record than `CYCLE`.
 PREV_CYCLE = "cyc20260917-215929"
+
+#: A record corpus with **nothing** in it, for runs that must not read the host's own
+#: `cycle-*.md` files. The window's *far* bound is the cycle that follows this one, and on
+#: this host every synthetic id in this file (2026-09-17) has a real successor minutes
+#: later, so a run left to the default corpus would close the span at a machine-dependent
+#: instant. A path that does not exist answers "no cycle record after this cycle", which
+#: leaves the span open above — the state the posting cycle itself is in. Callers that
+#: exercise the corpus pass their own `--cycles-log`.
+NO_RECORDS = REPO_ROOT / "tests" / "_no_such_cycles_log"
 
 #: The login this instance votes under, and one it does not. The abstention clause asks
 #: whose push a head was before it asks about the window, so both ends of that
@@ -344,19 +356,16 @@ def _read(mod, monkeypatch, votes, fresh, *, number=1, cycle=None, prs=()):
     argv = [str(pr) for pr in prs] if prs else [str(number)]
     if cycle:
         argv += ["--cycle", cycle]
-        # Pin the previous cycle, so the abstention window is a property of this file
-        # and not of the machine that runs it. Left to itself the tool resolves it from
-        # the host's own cycles log, and the window's start is then whatever record
-        # happens to sort last before this cycle's id: on a corpus that reaches back to
-        # 2026-09-17 that is `PREV_CYCLE` (21:59) and every `PUSH_TIME` row is outside
-        # the window, but a record set with a gap there falls back to `cycle-20260916`
-        # and moves the start *behind* `PUSH_TIME`, which turns each `vote` /
-        # `already-voted` row under test into `abstain`. Measured 2026-09-28: six rows
-        # failed on a host whose newest record before `CYCLE` is 2026-09-16T15:46:18,
-        # while a checkout with no records at all (which is what CI has) passes them.
-        # Callers that exercise the log-reading path pass their own `--cycles-log`.
-        if "--cycles-log" not in argv and "--prev-cycle" not in argv:
-            argv += ["--prev-cycle", PREV_CYCLE]
+        # Pin the record corpus, so the window's *far* bound is a property of this file
+        # and not of the machine that runs it: `following_cycle` reads the cycle that
+        # follows from `--cycles-log`, and this host's own records give every synthetic id
+        # here (2026-09-17) a successor minutes later — which would close the span before
+        # the pushes these rows are about. A corpus with no records answers "nothing
+        # follows this cycle", leaving the span open above, which is the state the posting
+        # cycle itself is in. Callers that exercise the corpus pass their own
+        # `--cycles-log`.
+        if "--cycles-log" not in argv:
+            argv += ["--cycles-log", str(NO_RECORDS)]
     return mod.main(argv)
 
 
@@ -740,7 +749,7 @@ def test_an_unstable_head_whose_checks_passed_is_votable_not_blocked(mod, monkey
             run_id="37372464666", started_at="2026-10-05T20:52:57Z", id=2,
         ),
     )
-    rc = mod.main(["1", "--prev-cycle", PREV_CYCLE])
+    rc = mod.main(["1", "--cycles-log", str(NO_RECORDS)])
     out = capsys.readouterr().out
     assert rc == 0
     assert "unblock" not in out, "a head whose checks passed is not a branch defect"
@@ -769,7 +778,7 @@ def test_an_unstable_head_whose_newest_check_never_concluded_is_an_unblock(
             run_id="37390520380", started_at="2026-10-05T23:56:31Z", id=2,
         ),
     )
-    rc = mod.main(["1", "--prev-cycle", PREV_CYCLE])
+    rc = mod.main(["1", "--cycles-log", str(NO_RECORDS)])
     out = capsys.readouterr().out
     assert rc == 0
     assert "unblock" in out
@@ -785,7 +794,7 @@ def test_an_unread_check_run_list_keeps_the_state_blocking(mod, monkeypatch, cap
     """
     votes = FakeVotes(reviews=[], mergeable="MERGEABLE", state="UNSTABLE")
     _install(mod, monkeypatch, votes, FakeFresh())
-    rc = mod.main(["1", "--prev-cycle", PREV_CYCLE])
+    rc = mod.main(["1", "--cycles-log", str(NO_RECORDS)])
     out = capsys.readouterr().out
     assert rc == 0
     assert "unblock" in out
@@ -816,7 +825,7 @@ def test_an_unreadable_ci_half_is_not_a_branch_state(mod, monkeypatch, capsys):
     fresh = FakeFresh()
     _install(mod, monkeypatch, votes, fresh)
     monkeypatch.setattr(mod, "freshness", lambda: Boom())
-    rc = mod.main(["1", "--prev-cycle", PREV_CYCLE])
+    rc = mod.main(["1", "--cycles-log", str(NO_RECORDS)])
     out = capsys.readouterr().out
     assert rc == 2, "a PR whose CI half could not be read is a failure to measure"
     assert "unmeasurable: #1" in out, "the footer must name it, not only the exit code"
@@ -829,7 +838,7 @@ def test_an_unreadable_ci_half_is_not_a_branch_state(mod, monkeypatch, capsys):
 
     # control: the identical reading, with the CI half readable, is the branch-state row
     monkeypatch.setattr(mod, "freshness", lambda: fresh)
-    assert mod.main(["1", "--prev-cycle", PREV_CYCLE]) == 0
+    assert mod.main(["1", "--cycles-log", str(NO_RECORDS)]) == 0
     control = capsys.readouterr().out
     assert "unblock" in control
     assert "unmeasurable" not in control
@@ -1066,10 +1075,10 @@ def test_json_carries_the_reading_and_the_action(mod, monkeypatch, capsys):
     # test of the environment. `test_the_json_document_keeps_its_shape_and_carries_the_
     # same_fact` pins the live reading.
     monkeypatch.setattr(mod, "local_tree", lambda: ("/checkout", "some-branch", "b" * 40))
-    # `--prev-cycle` rather than the default cycle-record directory: the shape has to
-    # be the same everywhere, and the inferred window is a fact about the host.
+    # An empty record corpus rather than the default one: the shape has to be the same
+    # everywhere, and which cycle follows this one is a fact about the host.
     rc = mod.main(
-        ["1", "--cycle", CYCLE, "--prev-cycle", PREV_CYCLE, "--json"]
+        ["1", "--cycle", CYCLE, "--cycles-log", str(NO_RECORDS), "--json"]
     )
     payload = json.loads(capsys.readouterr().out)
     assert rc == 0
@@ -1096,9 +1105,12 @@ def test_json_carries_the_reading_and_the_action(mod, monkeypatch, capsys):
         "head_pushed_at": PUSH_TIME,
         "head_pushed_exact": True,
         "vote_window_start": (
-            datetime(2026, 9, 17, 21, 59, 29, tzinfo=LOCAL).isoformat(timespec="seconds")
+            datetime(2026, 9, 17, 22, 11, 17, tzinfo=LOCAL).isoformat(timespec="seconds")
         ),
-        "vote_window_source": f"previous cycle {PREV_CYCLE} (named by --prev-cycle)",
+        "vote_window_source": (
+            "this cycle's own run (started "
+            f"{datetime(2026, 9, 17, 22, 11, 17, tzinfo=LOCAL).isoformat(timespec='seconds')})"
+        ),
         "stale": True,
         "stale_kind": "ancestry",
         "behind_by": 1,
@@ -1123,12 +1135,12 @@ def test_the_summary_counts_every_row_once(mod, monkeypatch, capsys):
 # --- the abstention clause: whose head is it? (issue #1408) ------------------
 #
 # The counter's half of "may this cycle vote here" is the count. The other half is
-# *whose head is it*, and that is the half that has cost votes: a cycle neither votes
-# on nor merges a head it pushed, and because every cycle on a host is the same
-# instance running again, the window immediately before this one counts as its own
-# (the applied precedent is `cyc20260917-125823`). `CYCLE` began at 22:11:17 in the
-# host's zone and `PREV_CYCLE` at 21:59:29, so the two ends of the window are 11m48s
-# apart and every push below is named in that zone rather than in UTC.
+# *whose head is it*, and that is the half that has cost votes: a cycle neither votes on
+# nor merges a head **it pushed**. The window is that cycle's own run — from `CYCLE`'s
+# start (22:11:17 in the host's zone) to the start of the cycle that follows it — and a
+# head pushed before it began belongs to whoever pushed it: the host ruled the older
+# "the previous cycle's window counts as one's own" reading away on 2026-10-16T22:18:15.
+# Every push below is named in the host's zone rather than in UTC.
 
 
 def _run(mod, monkeypatch, votes, fresh, argv):
@@ -1161,17 +1173,24 @@ def test_a_head_pushed_inside_this_cycle_is_an_abstain(mod, monkeypatch, capsys)
     assert "check-vote-count.py 1" in out
 
 
-def test_a_head_pushed_by_the_previous_cycle_is_an_abstain(mod, monkeypatch, capsys):
-    """The half the precedent widened: 22:05 is after the previous cycle began
-    (21:59:29) and before this one did, so the push belongs to the cycle immediately
-    before — the same instance, one window back."""
+def test_a_head_pushed_by_the_previous_cycle_is_votable(mod, monkeypatch, capsys):
+    """The reading the host ruled for on 2026-10-16T22:18:15.
+
+    22:05 is after the previous cycle began (21:59:29) and before this one did, so a
+    wider window would call it this instance's own work. The host ruled that away —
+    "I think the requirement 'nor one pushed by the cycle immediately before it' should
+    not exist. That the cycle that pushed it cannot vote is already enough" (translated
+    from the Chinese original) — so the row is `vote`, and the vote is one this cycle
+    may spend.
+    """
     votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 5))
     fresh = FakeFresh()
-    _run(mod, monkeypatch, votes, fresh,
-         ["1", "--cycle", CYCLE, "--prev-cycle", PREV_CYCLE])
+    _run(mod, monkeypatch, votes, fresh, ["1", "--cycle", CYCLE])
     out = capsys.readouterr().out
-    assert "abstain" in out
-    assert PREV_CYCLE in out
+    assert "abstain" not in _rows(out), out
+    row = _rows(out).splitlines()[0]
+    assert "vote" in row or "measure-then-vote" in row, row
+    assert "cast-vote.py 1" in out, "the vote this cycle may spend is the row's remedy"
 
 
 def test_the_window_ends_where_the_following_cycle_begins(mod, tmp_path):
@@ -1187,9 +1206,11 @@ def test_the_window_ends_where_the_following_cycle_begins(mod, tmp_path):
     (records / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
     (records / "cycle-20260917-223000.md").write_text("x", encoding="utf-8")
 
-    window = mod.own_window(CYCLE, None, str(records), None)
+    window = mod.own_window(CYCLE, str(records))
 
-    assert window.start == mod.cycle_start(PREV_CYCLE), "the start is unchanged by #2334"
+    assert window.start == mod.cycle_start(CYCLE), (
+        "the near bound is this cycle's own start — the corpus decides only the far one"
+    )
     assert window.end == mod.cycle_start("cyc20260917-223000"), (
         "the far bound is the instant the cycle after this one began"
     )
@@ -1217,7 +1238,7 @@ def test_a_window_with_no_later_cycle_is_open_at_its_far_end(mod, tmp_path):
     records.mkdir()
     (records / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
 
-    window = mod.own_window(CYCLE, None, str(records), None)
+    window = mod.own_window(CYCLE, str(records))
 
     assert window.end is None
     assert window.window_end_text() == ""
@@ -1244,7 +1265,7 @@ def test_a_head_pushed_by_a_later_cycle_is_not_an_abstain_row(mod, monkeypatch, 
     out = capsys.readouterr().out
     assert rc == 0
     assert f"cast-vote.py 1 --cycle {CYCLE}" in out, out
-    assert "inside the window this cycle treats as its own" not in out, out
+    assert "inside the run this cycle treats as its own" not in out, out
 
 
 def test_a_head_pushed_past_a_corpus_with_no_later_cycle_reads_abstain(mod, monkeypatch,
@@ -1264,7 +1285,7 @@ def test_a_head_pushed_past_a_corpus_with_no_later_cycle_reads_abstain(mod, monk
     _run(mod, monkeypatch, FakeVotes(reviews=[], push=pushed), FakeFresh(),
          ["1", "--cycle", CYCLE, "--cycles-log", str(only_prev)])
     out = capsys.readouterr().out
-    assert "inside the window this cycle treats as its own" in out, out
+    assert "inside the run this cycle treats as its own" in out, out
 
 
 def test_a_head_another_instance_pushed_is_not_this_cycles_own(mod, monkeypatch, capsys):
@@ -1350,79 +1371,12 @@ def test_a_head_with_no_actor_reading_keeps_the_abstain(mod, monkeypatch, capsys
     assert "abstain" in out
 
 
-def test_a_push_at_the_previous_cycles_start_is_inside_the_window(mod, monkeypatch, capsys):
-    """The boundary is closed at the start: a window runs from its own id to the next
-    one, so the previous cycle's first instant belongs to it and not to the cycle
-    before it."""
-    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 21, 59, 29))
-    fresh = FakeFresh()
-    _run(mod, monkeypatch, votes, fresh,
-         ["1", "--cycle", CYCLE, "--prev-cycle", PREV_CYCLE])
-    out = capsys.readouterr().out
-    assert "abstain" in out
 
 
-def test_a_head_pushed_two_cycles_back_is_still_votable(mod, monkeypatch, capsys):
-    """The negative control for the clause: the window is one cycle wide and no
-    wider. 20:00 is before the previous cycle began, so nothing about it is one's own
-    and the row is the ordinary vote it would always have been."""
-    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 20, 0))
-    fresh = FakeFresh()
-    _run(mod, monkeypatch, votes, fresh,
-         ["1", "--cycle", CYCLE, "--prev-cycle", PREV_CYCLE])
-    out = capsys.readouterr().out
-    assert "abstain" not in _rows(out)
-    assert "cast-vote.py 1 --cycle cyc20260917-221117" in out
 
 
-def test_a_push_below_a_window_whose_far_end_was_never_measured_is_not_a_vote(
-    mod, monkeypatch, capsys, tmp_path
-):
-    """Issue #2275 at the row, and the arm the CI leg found: a narrowed window decides only
-    the half below its start.
-
-    22:05 is after the previous cycle began (21:59:29) and before this one did (22:11:17),
-    so the *widened* window is what decides it — and where the records could not be listed
-    that end was never measured. The row said `vote` there, inviting a vote the poster
-    refuses and the counter voids; it says `abstain` now, naming the corpus to pass.
-
-    Its control is the sibling test below, and the pair is split because the fakes are
-    installed per test: a second `_run` in one test re-installs them onto the first fake,
-    which reads as an unreadable count rather than as the row under test (measured while
-    writing this — the `read-first` row it produced is the trap, not the finding).
-    """
-    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 5))
-    _run(
-        mod, monkeypatch, votes, FakeFresh(),
-        ["1", "--cycle", CYCLE, "--cycles-log", str(tmp_path / "gone")],
-    )
-    out = capsys.readouterr().out
-    row = next(line for line in out.splitlines() if line.startswith("#1 "))
-    assert "abstain" in row, f"a boundary nobody measured is not passed: {row}"
-    assert "cast-vote.py" not in row, "never the command that spends the vote"
-    assert "--cycles-log" in out, "the remedy is the corpus this window needs, named"
-    assert "never measured" in out, "and the reason says which end was missing"
 
 
-def test_a_push_below_a_measured_narrow_window_is_still_a_vote(
-    mod, monkeypatch, capsys, tmp_path
-):
-    """The control for the row above, and the case the whole narrowing rests on: a corpus
-    that **was** listed and holds no earlier record has measured the boundary — it answered
-    "nothing earlier" — so a push below this cycle's own start is the ordinary votable head
-    it has always been. Without this arm a tool that abstained on every window it could not
-    widen would pass, and the narrowed window would stop being a reading at all."""
-    listed = tmp_path / "listed-and-empty"
-    listed.mkdir()
-    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 5))
-    _run(
-        mod, monkeypatch, votes, FakeFresh(),
-        ["1", "--cycle", CYCLE, "--cycles-log", str(listed)],
-    )
-    out = capsys.readouterr().out
-    row = next(line for line in out.splitlines() if line.startswith("#1 "))
-    assert "vote" in row and "abstain" not in row, row
-    assert "cast-vote.py 1 --cycle cyc20260917-221117" in out
 
 
 def test_a_head_this_cycle_pushed_is_not_merged_either(mod, monkeypatch, capsys):
@@ -1452,54 +1406,33 @@ def test_an_inexact_push_time_never_decides_the_window(mod, monkeypatch, capsys)
     assert "abstain" not in _rows(out)
 
 
-def test_the_previous_cycle_is_read_from_the_cycle_records(mod, monkeypatch, capsys,
-                                                           tmp_path):
-    """`--cycles-log`: the newest cycle record that sorts before this cycle's id — not
-    the newest record, and not an archive's filename.
-
-    The records are named `cycle-<date>-<time>.md`, without the id's `cyc` prefix, so
-    this also pins the filename-to-id mapping: the row names `PREV_CYCLE` with its
-    `cyc`, which is not what the filename says.
-    """
-    (tmp_path / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
-    (tmp_path / "cycle-20260917-100000.md").write_text("x", encoding="utf-8")
-    (tmp_path / f"cycle-{CYCLE[3:]}.md").write_text("x", encoding="utf-8")
-    (tmp_path / "cycle-archive-20260917.md").write_text("x", encoding="utf-8")
-    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 5))
-    fresh = FakeFresh()
-    _run(mod, monkeypatch, votes, fresh,
-         ["1", "--cycle", CYCLE, "--cycles-log", str(tmp_path)])
-    out = capsys.readouterr().out
-    assert "abstain" in out
-    assert PREV_CYCLE in out
 
 
-def test_a_corpus_split_across_two_roots_is_read_whole(mod, tmp_path):
-    """The newest record wins *across* the roots, not within one of them.
+def test_the_far_bound_is_read_across_two_roots(mod, tmp_path):
+    """The earliest record *after* this cycle wins across the roots, not within one.
 
-    The state this search exists for (measured 2026-09-25): 1,354 records sit beside
-    the checkout, while the root this tree's template names — the checkout one D9
-    (PR #1555) re-based onto — is empty, so a reinstall moves the next records onto
-    the other side. Either root alone then answers a different question: the older one
-    freezes the window at the last cycle before the move, the newer one cannot resolve
-    it at all until records accumulate there. The control is the first assertion — the
-    older root read alone really does answer the older cycle. Order is not the claim:
-    the same answer has to come out either way round.
+    The corpus is split for the reason records accumulate (measured 2026-09-25): the
+    records sit beside the checkout while the root a reinstall moves the next ones onto
+    starts empty, so either root read alone answers a different question — the older one
+    freezes the span at whatever it happens to hold. The control is the first assertion:
+    the older root alone holds nothing after `CYCLE`, so the span is open there and the
+    same head would read `abstain`. Order is not the claim — the same answer has to come
+    out either way round.
     """
     legacy, project = tmp_path / "legacy", tmp_path / "project"
     legacy.mkdir()
     project.mkdir()
     (legacy / "cycle-20260917-100000.md").write_text("x", encoding="utf-8")
-    (project / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    (project / "cycle-20260917-223000.md").write_text("x", encoding="utf-8")
 
-    frozen, _, frozen_gap = mod.previous_cycle(CYCLE, (legacy,))
-    assert frozen == "cyc20260917-100000", "the older root alone is the frozen reading"
+    frozen, _, frozen_gap = mod.following_cycle(CYCLE, (legacy,))
+    assert frozen == "", "the older root alone holds no record after this cycle"
     assert frozen_gap == "", "the root was listed, so nothing fell short"
 
     for order in ((project, legacy), (legacy, project)):
-        previous, where, gap = mod.previous_cycle(CYCLE, order)
-        assert previous == PREV_CYCLE, (
-            f"the newest record wins across the roots, in either order ({order})"
+        following, where, gap = mod.following_cycle(CYCLE, order)
+        assert following == "cyc20260917-223000", (
+            f"the earliest later record wins across the roots, in either order ({order})"
         )
         assert where == str(project), "the answer names the root it came from"
         assert gap == "", "both roots were listed"
@@ -1508,25 +1441,25 @@ def test_a_corpus_split_across_two_roots_is_read_whole(mod, tmp_path):
 def test_a_root_that_cannot_be_read_is_named_rather_than_passed_over(mod, tmp_path):
     """An answer drawn from the readable half is still an answer — and the reader is
     told which half it came from, because a record in the unreadable one could be
-    newer."""
+    *later*, which is the direction that closes the span."""
     project = tmp_path / "project"
     project.mkdir()
-    (project / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    (project / "cycle-20260917-223000.md").write_text("x", encoding="utf-8")
     missing = tmp_path / "gone"
 
-    previous, where, gap = mod.previous_cycle(CYCLE, (project, missing))
-    assert previous == PREV_CYCLE
+    following, where, gap = mod.following_cycle(CYCLE, (project, missing))
+    assert following == "cyc20260917-223000"
     assert str(missing) in where and "could not be read" in where
     assert str(missing) in gap, "the root that answered nothing is reported structurally"
 
     # Nothing readable at all: the reason is the read failure, not "no record" —
     # the two are different facts and only one of them is a gap in the corpus.
-    previous, where, gap = mod.previous_cycle(CYCLE, (missing,))
-    assert previous == ""
+    following, where, gap = mod.following_cycle(CYCLE, (missing,))
+    assert following == ""
     assert "could not be read" in where and "no cycle record" not in where
     assert str(missing) in gap, (
-        "an absent root is one that answered nothing, and this is the element a "
-        "window is narrowed on (issue #2275)"
+        "an absent root is one that answered nothing, and the far bound is read from "
+        "this element"
     )
     # …and the reason is carried with it, asserted as a *shape* rather than quoted.
     # Quoting it was the first form of this line, and it reddened `test-windows`
@@ -1542,13 +1475,13 @@ def test_a_root_that_cannot_be_read_is_named_rather_than_passed_over(mod, tmp_pa
         f"{gap!r}"
     )
 
-    # A root that **is** there and was listed, holding nothing earlier, is the other
-    # fact: the corpus answered, so nothing fell short and the narrow window stands.
+    # A root that **is** there and was listed, holding nothing later, is the other
+    # fact: the corpus answered, so nothing fell short and the span stays open above.
     empty = tmp_path / "listed-and-empty"
     empty.mkdir()
-    previous, where, gap = mod.previous_cycle(CYCLE, (empty,))
-    assert previous == ""
-    assert "no cycle record before" in where
+    following, where, gap = mod.following_cycle(CYCLE, (empty,))
+    assert following == ""
+    assert "no cycle record after" in where
     assert gap == "", "listed and empty is a measurement, not a shortfall"
 
 
@@ -1568,21 +1501,25 @@ def test_the_cycle_log_override_names_one_root_or_several(mod, monkeypatch, tmp_
 
 
 def test_the_cli_reads_both_roots_named_by_the_override(mod, monkeypatch, capsys, tmp_path):
-    """The wiring, end to end: `--cycles-log` carrying two roots resolves the window
-    from the newer record, so the row is an abstain rather than a vote."""
+    """The wiring, end to end: `--cycles-log` carrying two roots resolves the span's far
+    bound from a record in the **second** one, so the row is a vote rather than an
+    abstain. The first root alone is the control, and it is a test of its own
+    (`test_a_head_pushed_past_a_corpus_with_no_later_cycle_reads_abstain`): a second
+    `_run` in one test re-installs the fakes onto the first one."""
     legacy, project = tmp_path / "legacy", tmp_path / "project"
     legacy.mkdir()
     project.mkdir()
     (legacy / "cycle-20260917-100000.md").write_text("x", encoding="utf-8")
-    (project / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
-    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 5))
+    (project / "cycle-20260917-223000.md").write_text("x", encoding="utf-8")
+    pushed = _push(2026, 9, 17, 22, 35)  # at or after 22:30:00, the next cycle's start
+    votes = FakeVotes(reviews=[], push=pushed)
     fresh = FakeFresh()
     _run(mod, monkeypatch, votes, fresh,
          ["1", "--cycle", CYCLE, "--cycles-log",
           os.pathsep.join([str(legacy), str(project)])])
     out = capsys.readouterr().out
-    assert "abstain" in out and PREV_CYCLE in out
-    assert str(project) in out
+    assert f"cast-vote.py 1 --cycle {CYCLE}" in out, out
+    assert "abstain" not in _rows(out), out
 
 
 def test_the_records_land_where_the_queue_reads_them(mod, tmp_path):
@@ -1691,38 +1628,6 @@ def test_the_records_land_where_the_queue_reads_them(mod, tmp_path):
     )
 
 
-def test_an_unresolvable_previous_cycle_narrows_the_window_and_says_so(
-        mod, monkeypatch, capsys, tmp_path):
-    """No record to read: the scan shrinks to this cycle's own start. That is a
-    strictly weaker reading, so it is reported as one — a narrowed window must never
-    be printed as if the clause had been applied in full."""
-    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 5))
-    fresh = FakeFresh()
-    _run(mod, monkeypatch, votes, fresh,
-         ["1", "--cycle", CYCLE, "--cycles-log", str(tmp_path)])
-    out = capsys.readouterr().out
-    assert "abstain" not in _rows(out)  # not a claim the tool cannot support
-    assert "note: the abstention window could not be widened" in out
-    # Also inferred (the lookup ran and found nothing), so the two notes meet here:
-    # the narrowed one is the stronger statement and takes the line.
-    assert "issue #2214" not in out, out[:400]
-    assert "no cycle record before" in out
-    # The other half of "narrowed, and said so": the note names the boundary that
-    # *was* checked, so a reader can still apply the clause by hand to an earlier push
-    # (the push time is on the row) instead of taking the silence for a pass.
-    assert datetime(2026, 9, 17, 22, 11, 17, tzinfo=LOCAL).isoformat(timespec="seconds") \
-        in out
-    # And it is printed *ahead* of the rows it weakens (`cyc20260926-120320` moved it
-    # there): the tail placement left it at line 39 of a queue a reader pipes through
-    # `head`, or reads only as far as the first row whose command they copy.
-    #
-    # The tree line moved in front of it on 2026-09-26 (#1635), so "ahead of the rows"
-    # is now "the line after the tree line" rather than "line 0" - the reading that
-    # matters is the order, and it is asserted as an order.
-    lines = [line for line in out.splitlines() if line.strip()]
-    assert lines[0].startswith("tree: "), lines[0]
-    assert lines[1].startswith("note: the abstention window could not be widened"), lines[:2]
-    assert out.index("could not be widened") < out.index("#1 "), out[:300]
 
 
 def test_a_narrowed_window_still_catches_this_cycles_own_push(mod, monkeypatch, capsys,
@@ -1737,622 +1642,56 @@ def test_a_narrowed_window_still_catches_this_cycles_own_push(mod, monkeypatch, 
     assert "abstain" in out
 
 
-# --- the record-less cycle: the hole in the record corpus -------------------
-#
-# A cycle writes its record in §4, so a cycle that dies earlier leaves none and the
-# corpus cannot tell "no cycle ran" from "one ran and wrote nothing". `previous_cycle`
-# then answers with the *older* record and the window widens over the missing cycle's
-# work — a vote **blocked**, silently, which is the direction the clause exists to keep
-# narrow (issue #2214). The dispatches name that cycle exactly: the prompt carries the
-# cycle's own id, and the id *is* its start.
-
-#: A cycle dispatched between `PREV_CYCLE` (21:59:29) and `CYCLE` (22:11:17), with no
-#: record of its own. It is the cycle immediately before `CYCLE`, so a head it pushed is
-#: an abstain while a head pushed before it started belongs to `PREV_CYCLE` — two cycles
-#: back, and so votable.
-GAP_CYCLE = "cyc20260917-220300"
-
-
-def _dispatch_line(cycle, ts="2026-09-17T22:03:00", kind="message", role="user"):
-    """One history line, and the shell that holds it.
-
-    The real history is JSONL under `<sessions>/<session>/history[_YYMMDD].jsonl`, one
-    object per line; a message line carries the rendered prompt, which is where the
-    cycle's own id is substituted. Written through `json.dumps` so the fixture is the
-    file format rather than a hand-spelled lookalike of it.
-    """
-    body = f"## Evolution Cycle\n\nyou are cycle {cycle} of emrg-evolution-emrg-task"
-    record = {"type": kind, "content": body, "timestamp": ts}
-    if role:
-        record["role"] = role
-    return json.dumps(record)
-
-
-def _session_history(tmp_path, lines, name="history_260917.jsonl"):
-    """A session directory holding one history, and the directory it sits in."""
-    sessions = tmp_path / "sessions"
-    session = sessions / "emrg-evolution-emrg-task"
-    session.mkdir(parents=True, exist_ok=True)
-    (session / name).write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return sessions
-
-
-def test_a_recordless_cycle_is_the_immediately_preceding_one_not_the_older_record(
-        mod, monkeypatch, capsys, tmp_path):
-    """The head that issue #2214 is about: pushed by the cycle *two* back, which the
-    clause lets this cycle vote on, while the records alone read it as an abstain.
-
-    The records hold one cycle, `PREV_CYCLE` (21:59:29). A cycle was dispatched at
-    22:03:00 and wrote no record, so the cycle immediately before this one began there,
-    and the window's near end is 22:03:00 rather than 21:59:29. The head below is pushed
-    at 22:01 — after `PREV_CYCLE` began, before the record-less cycle did — so it is
-    `PREV_CYCLE`'s work: two cycles back, and votable.
-    """
-    (tmp_path / "records").mkdir()
-    (tmp_path / "records" / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
-    _session_history(tmp_path, [_dispatch_line(GAP_CYCLE)])  # beside the records: the default
-    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 1))
-    rc = _run(mod, monkeypatch, votes, FakeFresh(), [
-        "1", "--cycle", CYCLE, "--cycles-log", str(tmp_path / "records"),
-    ])
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "abstain" not in _rows(out)
-    assert f"cast-vote.py 1 --cycle {CYCLE}" in out
-
-
-def test_the_recordless_cycle_itself_is_still_an_abstain(
-        mod, monkeypatch, capsys, tmp_path):
-    """The control, over the same two corpora: narrowing must not delete the clause.
-
-    A head pushed at 22:05 is the record-less cycle's own work, and that cycle *is* the
-    one immediately before this one — the case the precedent widened the window for. A
-    fix that stopped abstaining here would be spending exactly the vote the clause
-    exists to protect.
-    """
-    (tmp_path / "records").mkdir()
-    (tmp_path / "records" / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
-    _session_history(tmp_path, [_dispatch_line(GAP_CYCLE)])
-    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 5))
-    rc = _run(mod, monkeypatch, votes, FakeFresh(), [
-        "1", "--cycle", CYCLE, "--cycles-log", str(tmp_path / "records"),
-    ])
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "abstain" in out
-    assert GAP_CYCLE in out  # the cycle the window was resolved to, named on the row
-
-
-def test_a_window_whose_far_end_was_never_measured_says_so(mod):
-    """Issue #2275: the two answers that read alike, and only one of which decided the push.
-
-    `abstain_window` has two ways to end up without a previous cycle, and it treated them
-    the same — fall back to this cycle's own start, the documented *narrower* reading.
-    That is a reading of the corpus ("listed, and it holds nothing earlier") and only one
-    of the two states has a corpus that was listed: where the records could not be listed,
-    the *far end* was never measured, and the narrowed window's lower half is then all it
-    knows — a push at or after the start is inside every candidate window, a push below it
-    is a push the wider window would have decided.
-
-    So the narrowed window is kept in both states — the queue's `abstain` row for a head
-    this cycle pushed is sound and must survive, which is what the CI leg measured when a
-    first cut of this fix refused to apply a window at all — and the difference is carried
-    by `boundary_unmeasured`, the one property the counter and the poster both ask. Arms
-    (b) and (c) are the controls: a corpus that **was** listed narrows for real, and a
-    resolved boundary is not made undecided by a shortfall somewhere else.
-    """
-    # (a) the records could not be listed: the narrow window stands, its far end does not
-    unmeasured = mod.abstain_window(
-        CYCLE, "", "gone (No such file or directory) could not be read",
-        inferred=True, corpus_shortfall="gone (No such file or directory)",
-    )
-    assert unmeasured.applied is True, "this cycle's own start needs no corpus"
-    assert unmeasured.window_start_text() == mod.cycle_start(CYCLE).isoformat(timespec="seconds")
-    assert unmeasured.boundary_unmeasured is True, (
-        "the boundary above the start was never measured, and this is what both readers ask"
-    )
-    assert "gone" in unmeasured.unresolved and "2275" in unmeasured.unresolved, (
-        f"the reason must name the corpus that fell short: {unmeasured.unresolved!r}"
-    )
-
-    # (b) the control: the same absence of a previous cycle, from a corpus that **was**
-    #     listed. The narrow window stands and it *was* measured — the legitimate case
-    #     `test_check_vote_count.py`'s fixture is built on, and the one a tool that
-    #     refused every narrowed window would break
-    narrowed = mod.abstain_window(
-        CYCLE, "", f"no cycle record before {CYCLE} in /listed/and/empty", inferred=True,
-    )
-    assert narrowed.applied is True
-    assert narrowed.window_start_text() == mod.cycle_start(CYCLE).isoformat(timespec="seconds")
-    assert narrowed.boundary_unmeasured is False, (
-        "a listed corpus that answers 'nothing earlier' measured the far end"
-    )
-
-    # (c) a boundary that **was** found survives a shortfall: `previous_cycle` answers with
-    #     the newest record across every readable root, so a root that could not be listed
-    #     can only have made that boundary too early - the wide direction, which blocks
-    #     rather than credits
-    resolved = mod.abstain_window(
-        CYCLE, PREV_CYCLE, "/some/records", inferred=True,
-        corpus_shortfall="gone (No such file or directory)",
-    )
-    assert resolved.applied is True
-    assert resolved.corpus_shortfall == "gone (No such file or directory)", (
-        "a resolved window still says which corpus fell short"
-    )
-    assert resolved.boundary_unmeasured is False, (
-        "the far end is what `previous` supplied, so nothing about it is undecided"
-    )
-
-
-def test_a_dispatch_that_fills_in_the_boundary_measures_the_far_end(mod):
-    """The dispatch corpus is a measured boundary, so it may fill one in — and a window it
-    filled in is decided, while the window must go on saying which corpus it could not read
-    rather than reading as an ordinary records-only resolution (issue #2275)."""
-    unmeasured = mod.abstain_window(
-        CYCLE, "", "gone (No such file or directory) could not be read",
-        inferred=True, corpus_shortfall="gone (No such file or directory)",
-    )
-    assert unmeasured.boundary_unmeasured is True  # the state the dispatch corpus repairs
-
-    moved = mod.with_dispatches(unmeasured, CYCLE, [PREV_CYCLE])
-    assert moved.applied is True, "a dispatched id is its cycle's start, so it is exact"
-    assert moved.window_start_text() == mod.cycle_start(PREV_CYCLE).isoformat(
-        timespec="seconds"
-    )
-    assert moved.corpus_shortfall == "gone (No such file or directory)"
-    assert moved.boundary_unmeasured is False, (
-        "a dispatched id *is* the boundary, so the far end is now measured - a window that "
-        "went on refusing every push below its start would strand votes the corpus reached"
-    )
-    assert "gone" in moved.source, f"the source must name it: {moved.source!r}"
-
-
-def test_a_window_the_dispatch_corpus_moves_keeps_its_far_bound(mod):
-    """Both exits of `with_dispatches` build a **fresh** `Window`, so any field the
-    constructor is not handed is dropped silently — and the far bound is not a function of
-    the boundary being moved: the cycle *after* this one began where it began either way.
-
-    Measured 2026-10-17 on this host: the ordinary exit lost it, so a head the next cycle
-    pushed read `abstain` again — issue #2334's defect, back on the path the corpus takes
-    most often (it moves the boundary whenever a dispatched cycle is newer than the newest
-    record, which is the case the corpus exists for). The guard beside this one could not
-    catch it: it resolves a window with no `following`, so there was no far bound to lose.
-    """
-    following = "cyc20260917-223000"  # the next cycle: the span's far bound
-    window = mod.abstain_window(CYCLE, PREV_CYCLE, "/some/records", inferred=True,
-                                following=following)
-    assert window.end == mod.cycle_start(following)
-
-    # Exit 1 — a dispatched cycle between the record and this cycle's own id moves the
-    # start up to it, and the span must still end where the next cycle began.
-    moved = mod.with_dispatches(window, CYCLE, [PREV_CYCLE, GAP_CYCLE])
-    assert moved.window_start_text() == mod.cycle_start(GAP_CYCLE).isoformat(
-        timespec="seconds")
-    assert moved.end == window.end, (
-        "the far bound is the start of the cycle *after* this one, which moving the near "
-        "end does not touch"
-    )
-    assert moved.covers(datetime(2026, 9, 17, 22, 35, tzinfo=LOCAL)) is False, (
-        "22:35 local is past the next cycle's start, so that head is that cycle's work "
-        "however far up the near end was moved"
-    )
-
-    # Exit 2 — the same move where the record corpus could not be read at all, which is
-    # the exit that repairs an unmeasured start.
-    unmeasured = mod.abstain_window(
-        CYCLE, "", "gone (No such file or directory) could not be read",
-        inferred=True, corpus_shortfall="gone (No such file or directory)",
-        following=following,
-    )
-    assert unmeasured.boundary_unmeasured is True
-    repaired = mod.with_dispatches(unmeasured, CYCLE, [PREV_CYCLE])
-    assert repaired.end == mod.cycle_start(following), (
-        "supplying the start the records could not measure says nothing about the far end"
-    )
-
-
-def test_a_dispatch_older_than_the_record_does_not_move_the_window(mod):
-    """The refinement runs one way. Where a record exists it is the answer, so an id
-    from before it — a stale quotation, a re-delivered prompt of an older cycle — must
-    not drag a resolved window backwards and un-abstain work the record covers."""
-    window = mod.abstain_window(CYCLE, PREV_CYCLE, "/some/records")
-    older = "cyc20260917-210000"
-    assert mod.cycle_start(older) < window.start
-    for ids in ([older], [older, "cyc20260917-200000"], [], ["cyc20260917-230000"]):
-        moved = mod.with_dispatches(window, CYCLE, ids)
-        assert moved.window_start_text() == window.window_start_text(), ids
-    # And the direction it does take: a dispatched cycle between the record and this
-    # cycle's own id is the new near end.
-    moved = mod.with_dispatches(window, CYCLE, [PREV_CYCLE, GAP_CYCLE])
-    assert moved.window_start_text() != window.window_start_text()
-    assert moved.window_start_text() == mod.cycle_start(GAP_CYCLE).isoformat(
-        timespec="seconds")
-
-
-def test_a_corpus_that_reaches_the_boundary_confirms_it_and_clears_the_caveat(mod):
-    """Issue #2216, composed with #2214's disclosure: two of the three cases agree on the
-    boundary and differ on what may be claimed about it.
-
-    An id **equal** to the records' own answer is the same cycle, so the corpus has
-    confirmed that nothing was dispatched between it and now — the missing cycle #2214
-    is about is one this corpus would have named — and the caveat a records-only
-    lookup owes its reader is not owed. An id **older** than the boundary reaches no gap
-    above it (a stale quotation, a re-delivered prompt) and must leave the caveat
-    standing. An empty corpus is the absent one: nothing was read to confirm with.
-    """
-    window = mod.abstain_window(CYCLE, PREV_CYCLE, "/some/records", inferred=True)
-    assert window.inferred is True
-
-    confirmed = mod.with_dispatches(window, CYCLE, [PREV_CYCLE])
-    assert confirmed.window_start_text() == window.window_start_text()
-    assert confirmed.inferred is False, (
-        "the corpus named the very cycle the records did - that is a confirmation, not a "
-        "silence, so the note has nothing left to disclose"
-    )
-
-    older = "cyc20260917-210000"
-    assert mod.cycle_start(older) < window.start
-    assert mod.with_dispatches(window, CYCLE, [older]).inferred is True, (
-        "an id older than the boundary does not reach the gap above it"
-    )
-    assert mod.with_dispatches(window, CYCLE, []).inferred is True
-    assert mod.with_dispatches(window, CYCLE, [CYCLE]).inferred is True, (
-        "a cycle is not its own predecessor: the id must be strictly earlier"
-    )
-    # The direction that moves the window already carried the flag down with it.
-    moved = mod.with_dispatches(window, CYCLE, [PREV_CYCLE, GAP_CYCLE])
-    assert moved.window_start_text() != window.window_start_text()
-    assert moved.inferred is False
-
-
-def test_a_dispatch_naming_the_records_own_cycle_suppresses_the_note(
-        mod, monkeypatch, capsys, tmp_path):
-    """The same fact at the report, which is where the reader meets it.
-
-    Measured while resolving #2215/#2217 on 2026-10-13: the live corpus holds 1798
-    dispatched ids and the newest one before the measuring cycle was the record's own
-    answer, so before this every run of a checkout with sessions printed the note. A
-    caveat on every run is how the caveat that matters gets skimmed.
-
-    The control is `test_an_inferred_window_names_the_instant_it_used_and_its_blind_spot`
-    below, which runs the same report with no sessions at all: there the id is absent,
-    nothing confirms, and the note must still print.
-    """
-    (tmp_path / "records").mkdir()
-    (tmp_path / "records" / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
-    _session_history(tmp_path, [_dispatch_line(PREV_CYCLE)])
-    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 23, 0))
-    rc = _run(mod, monkeypatch, votes, FakeFresh(), [
-        "1", "--cycle", CYCLE, "--cycles-log", str(tmp_path / "records"),
-    ])
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "issue #2214" not in out, (
-        "the corpus named the record's own cycle, so the boundary was confirmed and there "
-        f"is no gap to disclose: {out[:400]}"
-    )
-    assert "note: the own-window" not in out, out[:400]
-
-
-def test_the_dispatch_reader_takes_the_id_the_prompt_carries(mod, tmp_path):
-    """How the id is read, and what is refused.
-
-    The marker is a substring of anything that *quotes* a prompt — this file was
-    measured by grepping one — so a line is accepted only when it parses to a `user`
-    message. A tool result echoing the same text carries the marker and the id and is
-    not a dispatch.
-    """
-    sessions = _session_history(tmp_path, [
-        _dispatch_line("cyc20260917-220300"),
-        json.dumps({"type": "tool_result", "content": _dispatch_line("cyc20260917-230000")}),
-        "not json at all",
-        _dispatch_line("cyc20260917-211500", kind="message", role="assistant"),
-    ])
-    ids, unreadable = mod.dispatch_ids((sessions,))
-    assert ids == ["cyc20260917-220300"]
-    assert unreadable == []
-    # An absent directory is named, not raised: a checkout with no sessions is a state,
-    # and the caller must be able to tell it from a directory it failed to read.
-    ids, unreadable = mod.dispatch_ids((tmp_path / "nowhere",))
-    assert ids == []
-    assert unreadable and "nowhere" in unreadable[0]
-
-
-def test_the_dispatch_corpus_defaults_to_the_records_sibling(mod, tmp_path):
-    """One root, two corpora: pointing `--cycles-log` at a corpus of your own answers
-    the dispatches from beside it, so a test never reads the machine's real sessions and
-    a host needs no second path to keep in step."""
-    root = tmp_path / "records"
-    assert mod.resolve_session_dirs(None, (root,)) == (tmp_path / "sessions",)
-    assert mod.resolve_session_dirs("/elsewhere", (root,)) == (Path("/elsewhere"),)
-
-
-def test_a_corpus_that_is_there_and_cannot_be_read_is_not_an_absent_one(mod, tmp_path):
-    """Issue #2224: an absent corpus is a state; a corpus that failed to open is a
-    measurement that failed, and the two must not read the same.
-
-    `dispatch_ids` has always produced the second half of that distinction in its
-    `unreadable` list, and every caller dropped it — so the disclosure a records-only
-    window owes its reader was printed whether the corpus was absent (the CI shape, and
-    documented as *not* a failure) or unreadable (ids silently incomplete). Measured
-    2026-10-14 before this test: an absent corpus and a regular file at the corpus path
-    produced byte-identical output.
-
-    The membership test is the filesystem, not the error text: `exists()`, so that a file
-    where a directory was expected counts as *there* (it is not absent, and it is not
-    readable as a corpus either).
-    """
-    records = tmp_path / "records"
-    records.mkdir()
-    (records / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
-    # A corpus that is present and cannot be listed: a regular file at its path.
-    a_file = tmp_path / "notdir"
-    a_file.write_text("not a directory\n", encoding="utf-8")
-    absent = tmp_path / "nowhere"
-
-    for state, where in (("absent", absent), ("unreadable", a_file)):
-        window = mod.own_window(CYCLE, None, str(records), str(where))
-        assert window.inferred is True, (state, window)
-        clause = window.inferred_clause()
-        if state == "absent":
-            assert window.dispatch_unread == "", (state, window.dispatch_unread)
-            assert "could not be read" not in clause, clause
-        else:
-            assert window.dispatch_unread, "the reason a present corpus failed is kept"
-            assert "could not be read" in clause, clause
-            assert str(where) in clause, "the corpus that failed is named, not implied"
-
-    # And the distinction reaches the reader through the note it is printed in.
-    as_text = {
-        state: mod.window_note(mod.own_window(CYCLE, None, str(records), str(where)))
-        for state, where in (("absent", absent), ("unreadable", a_file))
-    }
-    assert as_text["absent"] != as_text["unreadable"], (
-        "the note must not read the same for a corpus that is not there and one that "
-        "could not be opened"
-    )
-    assert "could not be read" not in as_text["absent"], as_text["absent"]
-
-
-def test_the_corpus_membership_test_is_the_filesystem_not_the_error_text(mod, tmp_path):
-    """A unit check on `corpus_read_failure`, because its one rule is the whole point.
-
-    `exists()` and not `is_dir()`: an empty directory that *is* there is a corpus with no
-    dispatches (a state), a file at the path is a corpus that cannot be opened (a
-    failure), and a path with nothing at it is the CI shape (a state, silent).
-    """
-    empty_dir = tmp_path / "empty"
-    empty_dir.mkdir()
-    a_file = tmp_path / "afile"
-    a_file.write_text("x", encoding="utf-8")
-
-    absent = tmp_path / "nowhere"
-    assert mod.corpus_read_failure((absent,), [f"{absent} (No such file)"]) == ""
-    assert mod.corpus_read_failure((empty_dir,), []) == ""
-    assert mod.corpus_read_failure((a_file,), [f"{a_file} (Not a directory)"]) == (
-        f"{a_file} (Not a directory)"
-    ), "a path that exists is not absent, whatever the error says"
-    # Two corpora, one unreadable: the reason survives the other half being fine.
-    assert mod.corpus_read_failure(
-        (empty_dir, a_file), [f"{a_file} (Not a directory)"]
-    ) == f"{a_file} (Not a directory)"
-
-
-def test_a_mixed_set_reports_only_the_corpus_that_is_there(mod, tmp_path):
-    """Issue #2224, the mixed case: the absent member is not the failure.
-
-    The two tests above pin the homogeneous sets. This is the set that mixes them, and the
-    shape the helper had wrong: the filesystem test was applied to the **set**, so a corpus
-    that is there made the guard pass and the *absent* member's reason - which
-    `dispatch_ids` records, and whose docstring calls absence "not an error" - came back as
-    the reason a corpus could not be read. The clause then reads "The dispatch corpus could
-    not be read (<a path with nothing at it>), so no dispatch was consulted either" while
-    the present corpus was walked, which is three false statements in the one sentence this
-    change exists to make true - and master printed the silent clause for that set.
-
-    Driven through `dispatch_ids`' **real output**, never a hand-written list, because that
-    output is exactly where the absent member's reason lives: a list written for the purpose
-    omits it, which is why the homogeneous tests above cannot see this.
-    """
-    records = tmp_path / "records"
-    records.mkdir()
-    (records / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
-    present = tmp_path / "present"
-    present.mkdir()
-    absent = tmp_path / "nowhere"
-    a_file = tmp_path / "notdir"
-    a_file.write_text("not a directory\n", encoding="utf-8")
-
-    for seats in ((present, absent), (absent, present)):
-        _ids, unreadable = mod.dispatch_ids(seats)
-        assert any(str(absent) in reason for reason in unreadable), (
-            "the premise: `dispatch_ids` records the absent member in `unreadable`"
-        )
-        assert mod.corpus_read_failure(seats, unreadable) == "", (
-            "a set that also holds a corpus that is there must not report the path with "
-            "nothing at it as a measurement that failed"
-        )
-
-    # The other direction, so a helper that always answered "" for a mixed set cannot
-    # pass: a corpus that is there and refuses to list is named whatever it is mixed with.
-    for seats in ((a_file, absent), (absent, a_file), (present, a_file), (a_file, present)):
-        _ids, unreadable = mod.dispatch_ids(seats)
-        failure = mod.corpus_read_failure(seats, unreadable)
-        assert str(a_file) in failure, (seats, unreadable)
-        assert str(absent) not in failure, (seats, unreadable)
-
-    # A prefix collision is not a match: with `a` absent and a file at `ab`, a bare
-    # `startswith` on the absent path would drop `ab`'s genuine reason.
-    prefixed_absent = tmp_path / "a"
-    prefixed_file = tmp_path / "ab"
-    prefixed_file.write_text("x", encoding="utf-8")
-    seats = (prefixed_absent, prefixed_file)
-    _ids, unreadable = mod.dispatch_ids(seats)
-    failure = mod.corpus_read_failure(seats, unreadable)
-    assert f"{prefixed_file} (" in failure, unreadable
-    assert f"{prefixed_absent} (" not in failure, unreadable
-
-    # And the clause the reader is shown follows the same reading.
-    mixed = os.pathsep.join([str(present), str(absent)])
-    clause = mod.own_window(CYCLE, None, str(records), mixed).inferred_clause()
-    assert "could not be read" not in clause, clause
-    assert mod.own_window(CYCLE, None, str(records), mixed).dispatch_unread == ""
-
-
-def test_an_absent_corpus_is_never_disclosed_whatever_its_name_carries(mod, tmp_path):
-    """The rule the whole helper exists for, stated as a property over the naming.
-
-    `corpus_read_failure` may name a corpus that is there and would not open; it may
-    **never** name one that is not there. Every test above checks that on a path with an
-    ordinary name, and a reason string is `"<path> (<error>)"` - so a path that itself
-    carries a `" ("` makes the two shapes overlap, and the membership test is where that
-    shows. Measured 2026-10-14 (cycle `cyc20261014-081405`): the comparison suggested on
-    issue #2224's PR thread, `reason.split(" (", 1)[0] == directory`, satisfies every
-    ordinary case above and **discloses an absent directory** whose name carries the
-    parenthetical, which is the defect #2224 removed. It was suggested by two reviewers
-    and repeated by an approving vote, so prose alone is what stood between this tree and
-    that regression; this test is what stands there instead.
-    """
-    absent_paren = tmp_path / "a (copy)"  # not on disk, and its name holds " ("
-    (tmp_path / "z").write_text("x", encoding="utf-8")  # there, unlistable
-    (tmp_path / "w").mkdir()                           # there, an empty corpus
-    others = {"a file, unlistable": tmp_path / "z", "an empty corpus": tmp_path / "w",
-              "nothing there, an ordinary name": tmp_path / "v"}
-    for label, other in others.items():
-        seats = (absent_paren, other)
-        _ids, unreadable = mod.dispatch_ids(seats)
-        assert any(str(absent_paren) in reason for reason in unreadable), (
-            "the premise, with " + label + ": `dispatch_ids` records the absent member",
-            unreadable,
-        )
-        failure = mod.corpus_read_failure(seats, unreadable)
-        assert str(absent_paren) not in failure, (
-            f"an absent corpus directory was reported as one that could not be read, "
-            f"beside {label}: {failure!r}"
-        )
-
-    # The other direction, so a helper that named nothing at all cannot pass: the present
-    # file beside that absent directory is still disclosed, by its own path.
-    present_file = tmp_path / "z"
-    failure = mod.corpus_read_failure(
-        (absent_paren, present_file),
-        [f"{absent_paren} (No such file)", f"{present_file} (Not a directory)"],
-    )
-    assert failure == f"{present_file} (Not a directory)", failure
-
-
-def test_the_dispatch_corpus_comes_from_the_emrg_root_that_owns_the_records(mod, tmp_path):
-    """Issue #2222: a record root's corpus is the `.emrg` root's `sessions`, not the
-    directory beside the root.
-
-    The derivation looked beside each record root, which was right while the corpus had
-    one root (`<checkout>/.emrg/memory` → `<checkout>/.emrg/sessions`). #2221 made the
-    default several roots, one of them a session's (`.../.emrg/sessions/<id>/memory`),
-    whose sibling — `<id>/sessions` — was never a corpus at all. So the reading invented
-    a directory and then reported it as one it could not read.
-
-    Both scopes belong to the same `.emrg` root and must answer with the same directory,
-    once: two entries naming one corpus is a reading that looks like two.
-    """
-    checkout = tmp_path / "proj"
-    project_root = checkout / ".emrg" / "memory"
-    session_root = checkout / ".emrg" / "sessions" / "s1" / "memory"
-    project_root.mkdir(parents=True)
-    session_root.mkdir(parents=True)
-
-    assert mod.resolve_session_dirs(None, (project_root,)) == (
-        checkout / ".emrg" / "sessions",
-    )
-    assert mod.resolve_session_dirs(None, (session_root,)) == (
-        checkout / ".emrg" / "sessions",
-    ), "a session root's corpus is its `.emrg` root's sessions, not a directory beside it"
-    assert mod.resolve_session_dirs(None, (project_root, session_root)) == (
-        checkout / ".emrg" / "sessions",
-    ), "one corpus named by two roots is one directory, not two"
-
-
-def test_a_session_scoped_corpus_is_read_rather_than_lost(mod, tmp_path):
-    """The other half of the same mistake, and the one that loses dispatches outright.
-
-    A caller naming a session's memory directory as its record corpus had its dispatches
-    read from `<session>/sessions` — absent — so the window silently fell back to the
-    records alone, with the corpus two levels up never consulted and no fault printed.
-    The histories are written where `dispatch_ids` looks, and they are found now.
-    """
-    checkout = tmp_path / "proj"
-    session_root = checkout / ".emrg" / "sessions" / "s1" / "memory"
-    session_root.mkdir(parents=True)
-    history = checkout / ".emrg" / "sessions" / "s1" / "history_260917.jsonl"
-    history.write_text(
-        json.dumps({
-            "type": "message", "role": "user", "timestamp": "2026-09-17T22:03:00",
-            "content": "## Evolution Cycle\n\ncycle cyc20260917-220300 of the task",
-        }) + "\n",
-        encoding="utf-8",
-    )
-
-    dirs = mod.resolve_session_dirs(None, (session_root,))
-    assert dirs == (checkout / ".emrg" / "sessions",), dirs
-    ids, unreadable = mod.dispatch_ids(dirs)
-    assert ids == ["cyc20260917-220300"], ids
-    assert unreadable == [], unreadable
-
-
-def test_the_sessions_override_reaches_the_window(mod, monkeypatch, capsys, tmp_path):
-    """`--sessions-dir` / `$EMRG_SESSIONS_DIR` name the dispatch corpus somewhere else, and
-    both have to reach `main`'s reading rather than only the parser: the flag is the
-    remedy when the histories do not sit beside the records, so a wiring mistake would
-    leave the fix silently off for the callers who need it. Neither the records' sibling
-    nor the real machine's sessions is read here — the override is what is passed."""
-    records = tmp_path / "records"
-    records.mkdir()
-    (records / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
-    elsewhere = _session_history(tmp_path / "elsewhere", [_dispatch_line(GAP_CYCLE)])
-    argv = ["1", "--cycle", CYCLE, "--cycles-log", str(records)]
-
-    # Each run installs both seams, and `_install` binds its fake to the sibling it
-    # replaces by calling the *patched* name — so a second run over the first run's seams
-    # would hand the new fake the old fake as its "real" module (`'FakeVotes' object has
-    # no attribute 'Verdict'`), which is a fact about this fixture and not about the flag.
-    # A nested context undoes exactly what that run installed. It is not `undo()`:
-    # `monkeypatch.undo()` undoes the autouse ledger seam too, and the second run then
-    # reads the machine's `~/.emrg/rants.jsonl` — absent on a CI runner, where the tool
-    # answers `unmeasurable` and exits 2, and present on the host that wrote this, where
-    # it exits 0. Measured: run 38411916623, both legs, 1 failed / 4976 passed.
-    with monkeypatch.context() as first:
-        rc = _run(mod, first, FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 1)),
-                  FakeFresh(), argv + ["--sessions-dir", str(elsewhere)])
-    assert rc == 0
-    assert "abstain" not in _rows(capsys.readouterr().out)
-
-    monkeypatch.setenv("EMRG_SESSIONS_DIR", str(elsewhere))
-    rc = _run(mod, monkeypatch, FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 1)),
-              FakeFresh(), argv)
-    # The seam, not only the exit code: an exit code is a fact about the machine as much
-    # as about the flag (that is exactly how the run above went green here and red on
-    # CI), so the property this test rests on — every invocation read the ledger through
-    # the fixture — is asserted directly, and holds on a host with the file or without it.
-    assert isinstance(mod.open_rant_rows, FakeLedger), (
-        "this test ran the tool against the machine's own ~/.emrg/rants.jsonl: the ledger "
-        "seam was undone, so the verdict below is about this host's files, not the flag"
-    )
-    assert rc == 0
-    assert "abstain" not in _rows(capsys.readouterr().out)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # ── one window, three carriers (issue #2218) ────────────────────────────────
 #
 # The own-window clause is decided once and acted on **thrice**: this tool prints
 # `vote` / `abstain` from it, `cast-vote.py` refuses to *post* on it, and
-# `check-vote-count.py` voids a posted vote on it. Resolve it in one carrier from the
-# records alone while another has already moved it past a record-less cycle, and the
-# same head reads `vote` in the queue and is refused at the poster -- a vote lost to an
-# arithmetic difference between two readings of one rule rather than to the clause.
-# Measured 2026-10-14, after #2217 fixed the queue's half and left both siblings on the
-# records-only boundary: it is too early for **20** of this corpus's **350** cycle
-# records. `own_window` is now the single producer; these two tests are the comparison
-# that keeps the carriers from drifting apart again.
+# `check-vote-count.py` voids a posted vote on it. Resolve it differently in one carrier
+# — a bound, or an identity reading the others do not make — and the same head reads
+# `vote` in the queue and is refused at the poster, which is a vote lost to an arithmetic
+# difference between two readings of one rule rather than to the clause (issue #2218,
+# measured 2026-10-14: both siblings read a boundary the queue had already moved).
+# `own_window` is now the single producer; the test below is the comparison that keeps
+# the carriers from drifting apart again.
 
 
 def _load_sibling(module_name, filename):
@@ -2371,46 +1710,8 @@ def _load_sibling(module_name, filename):
     return module
 
 
-def _gap_corpus(tmp_path):
-    """The two corpora of the shape issue #2214 is about, and the record directory.
-
-    `records` holds the cycle *two* back (`PREV_CYCLE`, 21:59:29). A cycle was dispatched
-    at 22:03:00 (`GAP_CYCLE`) and wrote no record, so the cycle immediately before
-    `CYCLE` (22:11:17) is the record-less one -- and the record corpus cannot say so.
-    The sessions go beside the records, which is the default the tool derives.
-    """
-    records = tmp_path / "records"
-    records.mkdir()
-    (records / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
-    _session_history(tmp_path, [_dispatch_line(GAP_CYCLE)])
-    return records
 
 
-def test_own_window_resolves_the_boundary_from_the_dispatches(mod, tmp_path):
-    """The producer's own half: the boundary the dispatches give, and the disclosure
-    cleared along with it.
-
-    `previous_cycle` reads records, so a cycle that reached no §4 leaves none and the
-    boundary lands on the record *before* it (issue #2214). `with_dispatches` moves it
-    onto the dispatched cycle -- whose id is its own start, so the boundary is exact
-    rather than estimated -- and `inferred` goes with it, because a corpus that reached
-    the boundary confirmed it rather than merely failing to extend it.
-    """
-    records = _gap_corpus(tmp_path)
-    window = mod.own_window(CYCLE, None, str(records), None)
-    assert window.start == mod.cycle_start(GAP_CYCLE), window.source
-    assert GAP_CYCLE in window.source
-    assert window.inferred is False, (
-        "the dispatch corpus named the boundary, so the note a records-only resolution "
-        f"owes its reader is not owed here: {window.source}"
-    )
-
-    # The control, over the same records and no sessions at all: the window is the
-    # records' one and says so. Without it the assertion above would pass on a producer
-    # that ignored `--cycles-log` and answered the gap from nowhere.
-    window = mod.own_window(CYCLE, None, str(records), str(tmp_path / "no-sessions"))
-    assert window.start == mod.cycle_start(PREV_CYCLE), window.source
-    assert window.inferred is True
 
 
 class _CarrierVerdict:
@@ -2430,33 +1731,37 @@ class _CarrierVerdict:
 
 
 def test_the_three_carriers_read_one_window(mod, tmp_path):
-    """Issue #2218, as a comparison rather than a claim: same corpora, two heads, three
+    """Issue #2218, as a comparison rather than a claim: same corpus, two heads, three
     verdicts, and the queue's own reading is the one the other two must reproduce.
 
     Both instants are driven through both siblings. A pair that only compared the head
     the clause lets through would pass on a tool that never applied it, and one that only
     compared the head it refuses would pass on a tool that refused everything -- so the
     two are asserted to fall on *opposite* sides first, and then each carrier is held to
-    the side the queue put it on. The head at 22:01 is the work of `PREV_CYCLE`, two
-    cycles back and votable; the one at 22:05 is `GAP_CYCLE`'s own, which is the cycle
-    immediately before this one and therefore this cycle's own.
+    the side the queue put it on. The corpus holds the cycle that followed `CYCLE`
+    (22:30:00), so the head at 22:15 is inside this cycle's own run (which starts at
+    22:11:17) and the one at 22:35 (at or after that cycle's start) belongs to the cycle
+    that followed — the far bound issue #2334 added.
     """
-    records = _gap_corpus(tmp_path)
+    records = tmp_path / "records"
+    records.mkdir()
+    (records / "cycle-20260917-223000.md").write_text("x", encoding="utf-8")
     counter = _load_sibling("check_vote_count_carrier", "check-vote-count.py")
     poster = _load_sibling("cast_vote_carrier", "cast-vote.py")
 
-    window = mod.own_window(CYCLE, None, str(records), None)
-    assert window.start == mod.cycle_start(GAP_CYCLE), window.source
+    window = mod.own_window(CYCLE, str(records))
+    assert window.start == mod.cycle_start(CYCLE), window.source
+    assert window.end == mod.cycle_start("cyc20260917-223000"), window.source
 
-    heads = [_push(2026, 9, 17, 22, 1), _push(2026, 9, 17, 22, 5)]
-    wanted = {mod.instant(head) >= window.start for head in heads}
+    heads = [_push(2026, 9, 17, 22, 15), _push(2026, 9, 17, 22, 35)]
+    wanted = {window.covers(mod.instant(head)) for head in heads}
     assert wanted == {False, True}, (
         "the fixture must put one head on each side of the window, or the loop below "
         "measures one direction only"
     )
 
     for head in heads:
-        want = mod.instant(head) >= window.start
+        want = window.covers(mod.instant(head))
         counted, why = counter.own_head_window(
             CYCLE, push_time=head, push_time_exact=True, cycles_log=str(records)
         )
@@ -2654,84 +1959,23 @@ def test_the_json_document_keeps_its_shape_and_carries_the_same_fact(
     assert payload[0]["tree"] == str(REPO_ROOT)
     assert payload[0]["branch"] == "feature/x"
     assert "tree: " not in out, "the prose line must not be emitted into the JSON document"
-def test_an_inferred_window_names_the_instant_it_used_and_its_blind_spot(
-        mod, monkeypatch, capsys, tmp_path
-):
-    """Issue #2214: here the clause *was* applied, and the row still cannot show from
-    where.
-
-    The boundary is looked up in the `cycle-*.md` records, so a cycle that ran and wrote
-    none is found nowhere: the resolver lands on the record before it and the window
-    reaches further back than the clause does, so a head pushed inside that gap reads
-    `abstain` where it was votable. Measured 2026-10-13 — two such cycles in one day
-    (`cyc20261013-150748`, `cyc20261013-194608`), the window starting at 17:17:21 where
-    the cycle before the measuring one began at 19:46:08, and a head pushed at 19:32:47
-    inside the gap.
-
-    Silence is exactly how a full window reads, so this state has to name the instant it
-    used. The remedy is *not* the reader's — they cannot see the missing cycle either —
-    which is why the sentence states the gap instead of printing a flag.
-    """
-    (tmp_path / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
-    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 30))
-    fresh = FakeFresh()
-    rc = _run(mod, monkeypatch, votes, fresh,
-              ["1", "--cycle", CYCLE, "--cycles-log", str(tmp_path)])
-    out = capsys.readouterr().out
-
-    assert rc == 0
-    assert "issue #2214" in out
-    # The instant, not just the id: the width is the fact being disclosed, and the id
-    # alone does not give one to a reader who does not convert ids by hand.
-    assert mod.cycle_start(PREV_CYCLE).isoformat(timespec="seconds") in out, out[:400]
-    assert PREV_CYCLE in out
-    lines = [line for line in out.splitlines() if line.strip()]
-    assert lines[0].startswith("tree: "), lines[0]
-    assert lines[1].startswith(
-        "note: the own-window clause was read off the cycle records"), lines[:2]
-    assert out.index("issue #2214") < out.index("#1 "), out[:400]
-    # The row itself is unchanged: this note says where the window came from, it does
-    # not move a verdict.
-    assert "abstain" in out
 
 
-def test_the_inferred_window_note_stays_out_of_the_json_document(
-        mod, monkeypatch, capsys, tmp_path
-):
-    """The fact rides as fields — `vote_window_start` already carries the instant the
-    note exists to disclose — and a prose line ahead of the list would break every
-    machine consumer instead of warning them."""
-    (tmp_path / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
-    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 30))
-    fresh = FakeFresh()
-    _run(mod, monkeypatch, votes, fresh,
-         ["1", "--cycle", CYCLE, "--cycles-log", str(tmp_path), "--json"])
-    out = capsys.readouterr().out
-
-    payload = json.loads(out)  # a prose line here raises, which is the assertion
-    assert payload[0]["vote_window_start"] == \
-        mod.cycle_start(PREV_CYCLE).isoformat(timespec="seconds")
-    assert "issue #2214" not in out, out[:400]
 
 
 def test_a_windowed_run_prints_no_such_note(mod, monkeypatch, capsys):
-    """The control: with `--cycle` and a previous cycle in hand the clause *is*
-    applied in full, and a note printed anyway would be a claim about a gap that is not
-    there — the reader would learn to skim the line that matters."""
+    """The control: with `--cycle` naming an instant the clause *is* applied, and a note
+    printed anyway would be a claim about a gap that is not there — the reader would
+    learn to skim the line that matters."""
     votes = FakeVotes(reviews=[])
     fresh = FakeFresh()
-    _run(mod, monkeypatch, votes, fresh, ["1", "--cycle", CYCLE, "--prev-cycle",
-                                          "cyc20260917-221117"])
+    _run(mod, monkeypatch, votes, fresh, ["1", "--cycle", CYCLE])
     out = capsys.readouterr().out
 
     assert "no --cycle was given" not in out, out[:300]
-    assert "could not be widened" not in out, out[:300]
-    # And the note a *records-only* resolution prints is the other half of this control:
-    # the caller named the boundary, so the tool has no resolution of its own to
-    # disclose, and a line printed anyway is how the line that matters gets skimmed.
-    assert "issue #2214" not in out, out[:400]
-    # Same move as above: the row is the first line after the tree line, and no
-    # window note sits between them.
+    assert "the own-window clause was NOT applied" not in out, out[:300]
+    # The row follows the tree line with nothing printed between them: a note here would
+    # sit ahead of the row it weakens, which is where this family never puts one.
     lines = [line for line in out.splitlines() if line.strip()]
     assert lines[0].startswith("tree: "), lines[0]
     assert lines[1].startswith("#1 "), lines[:2]

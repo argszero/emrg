@@ -114,9 +114,11 @@ the tool refuses rather than posting a vote under a cycle it was not told to use
 The abstention clause, asked where the vote is spent
 ----------------------------------------------------
 The merge rules say what a vote *is*; until 2026-09-18 nothing said **who may cast
-one** (issue #1408). The clause is *a cycle does not vote on a head it pushed*, and
-the cycle immediately before this one counts as one's own — because every cycle on a
-host is the same instance running again. `review-queue.py` owns that reading, and
+one** (issue #1408). The clause is *a cycle does not vote on a head it pushed*, read
+against the cycle's own run — from its own start to the start of the cycle that
+follows it. The host struck the wider reading out on 2026-10-16T22:18:15, so a head
+the cycle *before* this one pushed belongs to whoever made it and is votable.
+`review-queue.py` owns that reading, and
 `uv run --no-sync python3 scripts/review-queue.py --cycle <id>` reports such a head as an
 `abstain` row.
 
@@ -128,22 +130,18 @@ pushed the head, and a review cannot be un-posted. Measured 2026-09-21
 window, and the sibling reported `abstain` for it minutes later.
 
 So the clause is applied here too, from the same reading, and refuses to post. The
-window is the previous cycle's start when it can be found (`--prev-cycle`, else the
-newest cycle record that sorts before this cycle's id in `--cycles-log`, default
+window is this cycle's own run: it starts at this cycle's own id — a cycle id *is* its
+start instant, so the near bound needs no corpus — and ends where the cycle that follows
+begins, read from the newest cycle record in `--cycles-log` (default
 `$EMRG_CYCLES_LOG`, else the directory the evolution template names: the project memory
-root inside this checkout) and this
-cycle's own start
-when it cannot — narrowed and said so, never abandoned and never widened by a guess.
-A head whose push time fell back to the commit date is **refused rather than judged**:
-a lower bound cannot decide a window, so nothing is posted and the refusal names the
-remedy that same missing run already has — get a run for the head, then ask again. The
-counter calls such a head blocking for that same missing run, so the cost is a delay
-rather than a vote nobody can recount. The other uncertain input — no previous cycle to
-widen the window from — is *narrowed* rather than refused: the head is judged over this
-cycle's own start and the narrowing is reported, because a clause applied over a smaller
-window is a weaker reading than the rule states and must not pass as the stronger one.
-Only a cycle id that names no instant at all leaves the clause inapplicable, and that is
-a refusal.
+root inside this checkout). A push below the start belongs to whoever made it before
+this cycle ran, so the vote counts; the host ruled the older, wider reading away on
+2026-10-16T22:18:15. A head whose push time fell back to the commit date is **refused
+rather than judged**: a lower bound cannot decide a window, so nothing is posted and
+the refusal names the remedy that same missing run already has — get a run for the head,
+then ask again. The counter calls such a head blocking for that same missing run, so the
+cost is a delay rather than a vote nobody can recount. Only a cycle id that names no
+instant at all leaves the clause inapplicable, and that is a refusal.
 
 Why `-` exists (issue #1462)
 ----------------------------
@@ -327,12 +325,11 @@ def votes_counter():
 
 
 #: The sibling that owns the abstention window (issue #1408; the reading itself landed
-#: with PR #1498). The clause — *a cycle does not vote on a head it pushed*, with the
-#: window immediately before this one counted as one's own — is defined there: its two
-#: ends, its narrowed form when the previous cycle cannot be found, and why an inexact
-#: push time never decides it. This tool asks for that reading rather than deriving a
-#: second one, because a second reading of "whose head is this" is a second answer to
-#: one question, and the two would disagree exactly when it matters.
+#: with PR #1498). The clause — *a cycle does not vote on a head it pushed* — is
+#: defined there: its two ends, and why an inexact push time never decides it. This
+#: tool asks for that reading rather than deriving a second one, because a second
+#: reading of "whose head is this" is a second answer to one question, and the two
+#: would disagree exactly when it matters.
 _QUEUE = Path(__file__).resolve().parent / "review-queue.py"
 _queue: object | None = None
 
@@ -521,15 +518,14 @@ def tree_claim_refusal(body: str, pr: int, repo: str) -> tuple[str | None, str]:
 def own_head_window(
     cycle: str,
     verdict: object,
-    prev_cycle: str | None = None,
     cycles_log: str | None = None,
 ) -> tuple[str, str]:
     """The abstention clause, applied at the moment the vote would be spent.
 
     Answers `(refusal, note)`: a non-empty `refusal` means **nothing was posted**,
-    and `note` is what to say when it is empty. `note` is also where a *narrowed*
-    window is reported — a clause applied over this cycle alone is a strictly weaker
-    reading than the one the rule states, so it says so rather than passing as it.
+    and `note` is what to say when it is empty — it carries the one exemption that
+    a *reading* decided rather than the clock (a head provably pushed by another
+    instance), so a reader can see which datum decided.
 
     Why this is here and not only in `review-queue.py`: that tool answers "may this
     cycle vote here" **when a cycle asks it**, and a cycle that does not ask spends
@@ -539,6 +535,14 @@ def own_head_window(
     went out on a head pushed inside the previous cycle's window, and the sibling
     reported `abstain` for that same head minutes later, from the same window this
     refuses on.
+
+    **The window is this cycle's own run** — from its own start to the start of the
+    cycle that follows it — and only a push inside it is refused. The host ruled the
+    wider reading away on 2026-10-16T22:18:15 ("I think the requirement 'nor one pushed
+    by the cycle immediately before it' should not exist. That the cycle that pushed it
+    cannot vote is already enough" — translated from the Chinese original): a head the
+    *previous* cycle pushed is no longer this cycle's own work, and a push below this
+    cycle's own start belongs to whoever made it.
 
     **An undecidable window is a refusal, not a pass** — that is the sibling's own
     rule (`an unresolved window is never reported as a pass`) and it is the only
@@ -568,33 +572,16 @@ def own_head_window(
             "instance's work and the abstention clause is not asked of it"
         )
     # One producer for the window, shared with the queue that prints the verdict and the
-    # counter that voids a posted vote (`review-queue.own_window`). Resolved here from
-    # the records alone it was too early for 20 of the corpus's 350 cycle records
-    # (measured 2026-10-14), so a head pushed in such a gap was refused a vote it was
-    # entitled to post - a vote lost to an arithmetic difference between carriers rather
-    # than to the clause (issue #2218). `prev_cycle` is the caller's own answer and is
-    # not second-guessed.
-    window = queue.own_window(cycle, prev_cycle, cycles_log)
-
-    note = ""
-    if window.unresolved:
-        narrowed = (
-            f"only pushes at or after {window.window_start_text()} were checked"
-            if window.applied
-            else "and this cycle's own id names no instant"
-        )
-        note = (
-            "the abstention window could not be widened to the cycle before this one "
-            f"({window.unresolved}); it was applied as {window.source or 'nothing'} - "
-            f"{narrowed}"
-        )
+    # counter that voids a posted vote (`review-queue.own_window`), so the same head
+    # cannot read `vote` in one and be refused by another (issue #2218).
+    window = queue.own_window(cycle, cycles_log)
 
     if not window.applied:
         return (
-            f"the abstention clause cannot be applied: {note}. Nothing was posted - a "
-            "vote that may be this cycle's own work is not worth spending, and the "
-            "clause is the reason the question is asked at all (issue #1408)"
-        ), note
+            f"the abstention clause cannot be applied: {window.unresolved}. Nothing was "
+            "posted - a vote that may be this cycle's own work is not worth spending, and "
+            "the clause is the reason the question is asked at all (issue #1408)"
+        ), ""
 
     head = str(getattr(verdict, "head_sha", ""))
     push_time = str(getattr(verdict, "push_time", ""))
@@ -609,62 +596,35 @@ def own_head_window(
             "(`gh workflow run test.yml --ref <branch>`, or "
             "`bash scripts/re-trigger-ci.sh <branch>`), then ask again - "
             f"`{RUNNER} scripts/review-queue.py --cycle <id>` reads the same head the same way"
-        ), note
+        ), ""
 
     pushed = queue.instant(push_time)
     if pushed is None:
         return (
             f"the window cannot be decided from head {head[:8]}: its push time "
             f"({push_time!r}) is not an instant. Nothing was posted"
-        ), note
+        ), ""
 
-    if window.boundary_unmeasured and pushed < window.start:
-        # Issue #2275's posting half: the narrowed window is real, its far end is not, and
-        # this push falls below the start — so whether it is inside the window this cycle
-        # treats as its own was never decided. Posting under it spends a vote the counter
-        # voids, which is the one thing this tool exists to prevent; the counter takes the
-        # same branch (both ask `Window.boundary_unmeasured`), so the two readings cannot
-        # disagree about the same head.
-        return (
-            f"the head {head[:8]} was pushed {push_time}, below the window this cycle "
-            f"treats as its own, which starts {window.window_start_text()} "
-            f"({window.source}) - and the boundary the wider window uses, the start of the "
-            "cycle before this one, which is earlier than that start, was never "
-            f"measured, because the cycle-record corpus could not be read "
-            f"({window.corpus_shortfall}). Whether the push falls inside the window this "
-            "clause asks about cannot be decided from here, and a boundary nobody measured "
-            "is not passed: the narrowed window would credit a vote cast inside the one "
-            "that was never read. Nothing was posted. Pass the corpus the window needs - "
-            f"`--cycles-log DIR` (or `--prev-cycle <id>`) - and ask again (issue #2275)"
-        ), note
+    # The clause's span has **two** ends, and both of them can put a push outside it: a
+    # push below `start` belongs to whoever made it before this cycle began, and one at
+    # or after `end` belongs to the cycle that followed (issue #2334). Only a push inside
+    # the run is this cycle's own work, so this is the comparison that decides — and it is
+    # the same predicate the queue prints and the counter voids on.
+    if not window.covers(pushed):
+        return "", ""
 
-    if window.covers(pushed):
-        # The same disclosure the report carries, from the same producer: a window read
-        # off the records can be wider than the clause, and here that costs a *posted
-        # vote* rather than a reading - this refusal is the one place a cycle cannot
-        # simply re-read next cycle (issue #2214).
-        #
-        # Both ends of the span, not its start alone (issue #2334). A posting cycle is the
-        # newest one, so its far bound is open and this is the comparison it always was;
-        # the far end is asked all the same, because the predicate the three carriers share
-        # is the one place that difference is allowed to live.
-        widened = f" {window.inferred_clause()}." if window.inferred else ""
-        far = f", until {window.window_end_text()}" if window.end is not None else ""
-        return (
-            f"the head {head[:8]} was pushed {push_time}, inside the window this cycle "
-            f"treats as its own, which starts {window.window_start_text()}{far} "
-            f"({window.source}) - a cycle does not vote on a head it pushed, and the "
-            "window immediately before this one counts as its own as well, because every "
-            f"cycle on a host is the same instance running again.{widened} "
-            "Nothing was posted. The next vote here has to come from a later cycle "
-            "(the same head is an `abstain` row in "
-            f"`{RUNNER} scripts/review-queue.py --cycle <id>`); if the head is stale and its "
-            "votes are at risk, measure the tree the merge would land instead of "
-            "refreshing it - a push voids the votes it was meant to preserve "
-            f"(`{RUNNER} scripts/check-merge-plan-suite.py <PR>`)"
-        ), note
-
-    return "", note
+    far = f", until {window.window_end_text()}" if window.end is not None else ""
+    return (
+        f"the head {head[:8]} was pushed {push_time}, inside the run this cycle treats "
+        f"as its own, which starts {window.window_start_text()}{far} "
+        f"({window.source}) - a cycle does not vote on a head it pushed. "
+        "Nothing was posted. The next vote here has to come from a later cycle "
+        "(the same head is an `abstain` row in "
+        f"`{RUNNER} scripts/review-queue.py --cycle <id>`); if the head is stale and its "
+        "votes are at risk, measure the tree the merge would land instead of "
+        "refreshing it - a push voids the votes it was meant to preserve "
+        f"(`{RUNNER} scripts/check-merge-plan-suite.py <PR>`)"
+    ), ""
 
 
 def _gh(args: list[str], stdin: str | None = None) -> subprocess.CompletedProcess:
@@ -927,17 +887,11 @@ def main(argv: list[str] | None = None) -> int:
         help="the cycle id the vote is cast under; must be the one in the body",
     )
     parser.add_argument(
-        "--prev-cycle",
-        default=None,
-        help="the cycle immediately before this one, whose start is the abstention "
-        "window's start; read from the cycle records when omitted",
-    )
-    parser.add_argument(
         "--cycles-log",
         default=None,
         help="directory (or several, joined by `os.pathsep`) holding the "
-        "`cycle-<date>-<time>.md` records the previous cycle is read from when "
-        "--prev-cycle is not given (default: $EMRG_CYCLES_LOG, else the project "
+        "`cycle-<date>-<time>.md` records, read for the cycle that follows this one "
+        "- the window's far bound (default: $EMRG_CYCLES_LOG, else the project "
         "memory root inside this checkout)",
     )
     parser.add_argument("--repo", default=REPO, help="owner/name the PR lives in")
@@ -1030,12 +984,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"note: {note}", file=sys.stderr)
 
     refusal, window_note = own_head_window(
-        cycle, verdict, prev_cycle=args.prev_cycle, cycles_log=args.cycles_log
+        cycle, verdict, cycles_log=args.cycles_log
     )
     if window_note:
         # Ahead of the refusal, because the note describes the *reading* rather than the
-        # outcome: a window narrowed to this cycle alone is weaker than the rule states,
-        # and the refusal it produces is exactly the case a reader has to know that for.
+        # outcome: a head provably pushed by another instance is exempt from the clause
+        # altogether, and that is what the refusal beside it has to be read against.
         print(f"note: {window_note}", file=sys.stderr)
     if refusal:
         print(f"refusing to post: {refusal}", file=sys.stderr)

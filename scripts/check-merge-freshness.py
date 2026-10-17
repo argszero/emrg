@@ -895,9 +895,10 @@ def _remedy(pr: int, kind: str, price: Price, run_id: str = "") -> str:
 
     "Nothing to void" is a statement about votes already cast, and it was read as
     "free" - which is a different claim, and false: the push moves the head into the
-    abstention window of the cycle that makes it *and of the cycle after that one*,
-    so the first vote the head can collect comes two cycles later than it otherwise
-    would. Measured 2026-09-26 (`cyc20260926-155041`): that cycle followed this very
+    abstention window of the cycle that makes it — that cycle's own run, and only it
+    (the host struck the wider reading out on 2026-10-16T22:18:15) — so the first vote
+    the head can collect comes one cycle later than it otherwise would.
+    Measured 2026-09-26 (`cyc20260926-155041`): that cycle followed this very
     sentence on #1638 and then could not vote on the head it had pushed -
     `cast-vote.py` refused it `own-head-window` - when the pre-refresh head was one
     its window no longer covered. The zero-vote branch therefore names the trade
@@ -920,10 +921,10 @@ def _remedy(pr: int, kind: str, price: Price, run_id: str = "") -> str:
                 "not a rebase: a rebase of a pushed branch is refused as non-fast-forward, "
                 "and publishing one needs the force-push this project forbids. Nothing to "
                 "*void* is not nothing to *lose*: the push puts the head inside the "
-                "abstention window of the cycle that makes it and of the cycle after that "
-                "one - a cycle neither votes on nor merges a head it pushed, and the window "
-                "immediately before it counts as its own - so the earliest vote this head "
-                "can collect is from the cycle after next. If this cycle would have cast "
+                "abstention window of the cycle that makes it - a cycle neither votes on "
+                "nor merges a head it pushed, and that window is the cycle's own run - so "
+                "the earliest vote this head can collect is from the cycle after this one. "
+                "If this cycle would have cast "
                 "that first vote, do not push: measure the tree this merge would land "
                 f"(`{RUNNER} scripts/check-merge-plan-suite.py <PR>`) and the head does not move, "
                 "leaving the next cycle free to vote on it"

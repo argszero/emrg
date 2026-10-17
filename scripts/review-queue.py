@@ -114,30 +114,26 @@ whose rows are right is cheaper than a backstop that has to disagree with them.
 The other half of "may this cycle vote here" is the clause the counter cannot see
 -------------------------------------------------------------------------------
 Issue #1408. The clause is **a cycle does not vote on a head it pushed** (nor merge
-it) and, because every cycle on a host is the same instance running again, the
-**immediately preceding cycle's window counts as one's own** — the applied precedent
-is `cyc20260917-125823`, which refused to endorse `#1315`'s head 25 minutes after
-`cyc20260917-122459` pushed it. It has been applied by hand every cycle since, and
-two measured cycles show the cost in both directions: `cyc20260919-065231` cast a
-vote on the head it had just refreshed and had to withdraw it by hand, and
-`cyc20260920-214143` found this tool answering `vote` for two heads the cycle
-immediately before it had pushed.
+it), and the window that decides it is that cycle's **own run**: from its start to the
+start of the cycle that follows it. The host ruled the older, wider reading away on
+2026-10-16T22:18:15 ("I think the requirement 'nor one pushed by the cycle immediately
+before it' should not exist. That the cycle that pushed it cannot vote is already
+enough" — translated from the Chinese original), so a head the immediately preceding
+cycle pushed is no longer read as this cycle's own work.
 
 *Who pushed a head* is not a fact GitHub records, so the clause has to be read off
 the clock, and a cycle id **is** its start time in the host's local zone
-(`cyc20260917-221117` began at 22:11:17 local). So the window is decidable from two
-datums this tool already has — the push time (the counter prints it) and the cycle's
-id — plus one it does not: **the previous cycle**, which `--prev-cycle` supplies and
-which is otherwise read from the cycle records in the directories the memory system
-writes them to (`--cycles-log`, default `DEFAULT_CYCLES_LOGS` — the checkout's project
-memory root, plus one memory directory per session under it). A head pushed inside
-`[previous cycle's start, now)` is reported `abstain` instead of `vote` or `merge`.
+(`cyc20260917-221117` began at 22:11:17 local). The near bound therefore needs no
+corpus at all: it is this cycle's own id. The far one does — **the cycle that follows
+it**, read from the cycle records in the directories the memory system writes them to
+(`--cycles-log`, default `DEFAULT_CYCLES_LOGS` — the checkout's project memory root,
+plus one memory directory per session under it). A head pushed inside `[this cycle's
+start, the next cycle's start)` is reported `abstain` instead of `vote` or `merge`.
 
-When the previous cycle cannot be found, `--cycle` is not silently ignored: the
-window shrinks to this cycle's own start, a `vote` row for an earlier push comes
-with the push time in view, and the queue prints what it could not determine. An
-unresolved window is never reported as a pass — the whole point of the clause is
-that the wrong direction is the one that spends a vote nobody can recount.
+A cycle id that names no instant leaves the window unapplied, and the queue prints
+what it could not determine rather than passing it. An unresolved window is never
+reported as a pass — the whole point of the clause is that the wrong direction is the
+one that spends a vote nobody can recount.
 
 Exit codes
 ----------
@@ -164,7 +160,6 @@ import traceback
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Sequence
 
 REPO = "argszero/emrg"
 
@@ -261,15 +256,14 @@ def session_memory_roots(checkout: Path) -> tuple[Path, ...]:
 #: hold the ones written since a cycle put its record under the session it belongs to.
 #:
 #: **The direction of the error is why this is worth a paragraph.** The newest record
-#: decides the previous cycle, so a root that has stopped growing *freezes* the window
-#: at the last cycle that wrote there, and a frozen window is an over-wide one: heads
-#: pushed by the cycles in between are reported `abstain` when they are not one's own,
-#: and the cycles that pushed them lose a vote they were entitled to. Nothing is
+#: decides the far bound — the cycle that follows this one — so a root that has stopped
+#: growing *freezes* that bound at the last cycle that wrote there, and a frozen far
+#: bound is an *open* one: the span then has no upper end, so a head pushed by a cycle
+#: that followed is reported `abstain` when it is that later cycle's own work. Nothing is
 #: printed as a fault — the tool names a window, names the cycle it resolved and exits
-#: 0 — so only the row's cycle is wrong, and it is wrong in the permissive direction.
-#: Measured 2026-10-12: the project root's newest record was a day older than the
-#: newest record the session directories held, and the window was resolved from the
-#: stale one.
+#: 0 — so only the row's cycle is wrong. Measured 2026-10-12: the project root's newest
+#: record was a day older than the newest record the session directories held, and the
+#: bound was resolved from the stale one.
 #:
 #: This is the shape this tool carried while the prompt's record path moved once
 #: before (D9, PR #1555) and the corpus was split over two roots — it searched both
@@ -302,246 +296,6 @@ def resolve_cycle_logs(override: str | None = None) -> tuple[Path, ...]:
     if raw:
         return tuple(Path(part) for part in raw.split(os.pathsep) if part)
     return DEFAULT_CYCLES_LOGS
-
-
-# ── the dispatch corpus: the cycles the record corpus cannot see ──────────────
-#
-# Where a **dispatched** cycle leaves a trace even when it never reaches §4: one
-# `## Evolution Cycle` message per dispatch, in the task sessions' histories that sit
-# beside the cycle records under the same `.emrg` root.
-#
-# This corpus exists because the record one is written by the cycle itself, in its
-# final step, and a cycle that dies earlier writes nothing at all — so the record
-# corpus cannot tell "no cycle ran" from "a cycle ran and wrote no record". Issue
-# #2214 measured the consequence: `previous_cycle` then answers with the *older*
-# record, and the own-window widens silently over the missing cycle's work, which is
-# the direction that **blocks** a vote the clause would allow.
-#
-# What is read is the **cycle id the prompt carries**, never the line's timestamp. The
-# id is exact — it *is* the cycle's start — while a line's timestamp is a write instant
-# lagging it without a stated bound: over one host's 1793 dispatch lines, 1781 carry
-# their own id, and the gap between an id and the line holding it runs from 0.17 s to
-# 133 s (fourteen pairs above 5 s) against a 124 s minimum between two cycles. The two
-# ranges overlap, so a reading built on the timestamps cannot tell a late-written line
-# from a later cycle; the id decides it outright, and no threshold is fitted here.
-#
-# A session directory is not required, and its absence is not a failure: a checkout
-# shaped like CI's has no `.emrg/sessions/` at all, and the reading there is the one
-# the records alone give.
-#
-# The default follows the **records** rather than a constant of its own, so the two
-# corpora cannot be pointed at different roots: a record root `<...>/.emrg/memory` has
-# its dispatches in the `sessions` directory of the **same `.emrg` root**, and a
-# session's record root — the other scope a record root comes in — is owned by that
-# same root, so both answer with the one corpus instead of one real corpus and one
-# directory that never existed. A caller naming a corpus of its own (`--cycles-log`) is
-# answered from its own `.emrg` root, or from beside it when it has none — one
-# directory that is named, or absent.
-
-#: A dispatch marker, and the histories that hold one. Only the *line* has to be
-#: recognised cheaply, so the marker is matched as a substring before any parsing:
-#: a session history is the largest file this tool reads (11 MB on the host that
-#: measured it, and never compacted), and every line of it is a JSON object.
-_DISPATCH_MARK = "## Evolution Cycle"
-_HISTORY_NAME = re.compile(r"history(?:_\d{6})?\.jsonl")
-
-
-def sessions_root(record_root: Path) -> Path:
-    """The `sessions` directory of the `.emrg` root that owns a record directory.
-
-    A record's dispatch corpus sits in the `sessions` directory of the **same `.emrg`
-    root** as the record, and a record root comes in two scopes since D9 and #2221: the
-    project one (`.emrg/memory`) and a session's (`.emrg/sessions/<session>/memory`).
-    Looking beside the root answers that correctly for the first and invents nothing for
-    the second — `<session>/sessions` was never a corpus, but the derivation produced it
-    anyway, so the reading named a directory that does not exist as one it *could not
-    read* (issue #2222). Both scopes belong to the same `.emrg` root, so both answer with
-    the same directory and the difference disappears where it was introduced.
-
-    Without a `.emrg` ancestor the caller's own corpus is answered from **beside** it —
-    the convention the tests rely on to stay off the machine's real sessions
-    (`--cycles-log <tmp>/records` reads `<tmp>/sessions`), kept because a corpus of one's
-    own has no `.emrg` root to be found and no reason to be read from elsewhere.
-    """
-    for parent in Path(record_root).parents:
-        if parent.name == ".emrg":
-            return parent / "sessions"
-    return Path(record_root).parent / "sessions"
-
-
-def resolve_session_dirs(
-    override: str | None = None, cycles_logs: Sequence[Path] | None = None
-) -> tuple[Path, ...]:
-    """The session directories to read dispatches from.
-
-    The override (`--sessions-dir` / `$EMRG_SESSIONS_DIR`) wins; otherwise each record
-    root's own `.emrg` sessions directory (`sessions_root`), so the dispatches are read
-    from the same `.emrg` root as the records and there is no second constant to keep in
-    step — a caller that pointed `--cycles-log` at a corpus of its own is answered from
-    beside it, which is also what keeps a test off the machine's real sessions.
-
-    Duplicates collapse: the project root and every session root under one `.emrg` name
-    the same corpus, and a directory listed twice is a reading that looks like two.
-    """
-    raw = override or os.environ.get("EMRG_SESSIONS_DIR")
-    if raw:
-        return tuple(Path(part) for part in raw.split(os.pathsep) if part)
-    roots = tuple(cycles_logs) if cycles_logs else DEFAULT_CYCLES_LOGS
-    found: list[Path] = []
-    for root in roots:
-        candidate = sessions_root(Path(root))
-        if candidate not in found:
-            found.append(candidate)
-    return tuple(found)
-
-
-def dispatch_ids(dirs: Sequence[Path] | None = None) -> tuple[list[str], list[str]]:
-    """Every cycle id these sessions recorded as dispatched, oldest first, and what was unread.
-
-    One id per rendered evolution prompt, taken from the message that *is* the prompt:
-    the template substitutes the cycle's own id, so the line says which cycle it
-    dispatched. Duplicates collapse — a compacted `history.jsonl` and the daily file it
-    was compacted from hold the same dispatch, and a re-delivered prompt carries the id
-    it was first rendered with — and ids sort as time, so the caller can take the newest
-    one before its own.
-
-    A line is accepted only when it parses to a `message` whose role is `user`: the
-    marker is also a substring of anything that *quotes* a prompt (a tool result echoing
-    a history or the template, which is how this very file was measured), and an id read
-    off a quotation would attribute somebody else's dispatch to this corpus.
-
-    :param dirs: the session directories to read. `None` means the default.
-    :returns: `(ids, unreadable)` — the second names each directory or history that could
-        not be read, so a caller can tell "no dispatch is recorded here" from "the record
-        could not be read". An absent directory is named there too and is not an error: a
-        checkout with no sessions has no dispatches to offer, which is a state and not a
-        measurement that failed.
-    """
-    found: set[str] = set()
-    unreadable: list[str] = []
-    for directory in (resolve_session_dirs() if dirs is None else tuple(dirs)):
-        try:
-            sessions = sorted(entry for entry in directory.iterdir() if entry.is_dir())
-        except OSError as exc:
-            unreadable.append(f"{directory} ({exc.strerror or exc})")
-            continue
-        for session in sessions:
-            try:
-                histories = sorted(
-                    entry
-                    for entry in session.iterdir()
-                    if _HISTORY_NAME.fullmatch(entry.name)
-                )
-            except OSError as exc:
-                unreadable.append(f"{session} ({exc.strerror or exc})")
-                continue
-            for history in histories:
-                for line in _dispatch_lines(history, unreadable):
-                    try:
-                        record = json.loads(line)
-                    except ValueError:
-                        continue
-                    if record.get("type") != "message" or record.get("role") != "user":
-                        continue
-                    content = record.get("content") or ""
-                    if not isinstance(content, str):
-                        content = json.dumps(content)
-                    found.update(match.group(0) for match in _CYCLE_ID.finditer(content))
-    return sorted(found), unreadable
-
-
-#: The dispatch corpus, read at most once per process **per corpus**. A history is the
-#: largest file this tool reads (11 MB on the host that measured it) and the answer is a
-#: pure function of what is on disk, so a run that asks for the window once per vote -
-#: `check_pr` asks per voting cycle and `review-queue.py` asks once per PR - would pay the
-#: scan every time: 0.58 s, measured 2026-10-14 over 1802 ids. The key is the **resolved**
-#: dirs rather than the caller's argument, so two spellings of one corpus share an entry.
-#: A caller that writes to a corpus and re-reads it inside one process must clear this
-#: first; nothing in this tool does, and every test names a corpus of its own.
-_DISPATCHED_IDS: dict[tuple[str, ...], tuple[list[str], list[str]]] = {}
-
-
-def dispatched_ids(dirs: Sequence[Path] | None = None) -> tuple[list[str], list[str]]:
-    """`dispatch_ids`'s whole reading for one corpus, read once per process.
-
-    Both halves are cached and both are returned: the reading is a pure function of what
-    is on disk, so caching the ids alone made the caller re-read the corpus to learn
-    *why* an id was missing — which is the half that says whether a corpus was absent (a
-    state) or could not be read (a measurement that failed).
-    """
-    resolved = resolve_session_dirs() if dirs is None else tuple(dirs)
-    key = tuple(str(directory) for directory in resolved)
-    if key not in _DISPATCHED_IDS:
-        _DISPATCHED_IDS[key] = dispatch_ids(resolved)
-    ids, unreadable = _DISPATCHED_IDS[key]
-    return list(ids), list(unreadable)
-
-
-def corpus_read_failure(dirs: Sequence[Path], unreadable: Sequence[str]) -> str:
-    """The reason a dispatch corpus **that is there** could not be read (empty otherwise).
-
-    Membership is decided by the filesystem rather than by the error text: a corpus is
-    absent when nothing is at its path, which is the state a checkout shaped like CI's is
-    in and is not reported as a failure (issue #2216's acceptance), while a path that
-    holds something the reading could not open - a file where a directory was expected, a
-    directory that refused to list - leaves the ids incomplete and has to be said out
-    loud. `exists()` and not `is_dir()` for exactly that first case: a regular file at the
-    corpus path is not "absent", and it is not readable as a corpus either.
-
-    The test is applied **per entry, not to the set** (issue #2224's mixed case). A set that
-    holds one corpus that is there and one path that is not leaves the absent member's own
-    reason in `unreadable` - `dispatch_ids` records one, and its docstring says an absent
-    directory "is not an error" - so a set-level test passes on the present member and then
-    hands the *absent* one's reason back as the reason a corpus could not be read. Printed,
-    it says that a path with nothing at it failed to open, and "no dispatch was consulted
-    either" while the present corpus was walked. So the reasons kept are exactly those that
-    do not name an absent corpus directory.
-
-    The match is anchored at `"<path> ("`, the shape `dispatch_ids` writes, and not a bare
-    prefix: with `/tmp/a` absent and a file at `/tmp/ab`, `startswith("/tmp/a")` would drop
-    `/tmp/ab`'s genuine reason. In the other direction, a reason naming a **session**
-    directory or a **history** under a corpus is kept - it cannot be the absent member,
-    because `dispatch_ids` only descends into a directory that listed successfully.
-
-    **One overlap is left**, and it is silent rather than false: a reason string carries
-    its path's parentheses unescaped, so with `/tmp/a` absent and a file at `/tmp/a (copy)`
-    the *present* member's genuine reason starts with `"/tmp/a ("` too and is dropped with
-    the absent one (measured 2026-10-14, `cyc20261014-081405`). Master printed nothing for
-    that set either, so this is the reach of the disclosure and not a regression, and it
-    takes a corpus directory literally named `<another corpus> (…)` to arise. Closing it
-    needs the reasons **attributed to their directory by `dispatch_ids`** - the loop that
-    knows which member produced which - because an exact string comparison does not reach
-    both shapes: `reason.split(" (", 1)[0] == directory` fixes nothing here and reports an
-    *absent* directory whose own name carries a `" ("` as a corpus that failed to read.
-    `tests/test_review_queue.py::test_an_absent_corpus_is_never_disclosed_whatever_its_name_carries`
-    refuses that trade.
-    """
-    absent = tuple(str(directory) for directory in dirs if not Path(directory).exists())
-    return "; ".join(
-        reason
-        for reason in unreadable
-        if not any(reason.startswith(f"{directory} (") for directory in absent)
-    )
-
-
-def _dispatch_lines(history: Path, unreadable: list[str]) -> Iterator[str]:
-    """The lines of one history that hold a dispatch marker.
-
-    Reading line by line and matching before parsing is what keeps this affordable on
-    a file that grows without bound: the parse is paid only for the handful of lines
-    that can be a dispatch.
-
-    :param history: the history file to read.
-    :param unreadable: appended to when the file cannot be read.
-    :returns: the candidate lines, in file order.
-    """
-    try:
-        with history.open(encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                if _DISPATCH_MARK in line and '"role": "user"' in line:
-                    yield line
-    except OSError as exc:
-        unreadable.append(f"{history} ({exc.strerror or exc})")
 
 
 # ── the abstention window ────────────────────────────────────────────────────
@@ -585,67 +339,13 @@ def instant(text: str) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def previous_cycle(cycle: str, cycles_logs) -> tuple[str, str, str]:
-    """`(the cycle immediately before `cycle`, where it was found, why the corpus fell short)`.
-
-    The newest cycle record whose id sorts before this cycle's; ids are fixed width,
-    so string order is time order, and a file's `<date>-<time>` stem is turned back
-    into an id here because the filename does not carry the `cyc` prefix. The default
-    is several directories (`DEFAULT_CYCLES_LOGS`: the project memory root and one per
-    session); a caller may name several too, and the newest record wins *across* them —
-    which is the only reading that is right when the writers do not all use one root.
-
-    `("", reason, ...)` when there is none — an unresolvable window is the one input this
-    reading must not invent, because inventing it spends a vote. A directory that
-    cannot be read is named in the answer rather than passed over: an answer drawn
-    from the readable half is still an answer, but a reader has to know which half
-    it came from.
-
-    The third element is that half, **structurally**, and it is the difference between two
-    answers `where` renders in the same kind of words (issue #2275): "no cycle record
-    before this cycle" is a **measurement** — the corpus was listed and holds no earlier
-    record — while a root that could not be listed at all leaves the boundary
-    *unmeasured*, and a boundary nobody measured must not be replaced by the narrower
-    reading that credits a vote. So it is the reasons of the roots that were **not
-    listed** (an absent path and an unreadable one alike: neither answered), joined with
-    `'; '`, and `""` only when every named root was listed. A root that was listed and
-    merely holds nothing is not a shortfall — that is the case that legitimately narrows
-    the window, and `tests/test_check_vote_count.py`'s fixture is built on it.
-
-    A caller that named **no** root gets a shortfall too, which is the same fact
-    (`"no cycle-record directory was named"`): nothing was measured, so nothing may be
-    narrowed off.
-    """
-    logs = tuple(Path(entry) for entry in (cycles_logs or ()))
-    if not logs:
-        return "", "no cycle-record directory was named", "no cycle-record directory was named"
-    found, unreadable = _cycle_record_ids(cycles_logs)
-    named = ", ".join(str(log) for log in logs)
-    shortfall = "; ".join(unreadable)
-    if not found:
-        if len(unreadable) == len(logs):
-            return "", f"{shortfall} could not be read", shortfall
-        detail = f" ({shortfall} could not be read)" if unreadable else ""
-        return "", f"no cycle record before {cycle} in {named}{detail}", shortfall
-    earlier = sorted(entry for entry in found if entry < cycle)
-    where = (
-        str(found[earlier[-1]])
-        if earlier
-        else f"no cycle record before {cycle} in {named}"
-    )
-    if unreadable:
-        where += f" ({shortfall} could not be read)"
-    return (earlier[-1], where, shortfall) if earlier else ("", where, shortfall)
-
-
 def _cycle_record_ids(cycles_logs) -> tuple[dict[str, Path], list[str]]:
     """Every cycle id the record corpus holds, and the roots that were **not listed**.
 
-    The one scan both boundary resolvers read — `previous_cycle` takes the newest id below
-    this cycle's, `following_cycle` the earliest id above it — because a window is one span
-    and its two ends must see the same corpus. Resolved from two separate readings of the
-    roots, the same head reads one way in the queue and another at the poster, which is the
-    divergence this family has already paid for once (issue #2218).
+    The scan `following_cycle` reads for the window's far bound: the earliest id above this
+    cycle's. Resolved from a second reading of the roots, the same head would read one way in
+    the queue and another at the poster, which is the divergence this family has already paid
+    for once (issue #2218).
 
     A root that cannot be listed is *named* rather than passed over: an answer drawn from
     the readable half is still an answer, but a reader has to know which half it came from.
@@ -676,8 +376,8 @@ def following_cycle(cycle: str, cycles_logs) -> tuple[str, str, str]:
 
     `("", reason, ...)` when there is none — the *ordinary* state here rather than an
     accident: the newest cycle is the one posting a vote and nothing follows it yet, so its
-    span stays open at the far end. The third element keeps `previous_cycle`'s meaning (the
-    roots that were not listed), and its direction is the safe one: a corpus nobody could
+    span stays open at the far end. The third element is the roots that were **not listed**,
+    and its direction is the safe one: a corpus nobody could
     read has not said there is no later cycle either, so the bound stays open, which leaves
     the window **wide** — a delay, never a vote credited.
     """
@@ -687,14 +387,21 @@ def following_cycle(cycle: str, cycles_logs) -> tuple[str, str, str]:
     later = sorted(entry for entry in found if entry > cycle)
     if later:
         where = str(found[later[0]])
+        if unreadable:
+            where += f" ({shortfall} could not be read)"
+    elif unreadable and not found:
+        # Nothing at all could be listed, so "no cycle record after X" is a claim the
+        # corpus never supported: the reason is the read failure. The two are different
+        # facts and only one of them is a gap in the record corpus.
+        where = f"{shortfall} could not be read"
     else:
         where = (
             f"no cycle record after {cycle} in {named}"
             if named
             else "no cycle-record directory was named"
         )
-    if unreadable:
-        where += f" ({shortfall} could not be read)"
+        if unreadable:
+            where += f" ({shortfall} could not be read)"
     return (later[0], where, shortfall) if later else ("", where, shortfall)
 
 
@@ -702,45 +409,20 @@ def following_cycle(cycle: str, cycles_logs) -> tuple[str, str, str]:
 class Window:
     """The span of cycles whose heads this cycle must neither vote on nor merge.
 
-    `start` is the earliest push instant that counts as one's own; no `start` means
-    the clause could not be applied at all. `unresolved` names what is missing, so a
-    window shrunk to this cycle alone can say so rather than reading as the full one.
+    `start` is this cycle's own run start — a cycle id **is** its start instant — and
+    `end` is the instant the **next** cycle began, or `None` while this cycle is the
+    newest. The span is `[start, end)`: a head pushed before `start` belongs to somebody
+    else, so the vote counts, and one pushed from `end` onward belongs to the cycle that
+    followed (issue #2334).
 
-    `inferred` says the boundary was **read off the cycle records** rather than named
-    by the caller, *and* that no second corpus was able to confirm it, and that is a
-    different kind of answer: a cycle that ran without writing a record has no record to
-    be found, so the window lands on the record *before* it instead - wider than the
-    clause says, silently, because a missing record and a cycle that never ran look
-    identical from there (issue #2214). `dispatch_ids`/`with_dispatches` clear the flag
-    where the session histories reach the boundary (issue #2216), so what it marks is
-    the state the records alone leave: the gap is real or unverifiable, never confirmed
-    otherwise. `previous` keeps the id the boundary was read from, so the reading can
-    name it.
-
-    `dispatch_unread` names a dispatch corpus that **is there and could not be read**,
-    which is a third answer and not the same one as an absent corpus: a checkout shaped
-    like CI's has no sessions and that is a state, while a corpus that exists and failed
-    to open leaves the ids *incomplete* — so the clause must not say no dispatch names
-    the cycle when a dispatch may sit in a file nobody could read.
-
-    `corpus_shortfall` is the same fact about the **record** corpus — the roots that
-    were not listed, absent ones included, because neither answered — and on this window
-    it is not a qualification but a **limit on what the window decided** (issue #2275):
-    the narrowed window's `start` is this cycle's own id, which no corpus supplies, while
-    its far end is the previous cycle's, which only the records answer. So a corpus that
-    could not be listed leaves that boundary unmeasured, and `boundary_unmeasured` is the
-    one producer of that reading — the counter asks it before it credits a vote whose
-    push falls below `start`, and the poster asks it before it posts one. It stays on the
-    window once resolved so the reading keeps saying which corpus fell short.
+    No `start` means the clause could not be applied at all — the caller's cycle id names
+    no instant — and `unresolved` names that, so a window that was not applied says so
+    rather than reading as an empty one.
     """
 
     start: datetime | None = None
     source: str = ""
     unresolved: str = ""
-    previous: str = ""
-    inferred: bool = False
-    dispatch_unread: str = ""
-    corpus_shortfall: str = ""
     #: The far bound of the span: the instant the **next** cycle started, or `None` while
     #: this cycle is the newest — its run has not ended, which is the state every cycle is
     #: in when it posts a vote. A head pushed at or after this instant was pushed by that
@@ -758,10 +440,16 @@ class Window:
         The clause is about a head **this** cycle pushed, and a cycle's run ends where the
         next cycle begins: the span is `[start, end)`, with `end` open while this cycle is
         the newest — nothing after it exists to take the run over, so every push since its
-        start is its own. The reason a far bound is needed at all is that without one the
-        span reaches *forward* without limit, and a head pushed by a later cycle was
-        reported as this one's own work (issue #2334: `cyc20261016-181619` was voided on a
-        head `cyc20261016-183420` pushed).
+        start is its own. A push *before* `start` was pushed by somebody else, and that is
+        the reading the host ruled for on 2026-10-16T22:18:15: "I think the requirement
+        'nor one pushed by the cycle immediately before it' should not exist. That the
+        cycle that pushed it cannot vote is already enough" (translated from the Chinese
+        original). So the window is this cycle's own run, not the previous cycle's too.
+
+        The far bound is needed because without one the span reaches *forward* without
+        limit, and a head pushed by a later cycle was reported as this one's own work
+        (issue #2334: `cyc20261016-181619` was voided on a head `cyc20261016-183420`
+        pushed).
 
         One predicate, asked by all three carriers — the queue that prints the verdict,
         the counter that voids a posted vote, the poster that refuses to spend one — so
@@ -770,24 +458,6 @@ class Window:
         if self.start is None:
             return False
         return pushed >= self.start and (self.end is None or pushed < self.end)
-
-    @property
-    def boundary_unmeasured(self) -> bool:
-        """Was the boundary the clause asks about ever measured?
-
-        `False` for a window whose far end a corpus answered — either the records (a
-        record was found for the cycle before this one) or the dispatch corpus (a
-        dispatched id reached the boundary, which clears `unresolved` and is exact, since
-        a cycle's id *is* its start). `True` only where the record corpus could not be
-        listed **and** nothing reached that boundary. The narrowed window is still
-        sound where it decided something: a push at or after its `start` (this cycle's own
-        id) is inside **every** candidate window, so `abstain` there is right. A push
-        *before* `start` is the one the wider window would have decided — the boundary it
-        needed, the start of the cycle before this one, is earlier than `start` and comes
-        from the records alone — and no reader may report a decision nobody took (issue
-        #2275).
-        """
-        return bool(self.corpus_shortfall and self.unresolved)
 
     def window_start_text(self) -> str:
         """The window's start as one readable instant (empty when unapplied)."""
@@ -803,312 +473,66 @@ class Window:
         """
         return self.end.isoformat(timespec="seconds") if self.end else ""
 
-    def inferred_clause(self) -> str:
-        """The sentence a records-only resolution owes its reader (empty otherwise).
 
-        One producer for both tools that act on a window: `review-queue.py` prints it as
-        its note and `cast-vote.py` appends it to the refusal a window produced, because
-        the two readings differ and the disclosure does not - a widened window makes the
-        report say `abstain` where a narrower one says `vote`, *and* makes the poster
-        refuse a vote the narrower window would have posted.
-        """
-        if not self.inferred:
-            return ""
-        named = f", the start of {self.previous}" if self.previous else ""
-        # What closes the gap is a *read* dispatch corpus, so the clause has to say
-        # which of the two states it is in rather than assume the good one. A corpus that
-        # is there and could not be read is the case this family treats as loudly as any
-        # other: the ids come back incomplete, so "no dispatch names it" is a claim about
-        # files nobody opened (issue #2224).
-        if self.dispatch_unread:
-            consulted = (
-                "The dispatch corpus could not be read "
-                f"({self.dispatch_unread}), so no dispatch was consulted either, and this "
-                "window reaches further back than the clause does - a head pushed inside "
-                "such a gap reads `abstain` where it would have been votable"
-            )
-        else:
-            consulted = (
-                "A cycle that ran and wrote no record is not named there, so where no "
-                "dispatch names it either this window reaches further back than the "
-                "clause does - a head pushed inside such a gap reads `abstain` where it "
-                "would have been votable"
-            )
-        return (
-            "the own-window clause was read off the cycle records, not named by a "
-            f"caller: the window starts {self.window_start_text()}{named}. {consulted} "
-            "(issue #2214)"
-        )
+def abstain_window(cycle: str, following: str = "") -> Window:
+    """The window one cycle's own run defines: `[its start, the next cycle's start)`.
 
-
-def abstain_window(cycle: str, previous: str, where: str,
-                   inferred: bool = False, corpus_shortfall: str = "",
-                   following: str = "") -> Window:
-    """The window, from the previous cycle's id — or a narrower one that says so.
-
-    The previous cycle's start is preferred because it is the wider window: a head
-    pushed by the cycle immediately before this one is treated as one's own
-    (precedent `cyc20260917-125823`). Without it the scan shrinks to this cycle's own
-    start, which is a strictly weaker reading and must not be printed as the stronger
-    one.
-
-    `inferred` is the caller's own account of where `previous` came from: `True` when
-    it was looked up in the record corpus, `False` when the caller named it. It moves
-    the window's *reading* and not its extent — see `Window.inferred` for what a
-    record-only resolution cannot see.
-
-    `corpus_shortfall` is `previous_cycle`'s third element: the roots that were not
-    listed, or the fact that none was named. It changes the answer only when **no
-    earlier record was found**, and there it is decisive (issue #2275). Falling back to
-    this cycle's own start is a reading of the corpus — "listed, and it holds nothing
-    earlier" — and a corpus that could not be listed has not made that statement. The
-    two render in the same words (`where` says "no cycle record before …" in both),
-    which is how an unreadable corpus came to *credit* a vote the readable corpus voids:
-    `check-vote-count.py 2271 --cycle <id>` read the cycle id as a directory path, and
-    the window it narrowed to counted a vote cast inside the real window.
-
-    So with a shortfall and no `previous`, the window is left **unresolved** — no
-    `start` at all, which is the state both tools already treat as "this vote cannot be
-    counted" (`own_head_window`) and "this vote must not be posted"
-    (`cast-vote.py`'s refusal). That is the same direction the family takes for an
-    unresolvable cycle id, and the one the clause's own accounting prefers: a delay
-    costs less than a vote spent on a boundary nobody measured. A boundary that *was*
-    found is still used, shortfall or not — `previous_cycle` answers with the newest
-    record across every readable root, so a named root that could not be listed can
-    only have made that boundary too *early*, which is the wide direction.
-
-    **A resolved boundary stays a reading even beside a shortfall**, and a caller that
-    named its own boundary (`--prev-cycle`, `inferred=False`) is not second-guessed:
-    neither asked the records what only the records answer.
+    A cycle id **is** its start instant, so the near bound needs no corpus: the clause is
+    about a head *this* cycle pushed, and everything before its own start was pushed by
+    somebody else. The host ruled the older, wider reading away on 2026-10-16T22:18:15
+    ("I think the requirement 'nor one pushed by the cycle immediately before it' should
+    not exist. That the cycle that pushed it cannot vote is already enough" — translated
+    from the Chinese original) — a cycle abstained on any push from the *previous* cycle's
+    start onward, which is "any head pushed while this cycle ran", not "the head this cycle
+    pushed".
 
     `following` is the cycle *after* this one, and it closes the span at the far end: a
     head pushed from the next cycle's start onward was pushed by that cycle, not by this
-    one, so the clause has nothing to say about it (issue #2334). It is `""` for the newest
-    cycle — the state every posting cycle is in — and the span is then open above, which is
-    right: nothing has taken the run over yet.
+    one, so the clause has nothing to say about it (issue #2334). It is `""` for the
+    newest cycle — the state every posting cycle is in — and the span is then open above,
+    which is right: nothing has taken the run over yet.
+
+    A cycle id that names no instant is the one input this reading must not invent, so
+    the window is left **unresolved** — no `start` at all, the state both tools already
+    treat as "this vote cannot be counted" and "this vote must not be posted".
     """
     own = cycle_start(cycle)
-    start = cycle_start(previous)
-    # The far bound, and it is the cycle *after* this one rather than the one before: a
-    # cycle's run ends where the next cycle begins, so a push from that instant onward
-    # belongs to that later cycle (issue #2334). `""` — no later cycle — leaves the span
-    # open, which is the state this cycle is in while it is the one running.
     end = cycle_start(following)
-    if start is not None:
+    if own is None:
         return Window(
-            start=start,
+            start=None,
+            source="",
+            unresolved=f"{cycle!r} is not a cycle id",
             end=end,
-            source=f"previous cycle {previous}" + (f" ({where})" if where else ""),
-            previous=previous,
-            inferred=inferred,
-            corpus_shortfall=corpus_shortfall,
         )
-    if own is not None:
-        # The narrowed window, and the one case where its two ends are not equally
-        # measured: `start` is this cycle's own id, which no corpus supplies, so a head
-        # pushed at or after it is inside **every** candidate window and `abstain` is
-        # sound. The far end — the cycle before this one — comes from the records, so
-        # where those could not be listed it was never measured, and the narrowed window
-        # is then no longer a statement about a head pushed *before* `start`: the wider
-        # window it stands in for would have decided that push, and only one direction of
-        # the comparison survives (issue #2275). Which is why the shortfall stays on the
-        # reading rather than being spent here: `boundary_unmeasured` is what the counter
-        # and the poster ask before they credit or post on this window, and a window that
-        # answered "votable" from an end nobody measured is the defect this closes.
-        return Window(
-            start=own,
-            end=end,
-            source=f"this cycle only (started {own.isoformat(timespec='seconds')})",
-            unresolved=(
-                f"{corpus_shortfall} could not be read, so the start of the cycle "
-                "before this one - the boundary the wider window uses, earlier than this "
-                f"cycle's own start ({own.isoformat(timespec='seconds')}) - was never "
-                f"measured: a head pushed before "
-                f"{own.isoformat(timespec='seconds')} may be inside the window this vote's "
-                "cycle treats as its own, and an end nobody measured is not passed "
-                "(issue #2275)"
-                if corpus_shortfall
-                else where or "the previous cycle was not determined"
-            ),
-            previous=previous,
-            inferred=inferred,
-            corpus_shortfall=corpus_shortfall,
-        )
-    return Window(start=None, source="", unresolved=where or f"{cycle!r} is not a cycle id",
-                  previous=previous, inferred=inferred,
-                  corpus_shortfall=corpus_shortfall, end=end)
-
-
-def with_dispatches(window: Window, cycle: str, dispatched: Sequence[str]) -> Window:
-    """The window, moved up to a dispatched cycle the record corpus does not hold.
-
-    `previous_cycle` reads records, and a cycle that ran and never reached its record
-    step leaves none — so the corpus answers with the *older* record and the window it
-    found is wider than the clause asks. Every head pushed in the gap is then reported
-    `abstain`: not a vote spent, but a vote **blocked**, and silently, because nothing in
-    the row says the boundary it used is the wrong one. Issue #2214, whose two examples
-    are exactly this shape.
-
-    The remedy is the other corpus's own answer rather than an estimate of it: a
-    dispatched cycle's id *is* its start, so the boundary is exact, and a window moved
-    here is the one a record at that position would have produced. Nothing is inferred
-    from the clock, which is what the timestamps in those same histories cannot support
-    — see `dispatch_ids`.
-
-    An id taken here cannot be one the records hold: `previous_cycle` answers with the
-    **newest** record before this cycle, so a record newer than the window's own would
-    have *been* the window. That is the whole reason the move is sound in one direction
-    only — a dispatched id older than the record the window came from is either that same
-    cycle's own dispatch or an older cycle's, and it changes nothing. Where a record
-    exists it is authoritative; the dispatch corpus is never allowed to drag a resolved
-    window backwards.
-
-    :param window: the window the records produced.
-    :param cycle: this cycle's id.
-    :param dispatched: every cycle id the session histories recorded as dispatched.
-    :returns: the window to use. Moved when the newest dispatched cycle before this one
-        started later than the record the window was resolved from — in which case the
-        source names that cycle and says why the records do not hold it — and with its
-        `inferred` flag **cleared** either way when the corpus reaches the boundary: an
-        id equal to the records' own answer confirms it, so the disclosure that answer
-        owes its reader is not owed (see the two cases below).
-    """
-    own = cycle_start(cycle)
-    if own is None or not dispatched:
-        return window
-    earlier = [entry for entry in dispatched if entry < cycle]
-    if not earlier:
-        return window
-    boundary = cycle_start(earlier[-1])
-    if boundary is None:
-        return window
-    if window.start is not None and boundary <= window.start:
-        # The corpus names no *later* cycle than the records did, and the two cases in
-        # that are different answers. An id **older** than the boundary does not reach
-        # the gap above it — a stale quotation, a re-delivered prompt of an older cycle
-        # — and leaves the window, and its caveat, exactly as the records gave them.
-        # An id *equal* to the boundary is the **same cycle the records answered with**,
-        # and that confirms it: the gap this file's note is about is a cycle the daemon
-        # dispatched, so a corpus that was read and names no later one has nothing to
-        # disclose. Without this second case the note would print on every run of a
-        # checkout that has a session corpus — the ordinary shape here, measured
-        # 2026-10-13 while resolving issue #2216: 1798 dispatched ids, the newest the
-        # record's own answer — which is how a caveat that matters gets skimmed.
-        if window.boundary_unmeasured:
-            # The third case, and the one neither of the above answers: this window is the
-            # **narrowed fallback** (`abstain_window` found no record *and* the corpus could
-            # not be listed), so "exactly as the records gave them" says nothing about it —
-            # no record answered at all. A dispatched id *is* the boundary the records owed
-            # (`cycle_start` of the cycle before this one), so adopting it here does not
-            # drag a resolved window backwards; it supplies the measurement that was
-            # missing. It is also the **wider** window, earlier than this cycle's own start,
-            # and that is the point of taking it: without it the narrowed window can only
-            # abstain on a push below its start, which is a *delay* — while the counter's
-            # and the poster's `boundary_unmeasured` refusal is what stands in the meantime.
-            # A dispatch corpus that reached this boundary has answered the question the
-            # records could not, so the window stops saying an end nobody measured is
-            # undecided (issue #2275).
-            return Window(
-                start=boundary,
-                source=(
-                    f"previous cycle {earlier[-1]} (dispatched; the record corpus could "
-                    f"not be read ({window.corpus_shortfall}))"
-                ),
-                unresolved="",
-                previous=earlier[-1],
-                corpus_shortfall=window.corpus_shortfall,
-                # Both exits here build a **fresh** window rather than a `replace`, so
-                # every field the constructor is not handed is dropped silently. The far
-                # bound is not a function of the boundary being moved — the next cycle's
-                # start is the same fact either way — so it is carried (issue #2334).
-                end=window.end,
-            )
-        if boundary == window.start:
-            return replace(window, inferred=False)
-        return window
-    from_records = (
-        f"the newest record is {window.start.isoformat(timespec='seconds')}"
-        if window.start is not None
-        else (
-            f"the record corpus could not be read ({window.corpus_shortfall}), so this "
-            "boundary is the dispatch corpus's own answer"
-            if window.corpus_shortfall
-            else "no cycle record exists before this cycle"
-        )
-    )
     return Window(
-        start=boundary,
-        source=f"previous cycle {earlier[-1]} (dispatched, no cycle record; {from_records})",
-        unresolved="",
-        previous=window.previous,
-        corpus_shortfall=window.corpus_shortfall,
-        # The far bound moves with the window and not with its start: `boundary` is a
-        # dispatched cycle *before* this one, so it cannot be at or past `end`, which is
-        # the cycle *after* this one. Dropping it here would put the span back to having
-        # no far end, which is the defect `end` exists to close (issue #2334).
-        end=window.end,
+        start=own,
+        end=end,
+        source=f"this cycle's own run (started {own.isoformat(timespec='seconds')})",
     )
 
 
-def own_window(
-    cycle: str,
-    prev_cycle: str | None = None,
-    cycles_log: str | None = None,
-    sessions_dir: str | None = None,
-) -> Window:
-    """The own-window, resolved from **both** corpora — the single producer for a rule
-    three tools act on.
+def own_window(cycle: str, cycles_log: str | None = None) -> Window:
+    """The own-window — the single producer for a rule three tools act on.
 
-    `previous_cycle` answers from the records and `with_dispatches` moves that boundary
-    up past a cycle the daemon dispatched and that reached no record (issue #2216),
-    while `inferred` carries the disclosure a records-only resolution owes its reader
-    (issue #2214). The three compose **here and nowhere else**, because a window is a
-    rule and not an implementation detail: `review-queue.py` prints the verdict from it,
-    `cast-vote.py` refuses to *post* on it, and `check-vote-count.py` voids a posted
-    vote on it. Resolved from the records alone in one carrier and from both in another,
-    the same head reads `vote` in the queue and is refused at the poster — a vote lost
-    to an arithmetic difference between two carriers rather than to the clause (issue
-    #2218; measured 2026-10-14: the records-only boundary is too early for **20** of the
-    corpus's **350** cycle records, so a head pushed in such a gap is abstained *later*
-    than the clause asks, or refused a vote it was entitled to post).
-
-    `prev_cycle` is the caller's own answer (`--prev-cycle`) and the dispatches are not
-    consulted for it: a caller that named its boundary asked a different question, and
-    the note about a cycle the records cannot see is not owed to one that never asked
-    the records. It is also not *second-guessed*, which is the reading `--prev-cycle`
-    has always had.
+    The near bound is this cycle's own start (`abstain_window`); the far one is the cycle
+    that follows it, resolved from the record corpus because a later cycle's existence is
+    a fact only the records hold. The two compose **here and nowhere else**, because a
+    window is a rule and not an implementation detail: `review-queue.py` prints the
+    verdict from it, `cast-vote.py` refuses to *post* on it, and `check-vote-count.py`
+    voids a posted vote on it. Resolved from different corpora in different carriers, the
+    same head reads `vote` in the queue and is refused at the poster — a vote lost to an
+    arithmetic difference between two carriers rather than to the clause (issue #2218).
 
     :param cycles_log: the cycle-record corpus, `os.pathsep`-joined for several, or
         `None` for the default roots.
-    :param sessions_dir: the dispatch corpus, or `None` for `$EMRG_SESSIONS_DIR`, else
-        the `sessions` directory of the `.emrg` root each record root belongs to
-        (`sessions_root`) — so naming a corpus of one's own points both at *it*, and
-        the two cannot drift apart.
-    :returns: the window to use. `inferred` is cleared when the dispatch corpus reaches
-        the boundary the records gave, since an id equal to that boundary confirms it;
-        it also stays clear when `prev_cycle` named the boundary.
+    :returns: the window to use.
     """
     roots = resolve_cycle_logs(cycles_log)
-    # The far bound is resolved for **every** caller, `--prev-cycle` included. Naming the
-    # lower boundary says which question the caller asked about the *start*; the span's
-    # other end is a fact of the corpus either way, and a caller that named its start did
-    # not thereby claim the run of every cycle that followed it (issue #2334).
-    following, _following_where, _following_shortfall = following_cycle(cycle, roots)
-    if prev_cycle:
-        # The caller's own answer, taken as named: a caller that named its boundary asked
-        # a different question from one that asked the records, and the dispatches are
-        # not consulted for it.
-        return abstain_window(cycle, prev_cycle, "named by --prev-cycle", inferred=False,
-                              following=following)
-    previous, where, shortfall = previous_cycle(cycle, roots)
-    window = abstain_window(cycle, previous, where, inferred=True,
-                            corpus_shortfall=shortfall, following=following)
-    corpora = resolve_session_dirs(sessions_dir, roots)
-    ids, unreadable = dispatched_ids(corpora)
-    return replace(
-        with_dispatches(window, cycle, ids),
-        dispatch_unread=corpus_read_failure(corpora, unreadable),
-    )
+    # The far bound is read for every caller: it is a fact of the corpus, and a window
+    # whose far end nobody looked for would report a later cycle's head as this one's own.
+    following, _where, _shortfall = following_cycle(cycle, roots)
+    return abstain_window(cycle, following=following)
 
 
 def _sibling(name: str, module_name: str):
@@ -1470,8 +894,8 @@ def read_pr(pr: int, repo: str = REPO, cycle: str | None = None,
     is passed through to the counter, which is the tool that owns the refusal: this
     one neither softens it nor invents a verdict if the budget runs out. `cycles_log`
     goes through for the same reason the flag exists: the counter reads the abstention
-    window out of it, so a corpus named here and not there would have this row's window
-    read from one collection of cycles and its *count* judged against another.
+    window's far bound out of it, so a corpus named here and not there would have this
+    row's window read from one collection of cycles and its *count* judged against another.
     """
     out = Reading(pr=pr, head="", needed=needed)
 
@@ -1574,8 +998,9 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
       2026-09-24T14:46:10);
     * then a merge state that withholds the merge (draft, blocked, behind) — again
       not a review problem, and not curable by a vote;
-    * **then the abstention** (issue #1408): a head pushed by this cycle or by the one
-      immediately before it is not one this cycle may vote on or merge. It sits
+    * **then the abstention** (issue #1408): a head pushed inside this cycle's own run
+      — its own start to the start of the cycle that follows it — is not one this cycle
+      may vote on or merge. It sits
       directly above the two branches that *spend* something, because every branch
       above it asks "what does this PR need?" — and a head one pushed may still need
       a fix push, a conflict resolved, or CI to finish, which is work for the pusher
@@ -1776,40 +1201,10 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
         if pushed is not None and window.covers(pushed) and not other_pusher:
             return Action(
                 kind="abstain",
-                why=f"head pushed {reading.head_pushed_at}, inside the window this cycle "
+                why=f"head pushed {reading.head_pushed_at}, inside the run this cycle "
                     f"treats as its own ({window.source}) - a cycle neither votes on nor "
-                    "merges a head it pushed, and the window immediately before this one "
-                    "counts as one's own as well, because every cycle on a host is the same "
-                    "instance running again; the next vote here (and the merge) has to come "
-                    f"from a later cycle; {decided}",
-                command=f"{RUNNER} scripts/check-vote-count.py {pr}",
-            )
-        if (
-            pushed is not None
-            and pushed < window.start
-            and window.boundary_unmeasured
-            and not other_pusher
-        ):
-            # The other half of the same defect (issue #2275), and the half the row above
-            # cannot reach: this push is *below* the narrowed start, so the widened window
-            # is the one that decides it - and that window's far end was never measured,
-            # because the record corpus could not be listed. A row saying `vote` here
-            # invites a vote the poster refuses and the counter voids, which is the class
-            # this family keeps fixing: the remedy has to be right for its own cause. So
-            # the row reports the abstention the unmeasured boundary imposes, and names
-            # the corpus to pass rather than a command that would spend nothing but time.
-            return Action(
-                kind="abstain",
-                why=f"head pushed {reading.head_pushed_at}, before the window this cycle "
-                    f"treats as its own ({window.source}), and the boundary above it was "
-                    "never measured - the start of the cycle before this one is the "
-                    f"boundary the wider window uses, and the record corpus could not be listed "
-                    f"({window.corpus_shortfall}), so whether this push falls inside the "
-                    "window the clause asks about cannot be decided from here; a boundary "
-                    "nobody measured is not passed, because the narrowed window below it "
-                    "would credit a vote cast inside the one that was never read - pass "
-                    "`--cycles-log DIR` (or `--prev-cycle <id>`) to have the full window "
-                    f"applied; {decided}",
+                    "merges a head it pushed, so the next vote here (and the merge) has to "
+                    f"come from a later cycle; {decided}",
                 command=f"{RUNNER} scripts/check-vote-count.py {pr}",
             )
         if other_pusher and pushed is not None:
@@ -1880,8 +1275,8 @@ def rows(readings: list[Reading], cycle: str | None, repo: str,
 def window_note(window: Window | None) -> str:
     """What the report owes the reader about the own-window clause, before its rows.
 
-    Three states are readings of that clause the rows cannot show on their own, and each
-    of them moves a row that otherwise reads `vote`:
+    Two states are readings of that clause the rows cannot show on their own, and each of
+    them moves a row that otherwise reads `vote`:
 
     * **no `--cycle`** — the clause was not applied at all. The rows answer the count
       question and nothing else, so a `vote` here may be a head this very cycle pushed.
@@ -1893,50 +1288,23 @@ def window_note(window: Window | None) -> str:
       `--cycle` turned that row into `abstain`.
 
       The **cost, measured rather than carried over** — the vote itself is not spent:
-      `cast-vote.py` reads the cycle id out of the body, resolves the previous cycle
-      itself, and refuses with `own-head-window` (rc 2), which it did on that very head
-      in this cycle's probe. What the unflagged run costs is a **wrong reading**: the
-      first tool a cycle runs states `vote` where its own windowed answer is `abstain`,
-      and a reader who acts on the row — writing the body, planning the merge, reading
-      the state as "this head is votable" — has acted on a verdict the tool does not
-      hold. The backstop is downstream, one command later, and it arrives as a refusal
-      rather than as the `abstain` the report should have printed.
+      `cast-vote.py` reads the cycle id out of the body, resolves the window itself, and
+      refuses with `own-head-window` (rc 2), which it did on that very head in this
+      cycle's probe. What the unflagged run costs is a **wrong reading**: the first tool a
+      cycle runs states `vote` where its own windowed answer is `abstain`, and a reader
+      who acts on the row has acted on a verdict the tool does not hold.
 
-      The docstring above has promised "it reports the first question only, and says so"
-      since the clause was written, and this line is that "so" — it had no carrier at
-      all before.
-    * **a window narrowed to this cycle alone** — the previous cycle could not be read,
-      so a head *it* pushed is not reported as one's own. Already said, since
-      `test_an_unresolvable_previous_cycle_narrows_the_window_and_says_so`; what moves
-      is *where*, and the two notes move together because they are the same debt.
-    * **a window inferred from the records** (`window.inferred`) — the clause *was*
-      applied, and its extent is still not the one it claims, because the boundary was
-      looked up in the `cycle-*.md` records: a cycle that ran without writing one is not
-      found there, so the boundary lands on the record before it and the window reaches
-      further back than the clause does. The session histories' dispatch lines close that
-      gap where they are present (`dispatch_ids`/`with_dispatches`, which run first and
-      clear `inferred` both when they move the window and when they confirm it), so this
-      state is reached where that corpus is absent or empty — a checkout shaped like
-      CI's — or where the newest id it names is *older* than the record boundary and so
-      does not reach the gap. It
-      is the third state because it is the one silence read as a
-      pass for longest — the row says `abstain` and nothing else, and `abstain` here is
-      indistinguishable from `abstain` for a boundary that is right. Naming the instant
-      is what makes the width inspectable at all (issue #2214; the measurement is in the
-      code below). A boundary **named by the caller** (`--prev-cycle`) is not inferred
-      and prints nothing: the reader supplied it, so there is no resolution of the
-      tool's to disclose, and a note on every run is how the note that matters gets
-      skimmed — the control `test_a_windowed_run_prints_no_such_note` holds this half.
+    * **a window with no start** — the cycle id given names no instant, so the clause was
+      not applied either, and every row is the count question alone.
 
     The placement is the point, and it is this family's convention rather than a
     preference: a caveat that follows the row it weakens is read after the reader has
     already acted on it. Printed first, it also survives `| head`, which the tail
     placement did not — a queue of eight PRs is ~40 lines, and the note was line 39.
 
-    Returns the note (empty when the clause was applied from a boundary the caller
-    named). Prose only: under `--json` the same facts are the documented
-    `vote_window_start` / `vote_window_source` pair, and a line ahead of the document
-    would break every machine consumer.
+    Returns the note (empty when the clause was applied). Prose only: under `--json` the
+    same facts are the documented `vote_window_start` / `vote_window_source` pair, and a
+    line ahead of the document would break every machine consumer.
     """
     if window is None:
         return (
@@ -1945,39 +1313,13 @@ def window_note(window: Window | None) -> str:
             "into `abstain`. Pass --cycle <this cycle's id> to have the clause applied."
         )
     if window.unresolved:
-        where = (
-            f"only pushes at or after {window.window_start_text()}"
-            if window.applied
-            else "and this cycle's own id could not be read, so the clause was not "
-                 "applied at all"
-        )
         return (
-            f"note: the abstention window could not be widened to the cycle before this "
-            f"one ({window.unresolved}) - {where} were checked. Pass --prev-cycle or "
-            "--cycles-log DIR to have the full window applied."
+            "note: the own-window clause was NOT applied - "
+            f"{window.unresolved}, so the run this cycle owns was never delimitated and a "
+            'row reading "vote" may be a head this cycle pushed. Pass --cycle with this '
+            "cycle's own id to have the clause applied."
         )
-    if not window.inferred:
-        return ""
-    # The window was read off the records, so it is one record's answer and not the
-    # cycle boundary it stands for. A cycle that ran and wrote no record - phase work
-    # then no §4 - leaves nothing for the resolver to find, and it lands on the record
-    # *before* it: wider than the clause, silently for the reader, because silence here
-    # is exactly how a full window reads. Measured 2026-10-13 (issue #2214): two such
-    # cycles in one day, the window starting at 17:17:21 where the cycle before it
-    # began at 19:46:08, and one head pushed at 19:32:47 inside that gap read `abstain`
-    # where it was votable. So the instant is printed even though the clause *was*
-    # applied - the fact being disclosed is where the boundary came from, which the
-    # row cannot show. What closes it is not the daemon's own
-    # `logs/task-runs/<task>.jsonl` - measured the same day, that log holds no entry
-    # for a cycle that ended in error - but the session histories' dispatch lines,
-    # which `dispatch_ids`/`with_dispatches` read: a dispatch names its cycle's own id,
-    # so a cycle the records miss is found there and this note is then not reached.
-    # So a reader still sees it only where that corpus is absent, empty, or names no
-    # cycle the records do not — never as "the gap cannot be closed".
-    return (
-        f"note: {window.inferred_clause()}. "
-        "Pass --prev-cycle <id> to name the boundary yourself."
-    )
+    return ""
 
 
 def render(reading: Reading, action: Action) -> str:
@@ -2208,31 +1550,12 @@ def main(argv: list[str] | None = None) -> int:
              "whether this cycle may still vote at each head",
     )
     parser.add_argument(
-        "--prev-cycle",
-        default=None,
-        help="the cycle immediately before this one (cycYYYYMMDD-HHMMSS); a cycle id "
-             "is its start time, so this is the far end of the abstention window - a "
-             "head pushed by it counts as this cycle's own. Given, the boundary is "
-             "taken as named and the note that a records-only resolution cannot see a "
-             "cycle which wrote no record is not printed (issue #2214)",
-    )
-    parser.add_argument(
         "--cycles-log",
         default=None,
-        help="directory of `cycle-<id>.md` records, used to find the previous cycle "
-             "when --prev-cycle is not given (default: $EMRG_CYCLES_LOG, else the "
+        help="directory of `cycle-<id>.md` records, read for the cycle that follows "
+             "this one - the window's far bound (default: $EMRG_CYCLES_LOG, else the "
              f"{os.pathsep}-joined directories the memory system writes records to: "
              f"{os.pathsep.join(str(d) for d in DEFAULT_CYCLES_LOGS)})",
-    )
-    parser.add_argument(
-        "--sessions-dir",
-        default=None,
-        help="directory holding the task sessions whose histories record every cycle "
-             "dispatch, used to move the abstention window up to a cycle that ran and "
-             "wrote no record (default: $EMRG_SESSIONS_DIR, else the `sessions` "
-             "directory of the `.emrg` root each --cycles-log root belongs to). "
-             "Absent is not an error: a checkout shaped like CI's has none, and the "
-             "window is then the one the records alone give",
     )
     parser.add_argument(
         "--min-votes",
@@ -2271,15 +1594,11 @@ def main(argv: list[str] | None = None) -> int:
 
     window: Window | None = None
     if args.cycle:
-        # Both halves of the own-window's answer, and they compose in exactly one place:
-        # the records resolve the boundary and say whether it was inferred or named
-        # (issue #2214), and the dispatches then move it up past a cycle that ran without
-        # writing a record (issue #2216). `own_window` owns the composition because the
-        # two sibling tools that act on the same window - `cast-vote.py` at the poster and
-        # `check-vote-count.py` at the counter - read it from there too (issue #2218).
-        window = own_window(
-            args.cycle, args.prev_cycle, args.cycles_log, args.sessions_dir
-        )
+        # The window composes in exactly one place: `own_window` owns both bounds - this
+        # cycle's own start and the start of the cycle that follows it - because the two
+        # sibling tools that act on the same window (`cast-vote.py` at the poster and
+        # `check-vote-count.py` at the counter) read it from there too (issue #2218).
+        window = own_window(args.cycle, args.cycles_log)
 
     try:
         queue = args.prs if args.prs else open_prs(args.repo)
