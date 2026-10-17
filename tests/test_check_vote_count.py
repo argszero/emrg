@@ -117,15 +117,11 @@ def _pinned_cycle_records(mod, tmp_path, monkeypatch):
     the reading host's time zone — a verdict that is green here and red anywhere else,
     which is the defect class this whole family of guards exists to catch. An empty
     directory narrows the window to the *voting cycle's own start*: a fact of the
-    fixture, not of the host. A test that wants the wider window writes the previous
-    cycle's record into a directory it names (`--cycles-log`). The environment override
-    is cleared for the same reason — it would otherwise reach the reading too.
+    fixture, not of the host. A test that needs a *later* cycle's record — the window's
+    far bound — writes it into a directory it names (`--cycles-log`). The environment
+    override is cleared for the same reason — it would otherwise reach the reading too.
     """
     monkeypatch.delenv("EMRG_CYCLES_LOG", raising=False)
-    # The dispatch corpus is the window's other half and has its own override, honoured
-    # ahead of the records' sibling: left set on a host that names one, every test below
-    # would resolve its boundary from that corpus instead of the one it wrote.
-    monkeypatch.delenv("EMRG_SESSIONS_DIR", raising=False)
     empty = tmp_path / "no-cycle-records"
     empty.mkdir()
     monkeypatch.setattr(mod.review_queue(), "DEFAULT_CYCLES_LOGS", (empty,))
@@ -2076,8 +2072,8 @@ def test_the_default_budget_asks_exactly_once(mod, monkeypatch, capsys):
 # --- who may cast a vote: the head's own window ----------------------------
 #
 # The clause `cast-vote.py` refuses to **post** on, read on the counting side (issue
-# #1408: "a cycle abstains on a head it pushed, and on the head pushed by the cycle
-# immediately before it"). The counter is the only instrument a cycle consults before
+# #1408: "a cycle abstains on a head it pushed", read against that cycle's own run).
+# The counter is the only instrument a cycle consults before
 # merging, so a vote that must not have been cast has to read as not counting - and a
 # vote posted straight with `gh pr review` (the form the template tells a Committer to
 # use) never passes the poster's refusal at all.

@@ -998,8 +998,9 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
       2026-09-24T14:46:10);
     * then a merge state that withholds the merge (draft, blocked, behind) — again
       not a review problem, and not curable by a vote;
-    * **then the abstention** (issue #1408): a head pushed by this cycle or by the one
-      immediately before it is not one this cycle may vote on or merge. It sits
+    * **then the abstention** (issue #1408): a head pushed inside this cycle's own run
+      — its own start to the start of the cycle that follows it — is not one this cycle
+      may vote on or merge. It sits
       directly above the two branches that *spend* something, because every branch
       above it asks "what does this PR need?" — and a head one pushed may still need
       a fix push, a conflict resolved, or CI to finish, which is work for the pusher

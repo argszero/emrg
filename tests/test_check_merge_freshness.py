@@ -596,7 +596,7 @@ def test_a_stale_branch_with_no_votes_is_told_the_refresh_is_free(mod, monkeypat
     # (`check-merge-plan-suite.py`, which measures the landing tree without moving the
     # head) and the window fact that makes it the alternative.
     assert "not nothing to *lose*" in remedy, err
-    assert "the cycle after next" in remedy, err
+    assert "the cycle after this one" in remedy, err
     assert "check-merge-plan-suite.py <PR>" in remedy, err
     # The other direction of the channel rule: with no vote at risk there is
     # nothing to vote on, so the remedy line must name no channel at all. Asserted

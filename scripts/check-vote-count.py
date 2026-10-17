@@ -61,9 +61,10 @@ not have. `cast-vote.py` refuses to post a body like that; this is the reading s
 Who may cast one of those votes
 -------------------------------
 The rule counts *different cycles* and never said who is allowed to be one of them.
-The missing half — **a cycle abstains on a head it pushed**, and on the head pushed by
-the cycle immediately before it, because every cycle on a host is the same instance
-running again — is refused at post time by `cast-vote.py` (issue #1408). That refusal
+The missing half — **a cycle abstains on a head it pushed**, read against the cycle's
+own run: from its own start to the start of the cycle that follows it, the narrower
+reading the host ruled to on 2026-10-16T22:18:15 — is refused at post time by
+`cast-vote.py` (issue #1408). That refusal
 is not where the count is read, so it left a hole of exactly the shape this file
 exists to close: a vote posted straight with `gh pr review` (the form the template
 tells a Committer to use) was counted by the only authority on whether a vote counted.
@@ -484,8 +485,8 @@ def distinct_cycle_ids(body: str) -> list[str]:
 #
 # The rule's other half. "3 consecutive ✅ from different cycles" says nothing about
 # *who may cast one*, and the clause that carries it — a cycle does not vote on a PR
-# whose head it pushed, nor on the head pushed by the cycle immediately before it —
-# is refused at post time by `cast-vote.py` (issue #1408). This is the reading side
+# whose head it pushed, inside that cycle's own run — is refused at post time by
+# `cast-vote.py` (issue #1408). This is the reading side
 # of the same clause, which was missing: the count is what a cycle reads when it
 # decides to merge, so a vote that must not have been cast has to read as uncounted.
 # Both halves ask one question — "were the head and the vote cast by the same
@@ -502,11 +503,11 @@ _review_queue: object | None = None
 
 # ── whose window is it? ─────────────────────────────────────────────────────
 #
-# The clause above is a **self**-review guard, and its own premise says so: "a cycle
-# does not vote on a head it pushed, and on the head pushed by the cycle immediately
-# before it, because every cycle on a host is the same instance running again". The
-# cycles of a host are the records on that host — so the question can be asked only
-# of a vote cast by the instance those records belong to.
+# The clause above is a **self**-review guard, and its own premise says so: a cycle
+# does not vote on a head it pushed, because no cycle can judge the head it has just
+# built. The window the clause reads is that cycle's own run, and the records such a
+# run is read from are the records of the host that ran the cycle — so the question
+# can be asked only of a vote cast by the instance those records belong to.
 #
 # Asked of every vote it is not merely wider than the rule: it is a verdict read off
 # the wrong corpus. Measured 2026-10-05 on #1851, the repo's only open PR: two ✅

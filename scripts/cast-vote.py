@@ -114,9 +114,11 @@ the tool refuses rather than posting a vote under a cycle it was not told to use
 The abstention clause, asked where the vote is spent
 ----------------------------------------------------
 The merge rules say what a vote *is*; until 2026-09-18 nothing said **who may cast
-one** (issue #1408). The clause is *a cycle does not vote on a head it pushed*, and
-the cycle immediately before this one counts as one's own — because every cycle on a
-host is the same instance running again. `review-queue.py` owns that reading, and
+one** (issue #1408). The clause is *a cycle does not vote on a head it pushed*, read
+against the cycle's own run — from its own start to the start of the cycle that
+follows it. The host struck the wider reading out on 2026-10-16T22:18:15, so a head
+the cycle *before* this one pushed belongs to whoever made it and is votable.
+`review-queue.py` owns that reading, and
 `uv run --no-sync python3 scripts/review-queue.py --cycle <id>` reports such a head as an
 `abstain` row.
 
