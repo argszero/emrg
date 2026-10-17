@@ -72,7 +72,6 @@ describe("工具合并组（rant 21:28:49，镜像 tool-group.test.js）", () =>
     const gi = entries.indexOf(groups[0]!);
     s.toggleGroup("s1", gi);
     expect(group.collapsed).toBe(true);
-    expect(group.userExpanded).toBe(false);
     // 收起后再来新工具并完成 → 仍然收起（不因为 tool_start 就翻开）
     s.handleToolStart({ tool_call_id: "t4", tool_name: "bash", request_id: "r1" }, "s1");
     expect(group.collapsed, "tool_start must not expand a collapsed group").toBe(true);

@@ -66,7 +66,7 @@ Module._load = function (request, parent, isMain) {
   if (request === "ws") return MockWs;
   return origLoad.apply(this, arguments);
 };
-const { DaemonClient, generateSessionId, TOKEN_FILE, EMRGD_PORT, EMRGD_START_ERR } = require("../daemon_client.js");
+const { DaemonClient, generateSessionId, isSessionId, TOKEN_FILE, EMRGD_PORT, EMRGD_START_ERR } = require("../daemon_client.js");
 let tmpHome = null;
 let origHome = null;
 let origUserProfile = null;
@@ -1276,6 +1276,22 @@ test("generateSessionId 格式（G28+G81）", () => {
   const seen = new Set();
   for (let i = 0; i < 100; i++) seen.add(generateSessionId());
   assert.strictEqual(seen.size, 100);
+});
+
+test("isSessionId 不查命名方案，只查路径安全（宿主 2026-10-17）", () => {
+  // 定时任务的会话 id 现在就是任务名，所以凡是"看起来像名字"的都必须放行——
+  // 原先的白名单只认 s_<...>_<hex> 与 emrg-evolution-<...>，裸任务名会被挡在
+  // GUI 门外，而报错只说 `invalid session_id`（main.js 每个 IPC 都先问这个谓词）。
+  for (const id of ["emrg-task", "competition-task", "silicon-science-cs-journal-task",
+                    "OfficeCLI-opensource-task", "s_260808_0857_387c852f"]) {
+    assert.strictEqual(isSessionId(id), true, `${id} must be accepted`);
+  }
+  // 剩下的只有路径安全：id 会拼进 `<cwd>/.emrg/sessions/<id>`，逃出目录的必须拒绝。
+  for (const id of ["", ".", "..", "../etc", "a/b", "a\\b", "cwd\u0000x", "x".repeat(129)]) {
+    assert.strictEqual(isSessionId(id), false, `${JSON.stringify(id)} must be refused`);
+  }
+  assert.strictEqual(isSessionId(42), false, "a non-string is not an id");
+  assert.strictEqual(isSessionId(null), false, "null is not an id");
 });
 
 test("isRunning：TCP 探测（G43/G90）", async () => {

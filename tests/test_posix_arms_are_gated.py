@@ -34,6 +34,15 @@ where there are no FIFOs"), and every call site carries a hand-written gate. A n
 forgets one is silently red on one leg and green on the other, and no command in this repo
 says so.
 
+It was paid for a **third** time on 2026-10-17, and this time the payment was this file's own:
+an arm gated with ``if shutil.which("bash") is None: pytest.skip(...)`` -- the spelling the
+paragraph above says is not the guard -- was reported GATED, because ``_is_gated`` ended with
+"a body holding ``pytest.skip(`` has a gate", whatever condition it sat under. ``test-windows``
+went red on run ``39027157421`` while ``test`` passed. The fallback is gone: a skip counts only
+when its condition names the platform, and ``TestAGateIsACondition``'s ``which`` control holds
+that direction on a synthetic source. Measured before removing it: over the suite as it stood,
+**no** arm was relying on it, so the removal rewrote nothing.
+
 What is asserted
 ----------------
 Every ``test*`` function under ``tests/`` that reaches a POSIX-only primitive -- **directly,
@@ -390,11 +399,6 @@ def _body_statements(node: ast.AST) -> list[ast.stmt]:
     return body
 
 
-def _body_source(node: ast.AST) -> str:
-    """The function's body as source, for the one shape that is not a condition."""
-    return "\n".join(ast.unparse(stmt) for stmt in _body_statements(node))
-
-
 def _is_gated(node: ast.AST, markers: set[str], module_gated: bool) -> bool:
     """Whether this function carries a gate of any admitted spelling."""
     if module_gated:
@@ -405,12 +409,7 @@ def _is_gated(node: ast.AST, markers: set[str], module_gated: bool) -> bool:
         if _names_the_platform(decorator):
             return True
     body = _body_statements(node)
-    if _names_the_platform(ast.Module(body=body, type_ignores=[])):
-        return True
-    # `pytest.skip(...)` is kept as a spelling of its own: the condition it is *under* is an
-    # `if` this reader already asks about, and a skip under no platform condition at all is a
-    # red on both legs rather than the one-leg red this file exists for.
-    return "pytest.skip(" in _body_source(node)
+    return _names_the_platform(ast.Module(body=body, type_ignores=[]))
 
 
 def _index(path: Path) -> Reading:
@@ -911,6 +910,49 @@ class TestAWordIsNotAGate:
                 os.mkfifo(tmp_path / "pipe")
         ''')
         assert [row[1] for row in reading.ungated] == ["test_a_fifo_is_made"], reading
+
+
+class TestAGateIsACondition:
+    """A skip is not a gate: the direction this file itself shipped red on, 2026-10-17.
+
+    ``_is_gated`` used to close with "a body holding ``pytest.skip(`` has a gate", so *any*
+    skip counted. An arm gated by ``shutil.which("bash") is None`` -- a reading of this host,
+    green everywhere the launcher is absent and red on the ``windows-2025`` leg, where the
+    launcher exists and cannot run a script -- was therefore reported GATED, and ``test-windows``
+    went red on run ``39027157421``. The two controls below are the pair: the bare skip must be
+    reported, the platform-named one must not.
+    """
+
+    def test_a_skip_under_a_host_probe_is_not_a_gate(self, tmp_path: Path) -> None:
+        reading = _index_source(tmp_path, '''
+            import shutil
+            import subprocess
+
+            import pytest
+
+            def test_the_block_parses():
+                if shutil.which("bash") is None:
+                    pytest.skip("no bash on this host")
+                subprocess.run(["bash", "-n", "block.sh"])
+        ''')
+        assert [row[1] for row in reading.ungated] == ["test_the_block_parses"], reading
+        assert "bash" in reading.ungated[0][2], reading
+
+    def test_a_skip_under_the_platform_is_a_gate(self, tmp_path: Path) -> None:
+        """The other half of the pair, so the removal above is not just "nothing counts"."""
+        reading = _index_source(tmp_path, '''
+            import subprocess
+            import sys
+
+            import pytest
+
+            def test_the_block_parses():
+                if sys.platform == "win32":
+                    pytest.skip("bash there is the WSL launcher")
+                subprocess.run(["bash", "-n", "block.sh"])
+        ''')
+        assert reading.ungated == [], reading
+        assert [row[1] for row in reading.gated] == ["test_the_block_parses"], reading
 
 
 class TestTheSweptTree:

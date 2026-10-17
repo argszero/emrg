@@ -300,7 +300,7 @@ def test_a_clean_install_tree_answers_zero(install_dir: Path, checkout: Path) ->
     """The positive half: a tree holding exactly the released bytes is not drift."""
     proc = _run(install_dir, checkout)
     assert proc.returncode == 0, f"a clean install tree was reported as drift: {proc.stdout}"
-    assert "2 file(s) checked, 0 skipped" in proc.stdout, (
+    assert "2 file(s) checked, 0 named as leftovers" in proc.stdout, (
         f"the count of what was checked is what keeps a green verdict from being a "
         f"reading over nothing: {proc.stdout!r}"
     )
@@ -349,15 +349,17 @@ def test_the_verdict_flips_on_a_single_added_byte(
     )
 
 
-def test_an_install_file_the_checkout_does_not_track_is_skipped_not_reported(
+def test_an_install_file_the_checkout_does_not_track_is_named_as_a_leftover(
     install_dir: Path, checkout: Path
 ) -> None:
-    """A file only the install has is a version difference, not an edit.
+    """A file only the install has is a version difference, not an edit - and it is named.
 
-    Packaging writes files this repository does not track (`py.typed` is the measured
-    one), and the repository also moves files between releases; reporting either as an
-    in-place edit would make the tool noise, which is how a reading stops being read. It
-    is counted and named as skipped rather than silently dropped.
+    Packaging writes files this repository does not track (`py.typed` is the measured one),
+    and the repository also moves files between releases, so neither may turn the verdict
+    red: a reading that fires on those stops being read. What they may not be is *silent*,
+    which is what this test asserted until 2026-10-17: the host's tree carried a whole
+    renderer directory the source had deleted on 2026-08-27, and three host rants of that
+    day audited it as live code.
     """
     (install_dir / "packaging_only.txt").write_text("not in the repository\n", encoding="utf-8")
 
@@ -365,10 +367,13 @@ def test_an_install_file_the_checkout_does_not_track_is_skipped_not_reported(
     assert proc.returncode == 0, (
         f"an untracked install file was reported as drift: {proc.stdout!r}"
     )
-    assert "packaging_only.txt" not in proc.stdout.split("could not measure")[0]
-    assert "1 skipped" in proc.stdout, (
-        f"the skipped file is not counted, so a reader cannot tell it was considered: "
-        f"{proc.stdout!r}"
+    assert "leftovers: 1 file(s)" in proc.stdout, proc.stdout
+    assert "packaging_only.txt" in proc.stdout, (
+        f"a file only the install has was not named, so a reader cannot tell it was "
+        f"considered: {proc.stdout!r}"
+    )
+    assert "file(s) hold content no shipped commit has" not in proc.stdout, (
+        f"a version difference must not read as an in-place edit: {proc.stdout!r}"
     )
 
 
@@ -652,3 +657,65 @@ def test_the_module_does_not_inherit_the_hosts_git_config(tmp_path: Path) -> Non
         "stopped agreeing with their assertions:\n"
         f"{proc.stdout[-4000:]}\n{proc.stderr[-2000:]}"
     )
+
+
+def test_a_file_the_checkout_no_longer_tracks_is_named_not_silently_skipped(
+    install_dir: Path, checkout: Path
+) -> None:
+    """The class the tool used to count and never name.
+
+    Its docstring justified the skip with "it is removed by the upgrade either way", and
+    that premise is false: measured 2026-10-17, this host's tree reports `0.3.16` and still
+    carries 11 files from a renderer directory the source deleted on 2026-08-27. Three host
+    rants of the same day were audits of exactly that dead code, which is what silence at
+    this line costs.
+    """
+    stale = install_dir / "emrg" / "gui" / "renderer" / "js" / "chat.js"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("// a file no build ships\n", encoding="utf-8")
+
+    done = _run(install_dir, checkout)
+
+    assert done.returncode == 0, (
+        "a leftover is not drift by content, so it must not turn the verdict red: "
+        f"{done.stdout}{done.stderr}"
+    )
+    assert "leftovers: 1 file(s)" in done.stdout, done.stdout
+    assert "emrg/gui/renderer/js/chat.js" in done.stdout, done.stdout
+    assert "remedy:" in done.stdout, "the reading must name an action a host can take"
+
+
+def test_a_tree_without_leftovers_does_not_print_the_section(
+    install_dir: Path, checkout: Path
+) -> None:
+    """The other direction: the section appears because of a file, not always."""
+    done = _run(install_dir, checkout)
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "leftovers:" not in done.stdout, done.stdout
+    assert "0 named as leftovers above" in done.stdout, (
+        "the clean line must still state the count, or a zero and a silence read alike: "
+        f"{done.stdout}"
+    )
+
+
+def test_interpreter_caches_are_counted_but_not_listed(
+    install_dir: Path, checkout: Path
+) -> None:
+    """A `.pyc` under `__pycache__` is not source a reader reasons about.
+
+    Listed instead of dropped: the count says how many were left out of the list, so the
+    section is not silently editing what it found.
+    """
+    cache = install_dir / "emrg" / "gui" / "renderer" / "js" / "__pycache__" / "chat.pyc"
+    cache.parent.mkdir(parents=True)
+    cache.write_bytes(b"\x00compiled\x00")
+
+    done = _run(install_dir, checkout)
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "leftovers:" not in done.stdout, (
+        "an interpreter cache alone must not open the leftover section: " + done.stdout
+    )
+    assert "1 interpreter cache file(s) not listed" in done.stdout, done.stdout
+    assert "chat.pyc" not in done.stdout, done.stdout

@@ -26,7 +26,7 @@ function mockEmrg() {
   const clearSession = vi.fn().mockResolvedValue({ ok: true });
   const compactSession = vi.fn().mockResolvedValue({ ok: true });
   const listProjects = vi.fn().mockResolvedValue([{ name: "emrg", path: "/p/emrg" }]);
-  const listTasks = vi.fn().mockResolvedValue([{ name: "evo", type: "evolution", enabled: true, session_id: "emrg-evolution-evo", project_path: "/p/emrg" }]);
+  const listTasks = vi.fn().mockResolvedValue([{ name: "evo", type: "evolution", enabled: true, session_id: "evo", project_path: "/p/emrg" }]);
   const listRants = vi.fn().mockResolvedValue([{ timestamp: "2026-08-26T12:00:00+08:00", project: "emrg", status: "pending", message: "x" }]);
   const listMemories = vi.fn().mockResolvedValue([]);
   const listSkills = vi.fn().mockResolvedValue([]);
@@ -615,7 +615,7 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     expect(openBtn).toBeEnabled();
     fireEvent.click(openBtn);
     await waitFor(() =>
-      expect(m.switchSession).toHaveBeenCalledWith({ sessionId: "emrg-evolution-evo", projectPath: "/p/emrg" }),
+      expect(m.switchSession).toHaveBeenCalledWith({ sessionId: "evo", projectPath: "/p/emrg" }),
     );
     // 切回会话视图（transcript + composer 可见）
     await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());

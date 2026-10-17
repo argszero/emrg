@@ -118,7 +118,7 @@ describe("WorkspaceView", () => {
     const startedAt = Math.floor(Date.now() / 1000) - 100; // 100s 前启动
     const tasks = [
       task("daily-report", { running: true, started_at: startedAt }),
-      task("evolve", { next_run_in_seconds: 83, session_id: "emrg-evolution-evolve", project_path: "/proj/evolve" }),
+      task("evolve", { next_run_in_seconds: 83, session_id: "evolve", project_path: "/proj/evolve" }),
       task("idle", {}),
     ];
     setup({ activeView: "tasks", tasks, onTriggerTask: onTrigger, onOpenSessionTask: onOpenSession, onEditTask: onEdit, onDeleteTask: onDelete });

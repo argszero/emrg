@@ -13,8 +13,9 @@ import type { TranslateFn } from "./utils";
  * - 文本段封存（rant 21:57:10）：助手文本段之后来工具 → 封存当前段（移除 typing），
  *   后续 delta 开新段，保持 TUI 交错顺序。
  * - 工具合并组（rant 21:28:49）：前一个工具已完成（.tool-row:not(.running)）→ 建组收编；
- *   已是组 → 新行并入；组收起后新工具 start 自动展开显示 running 行；全部完成且 ≥2 行
- *   → bar 显示摘要（数量 + 总耗时）并自动收起（除非手动展开 user-expanded，rule 5）。
+ *   已是组 → 新行并入；≥2 行 → bar 显示摘要（数量 + 总耗时）。**展开状态只在宿主点 bar 时
+ *   改变**（rant 2026-10-17T19:23:08）：工具开始、结束、追加、摘要变大都不动它。这条规则
+ *   取代了原先的「有 running 行就展开、全部完成且 ≥2 行就收起（除非 user-expanded）」。
  * - done 收尾：typing 停止、doneRids 记入（>500 清空防长期运行增长）、timeout/maxRounds
  *   提示系统消息（文案经注入 t 解析，与 copywriting.ts 同模式）。
  *
@@ -48,11 +49,14 @@ export interface ToolRow {
 export interface ToolGroup {
   rows: ToolRow[];
   collapsed: boolean;
-  /** 手动展开后不再自动收起（rule 5）；折叠后再手动收起清除 */
-  userExpanded: boolean;
-  /** 组内 <2 行或有 running 行 → bar 隐藏（进行中工具实时可见） */
+  /**
+   * 组内 <2 行 → bar 隐藏（还不成一个可折叠的组）。
+   *
+   * 「或有 running 行」那半句随自动收起一起去掉了：现在 ≥2 行就显示 bar，**包括还在跑的
+   * 时候**——这是本改动的第二个可见后果，摘要会在运行中就出现。
+   */
   barHidden: boolean;
-  /** ≥2 行全部完成 → 摘要（数量 + 总耗时）；否则 null */
+  /** ≥2 行 → 摘要（数量 + 总耗时），不再要求全部完成；否则 null */
   summary: { count: number; totalElapsed: number } | null;
 }
 
@@ -470,14 +474,14 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
       };
       // rant 21:28:49：连续工具合并 —— 最后条目判定
       // 1) 前一个工具已完成（.tool-row:not(.running)）→ 新建 .tool-group，把旧行移入 rows，新行也入 rows
-      // 2) 已是 .tool-group → 新行直接入其 rows（组收起时新工具 start 自动展开显示 running）
+      // 2) 已是 .tool-group → 新行直接入其 rows（**不**动展开状态：组收起时新工具也留在
+      //    收起里；展开只由宿主点 bar 决定，rant 2026-10-17T19:23:08）
       // 3) 其他（文本/用户消息/无条目）→ 独立 .tool-row（文本穿插不合并）
       const last = s.entries[s.entries.length - 1];
       if (last && last.kind === "tool-row" && last.row.status !== "running") {
         const group: ToolGroup = {
           rows: [last.row, row],
           collapsed: false,
-          userExpanded: false,
           barHidden: true,
           summary: null,
         };
@@ -638,13 +642,8 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
       mutate(() => {
         const entry = st(sid).entries[entryIndex];
         if (!entry || entry.kind !== "tool-group") return;
-        if (entry.group.collapsed) {
-          entry.group.collapsed = false;
-          entry.group.userExpanded = true;
-        } else {
-          entry.group.collapsed = true;
-          entry.group.userExpanded = false;
-        }
+        // 唯一会改变展开状态的地方（rant 2026-10-17T19:23:08）：一个布尔量，一个写入点。
+        entry.group.collapsed = !entry.group.collapsed;
       });
     },
   };
