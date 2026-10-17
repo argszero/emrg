@@ -1110,6 +1110,17 @@ class DaemonClient {
     // 实测（`~/.emrg/emrg-gui.log`，176404 行）：turn_start 丢 703、turn_end 丢 704，
     // 首丢 2026-09-02T07:26:10Z、末丢 2026-09-30T02:02:14Z——bug 一直活着。
     // 与 done/cancelled 幂等（渲染层清计时也是幂等的），故直接按原名转发。
+    if (frame.type === "rewind_result") {
+      // A rewind of this session (#2351). The daemon broadcasts the result to every
+      // connection subscribed to the session, because the rewind rewrote the history
+      // they are all displaying. The requesting client's own reply never arrives
+      // here — `_resolvePending` above claims it — so the main process forwards that
+      // one on the same channel (`main.js`, `emrg:rewindSession`). Both then reach
+      // the renderer as this event, which rebuilds the transcript from the file
+      // instead of deleting the rows it remembers.
+      this._emit(frame.type, frame);
+      return;
+    }
     if (frame.type === "turn_start" || frame.type === "turn_end") {
       this._emit(frame.type, frame);
       return;

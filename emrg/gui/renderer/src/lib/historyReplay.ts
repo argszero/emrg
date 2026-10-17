@@ -22,6 +22,7 @@
  */
 
 import { createTranscriptStore, type TranscriptStore } from "./transcript";
+import { t } from "./i18n";
 
 /** 落盘记录里的一条助手/用户消息（daemon `include_records` 的 `kind: "message"`）。 */
 export interface HistoryMessageRecord {
@@ -44,7 +45,21 @@ export interface HistoryToolResultRecord {
   error?: boolean;
 }
 
-export type HistoryRecord = HistoryMessageRecord | HistoryToolResultRecord;
+export type HistoryRecord = HistoryMessageRecord | HistoryToolResultRecord | HistorySummaryRecord;
+
+/**
+ * 落盘记录里的一次压缩（daemon `include_records` 的 `kind: "summary"`，#2351）。
+ *
+ * 实时那一路是 `compact_result` → 一条系统提示；落盘记录里压缩边界是**一条记录**，
+ * 若回放跳过它，重开一个会话就看不到自己亲眼见过的「已压缩」这一行。
+ */
+export interface HistorySummaryRecord {
+  record_index?: number;
+  kind: "summary";
+  content?: string;
+  timestamp?: string;
+  compacted_message_count?: number;
+}
 
 /** 回放写入端：实时那一组 handler（TranscriptStore 直接满足）。 */
 export interface ReplaySink {
@@ -67,6 +82,12 @@ export interface ReplaySink {
     data: { tool_call_id: string; tool_name?: string; content?: string; error?: unknown },
     sid?: string | null,
   ): void;
+  /**
+   * 一条系统提示行（#2351）。实时那一路由 `DialogHost` 在 `compact_result` 上调用，
+   * 回放那一路由 `replayHistoryRecords` 调用——两条路写的是同一个入口，所以重开一个
+   * 会话看到的压缩提示与一直开着时那一行是同一行。
+   */
+  addSystemMessage(text: string, sid?: string | null): void;
 }
 
 /** 助手记录的 `tool_calls[].function.arguments` 里的 intent（daemon 记日志用的就是它）。 */
@@ -136,6 +157,23 @@ export function replayHistoryRecords(
   };
 
   for (const r of records) {
+    if (r.kind === "message" && r.role === "system") {
+      // 落盘写下的系统提示（`Session.clear` 的 `[Session cleared]`，#2351）。它的正文
+      // 就是记录自己的文本：既不翻译、也不改写——实时那一路 `/clear` 之后屏幕上也
+      // 只有这一句话，而回放如果换一个说法，两条路就又分叉了。
+      // 不在这里 closeTurn：压缩可以在工具轮次之间发生（auto-compact），实时那一路
+      // 那时**没有** done 帧，凭空补一个会把这一段助手文本提前封口。
+      sink.addSystemMessage(r.content ?? "", sid);
+      continue;
+    }
+
+    if (r.kind === "summary") {
+      // 压缩边界（#2351）。实时那一行由 `DialogHost` 的 `compact_result` 分支写，
+      // 文案是 `app.compacted`；这里调同一个入口、用同一个键，于是同一行。
+      sink.addSystemMessage(t("app.compacted"), sid);
+      continue;
+    }
+
     if (r.kind === "message" && r.role === "user") {
       // 实时顺序：上一轮的 done 先到，用户才接着发下一条。
       closeTurn();

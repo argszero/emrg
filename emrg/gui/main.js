@@ -701,6 +701,14 @@ vision = false
         { session_id: sessionId, cwd: resolveSessionCwd(sessionId) || DEFAULT_CWD, record_index: recordIndex },
         5000
       );
+      // The requester's own answer never reaches the renderer as an event:
+      // `daemon_client._classify` resolves the pending command with it and stops
+      // (#2351). Forward it here so the client that did the rewind takes the same
+      // path as every other client watching the session — its transcript is rebuilt
+      // from the truncated history rather than patched by deleting rows.
+      if (win && !win.isDestroyed()) {
+        win.webContents.send("emrg:event", { type: "rewind_result", data: frame, sid: sessionId });
+      }
       return { ok: true, removedCount: frame.removed_count ?? 0 };
     });
 

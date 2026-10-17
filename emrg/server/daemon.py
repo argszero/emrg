@@ -3347,8 +3347,20 @@ class EmrgServer:
             # A client replaying a session must show what the live stream
             # showed, so the answer has to be the same material: every message
             # record (including the tool-call-only assistant records the
-            # display path drops) and every tool_result record, in record
-            # order, each carrying its absolute `record_index`.
+            # display path drops), every tool_result record and the two record
+            # kinds the file holds that are neither, in record order, each
+            # carrying its absolute `record_index`.
+            #
+            # The last part is #2351. `history.jsonl` also holds a persisted
+            # `role: "system"` message (`Session.clear` writes `[Session
+            # cleared]`) and one `type: "summary"` record per compaction, and
+            # both were dropped here: the live stream announced each of them
+            # (a system note, a `compact_result`) and a reopened session showed
+            # neither, so the replay was quietly a different transcript. They
+            # are projected as their own material, with the fields each client
+            # needs to reproduce its live wording — the daemon does not invent
+            # the text: a summary record carries the summary body because the
+            # TUI's live note shows its first 200 characters.
             #
             # `preview` is deliberately NOT attached here. It is a /rewind
             # affordance — a one-line rewind point — and a replay that prefers
@@ -3389,7 +3401,7 @@ class EmrgServer:
                             "content": r.get("content", "") or "",
                             "error": bool(r.get("error")),
                         })
-                    elif rtype == "message" and r.get("role") in ("user", "assistant"):
+                    elif rtype == "message" and r.get("role") in ("user", "assistant", "system"):
                         item: dict = {
                             "record_index": i,
                             "kind": "message",
@@ -3401,6 +3413,18 @@ class EmrgServer:
                         if tool_calls:
                             item["tool_calls"] = tool_calls
                         history_messages.append(item)
+                    elif rtype == "summary":
+                        # One per compaction (#2351): the live stream announced it
+                        # with `compact_result`, so a replay that omits it loses a
+                        # boundary the host watched appear.
+                        history_messages.append({
+                            "record_index": i,
+                            "kind": "summary",
+                            "content": r.get("content", "") or "",
+                            "timestamp": r.get("timestamp", ""),
+                            "compacted_message_count":
+                                r.get("compacted_message_count", 0),
+                        })
                 await self._send(ws, {
                     "type": "history_list",
                     "session_id": session_id,
@@ -3484,15 +3508,40 @@ class EmrgServer:
             )
             session._updated_at = datetime.now().isoformat()
             session._save_meta()
-            await self._send(ws, {
+            # What the cut removed, not only how much (#2351, item 2). A count alone
+            # let the requesting client drop its last N rows and nothing else: a
+            # client that reconnects, or a second client watching this session, had
+            # no way to apply the same cut and so drifted from the live view. The
+            # descriptors name each removed record by its absolute position and its
+            # kind, which is enough for a receiver holding the same history to
+            # identify the rows; `kept_count` says where the surviving transcript
+            # now ends.
+            removed = [
+                {
+                    "record_index": i,
+                    "kind": str(r.get("type", "message") or "message"),
+                    "role": r.get("role"),
+                }
+                for i, r in enumerate(records) if i >= record_index
+            ]
+            frame = {
                 "type": "rewind_result",
                 "session_id": session_id,
                 "ok": True,
                 "record_index": record_index,
-                "removed_count": len(records) - len(truncated),
-            })
-            logger.info("session rewound: %s at index %d (removed %d records)",
-                        session_id, record_index, len(records) - len(truncated))
+                "kept_count": len(truncated),
+                "removed_count": len(removed),
+                "removed": removed,
+            }
+            # Every connection subscribed to this session, not just the caller: the
+            # rewind rewrote the history the other clients on it are displaying.
+            # `_broadcast` reaches the caller too when it is a subscriber; when it
+            # is not, the frame above is its own answer.
+            await self._broadcast(session_id, frame)
+            if ws not in self._session_subscribers.get(session_id, {}):
+                await self._send(ws, frame)
+            logger.info("session rewound: %s at index %d (removed %d records, %d kept)",
+                        session_id, record_index, len(removed), len(truncated))
 
         elif msg_type == "task_vibe_check":
             # Rant 2026-08-17T11:39:19: scheduler asks the agent, after a
