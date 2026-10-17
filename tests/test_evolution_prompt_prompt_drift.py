@@ -45,6 +45,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 import time
 import tempfile
 from pathlib import Path
@@ -235,6 +236,46 @@ def _bash_blocks() -> list[str]:
     return blocks
 
 
+def _a_shell_runs(program: str) -> bool:
+    """Whether `program` is a shell that can actually run a script on this host.
+
+    `shutil.which("bash") is None` answers a different question, and on the `windows-2025`
+    leg it answers it **yes**: a bare `bash` resolves to the WSL launcher
+    `C:\\Windows\\System32\\bash.exe` — `CreateProcess` searches System32 before `PATH` — which
+    exists, cannot run a script, and answers *"Windows Subsystem for Linux has no installed
+    distributions."* with exit 1. Both arms below were red there for exactly that reason
+    (CI run `39027157421`, `test-windows`, 2026-10-17), and it is reproducible on any host by
+    putting a stub of that launcher first on `PATH`: the `which` gate sees a shell, the arms
+    then fail on a program that answers nothing.
+
+    So the gate asks the shell to run one command and reads what comes back.
+    """
+    if shutil.which(program) is None:
+        return False
+    try:
+        done = subprocess.run(
+            [program, "-c", "echo ok"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0 and done.stdout.strip() == "ok"
+
+
+#: The gate both shell arms carry. It names the platform as well as probing, because a probe
+#: alone says nothing about *which leg* it is about, and the family guard
+#: (`tests/test_posix_arms_are_gated.py`) reads a gate off a condition rather than off a skip.
+_needs_a_shell = pytest.mark.skipif(
+    sys.platform == "win32" or not _a_shell_runs("bash"),
+    reason="bash on the Windows runner is WSL's launcher, not the shell these blocks are "
+    "written for, and where no shell answers the blocks cannot be parsed or run",
+)
+
+
 def test_no_placeholder_carries_a_quote() -> None:
     """Measured 2026-10-17: the step-0 block shipped a placeholder reading `<that project's
     bookmark time>`. The apostrophe closed the single quote around it, and `bash -n` on the
@@ -266,6 +307,7 @@ def test_the_placeholder_rule_discriminates() -> None:
     )
 
 
+@_needs_a_shell
 def test_every_shell_block_parses() -> None:
     """`bash -n` over every block, placeholders neutralised.
 
@@ -274,8 +316,6 @@ def test_every_shell_block_parses() -> None:
     cycle would substitute. The named limit is that a neutralised placeholder no longer
     tests its quoting — that is the pin above, on the text as shipped.
     """
-    if shutil.which("bash") is None:  # pragma: no cover - a POSIX-less host
-        pytest.skip("no bash on this host, so the blocks' syntax cannot be parsed here")
     failures = []
     for index, block in enumerate(_bash_blocks(), 1):
         source = _PLACEHOLDER.sub("X", block)
@@ -296,6 +336,7 @@ def test_every_shell_block_parses() -> None:
 
 
 
+@_needs_a_shell
 def test_the_step_zero_line_finds_a_file_that_changed(tmp_path: Path) -> None:
     """The block as shipped, substituted and run, on a tree whose answer is known.
 
@@ -313,9 +354,6 @@ def test_the_step_zero_line_finds_a_file_that_changed(tmp_path: Path) -> None:
     * it proves the shipped line answers on the host that runs it. A BSD `find` mis-parses
       the `T` form and a GNU one may not, so no single arm fixes the format everywhere.
     """
-    if shutil.which("bash") is None:  # pragma: no cover - a POSIX-less host
-        pytest.skip("no bash on this host, so the block cannot be run here")
-
     block = next((b for b in _bash_blocks() if "-newermt" in b), "")
     assert block, "the template no longer carries a -newermt block for step 0"
 
