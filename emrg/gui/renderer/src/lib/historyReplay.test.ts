@@ -299,6 +299,7 @@ describe("the record shape the daemon actually sends", () => {
       handleDone: vi.fn(),
       handleToolStart: vi.fn(),
       handleToolEnd: vi.fn(),
+      addSystemMessage: vi.fn(),
     };
     replayHistoryRecords(
       [
@@ -342,6 +343,7 @@ describe("工具入参的回放一致性（#1787）", () => {
       handleDone: vi.fn(),
       handleToolStart: vi.fn(),
       handleToolEnd: vi.fn(),
+      addSystemMessage: vi.fn(),
     };
     replayHistoryRecords(RECORDS, SID, sink);
     expect(sink.handleToolStart).toHaveBeenCalledWith(

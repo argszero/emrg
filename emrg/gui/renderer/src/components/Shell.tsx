@@ -170,6 +170,29 @@ export function Shell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appState.openSessions, activeSid]);
 
+  /** 重新装配一个会话的 transcript：丢掉分页状态与「已加载」标记，从头回放一次。 */
+  async function reloadHistory(sid: string) {
+    historyLoadedRef.current.delete(sid);
+    historyPagesRef.current.delete(sid);
+    transcript.clear(sid);
+    await loadHistory(sid);
+  }
+
+  /**
+   * 一次 rewind 之后重建这个会话的 transcript（#2351）。
+   *
+   * daemon 把 `rewind_result` 广播给订阅该会话的每个连接，改写的是同一份落盘历史；
+   * 本客户端自己做的那次也经主进程转发成同一个事件（`main.js:emrg:rewindSession`），
+   * 于是这里只有一条规则：**谁被告知历史被改写了，谁的屏幕就从那份历史重新长出来**，
+   * 而不是各自猜着删掉最后 N 行。计数器只比较变化，值本身没有含义。
+   */
+  const rewoundCount = activeSid ? appState.rewoundBySid[activeSid] : undefined;
+  useEffect(() => {
+    if (!activeSid || rewoundCount === undefined) return;
+    void reloadHistory(activeSid);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rewoundCount, activeSid]);
+
   // ── workspace 面板数据加载（vanilla loadTaskMeta/renderRantList 语义） ──
   async function loadProjects() {
     const b = wsBridge();

@@ -119,6 +119,18 @@ export interface DaemonAppState {
   busyBySid: Record<string, boolean>;
   /** 每会话 turn 开始时刻（epoch ms；rant 2026-09-02T10:36:26 daemon turn_start 权威广播） */
   turnStartBySid: Record<string, number>;
+  /**
+   * How many rewinds of each session this client has been told about (#2351).
+   *
+   * A rewind rewrites the session's persisted history, so every client showing that
+   * session has to rebuild its transcript from the file rather than keep the rows it
+   * happens to hold. The daemon broadcasts `rewind_result` to every connection
+   * subscribed to the session — the requester's own reply is forwarded by the main
+   * process as the same event — so this counter is the one signal both cases share.
+   * Shell watches it and reloads that session; the value itself is only ever
+   * compared for change.
+   */
+  rewoundBySid: Record<string, number>;
   /** 每会话断线标记（P3 finalize：后台会话断线不触发全局 UI） */
   disconnectedBySid: Record<string, boolean>;
   /**
@@ -288,6 +300,7 @@ export function createDaemonAppStore(): SnapshotStore<DaemonAppState> {
     openSessions: [],
     busyBySid: {},
     turnStartBySid: {},
+    rewoundBySid: {},
     disconnectedBySid: {},
     sandboxBySid: {},
     sandboxRootsBySid: {},
@@ -563,6 +576,26 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
           ...(storedRoots === null
             ? {}
             : { sandboxRootsBySid: { ...s.sandboxRootsBySid, [k]: storedRoots } }),
+        }));
+        break;
+      }
+      case "rewind_result": {
+        // A rewind — this client's own, or another client's on the same session
+        // (#2351). The daemon rewrote `history.jsonl`, so every row this transcript
+        // holds about that session describes a history that no longer exists: drop
+        // them and let Shell replay the file. Acting on the *frame* rather than on
+        // the click is what makes a second client and a reconnecting one agree with
+        // the one that did the rewind.
+        const rw = data as { session_id?: string; ok?: boolean };
+        const rwSid = rw?.session_id ?? sid;
+        if (!rwSid || rw?.ok !== true) break;
+        transcript.clear(rwSid);
+        store.update((s) => ({
+          ...s,
+          rewoundBySid: {
+            ...s.rewoundBySid,
+            [rwSid]: (s.rewoundBySid[rwSid] ?? 0) + 1,
+          },
         }));
         break;
       }

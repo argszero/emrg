@@ -2994,6 +2994,140 @@ class TestWSHistoryRecords:
                     await cleanup()
         asyncio.run(_test())
 
+    def test_the_two_record_kinds_that_are_neither_reach_a_client(self):
+        """Issue #2351: a system note and a compaction boundary are rows too.
+
+        `history.jsonl` holds two record kinds that are neither a message from a role
+        the display path projects nor a tool result: the `role: "system"` message
+        `Session.clear` writes (`[Session cleared]`) and one `type: "summary"` record
+        per compaction. The live stream announced both — a system note after `/clear`,
+        a `compact_result` on compaction — so a records mode that dropped them made a
+        reopened session a different transcript from the one the host closed.
+
+        The assertion is about what the projection *says*, not only that it says
+        something: the system note carries the record's own text, and the summary
+        carries the count the live note named plus the body the record holds. A row
+        without those would render as a boundary with no account of itself.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                sid = "s_records_note"
+                self._seed(cwd, sid, [
+                    {"type": "message", "role": "system", "content": "[Session cleared]",
+                     "timestamp": "2026-09-20T00:00:10"},
+                    {"type": "summary", "content": "the earlier turns, summarised",
+                     "timestamp": "2026-09-20T00:00:20",
+                     "compact_id": "c_001", "compacted_message_count": 7},
+                    {"type": "message", "role": "user", "content": "after the compact",
+                     "timestamp": "2026-09-20T00:01:00"},
+                ])
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        resp = await self._cmd(ws, {
+                            "type": "list_history", "session_id": sid,
+                            "cwd": str(cwd), "include_records": True,
+                        })
+                        items = resp["messages"]
+                        assert [(m["record_index"], m["kind"], m.get("role"))
+                                for m in items] == [
+                            (0, "message", "system"),
+                            (1, "summary", None),
+                            (2, "message", "user"),
+                        ], f"records mode did not project them: {items}"
+                        assert items[0]["content"] == "[Session cleared]"
+                        assert items[0]["timestamp"] == "2026-09-20T00:00:10"
+                        assert items[1]["compacted_message_count"] == 7
+                        assert items[1]["content"] == "the earlier turns, summarised"
+                        assert items[1]["timestamp"] == "2026-09-20T00:00:20"
+
+                        # The default mode is the /rewind list and stays user-only: a
+                        # system note is not a rewind point.
+                        default = await self._cmd(ws, {
+                            "type": "list_history", "session_id": sid, "cwd": str(cwd),
+                        })
+                        assert [m["content"] for m in default["messages"]] == [
+                            "after the compact",
+                        ], f"the default mode listed a non-user row: {default['messages']}"
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_a_rewind_says_what_it_removed_and_tells_every_subscriber(self):
+        """Issue #2351, item 2: the frame must name the cut, and reach every client.
+
+        `rewind_result` used to carry `removed_count` alone, sent to the caller only.
+        A client could delete its last N rows — which reproduces the view only while
+        that client still holds them — and a second client watching the same session
+        was told nothing at all, so the two drifted exactly where the issue says they
+        must not. The rewind rewrote `history.jsonl`; that file is shared.
+
+        So the frame names each removed record by its absolute position and its kind
+        (`kept_count` says where the surviving history now ends), and it goes to every
+        connection subscribed to the session. The second connection here never asked
+        for the rewind — it only subscribed — and must still be told.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                sid = "s_rewind_says"
+                self._seed(cwd, sid, [
+                    {"type": "message", "role": "user", "content": "one",
+                     "timestamp": "2026-09-20T00:00:01"},
+                    {"type": "message", "role": "assistant", "content": "two",
+                     "timestamp": "2026-09-20T00:00:02"},
+                    {"type": "message", "role": "user", "content": "three",
+                     "timestamp": "2026-09-20T00:00:03"},
+                ])
+                _, _, cleanup = await _boot_server(cwd)
+
+                async def _drain(ws, want):
+                    """Read until the frame of this type, so a pong cannot be mistaken
+                    for the answer (the two connections each get their own)."""
+                    while True:
+                        frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+                        if frame.get("type") == want:
+                            return frame
+
+                try:
+                    asker = await connect_to_server()
+                    watcher = await connect_to_server()
+                    try:
+                        # Subscribing is what the read loop records: any frame naming
+                        # the session does it, and this one is answered by a pong.
+                        for ws in (asker, watcher):
+                            await ws.send(json.dumps({
+                                "type": "ping", "session_id": sid, "cwd": str(cwd),
+                            }))
+                            await _drain(ws, "pong")
+
+                        await asker.send(json.dumps({
+                            "type": "rewind_session", "session_id": sid,
+                            "cwd": str(cwd), "record_index": 1,
+                        }))
+                        here = await _drain(asker, "rewind_result")
+                        there = await _drain(watcher, "rewind_result")
+                    finally:
+                        await asker.close()
+                        await watcher.close()
+
+                    for frame in (here, there):
+                        assert frame.get("ok") is True, frame
+                        assert frame["record_index"] == 1
+                        assert frame["kept_count"] == 1, frame
+                        assert frame["removed_count"] == 2, frame
+                        assert frame["removed"] == [
+                            {"record_index": 1, "kind": "message", "role": "assistant"},
+                            {"record_index": 2, "kind": "message", "role": "user"},
+                        ], frame
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
 
 class TestWSTaskWire:
     """GUI task CRUD wire frames — task type field contract (rant 2026-08-14T21:48:00).

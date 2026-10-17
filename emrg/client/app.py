@@ -310,12 +310,19 @@ def _replay_rows(messages) -> list[tuple[str, object, str]]:
     The rows are `(kind, payload, timestamp)` triples; `assistant` is deliberately its own kind
     rather than pre-wrapped, because the caller renders it through
     `StreamingMarkdown` for colour. What the daemon's records mode emits is its own
-    contract and it is narrow: `kind: "message"` for the user and assistant roles
-    and `kind: "tool_result"` for tool output. A record outside that pair is
-    skipped rather than rendered as a blank row — including a role the file on disk
-    may hold and the records mode does not project, because inventing it here would
-    put the TUI and the GUI back on two different content paths, which is the
-    defect that requirement removes.
+    contract: `kind: "message"` for the user, assistant and system roles,
+    `kind: "tool_result"` for tool output, and `kind: "summary"` for a compaction
+    boundary. A record outside that set is skipped rather than rendered as a blank
+    row — a role the file on disk may hold and the records mode does not project is
+    invented nowhere here, because inventing it would put the TUI and the GUI back on
+    two different content paths, which is the defect that requirement removes.
+
+    The system role and the summary record are the two #2351 restored, and each is
+    rendered with the wording its own **live** path used, so a reopen matches the
+    screen the host closed: a system note is the record's text (the live note for
+    `/clear` was written from the same record), and a compaction row is the string
+    `compact_result` produced, rebuilt from the count and the first 200 characters of
+    the summary body the record carries.
     """
     rows: list[tuple[str, object, str]] = []
     calls: dict[str, ToolCard] = {}
@@ -330,13 +337,26 @@ def _replay_rows(messages) -> list[tuple[str, object, str]]:
             # (rant 2026-10-09T09:25:00). Absent on records written before the
             # field was carried, which renders as no clock at all.
             stamp = str(record.get("timestamp") or "")
-            if role in ("user", "assistant"):
+            if role in ("user", "assistant", "system"):
                 rows.append((str(role), str(record.get("content") or ""), stamp))
             if role == "assistant":
                 for card in _cards_from_tool_calls(record.get("tool_calls")):
                     rows.append(("tool_card", card, ""))
                     if card.tool_call_id:
                         calls[card.tool_call_id] = card
+        elif kind == "summary":
+            # The live note the daemon's `compact_result` produced, rebuilt from the
+            # record (#2351). Same wording, same 200-character cut: a replay that
+            # said it differently would be a second transcript again.
+            try:
+                compacted = int(record.get("compacted_message_count") or 0)
+            except (TypeError, ValueError):
+                compacted = 0
+            body = str(record.get("content") or "")
+            rows.append(("system",
+                         f"Compact complete — {compacted} messages compressed into summary.\n"
+                         f"Summary: {body[:200]}...",
+                         str(record.get("timestamp") or "")))
         elif kind == "tool_result":
             card = calls.get(str(record.get("tool_call_id") or ""))
             if card is not None:

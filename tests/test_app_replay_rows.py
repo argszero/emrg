@@ -46,22 +46,51 @@ def test_a_message_record_becomes_its_own_role_row():
     assert rows == [("user", "hello", ""), ("assistant", long_body, "")]
 
 
-def test_a_role_the_records_mode_does_not_project_is_skipped():
-    """A `system` record is not material this client may invent.
+def test_a_system_note_and_a_compaction_boundary_are_rows():
+    """Issue #2351: the two record kinds the live stream announced, replayed as asked.
 
-    The daemon's records mode answers `role: "user" | "assistant"` explicitly. The file
-    on disk holds more than that (system rows, compaction summaries), so a client that
-    rendered them would again be reading a different session than the GUI — the drift
-    requirement 4 removes. If the mode is widened, this client learns it there.
+    This client renders exactly what the daemon's records mode projects, and nothing it
+    does not — that is the drift requirement 4 removes. The mode now projects a
+    `role: "system"` message and a `kind: "summary"` record, so both are rows here:
+
+    * the system note takes the **record's own text** (that is all the live note for
+      `/clear` ever said), with the record's own moment;
+    * the compaction row is rebuilt with the wording `compact_result` produced live —
+      the count it named and the first 200 characters of the summary body — because a
+      different sentence would be a second transcript again.
     """
     rows = _replay_rows([
-        {"record_index": 0, "kind": "message", "role": "system", "content": "Interrupted"},
+        {"record_index": 0, "kind": "message", "role": "system",
+         "content": "[Session cleared]", "timestamp": "2026-09-20T00:00:10"},
         {"record_index": 1, "kind": "message", "role": "tool", "content": "legacy role"},
-        {"record_index": 2, "kind": "summary", "content": "[Session summary from compact #3]"},
+        {"record_index": 2, "kind": "summary", "content": "the earlier turns",
+         "compacted_message_count": 7, "timestamp": "2026-09-20T00:00:20"},
         {"record_index": 3, "kind": "message", "role": "user", "content": "kept"},
     ])
 
-    assert rows == [("user", "kept", "")]
+    assert rows == [
+        ("system", "[Session cleared]", "2026-09-20T00:00:10"),
+        ("system",
+         "Compact complete — 7 messages compressed into summary.\n"
+         "Summary: the earlier turns...",
+         "2026-09-20T00:00:20"),
+        ("user", "kept", ""),
+    ], "a role the mode does not project must still be skipped, and the two it now "
+    "projects must arrive with their own text and moment"
+
+
+def test_a_summary_without_a_count_still_renders_as_a_boundary():
+    """A record written before the count was carried, or a truncated one.
+
+    Rendering it as `0 messages` would state a fact the record does not hold; skipping
+    it would lose the boundary the host watched appear. The row is produced with the
+    count it was given and no invention beyond that.
+    """
+    rows = _replay_rows([{"record_index": 0, "kind": "summary", "content": ""}])
+
+    assert rows == [("system",
+                     "Compact complete — 0 messages compressed into summary.\n"
+                     "Summary: ...", "")]
 
 
 def test_a_tool_result_names_the_tool_and_whether_it_failed():
