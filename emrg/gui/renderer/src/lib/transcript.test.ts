@@ -59,23 +59,56 @@ describe("工具合并组（rant 21:28:49，镜像 tool-group.test.js）", () =>
     expect(entries.filter((e) => e.kind === "tool-row")).toHaveLength(0); // 无独立行
     const group = groupOf(entries)!;
     expect(group.rows).toHaveLength(3); // 组内 3 行
-    // 组收起（全部完成且未手动展开）
-    expect(group.collapsed).toBe(true);
-    // 摘要：3 个工具执行 · 1.9s（0.4+1.2+0.3）
+    // 宿主没点过 bar ⇒ 组从头到尾是展开的。这里断言的是 rant 2026-10-17T19:23:08 的规则：
+    // 展开状态**只**在点击时改变，工具的开始与结束都不动它。旧版本在这一行断言 `true`，
+    // 而那个 `true` 正是每个 tool_end 收起、每个 tool_start 展开的跳动来源。
+    expect(group.collapsed).toBe(false);
+    // 摘要：3 个工具执行 · 1.9s（0.4+1.2+0.3）——在位的更新，不是重新排版
     expect(group.summary?.count).toBe(3);
     expect(group.summary?.totalElapsed.toFixed(1)).toBe("1.9");
     expect(group.barHidden).toBe(false);
 
-    // bar 点击 → 展开（user-expanded，不再自动收起）
+    // 点击 bar → 收起（唯一会改变状态的入口）
     const gi = entries.indexOf(groups[0]!);
     s.toggleGroup("s1", gi);
-    expect(group.collapsed).toBe(false);
-    expect(group.userExpanded).toBe(true);
-    // 展开后再来新工具并完成 → 不自动收起（user-expanded）
+    expect(group.collapsed).toBe(true);
+    expect(group.userExpanded).toBe(false);
+    // 收起后再来新工具并完成 → 仍然收起（不因为 tool_start 就翻开）
     s.handleToolStart({ tool_call_id: "t4", tool_name: "bash", request_id: "r1" }, "s1");
+    expect(group.collapsed, "tool_start must not expand a collapsed group").toBe(true);
     s.handleToolEnd({ tool_call_id: "t4", tool_name: "bash", elapsed: 0.5, content: "" }, "s1");
     expect(group.rows).toHaveLength(4); // 新工具应并入组
+    expect(group.collapsed, "tool_end must not change the state either").toBe(true);
+    expect(group.summary?.count).toBe(4); // 计数照旧在位更新
+
+    // 再点一次 → 展开，且保持展开
+    s.toggleGroup("s1", gi);
     expect(group.collapsed).toBe(false);
+    s.handleToolStart({ tool_call_id: "t5", tool_name: "bash", request_id: "r1" }, "s1");
+    s.handleToolEnd({ tool_call_id: "t5", tool_name: "bash", elapsed: 0.1, content: "" }, "s1");
+    expect(group.collapsed).toBe(false);
+  });
+
+  it("五个连续工具：每个边界都不改变展开状态（rant 2026-10-17T19:23:08 的验收）", () => {
+    // 记录「可见行数 + bar」这个高度代理在每一个 tool_start / tool_end 上的取值：
+    // 它必须单调不减，即块永远不会在边界处缩回去。step 为单位，故用数组比对。
+    const s = store();
+    const heights: number[] = [];
+    const sample = () => {
+      const g = groupOf(s.getEntries("s1"));
+      if (!g) return 0;
+      return (g.barHidden ? 0 : 1) + (g.collapsed ? 0 : g.rows.length);
+    };
+    for (let i = 1; i <= 5; i++) {
+      s.handleToolStart({ tool_call_id: `c${i}`, tool_name: "bash", request_id: "r1" }, "s1");
+      heights.push(sample());
+      s.handleToolEnd({ tool_call_id: `c${i}`, tool_name: "bash", elapsed: 0.2, content: "" }, "s1");
+      heights.push(sample());
+    }
+    for (let i = 1; i < heights.length; i++) {
+      expect(heights[i], `height shrank at step ${i}: ${heights.join(",")}`).toBeGreaterThanOrEqual(heights[i - 1]!);
+    }
+    expect(heights[heights.length - 1]).toBe(6); // 5 行 + bar
   });
 
   it("文本穿插不合并：工具前有文本 → 独立行", () => {

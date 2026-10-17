@@ -262,19 +262,27 @@ export function formatToolArguments(value: unknown): string {
   }
 }
 
-/** 更新工具合并组展示状态（chat.js updateToolGroup 数据化） */
+/** 更新工具合并组的**摘要**——只数数，不动展开状态（rant 2026-10-17T19:23:08）。
+ *
+ * 这里曾经按「有没有 running 行」决定收起：`collapsed = !userExpanded`（≥2 行且全部完成）
+ * 与 `collapsed = false`（有 running 行）。于是**每一个工具边界都翻转一次**——`tool_end`
+ * 收起、`tool_start` 展开——组的高度在 1 行与 N 行之间来回摆，五个工具摆五次，滚动位置跟着跳。
+ * `userExpanded` 只保护「宿主亲手展开过」的组，没被点过的组照样每调一次翻一次；而旧测试
+ * 恰恰把这个翻转断言为正确行为，所以套件一直是绿的。
+ *
+ * 规则：**组的展开状态只在宿主点它的 bar 时改变**（`toggleGroup`），别的时候——工具开始、
+ * 结束、追加、摘要变大——都不动。新建的组初始是展开的（进行中的工具必须看得见），且此后
+ * 不会自己收起：轨道允许一次性的收尾收起，但那是有意的设计选择，不是"每调一次顺手收一下"。
+ */
 function updateToolGroup(group: ToolGroup): void {
-  const running = group.rows.some((r) => r.status === "running");
-  if (group.rows.length >= 2 && !running) {
+  if (group.rows.length >= 2) {
     const total = group.rows.reduce((acc, r) => acc + (r.elapsed ?? 0), 0);
     group.summary = { count: group.rows.length, totalElapsed: total };
     group.barHidden = false;
-    group.collapsed = !group.userExpanded;
   } else {
-    // 组内仅 1 行 或 存在 running 行 → bar 隐藏、rows 展开（进行中工具实时可见）
+    // 组内仅 1 行 → 还没有可折叠的东西，bar 不显示
     group.summary = null;
     group.barHidden = true;
-    group.collapsed = false;
   }
 }
 
@@ -480,7 +488,8 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
       } else if (last && last.kind === "tool-group") {
         const g = last.group;
         g.rows.push(row);
-        g.collapsed = false; // 组收起后新工具 start → 自动展开显示 running 行
+        // 不展开、不收起了：宿主收起过的组，新工具也保持收起（rant 2026-10-17T19:23:08）。
+        // 正在跑的那一行如果要一直看得见，那是另一条"常显"行的事，不是把上面的行翻开的理由。
         s.toolRowIndex.set(row.callId, { entry: s.entries.length - 1, row: g.rows.length - 1 });
         updateToolGroup(g);
       } else {

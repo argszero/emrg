@@ -411,7 +411,7 @@ describe("TranscriptView", () => {
     expect(container.querySelector(".tool-time")).not.toBeInTheDocument();
   });
 
-  it("连续工具合并组：摘要 + 收起，bar 点击展开后不再自动收起", () => {
+  it("连续工具合并组：摘要随调用增长，收起只由点击决定（rant 2026-10-17T19:23:08）", () => {
     const store = createTranscriptStore({ t: (k) => k });
     store.handleToolStart({ tool_call_id: "t1", tool_name: "bash", request_id: "r1" }, "s1");
     store.handleToolEnd({ tool_call_id: "t1", tool_name: "bash", elapsed: 0.4, content: "" }, "s1");
@@ -419,23 +419,34 @@ describe("TranscriptView", () => {
     store.handleToolEnd({ tool_call_id: "t2", tool_name: "read", elapsed: 1.2, content: "" }, "s1");
     const { container } = setup(store, "s1");
     const group = container.querySelector(".tool-group")!;
-    expect(group).toHaveClass("collapsed");
+    // 宿主还没点过 bar：组是展开的，而且此后每一次开始/结束/追加都不改变它——
+    // 旧版本在这里断言 `collapsed`，那个断言正是"每个 tool_end 收起、每个 tool_start
+    // 展开"的跳动被当成正确行为的地方。
+    expect(group).not.toHaveClass("collapsed");
     expect(container.querySelectorAll(".tool-row")).toHaveLength(2);
     expect(container.querySelector(".tool-group-summary")).toHaveTextContent("2 个工具执行 · 1.6s");
-    // bar 点击 → 展开 + user-expanded
-    act(() => {
-      (container.querySelector(".tool-group-bar") as HTMLElement).click();
-    });
-    expect(group).not.toHaveClass("collapsed");
-    expect((group as HTMLElement).dataset.userExpanded).toBe("1");
-    // 新工具并入组且不自动收起
+    // 新工具并入组：行数增长，状态不动
     act(() => {
       store.handleToolStart({ tool_call_id: "t3", tool_name: "edit", request_id: "r1" }, "s1");
+    });
+    expect(container.querySelectorAll(".tool-row")).toHaveLength(3);
+    expect(group).not.toHaveClass("collapsed");
+    act(() => {
       store.handleToolEnd({ tool_call_id: "t3", tool_name: "edit", elapsed: 0.3, content: "" }, "s1");
     });
     expect(container.querySelectorAll(".tool-row")).toHaveLength(3);
     expect(group).not.toHaveClass("collapsed");
     expect(container.querySelector(".tool-group-summary")).toHaveTextContent("3 个工具执行 · 1.9s");
+    // 点击 bar → 收起（唯一入口）
+    act(() => {
+      (container.querySelector(".tool-group-bar") as HTMLElement).click();
+    });
+    expect(group).toHaveClass("collapsed");
+    // 收起之后再来一个工具：仍然收起，不因为 tool_start 就翻开
+    act(() => {
+      store.handleToolStart({ tool_call_id: "t4", tool_name: "bash", request_id: "r1" }, "s1");
+    });
+    expect(group).toHaveClass("collapsed");
   });
 
   it("广播流与 own stream 均不显示 remote 标签（rant 2026-08-28T22:16:36 去掉）", () => {
