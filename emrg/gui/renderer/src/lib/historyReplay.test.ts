@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createTranscriptStore, formatToolArguments, type AssistantEntry, type TranscriptEntry, type TranscriptStore } from "./transcript";
 import { replayHistoryRecords, replayHistoryRecordsPrepend, toolCallIntent, type HistoryRecord } from "./historyReplay";
+import { t } from "./i18n";
 
 /**
  * historyReplay.test.ts — 回放等价性测试（rant 2026-09-20T18:58:44 的验收）。
@@ -314,6 +315,67 @@ describe("the record shape the daemon actually sends", () => {
     expect(sink.addUserMessage).toHaveBeenCalledWith("q", SID, { requestId: "hist-u" });
     expect(sink.handleDelta).toHaveBeenCalledWith([{ request_id: "hist-u", content: "a" }], SID);
     expect(sink.handleDone).toHaveBeenCalledWith({ request_id: "hist-u" }, SID);
+  });
+});
+
+/**
+ * #2351：回放里的系统提示与压缩边界。
+ *
+ * daemon 的 records 模式现在也投影两条既不是消息（显示路径投影的两种角色）也不是工具结果的
+ * 记录：`Session.clear` 写下的 `role: "system"` 消息，和每次压缩写下的 `type: "summary"`。
+ * 实时那一路两条都有对应的行（`/clear` 之后的系统提示、`compact_result` 之后的已压缩提示），
+ * 所以回放必须调同一个入口写同一句话 —— 否则重开一个会话看到的就不是自己关掉的那一屏。
+ *
+ * 这三条是回放那一半唯一的钉：删掉 `replayHistoryRecords` 里那两个分支，此前整套渲染层
+ * 测试仍然全绿（实测：686 条不变），于是两个客户端的一致性可以静默退回去。
+ */
+describe("系统提示与压缩边界的回放（#2351）", () => {
+  const records: HistoryRecord[] = [
+    { record_index: 0, kind: "message", role: "system", content: "[Session cleared]" },
+    { record_index: 1, kind: "summary", content: "the earlier turns, summarised", compacted_message_count: 7 },
+    { record_index: 2, kind: "message", role: "user", content: "after the compact" },
+  ];
+
+  function sinkOf() {
+    return {
+      addUserMessage: vi.fn(),
+      handleDelta: vi.fn(),
+      handleDone: vi.fn(),
+      handleToolStart: vi.fn(),
+      handleToolEnd: vi.fn(),
+      addSystemMessage: vi.fn(),
+    };
+  }
+
+  it("写一行系统提示，用的就是记录自己的文本（不翻译、不改写）", () => {
+    const s = sinkOf();
+    replayHistoryRecords(records, SID, s);
+    // 第一条系统行：`Session.clear` 的那句话。实时那一路显示的也是它 —— 回放换一个说法，
+    // 两条路就又分叉了，而这正是 #2351 要消掉的东西。
+    expect(s.addSystemMessage).toHaveBeenNthCalledWith(1, "[Session cleared]", SID);
+  });
+
+  it("压缩边界写的是实时那一行的同一句话（同一个键，不是第二套文案）", () => {
+    const s = sinkOf();
+    replayHistoryRecords(records, SID, s);
+    // `DialogHost` 在 `compact_result` 上写的是 `t("app.compacted")`；回放调同一个入口、
+    // 同一个键，于是两路是同一行。断言精确相等：换成「已压缩 N 条」这种自造文案会变红。
+    expect(s.addSystemMessage).toHaveBeenNthCalledWith(2, t("app.compacted"), SID);
+    expect(s.addSystemMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it("边界两侧的顺序与落盘一致：系统行在前，压缩行在中间，用户消息在最后", () => {
+    const s = sinkOf();
+    replayHistoryRecords(records, SID, s);
+    const order = [
+      ...s.addSystemMessage.mock.calls.map((c) => `sys:${c[0]}`),
+      ...s.addUserMessage.mock.calls.map((c) => `user:${c[0]}`),
+    ];
+    expect(order).toEqual([
+      "sys:[Session cleared]",
+      `sys:${t("app.compacted")}`,
+      "user:after the compact",
+    ]);
   });
 });
 
