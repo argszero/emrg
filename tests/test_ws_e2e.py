@@ -283,7 +283,7 @@ class TestWSVibeCheck:
                 tmp = Path(tmp)
                 # Pre-create the task's session history on disk (session files
                 # are organized by cwd: <cwd>/.emrg/sessions/<session_id>/).
-                sess_dir = tmp / ".emrg" / "sessions" / "emrg-evolution-deepseek-harness-opensource-task"
+                sess_dir = tmp / ".emrg" / "sessions" / "deepseek-harness-opensource-task"
                 sess_dir.mkdir(parents=True, exist_ok=True)
                 (sess_dir / "history.jsonl").write_text(
                     json.dumps({"type": "message", "role": "user",
@@ -307,7 +307,7 @@ class TestWSVibeCheck:
                     try:
                         await ws.send(json.dumps({
                             "type": "task_vibe_check",
-                            "session_id": "emrg-evolution-deepseek-harness-opensource-task",
+                            "session_id": "deepseek-harness-opensource-task",
                             "cwd": str(tmp),
                             "task_name": "deepseek-harness-opensource-task",
                             "prompt": "run cycle",
@@ -348,7 +348,7 @@ class TestWSVibeCheck:
         async def _test():
             with tempfile.TemporaryDirectory() as tmp:
                 tmp = Path(tmp)
-                sess_dir = tmp / ".emrg" / "sessions" / "emrg-evolution-two-runs-task"
+                sess_dir = tmp / ".emrg" / "sessions" / "two-runs-task"
                 sess_dir.mkdir(parents=True, exist_ok=True)
                 (sess_dir / "history.jsonl").write_text(
                     json.dumps({"type": "message", "role": "user",
@@ -380,7 +380,7 @@ class TestWSVibeCheck:
                     try:
                         await ws.send(json.dumps({
                             "type": "task_vibe_check",
-                            "session_id": "emrg-evolution-two-runs-task",
+                            "session_id": "two-runs-task",
                             "cwd": str(tmp),
                             "task_name": "two-runs-task",
                             "prompt": "run cycle",
@@ -415,7 +415,7 @@ class TestWSVibeCheck:
         async def _test():
             with tempfile.TemporaryDirectory() as tmp:
                 tmp = Path(tmp)
-                sess_dir = tmp / ".emrg" / "sessions" / "emrg-evolution-emrg-task"
+                sess_dir = tmp / ".emrg" / "sessions" / "emrg-task"
                 sess_dir.mkdir(parents=True, exist_ok=True)
                 lines = []
                 # 60 user → assistant(tool_calls) → tool_result triples:
@@ -450,7 +450,7 @@ class TestWSVibeCheck:
                     try:
                         await ws.send(json.dumps({
                             "type": "task_vibe_check",
-                            "session_id": "emrg-evolution-emrg-task",
+                            "session_id": "emrg-task",
                             "cwd": str(tmp),
                             "task_name": "emrg-task",
                             "prompt": "run cycle",

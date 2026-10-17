@@ -37,7 +37,7 @@ a warning on stderr — a report tool must not fail on one corrupt record).
 Usage examples::
 
     scripts/llm-cost-report.py                          # all indexed sessions
-    scripts/llm-cost-report.py --session-id emrg-evolution-emrg-task
+    scripts/llm-cost-report.py --session-id emrg-task
     scripts/llm-cost-report.py --root ~/.emrg/.emrg/sessions --json
     scripts/llm-cost-report.py --pricing my-model:0.5:1.5
 """

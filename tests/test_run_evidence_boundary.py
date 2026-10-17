@@ -2,8 +2,8 @@
 
 Why this file exists
 --------------------
-A scheduled task runs in **one** session for its whole life: `emrg-evolution-<name>`
-is reused by every run. So "the recent history of that session" is not evidence about
+A scheduled task runs in **one** session for its whole life: the session is named after
+the task (`<name>`) and is reused by every run. So "the recent history of that session" is not evidence about
 *this* run — it is a window that mostly holds the *previous* one whenever this run was
 light on narrative (a vote-only run, a verification run, a run whose work is reading).
 
@@ -67,7 +67,7 @@ def _record(role: str, content: str, at: str) -> dict:
 
 def _two_run_session(cwd) -> Session:
     """One session file holding two runs, as the real task session is."""
-    session = Session.create_with_id("emrg-evolution-boundary-test", cwd)
+    session = Session.create_with_id("boundary-test", cwd)
     for record in (
         _record("user", "run one prompt", "2026-10-08T09:00:05"),
         _record("assistant", f"I {PREVIOUS_RUN_WORK}", "2026-10-08T09:20:00"),
@@ -356,7 +356,7 @@ def test_the_judge_is_not_shown_the_previous_runs_work(tmp_path) -> None:
     server = _bare_server(llm)
 
     asyncio.run(server._task_vibe_check(
-        "emrg-task", "emrg-evolution-boundary-test", str(tmp_path),
+        "emrg-task", "boundary-test", str(tmp_path),
         prompt="run two prompt", completion_summary="done",
         cycle_started_at=RUN_TWO_START,
     ))
@@ -380,7 +380,7 @@ def test_the_same_session_still_shows_both_runs_without_a_boundary(tmp_path) -> 
     server = _bare_server(llm)
 
     asyncio.run(server._task_vibe_check(
-        "emrg-task", "emrg-evolution-boundary-test", str(tmp_path),
+        "emrg-task", "boundary-test", str(tmp_path),
         prompt="run two prompt", completion_summary="done",
     ))
 

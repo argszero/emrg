@@ -102,11 +102,22 @@ const NO_LOG_MARK = Object.freeze({ size: 0, ino: null });
 // （测试与将来别的调用者）时的默认值，与"子进程有 pid"同义。
 const NO_SPAWN_STATE = Object.freeze({ err: null, neverStarted: false });
 
-// 会话 ID 允许多种形态：
-//  - 交互会话：s_<6位日期>_<4位时间>_<hex id>（generateSessionId 产物）
-//  - 固定任务会话：emrg-evolution-<task-name>（首尾均连字符，无下划线分隔）
-// 两者都可能经 GUI 的 switchSession/打开会话 传入，需都接受。
-const SESSION_ID_RE = /^(s_\d{6}_\d{4}_[0-9a-f]{4,8}|emrg-evolution-[A-Za-z0-9_-]+)$/;
+// 会话 ID 的**形态不做检查**（宿主 2026-10-17：定时任务的会话 id 就去掉前缀，叫任务名）。
+// 原先这里是一张白名单 `/^(s_\d{6}_\d{4}_[0-9a-f]{4,8}|emrg-evolution-[...])$/`，
+// 它挡的是"命名方案"而不是危险输入：交互会话叫 `s_260808_0857_387c852f`、任务会话现在
+// 叫任务自己的名字，白名单每多一种命名就要改一次，漏改的后果是这个会话在 GUI 里**打不开**
+// （main.js 的每个 IPC 都先问这个谓词），而错误信息只说 `invalid session_id`。
+//
+// 留下的只有路径安全，那不是命名规则：一个 id 会拼进 `<cwd>/.emrg/sessions/<id>`
+// （`Session.__init__`），所以空串、分隔符与 `..` 段必须拒绝——它们会逃出目录。
+const MAX_SESSION_ID_LENGTH = 128;
+
+function isSessionId(id) {
+  if (typeof id !== "string") return false;
+  if (id.length === 0 || id.length > MAX_SESSION_ID_LENGTH) return false;
+  if (id === "." || id === "..") return false;
+  return !id.includes("/") && !id.includes("\\") && !id.includes("\u0000");
+}
 
 // G93：命令类型 → 响应帧类型映射（daemon 协议，daemon.py _process_message）
 const RESPONSE_TYPES = {
@@ -1282,4 +1293,4 @@ function generateSessionId(seed) {
   return sid;
 }
 
-module.exports = { DaemonClient, generateSessionId, TOKEN_FILE, SESSION_ID_RE, MAX_PAYLOAD, EMRGD_PORT, EMRGD_START_ERR };
+module.exports = { DaemonClient, generateSessionId, isSessionId, TOKEN_FILE, MAX_PAYLOAD, EMRGD_PORT, EMRGD_START_ERR };

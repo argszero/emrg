@@ -48,7 +48,7 @@ def test_build_prompt_emrg_self():
 
     # Core template variables must be present
     assert "argszero/emrg" in prompt
-    assert "emrg-evolution" in prompt
+    assert "- Session ID: `emrg`" in prompt, "the prompt must carry the task's own session id"
     assert "https://github.com/argszero/emrg.git" in prompt
     # …and the per-daemon identity must NOT be, even though the builder still passes it
     # (it is there for the host's own custom templates in `~/.emrg/task-templates/`).
@@ -80,7 +80,7 @@ def test_build_prompt_with_project():
     prompt = handler._build_evolution_prompt()
 
     assert "/home/user/src/myproject" in prompt
-    assert "emrg-evolution-myproject" in prompt
+    assert "- Session ID: `myproject`" in prompt
     assert "https://github.com/user/myproject.git" in prompt
     assert "<<<<<<<" not in prompt
     assert ">>>>>>>" not in prompt
