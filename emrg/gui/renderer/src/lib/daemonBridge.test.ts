@@ -622,3 +622,68 @@ describe("createDaemonBridge", () => {
   });
 
 });
+
+/**
+ * 时刻从帧走到行上（rant 2026-10-17T10:03:08 → issue #2340）。daemon 早就把时刻发出来了；
+ * 这里守住中间这层：`done` / `user_message` / `steer_committed` 三个帧各自把 daemon 写的
+ * 那个字符串放到对的那一行上，且只在帧真的带了它的时候。
+ */
+describe("消息时刻的三个来源", () => {
+  const stampOf = (store: ReturnType<typeof createTranscriptStore>, sid: string, kind: "user" | "assistant") => {
+    const e = store.getEntries(sid).find((x) => x.kind === kind) as { timestamp?: string } | undefined;
+    return e?.timestamp;
+  };
+
+  it("done 帧的 timestamp 落到助手行上", () => {
+    const { bridge, transcript } = setup();
+    bridge.handleFrame({ type: "message_delta", data: { chunks: [{ request_id: "r1", content: "hi" }] }, sid: "s1" });
+    bridge.handleFrame({ type: "done", data: { request_id: "r1", timestamp: "2026-10-17T10:28:09+08:00" }, sid: "s1" });
+    expect(stampOf(transcript, "s1", "assistant")).toBe("2026-10-17T10:28:09+08:00");
+  });
+
+  it("user_message 帧按 request_id 给那一行补时刻，不碰别的行", () => {
+    const { bridge, transcript } = setup();
+    transcript.addUserMessage("mine", "s1", { requestId: "req-1" });
+    transcript.addUserMessage("other", "s1", { requestId: "req-2" });
+    bridge.handleFrame({
+      type: "user_message",
+      data: { request_id: "req-1", timestamp: "2026-10-17T10:27:55+08:00" },
+      sid: "s1",
+    });
+    const rows = transcript.getEntries("s1") as Array<{ text: string; timestamp?: string }>;
+    expect(rows[0].timestamp).toBe("2026-10-17T10:27:55+08:00");
+    expect(rows[1].timestamp).toBeUndefined();
+  });
+
+  it("user_message 帧认不到那一行时什么也不做（另一个客户端发的消息）", () => {
+    const { bridge, transcript } = setup();
+    transcript.addUserMessage("mine", "s1", { requestId: "req-1" });
+    bridge.handleFrame({
+      type: "user_message",
+      data: { request_id: "someone-else", timestamp: "2026-10-17T10:27:55+08:00" },
+      sid: "s1",
+    });
+    expect(stampOf(transcript, "s1", "user")).toBeUndefined();
+  });
+
+  it("steer_committed 帧给排队的用户行补时刻（那一行从发送起就在屏幕上）", () => {
+    const { bridge, transcript } = setup();
+    transcript.addUserMessage("queued", "s1", { requestId: "req-9" });
+    bridge.handleFrame({
+      type: "steer_committed",
+      data: { request_id: "req-9", timestamp: "2026-10-17T10:31:02+08:00" },
+      sid: "s1",
+    });
+    expect(stampOf(transcript, "s1", "user")).toBe("2026-10-17T10:31:02+08:00");
+  });
+
+  it("帧里没有 timestamp 时不写任何值（缺席就是缺席，不拿空串冒充）", () => {
+    const { bridge, transcript } = setup();
+    transcript.addUserMessage("mine", "s1", { requestId: "req-1" });
+    bridge.handleFrame({ type: "user_message", data: { request_id: "req-1" }, sid: "s1" });
+    bridge.handleFrame({ type: "message_delta", data: { chunks: [{ request_id: "r1", content: "hi" }] }, sid: "s1" });
+    bridge.handleFrame({ type: "done", data: { request_id: "r1" }, sid: "s1" });
+    expect(stampOf(transcript, "s1", "user")).toBeUndefined();
+    expect(stampOf(transcript, "s1", "assistant")).toBeUndefined();
+  });
+});

@@ -362,3 +362,54 @@ describe("工具入参：卡片持有 + 可读呈现（#1787）", () => {
     expect(formatToolArguments("   ")).toBe("");
   });
 });
+
+/**
+ * 消息的时刻（rant 2026-10-17T10:03:08 → issue #2340）。事实只有一条来源：daemon 写在帧里/
+ * 记录里的那个字符串。客户端不盖章、不换算，缺席就留空。
+ */
+describe("消息时刻", () => {
+  it("done 带来的时刻落在该 rid 的最后一段助手上（一轮被工具切成多段也只算一条消息）", () => {
+    const st = store();
+    st.handleDelta([{ request_id: "r1", content: "first" }], "s1");
+    st.handleToolStart({ request_id: "r1", tool_call_id: "c1", tool_name: "bash" }, "s1");
+    st.handleToolEnd({ tool_call_id: "c1", tool_name: "bash", content: "ok" }, "s1");
+    st.handleDelta([{ request_id: "r1", content: "second" }], "s1");
+    st.handleDone({ request_id: "r1", timestamp: "2026-10-17T10:27:55+08:00" }, "s1");
+
+    const assistants = st.getEntries("s1").filter((e) => e.kind === "assistant") as AssistantEntry[];
+    expect(assistants).toHaveLength(2);
+    // 时刻属于「这条回复」，不属于每一段：只有最后一段带它
+    expect(assistants[0].timestamp).toBeUndefined();
+    expect(assistants[1].timestamp).toBe("2026-10-17T10:27:55+08:00");
+  });
+
+  it("收尾帧不带时刻 → 行上没有时间（取消 / 超轮次 / 出错本就没有回复落盘）", () => {
+    const st = store();
+    st.handleDelta([{ request_id: "r1", content: "partial" }], "s1");
+    st.handleDone({ request_id: "r1", timeout: true }, "s1");
+    expect(assistantOf(st.getEntries("s1"), "r1")!.timestamp).toBeUndefined();
+    // 连空串也不写：渲染层据此不画元素（空串与缺席在数据里可辨，在屏幕上都是「没有」）
+    expect(assistantOf(st.getEntries("s1"), "r1")!.timestamp ?? "").toBe("");
+  });
+
+  it("用户行记下 request id，stampUserMessage 按 id 补 daemon 的时刻", () => {
+    const st = store();
+    st.addUserMessage("mine", "s1", { requestId: "req-1" });
+    st.addUserMessage("also mine", "s1", { requestId: "req-2" });
+    st.stampUserMessage("req-2", "2026-10-17T10:28:01+08:00", "s1");
+    const rows = st.getEntries("s1") as Array<{ kind: string; text: string; timestamp?: string }>;
+    expect(rows[0].timestamp).toBeUndefined();
+    expect(rows[1].timestamp).toBe("2026-10-17T10:28:01+08:00");
+  });
+
+  it("stampUserMessage 认不到那一行就什么都不做（别的客户端发的消息不该被盖成我的时刻）", () => {
+    const st = store();
+    st.addUserMessage("mine", "s1", { requestId: "req-1" });
+    const before = st.getVersion();
+    st.stampUserMessage("req-unknown", "2026-10-17T10:28:01+08:00", "s1");
+    const rows = st.getEntries("s1") as Array<{ timestamp?: string }>;
+    expect(rows[0].timestamp).toBeUndefined();
+    // 没有盖章就不该通知订阅者：一次没发生的变更不该触发一次渲染
+    expect(st.getVersion()).toBe(before);
+  });
+});

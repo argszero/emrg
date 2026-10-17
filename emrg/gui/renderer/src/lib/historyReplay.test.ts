@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createTranscriptStore, formatToolArguments, type TranscriptEntry, type TranscriptStore } from "./transcript";
+import { createTranscriptStore, formatToolArguments, type AssistantEntry, type TranscriptEntry, type TranscriptStore } from "./transcript";
 import { replayHistoryRecords, replayHistoryRecordsPrepend, toolCallIntent, type HistoryRecord } from "./historyReplay";
 
 /**
@@ -308,7 +308,9 @@ describe("the record shape the daemon actually sends", () => {
       SID,
       sink,
     );
-    expect(sink.addUserMessage).toHaveBeenCalledWith("q", SID);
+    // 第三个参数是「这一行是谁、什么时候」：id 由 record_index 合成（本页没有 record_index，
+    // 于是落在 `hist-u`），记录没带时刻就不写这个键（rant 2026-10-17T10:03:08）。
+    expect(sink.addUserMessage).toHaveBeenCalledWith("q", SID, { requestId: "hist-u" });
     expect(sink.handleDelta).toHaveBeenCalledWith([{ request_id: "hist-u", content: "a" }], SID);
     expect(sink.handleDone).toHaveBeenCalledWith({ request_id: "hist-u" }, SID);
   });
@@ -394,5 +396,48 @@ describe("工具入参的回放一致性（#1787）", () => {
       formatToolArguments(rowOf(live).arguments),
     );
     expect(formatToolArguments(rowOf(live).arguments)).toContain('"command": "ls -la"');
+  });
+});
+
+/**
+ * 时刻在回放这一路的去向（rant 2026-10-17T10:03:08 → issue #2340）：`timestamp` 曾经
+ * 「类型上有、映射处被丢掉」，于是重开一个会话永远看不到时间。这里断言两件事：
+ * 记录里的时刻确实落到了条目上，且与实时那一轮落下的是**同一个值**。
+ */
+describe("时刻：回放与实时同值", () => {
+  const USER_STAMP = "2026-10-17T10:27:55.123456+08:00";
+  const REPLY_STAMP = "2026-10-17T10:28:09.987654+08:00";
+  const records: HistoryRecord[] = [
+    { kind: "message", record_index: 0, role: "user", content: "hi", timestamp: USER_STAMP },
+    { kind: "message", record_index: 1, role: "assistant", content: "hello", timestamp: REPLY_STAMP },
+  ];
+
+  it("记录里的时刻落到用户行与助手行上", () => {
+    const replayed = createTranscriptStore();
+    replayHistoryRecords(records, SID, replayed);
+    const entries = replayed.getEntries(SID);
+    const user = entries.find((e) => e.kind === "user") as { timestamp?: string };
+    const assistant = entries.find((e) => e.kind === "assistant") as AssistantEntry;
+    expect(user.timestamp).toBe(USER_STAMP);
+    expect(assistant.timestamp).toBe(REPLY_STAMP);
+  });
+
+  it("同一条消息：实时那一轮与重开会话后读到的是同一个时刻", () => {
+    // 实时：用户行先由客户端插入（只带 request id），时刻由 user_message 帧补；回复的时刻
+    // 由收尾帧带着。两处给的都是 daemon 写在记录里的那个字符串。
+    const live = createTranscriptStore();
+    live.addUserMessage("hi", SID, { requestId: "req-1" });
+    live.stampUserMessage("req-1", USER_STAMP, SID);
+    live.handleDelta([{ request_id: "req-1", content: "hello" }], SID);
+    live.handleDone({ request_id: "req-1", timestamp: REPLY_STAMP }, SID);
+
+    const replayed = createTranscriptStore();
+    replayHistoryRecords(records, SID, replayed);
+
+    const stamps = (s: TranscriptStore) =>
+      s.getEntries(SID).map((e) =>
+        e.kind === "user" || e.kind === "assistant" ? e.timestamp : undefined,
+      );
+    expect(stamps(replayed)).toEqual(stamps(live));
   });
 });

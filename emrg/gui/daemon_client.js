@@ -1103,6 +1103,14 @@ class DaemonClient {
       this._emit(frame.type, frame);
       return;
     }
+    if (frame.type === "user_message") {
+      // 新消息落盘的回执（rant 2026-10-17T10:03:08）：daemon 在写用户记录的同一处
+      // `_broadcast` 它，带 `request_id` 与 `timestamp` —— 那一刻只有 daemon 知道，
+      // 渲染层据此给乐观画出来的那一行补上时间。此前本层没有分支，它落进下面的兜底
+      // 只记一行日志，于是 GUI 的用户消息永远没有时刻（TUI 一直在用这个帧）。
+      this._emit(frame.type, frame);
+      return;
+    }
     if (frame.type === "task_queued" || frame.type === "steer_committed") {
       // The same seam as the turn frames above, for two more types (#2189). The
       // daemon `_broadcast`s both to every connection subscribed to the session

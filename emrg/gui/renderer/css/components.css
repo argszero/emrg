@@ -88,6 +88,18 @@
   color: var(--accent);
   animation: cursor-pulse 1s ease-in-out infinite;
 }
+/* 消息行上的时钟（rant 2026-10-17T10:03:08）：dim、等宽数字，不抢正文。
+   元素只在 daemon 真的给了时刻时才存在（`formatMessageTime` 反问可读性），
+   所以这里没有「空值形态」需要兜。 */
+.msg-time {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--fs-aux);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
 .msg.system {
   text-align: center;
   font-size: var(--fs-secondary);

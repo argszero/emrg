@@ -937,7 +937,9 @@ test("守卫：daemon `_broadcast` 的每一种帧类型，中间层要么转发
   //    （TUI 独有）、或本就是别的会话命令的回执。写进这里＝承认它会被兜底记一行。
   const NOT_FORWARDED = {
     compact_result: "别的会话 /compact 的回执，渲染层无 case（daemon 广播给全部订阅者）",
-    user_message: "TUI 独有的通知（app.py:1505），渲染层 daemonBridge 无 case",
+    // `user_message` 曾在此处（「TUI 独有」）——rant 2026-10-17T10:03:08 之后它是渲染层
+    // 给用户行补时刻的唯一来源（`daemonBridge.ts` 的 `case "user_message"`），本层必须
+    // 转发；豁免留着就是名单说谎，④ 会当场变红。
   };
 
   const warned = [];

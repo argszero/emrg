@@ -68,11 +68,26 @@ export interface AssistantEntry {
   kind: "assistant";
   rid: string;
   segments: AssistantSegment[];
+  /**
+   * 这条回复的时刻 —— **daemon 记下的那一个**，取自收尾帧的 `timestamp`
+   * （rant 2026-10-17T10:03:08）。只有该 rid 的**最后**一个助手段带它：一轮回复被工具
+   * 切成多段时，时刻属于这条消息，不属于每一段。收尾帧不带时刻（取消/超轮次/出错，
+   * 那些结局本就不落盘回复）时留空，行上就不显示任何时间。
+   */
+  timestamp?: string;
 }
 
 export interface UserEntry {
   kind: "user";
   text: string;
+  /**
+   * 这一行的时刻 —— daemon 写记录的那一刻（`user_message` / `steer_committed` 帧带来）。
+   * 客户端自己点击发送时并不知道它，所以先留空、由帧补上；补不上的行（老记录、别的
+   * 客户端发的）宁可没有时间，也不能由本地时钟编一个。
+   */
+  timestamp?: string;
+  /** 发起这一行的 request id —— 帧按它认领自己那一行（见 `stampUserMessage`）。 */
+  rid?: string;
 }
 export interface SystemEntry {
   kind: "system";
@@ -129,6 +144,11 @@ export interface DoneData {
   request_id?: string;
   timeout?: boolean;
   content?: string;
+  /**
+   * 这条回复的时刻，与落盘记录里的是**同一个字符串**（`daemon.py` 收尾帧）。
+   * 缺席 = 这一轮没有回复落盘（取消 / 超轮次 / 出错），行上就该没有时间。
+   */
+  timestamp?: string;
 }
 export interface ToolStartData {
   request_id?: string;
@@ -172,7 +192,17 @@ export interface TranscriptStore {
   handleToolEnd(data: ToolEndData, sid?: string | null): void;
   clearTyping(sid?: string | null): void;
   clear(sid?: string | null): void;
-  addUserMessage(text: string, sid?: string | null): void;
+  /**
+   * 追加一条用户消息。`meta.requestId` 让后来到达的 `user_message` / `steer_committed`
+   * 帧认领这一行（`stampUserMessage`）；`meta.timestamp` 只有回放那一路用得上 —— 那是
+   * 记录里 daemon 写下的时刻，不是客户端时钟（rant 2026-10-17T10:03:08）。
+   */
+  addUserMessage(text: string, sid?: string | null, meta?: { requestId?: string; timestamp?: string }): void;
+  /**
+   * 给 `rid` 那一行用户消息补上 daemon 的时刻。找不到该行（例如别的客户端发的消息）
+   * 就什么也不做 —— 绝不退化成「给最后一行盖章」。
+   */
+  stampUserMessage(rid: string, timestamp?: string | null, sid?: string | null): void;
   addSystemMessage(text: string, sid?: string | null): void;
   /**
    * 把一段回放出来的条目整块插到最前（rant 2026-09-20T18:58:44：更早一页由实时 handler
@@ -385,6 +415,10 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
           const entry = s.entries[entryIndex];
           if (entry && entry.kind === "assistant") {
             for (const seg of entry.segments) seg.typing = false;
+            // 收尾帧带来的时刻写到**这一段回复的行**上 —— groupIndex[rid] 指的正是该 rid
+            // 最后一个助手条目，工具把一轮回复切成多段时，时刻属于消息而非每段。
+            // 帧不带时刻（取消/超轮次/出错，本就没有回复落盘）→ 行上留空。
+            if (data.timestamp) entry.timestamp = data.timestamp;
           }
           s.groupIndex.delete(rid); // 渲染完成 → 移除映射（chat.js groupNodes.delete）
         }
@@ -531,10 +565,28 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
     handleToolEnd,
     clearTyping,
     clear,
-    addUserMessage: (text, sid) => {
+    addUserMessage: (text, sid, meta) => {
       mutate(() => {
-        st(sid).entries.push({ kind: "user", text });
+        const entry: UserEntry = { kind: "user", text };
+        if (meta?.requestId) entry.rid = meta.requestId;
+        if (meta?.timestamp) entry.timestamp = meta.timestamp;
+        st(sid).entries.push(entry);
       });
+    },
+    stampUserMessage: (rid, timestamp, sid) => {
+      if (!rid || !timestamp) return;
+      const s = st(sid);
+      // 从后往前找：同一个 rid 只可能有一行，但重发过的行可能重复，取最近的那一行。
+      for (let i = s.entries.length - 1; i >= 0; i--) {
+        const e = s.entries[i];
+        if (e.kind === "user" && e.rid === rid) {
+          mutate(() => {
+            e.timestamp = timestamp;
+          });
+          return;
+        }
+      }
+      // 找不到就不动：`st(sid)` 已经在上面建过桶，不该为了补一个时刻而触发一次渲染。
     },
     addSystemMessage: (text, sid) => {
       mutate(() => {

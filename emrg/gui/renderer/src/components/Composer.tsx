@@ -610,13 +610,16 @@ export function Composer({
     // 回合结束未注入则 queued_requeue 以原 requestId 重发。busy 时记录待重发条目。
     const wasBusy = busy;
     setInternalBusy(true);
-    store.addUserMessage(value, sid);
-    editor.commands.clearContent();
-    // B3：消息已发送 → 清除草稿（tiptap 内容即草稿，发送即清）
     // G143：send 前预生成 requestId——消除 IPC 往返竞态窗口。（G143 原本还用它给消息打
     // 「自有流」标；那是客户端自持的“谁的消息”判定，已按 rant 2026-09-29T15:52:49 要求 3
     // 移除：daemon 是唯一状态源，客户端只是渲染器。）
+    // 铸在这里、并在插入消息行时就交给它：这一行要靠这个 id 认领 daemon 随后送来的
+    // `user_message` / `steer_committed` 帧里的时刻（rant 2026-10-17T10:03:08）——
+    // 客户端自己不知道这条消息是什么时候被记下的，也不许编一个。
     const requestId = genRequestId();
+    store.addUserMessage(value, sid, { requestId });
+    editor.commands.clearContent();
+    // B3：消息已发送 → 清除草稿（tiptap 内容即草稿，发送即清）
     if (wasBusy) {
       queueSend(queuedRef.current, sid, { requestId, text: value, sandbox: tier, images });
     }
