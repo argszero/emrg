@@ -140,7 +140,7 @@ find <project>/.emrg -newermt '<that project's bookmark time>' \
 - **the host disagreeing with work already done, in their own words** (「不对」 / 「算了」 / "that is not what I asked for", or a requirement restated because the last attempt missed it) — R8 item 1, and **exempt from the rotation below**;
 - **a task that has invented a rule its own prompt should have carried** — §1.7 is the sharpest case; a memory line reading "the prompt did not say X" is the same signal from another file;
 - **one workaround appearing in two unrelated projects** — a mechanism is missing, not a local mistake;
-- **an index far larger than its content justifies** — state is being kept in memory because the prompt does not hold it. Found by counting, without reading a word: `awk 'length($0)>512' MEMORY.md | wc -l` against R9's per-line limit.
+- **an index far larger than its content justifies** — state is being kept in memory because the prompt does not hold it. Found by counting, without reading a word, through the same producer R9's compaction uses: `uv run --no-sync python3 scripts/check-memory-index.py <project>/.emrg/memory/MEMORY.md` prints the three numbers R9 sets — lines, characters, and the longest row — and names the subject it read. Do not count rows with `awk 'length($0)>512'`: an `awk` that measures bytes rather than characters reports a CJK index as far over a bound it is nowhere near, and the number it prints is the one this branch exists to avoid acting on.
 
 **3. Read conversation by location, never whole.** A session history runs to tens of megabytes. Locate the passage, then read the range:
 
