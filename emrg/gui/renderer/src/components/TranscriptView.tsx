@@ -32,7 +32,8 @@ import { MarkdownText } from "./MarkdownText";
  *   渲染文本，避免破坏块语法解析。
  * - 工具行：running 转圈 → done ✓ / failed；耗时 · Ns（仅成功）；输出默认隐藏，
  *   点击行展开（G91/G131 >2000 字符截断 + 展开全文按钮）。
- * - 合并组：bar 摘要（chat.toolGroupSummary）+ 收起/展开，user-expanded 后不再自动收起。
+ * - 合并组：bar 摘要（chat.toolGroupSummary）+ 收起/展开，且**只**在宿主点 bar 时改变——
+ *   工具边界既不自动展开也不自动收起（rant 2026-10-17T19:23:08）。
  * - 本组件不含滚动/欢迎屏副作用（Batch 5 接线时由宿主容器负责）。
  */
 
@@ -466,10 +467,7 @@ function ToolGroupView({
   sid: string | null;
 }) {
   return (
-    <div
-      className={`tool-group ${group.collapsed ? "collapsed" : ""}`}
-      data-user-expanded={group.userExpanded ? "1" : undefined}
-    >
+    <div className={`tool-group ${group.collapsed ? "collapsed" : ""}`}>
       <div
         className={`tool-group-bar ${group.barHidden ? "hidden" : ""}`}
         onClick={() => store.toggleGroup(sid, entryIndex)}

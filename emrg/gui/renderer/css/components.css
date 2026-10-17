@@ -367,6 +367,11 @@ pre.tool-detail-body {
   align-items: center;
   gap: var(--sp-1);
   font-size: var(--fs-small);
+  /* 固定一行高：计数与总耗时会随调用次数变长（"3 个工具" → "12 个工具"），
+     没有固定行高时标签一变长就把整个块重新排版一次——那是自动收起之外的第二处跳动
+     （rant 2026-10-17T19:23:08）。 */
+  line-height: 18px;
+  height: 22px;
   color: var(--text-3);
   padding: 2px 4px;
   border-radius: 6px;
