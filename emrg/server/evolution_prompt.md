@@ -127,9 +127,11 @@ Read what others landed, why, and whether it needs follow-up. Use `FETCH_HEAD`, 
 ```bash
 cat ~/.emrg/projects.yml
 # step 0, per project: what under its memory is newer than its bookmark time?
-find <project>/.emrg -newermt '<that project's bookmark time>' \
+find <project>/.emrg -newermt '<bookmark-time>' \
      \( -path '*/memory/*.md' -o -name 'MEMORY.md' \) 2>/dev/null | head
 ```
+
+`<bookmark-time>` is **one token**, and it is written `%Y-%m-%d %H:%M:%S` — a **space between the date and the time, not `T`**. Both halves are measured readings, not style. A placeholder carrying an apostrophe closes the single quote it sits inside, and the block then stops parsing at the line it is meant to open (`bash -n` on that form exits 2, before anyone learns which project failed). The ISO `T` form is worse than a parse error because it *parses*: measured on this host over one project's memory, `-newermt '2026-10-17T16:00:00'` answered **0** files where `-newermt '2026-10-17 16:00:00'` answered **9** — a step 0 that reports nothing changed, for every project, for ever. So if this line answers zero for a project you know changed, suspect the value before the project.
 
 **0. Find what changed.** For each project, compare the newest modification time under `.emrg/memory/` and `.emrg/sessions/*/memory/` against the time recorded for that project in the bookmark below. A project with nothing newer is skipped — the normal outcome, not a failure. A project with no bookmark line has never been visited, and is read.
 
@@ -166,7 +168,7 @@ sed -n '<start>,<end>p' <session>/history_YYYYMMDD.jsonl
 A task's `extra_prompt` in `~/.emrg/tasks.yml` is this installation's supplement to that task's own prompt. Read it as **evidence about the prompt**, not as configuration to preserve: a general method written there is a gap in the task's prompt template, filed by the installation because the installation had no other channel.
 
 ```bash
-python3 - <<'PY'
+uv run --no-sync python3 - <<'PY'
 import yaml, os
 d = yaml.safe_load(open(os.path.expanduser("~/.emrg/tasks.yml"), encoding="utf-8"))
 for t in d:
@@ -175,7 +177,7 @@ for t in d:
 PY
 ```
 
-`extra_prompt` lives under a task record's `config:` key — a block written at the record's top level is never rendered, because the reader and the writer once disagreed about the field's position (issue #2110).
+`config.extra_prompt` is canonical, and the rule is **precedence, not exclusion**. A block under `config:` is what renders. A block written at the record's **top level** renders too, when `config:` carries none. A record carrying both loses the top-level copy, and `_template_task_context` names that copy in a warning rather than dropping it in silence — measured on this checkout: config-only answers the config block, top-level-only answers the top-level block, both answer the config block **and** a warning. So a block is never invisible for being at the top level; what is lost is the second copy, never the only one. Issue #2110 is why the position matters at all — the reader and the writer once disagreed about where the field lives.
 
 **Classify the blocks of one task's `extra_prompt`**, rotating tasks the way §1.5 rotates projects: a full pass over every non-empty block every cycle pays to re-read text that has not changed.
 
