@@ -97,8 +97,14 @@ an empty set.
 Named limits
 ------------
 * Only files the checkout **tracks** are checked: a file the repository has moved or
-  deleted since the install was built is skipped (and counted), because its absence is a
-  version difference rather than an edit, and it is removed by the upgrade either way.
+  deleted since the install was built is not drift by content, because its absence is a
+  version difference rather than an edit. It is **not** removed by the upgrade, though, and
+  this docstring said it was until the claim was measured: on 2026-10-17 a tree reporting
+  `0.3.16` still carried `emrg/gui/renderer/js/` - 11 files deleted from the source on
+  2026-08-27 and absent from that tag's own tree. So they are **named as leftovers**, with a
+  count and their paths, and they stay out of the exit code: the verdict is about content no
+  commit holds, and a leftover is a different fact - a stale tree that a reader (a cycle, an
+  audit, a session) can still be answered from.
 * The membership test is over objects reachable from the refs a release is built from, so
   content that was committed and then orphaned - a deleted branch, a rewritten commit -
   reads as an edit. That is a false positive in the strict sense and the safe direction:
@@ -421,13 +427,47 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    caches = [path for path in skipped if "__pycache__/" in path]
+    leftover = [path for path in skipped if "__pycache__/" not in path]
+    if leftover:
+        # The limit this tool used to state as a rationale ("its absence is a version
+        # difference rather than an edit, and it is removed by the upgrade either way") was
+        # measured false on 2026-10-17: a tree reporting `0.3.16` still carried
+        # `emrg/gui/renderer/js/` — 11 files deleted from the source on 2026-08-27 and
+        # absent from that tag's own tree. An upgrade copies a release in and removes
+        # nothing, so what it leaves behind is exactly the class a reader of this tree keeps
+        # finding, and silence about it is the defect.
+        shown = leftover[:10]
+        print(
+            f"leftovers: {len(leftover)} file(s) under {install_dir} are paths this checkout "
+            "no longer tracks. An install/upgrade copies a release in and removes nothing, so "
+            "a file a later release dropped stays here and anything that reads this tree can "
+            "still read it."
+        )
+        for relative in shown:
+            print(f"    {relative}")
+        if len(leftover) > len(shown):
+            print(f"    ... and {len(leftover) - len(shown)} more")
+        if caches:
+            print(
+                f"    ({len(caches)} interpreter cache file(s) under __pycache__ are not "
+                "listed: no reader executes them as source)"
+            )
+        print(
+            "    remedy: reinstall from the release, or delete these, so no reader (a cycle, "
+            "an audit, a session) is answering a question about code no build ships. An "
+            "upgrade alone will not do it."
+        )
+
     if not drifted:
         print(
             f"every file the install tree shares with this checkout holds content the "
             f"refs a release is built from still reach ({checked} file(s) checked, "
-            f"{len(skipped)} skipped as untracked here)"
+            f"{len(leftover)} named as leftovers above, "
+            f"{len(caches)} interpreter cache file(s) not listed)"
         )
         return 0
+
 
     for relative, size, note in drifted:
         print(f"{relative} ({size} bytes) - {note}")
