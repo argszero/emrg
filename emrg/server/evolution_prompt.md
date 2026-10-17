@@ -122,17 +122,82 @@ Read what others landed, why, and whether it needs follow-up. Use `FETCH_HEAD`, 
 
 #### 1.5 Memory and conversations across projects
 
+**Coverage is not negotiable; depth is.** Every cycle asks about **every** project whether anything changed — step 0 reads no content, and it is the step that is never skipped. How far into a project the cycle then goes is decided by evidence. Nothing here shrinks §1: every step of §1–§4 is still executed, and R10's rule — a cycle saves rounds by asking for several things at once, never by asking for less — is not relaxed by a word of it.
+
 ```bash
 cat ~/.emrg/projects.yml
+# step 0, per project: what under its memory is newer than its bookmark time?
+find <project>/.emrg -newermt '<bookmark-time>' \
+     \( -path '*/memory/*.md' -o -name 'MEMORY.md' \) 2>/dev/null | head
 ```
 
-For each project read its `.emrg/memory/` and `.emrg/sessions/`: does its memory carry feedback about EMRG itself, does a session show dissatisfaction ("wrong", "different approach", "forget it"), and are two different projects hitting the same problem?
+`<bookmark-time>` is **one token**, and it is written `%Y-%m-%d %H:%M:%S` — a **space between the date and the time, not `T`**. Both halves are measured readings, not style. A placeholder carrying an apostrophe closes the single quote it sits inside, and the block then stops parsing at the line it is meant to open (`bash -n` on that form exits 2, before anyone learns which project failed). The ISO `T` form is worse than a parse error because it *parses*: measured on this host over one project's memory, `-newermt '2026-10-17T16:00:00'` answered **0** files where `-newermt '2026-10-17 16:00:00'` answered **9** — a step 0 that reports nothing changed, for every project, for ever. So if this line answers zero for a project you know changed, suspect the value before the project.
+
+**0. Find what changed.** For each project, compare the newest modification time under `.emrg/memory/` and `.emrg/sessions/*/memory/` against the time recorded for that project in the bookmark below. A project with nothing newer is skipped — the normal outcome, not a failure. A project with no bookmark line has never been visited, and is read.
+
+**1. Read indices, not bodies.** For a project that changed, read its `MEMORY.md`. An index line is a claim about a detail file; the detail file is not opened on the strength of the line alone. The evolution session's own `MEMORY.md` is already embedded in this prompt (R9) — never read it again as a "project index".
+
+**2. Open a body only when its index line gives one of these reasons.** The list is what makes this step decidable, and what gives the reading an output:
+
+- **the host disagreeing with work already done, in their own words** (「不对」 / 「算了」 / "that is not what I asked for", or a requirement restated because the last attempt missed it) — R8 item 1, and **exempt from the rotation below**;
+- **a task that has invented a rule its own prompt should have carried** — §1.7 is the sharpest case; a memory line reading "the prompt did not say X" is the same signal from another file;
+- **one workaround appearing in two unrelated projects** — a mechanism is missing, not a local mistake;
+- **an index far larger than its content justifies** — state is being kept in memory because the prompt does not hold it. Found by counting, without reading a word, through the same producer R9's compaction uses: `uv run --no-sync python3 scripts/check-memory-index.py <project>/.emrg/memory/MEMORY.md` prints the three numbers R9 sets — lines, characters, and the longest row — and names the subject it read. Do not count rows with `awk 'length($0)>512'`: an `awk` that measures bytes rather than characters reports a CJK index as far over a bound it is nowhere near, and the number it prints is the one this branch exists to avoid acting on.
+
+**3. Read conversation by location, never whole.** A session history runs to tens of megabytes. Locate the passage, then read the range:
+
+```bash
+grep -n "<phrase>" <session>/history_*.jsonl | head
+sed -n '<start>,<end>p' <session>/history_YYYYMMDD.jsonl
+```
+
+**Rotate.** One or two projects per cycle, in this order: changed since the bookmark; related to this cycle's priority (R8); least recently visited. Every project is reached within a week, and no cycle pays to read all of them. **Dissatisfaction outranks the rotation**: a project whose memory or history shows the host disagreeing with work already done is read in the cycle that finds it.
+
+**Other projects' memory is read-only for this cycle.** It is their state, written by their own sessions; the cycle reads it to find work on EMRG itself, never to correct, reorganize or add to it.
+
+**Keep the bookmark — as one entry.** One memory entry at project scope, one line per project: the newest modification time read, and the cycle id that read it. **Update it in place every cycle; never append a second entry**, or the bookmark becomes the growing file this section exists to avoid. A project with no line yet has never been visited, which is what makes the first rotation reach every project. Without the bookmark the rotation has no clock, and step 0 cannot answer "what changed".
 
 #### 1.6 Comparable tools
 
 **Codex** and **Claude Code** — `gh search issues/repos`, or the web, for their latest releases, features and community discussion; and Reddit / Hacker News for comparisons with Cursor and Copilot, for designs worth borrowing.
 
 > When `gh` is unauthenticated or the network is restricted this source may be skipped — but this cycle's own records, the community queue and master are read every cycle.
+
+#### 1.7 Task configuration and prompt drift
+
+A task's `extra_prompt` in `~/.emrg/tasks.yml` is this installation's supplement to that task's own prompt. Read it as **evidence about the prompt**, not as configuration to preserve: a general method written there is a gap in the task's prompt template, filed by the installation because the installation had no other channel.
+
+```bash
+uv run --no-sync python3 - <<'PY'
+import yaml, os
+d = yaml.safe_load(open(os.path.expanduser("~/.emrg/tasks.yml"), encoding="utf-8"))
+for t in d:
+    ep = (t.get("config") or {}).get("extra_prompt") or ""
+    print(f"{t.get('name')}: {len(ep)} chars")
+PY
+```
+
+`config.extra_prompt` is canonical, and the rule is **precedence, not exclusion**. A block under `config:` is what renders. A block written at the record's **top level** renders too, when `config:` carries none. A record carrying both loses the top-level copy, and `_template_task_context` names that copy in a warning rather than dropping it in silence — measured on this checkout: config-only answers the config block, top-level-only answers the top-level block, both answer the config block **and** a warning. So a block is never invisible for being at the top level; what is lost is the second copy, never the only one. Issue #2110 is why the position matters at all — the reader and the writer once disagreed about where the field lives.
+
+**Classify the blocks of one task's `extra_prompt`**, rotating tasks the way §1.5 rotates projects: a full pass over every non-empty block every cycle pays to re-read text that has not changed.
+
+| Class | What it looks like | What happens |
+|---|---|---|
+| **Instance configuration** | a path, a port, a local account, a piece of private data, an authorization boundary that differs per host | it belongs where it is — leave it |
+| **Already in the template** | the same rule, stated twice, in one version or two | the template governs; the duplicate is the installation's to remove |
+| **Missing from the template** | a general method with no counterpart in the task's prompt template | the template has a gap — this is the cycle's work |
+
+⛔ **A block classified as instance configuration is never quoted** — not into a PR body, not into a cycle record, not into a rant. This field is exactly where an installation keeps paths, account names and credentials, and a public PR is the last place they may reappear. The PR quotes the general rule it adds, and refers to a private block by its heading only.
+
+**For the third class, write the rule into the template itself**, as a PR under the normal review path:
+
+- Write it **into the section that already owns that subject** — a rule is not appended at the end of the file, and it does not appear twice.
+- **Rewrite it in the template's own voice and structure.** Do not paste the `extra_prompt` text, and do not carry its history across: no dates, no "this used to be true", no migration note, no numbering that points at another document.
+- Where the `extra_prompt` and the template **contradict** each other, decide which is right from the source (the platform's own rules, the project's own state), state the decision in the PR, and make the other side agree. A contradiction left standing means every round reads two instructions and picks one.
+- ⛔ **Never edit `tasks.yml`.** It is the host's file, and it is rewritten through `_TaskTableDumper` (`emrg/server/scheduler.py`), a `SafeDumper` subclass that preserves `|` blocks for readability and **no comments** — a YAML serialization has nowhere to keep them. The cycle's output is the template change, plus a report to the host naming the blocks that are now redundant and safe to delete.
+- **Order matters: template first, deletion afterwards.** Removing an `extra_prompt` block before its rule exists in the template loses the rule in between, and nothing records that it was lost.
+
+Two ways this source goes quiet, and both are legitimate: an installation whose blocks are all instance configuration (nothing to do), and a task whose template genuinely delegates that subject to the installation.
 
 ---
 
@@ -159,7 +224,7 @@ For each project read its `.emrg/memory/` and `.emrg/sessions/`: does its memory
 
 #### 2.3 Decide this cycle's work
 
-The priority order is R8. State the decision with the readings that produced it, naming each source and marking the empty ones "none": open PRs and their vote counts, open issues, rants, own-PR feedback, the last Build Release runs, new master commits, and any obvious code defect.
+The priority order is R8. State the decision with the readings that produced it, naming each source and marking the empty ones "none": open PRs and their vote counts, open issues, rants, own-PR feedback, the last Build Release runs, new master commits, any obvious code defect, and the §1.7 prompt-drift reading of the task this cycle rotated to — how many `extra_prompt` blocks turned out to be general method, and which template sections they point at. "None" is a legitimate answer there and must be said, not omitted.
 
 **Open PRs awaiting review are not "nothing to evolve": reviewing and approving is the work.** Only when every source is genuinely empty — no open PR, no open issue, no rant, no new master commit — is the conclusion "nothing to evolve".
 
