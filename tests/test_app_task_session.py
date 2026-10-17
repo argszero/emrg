@@ -34,7 +34,7 @@ def make_task(name: str = "t", **extra) -> dict:
         "name": name,
         "project": "emrg",
         "project_path": "/Users/x/projects/emrg",
-        "session_id": "emrg-evolution-emrg",
+        "session_id": "emrg",
         "running": False,
         "interval": 300,
     }
@@ -111,7 +111,7 @@ def test_selected_task_is_none_when_nothing_is_selected():
 def test_a_real_row_yields_the_tasks_project_and_session():
     assert _task_session_target(make_task()) == (
         "/Users/x/projects/emrg",
-        "emrg-evolution-emrg",
+        "emrg",
     )
 
 
@@ -129,7 +129,7 @@ def test_a_real_row_yields_the_tasks_project_and_session():
         # replay somewhere that does not exist.
         make_task(project_path="   "),
         # Not a dict at all: the row comes off the wire.
-        "emrg-evolution-emrg",
+        "emrg",
     ],
 )
 def test_a_row_that_cannot_name_a_session_yields_nothing(row):
@@ -143,8 +143,8 @@ def test_a_row_that_cannot_name_a_session_yields_nothing(row):
 
 
 def test_the_cwd_moves_only_for_the_session_the_open_requested():
-    pending = ("/Users/x/projects/emrg", "emrg-evolution-emrg")
-    assert _task_open_switch(pending, "emrg-evolution-emrg") == "/Users/x/projects/emrg"
+    pending = ("/Users/x/projects/emrg", "emrg")
+    assert _task_open_switch(pending, "emrg") == "/Users/x/projects/emrg"
 
 
 def test_no_open_means_no_switch():
@@ -157,7 +157,7 @@ def test_a_stale_open_does_not_ride_along_on_an_unrelated_resume():
     (connection dropped) is still pending when a different session resumes, and
     moving the host into that stale project would put every later message and the
     history replay in the wrong directory."""
-    stale = ("/Users/x/projects/other", "emrg-evolution-other")
+    stale = ("/Users/x/projects/other", "other")
     assert _task_open_switch(stale, "s_260917_1200_abcd") is None
 
 

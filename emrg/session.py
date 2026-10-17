@@ -74,8 +74,8 @@ def _parse_instant(value: object) -> datetime | None:
 def records_since(records: list[dict], since: str) -> list[dict]:
     """The records from `since` (an ISO-8601 instant) onward — the run's own.
 
-    A task session is **one session for every run of that task**: `emrg-evolution-<name>`
-    is reused cycle after cycle, so its history holds all of them. Anything reading
+    A task session is **one session for every run of that task**: the task's own name is
+    reused cycle after cycle, so its history holds all of them. Anything reading
     "the recent history" as evidence about *this* run therefore reads the previous
     run's work as if it were this one's, unless it knows where the run began. This
     function is that knowledge, applied: `since` is the instant the run was dispatched,

@@ -2255,7 +2255,7 @@ class EmrgServer:
 
         Rant 2026-08-19T10:15:43 (host-finalized architecture): the PRIMARY
         evidence is the task's OWN session history, loaded here by the task's
-        fixed ``session_id`` (``emrg-evolution-{name}``) + working dir —
+        fixed ``session_id`` (the task's own name) + working dir —
         the full tool loop / analysis / memory writes are in the session,
         far richer than the transported prompt/completion_summary. Those are
         kept only as auxiliary context. System message lives in
@@ -3769,7 +3769,7 @@ class EmrgServer:
         # Rant 2026-09-02T10:36:26：权威 turn 生命周期广播——started_at 为任务
         # 实际开始执行时刻（队列等待之后）。TUI/GUI 据此对齐各自计时（排队请求
         # 不再从发送时刻起算）；覆盖所有 turn 来源：TUI/GUI 请求、演化任务
-        # （emrg-evolution-*）、upgrade 会话（都经此 locked 包装执行）。
+        # （定时任务会话）、upgrade 会话（都经此 locked 包装执行）。
         started_at = time.time()
         self._session_turn_started[session_id] = started_at
         # A new turn speaks for itself: the previous turn's terminal frame (or
