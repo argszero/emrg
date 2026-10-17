@@ -215,6 +215,54 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     expect((screen.getAllByTestId("open-session-item").find((el) => el.dataset.sid === "s2"))?.className).toContain("active");
   });
 
+  it("#2351：rewind_result 让 Shell 从落盘历史重建该会话，而不是删掉手里最后 N 行", async () => {
+    // The defect this pins: `rewind_result` used to be the requesting client's own
+    // business, and a client that answered it by deleting its last N rows stayed right
+    // only while it still held them. The daemon now broadcasts the frame to every
+    // connection subscribed to the session — so the rule is "whoever is told the history
+    // was rewritten rebuilds from the file", and the rebuild is this effect. Without it
+    // the transcript is cleared and never refilled: measured, deleting the effect left
+    // all 686 renderer tests green.
+    const m = mockEmrg();
+    let rewritten = false;
+    m.listHistory.mockImplementation(() =>
+      Promise.resolve(
+        rewritten
+          ? { messages: [{ record_index: 0, kind: "message", role: "user", content: "kept row" }], hasMore: false }
+          : { messages: [], hasMore: false },
+      ),
+    );
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(m.listHistory).toHaveBeenCalledTimes(1));
+    // A row that arrived live — the rewind removes it, and the file after the rewrite
+    // no longer holds it.
+    m.emit(deltaFrame("s1", "the row the rewind removed"));
+    await waitFor(() => expect(screen.getByText("the row the rewind removed")).toBeInTheDocument());
+
+    rewritten = true;
+    m.emit({
+      type: "rewind_result",
+      sid: "s1",
+      data: {
+        type: "rewind_result",
+        session_id: "s1",
+        ok: true,
+        record_index: 1,
+        kept_count: 1,
+        removed_count: 1,
+        removed: [{ record_index: 1, kind: "message", role: "assistant" }],
+      },
+    });
+    // ① the file is read again — this is the assertion the effect alone satisfies
+    await waitFor(() => expect(m.listHistory).toHaveBeenCalledTimes(2));
+    // ② what the rebuilt transcript shows comes from the file, not from the rows the
+    //    client happened to hold
+    await waitFor(() => expect(screen.getByText("kept row")).toBeInTheDocument());
+    expect(screen.queryByText("the row the rewind removed")).not.toBeInTheDocument();
+  });
+
   it("loads a session's history as records and replays them like the live stream (rant 2026-09-20T18:58:44)", async () => {
     const m = mockEmrg();
     // 一条远超 80 字的助手消息 + 一轮工具 + 收尾文本：旧路径取 preview 只会显示 81 字，

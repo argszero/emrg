@@ -32,6 +32,9 @@ function appState(over: Partial<DaemonAppState> = {}): DaemonAppState {
     openSessions: [],
     busyBySid: {},
     turnStartBySid: {},
+    // No rewind has been announced to this fixture (#2351) — the counter is only
+    // ever compared for change, and "absent" is the state before any `rewind_result`.
+    rewoundBySid: {},
     disconnectedBySid: {},
     // No frame has reported a session's sandbox tier to this fixture (rant
     // 2026-09-30T09:30:16, GUI half) — absent is "the daemon has not said".

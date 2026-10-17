@@ -60,6 +60,35 @@ describe("createDaemonBridge", () => {
     expect(txt.some((x) => x === "a:Hello")).toBe(true);
   });
 
+  it("#2351：rewind_result → 丢掉该会话的行并发出重载信号（自己那次与别人的都算）", () => {
+    // The defect this pins: a rewind rewrites `history.jsonl`, so a transcript that
+    // keeps its rows describes a history that no longer exists. The bridge must act
+    // on the *frame* — the daemon broadcasts it to every connection subscribed to
+    // the session — which is what makes a second client, and a client that did not
+    // perform the rewind, agree with the one that did.
+    const { emit, bridge, transcript } = setup();
+    emit({ type: "message_delta", data: { chunks: [{ request_id: "r1", content: "gone soon" }] }, sid: "s1" });
+    expect(entriesText(transcript, "s1").length).toBeGreaterThan(0);
+
+    emit({ type: "rewind_result", data: { session_id: "s1", ok: true, record_index: 1, kept_count: 1, removed_count: 1, removed: [{ record_index: 1, kind: "message", role: "assistant" }] }, sid: "s1" });
+
+    // ① rows the file no longer holds are gone
+    expect(entriesText(transcript, "s1")).toEqual([]);
+    // ② the counter Shell reloads on has moved — the value itself is not a claim
+    expect(bridge.store.get().rewoundBySid["s1"]).toBe(1);
+    expect(bridge.store.get().rewoundBySid["s2"]).toBeUndefined();
+  });
+
+  it("#2351：失败的 rewind_result 不动 transcript（历史没被改写）", () => {
+    // A refusal (`error`, no `ok`) leaves the file alone, so dropping the rows would
+    // erase a transcript that is still exactly what is on disk.
+    const { emit, bridge, transcript } = setup();
+    emit({ type: "message_delta", data: { chunks: [{ request_id: "r1", content: "still here" }] }, sid: "s1" });
+    emit({ type: "rewind_result", data: { error: "record_index 9 out of range (0-2)" }, sid: "s1" });
+    expect(entriesText(transcript, "s1").some((x) => x.includes("still here"))).toBe(true);
+    expect(bridge.store.get().rewoundBySid["s1"]).toBeUndefined();
+  });
+
   it("done → transcript.handleDone + 该会话的 busy 收敛（daemon 的回合终局为准）", () => {
     const { emit, bridge } = setup();
     bridge.store.update((s) => ({ ...s, busyBySid: { ...s.busyBySid, s1: true } }));

@@ -764,6 +764,39 @@ test("帧分类（G21+G58）：各帧事件分发正确", async () => {
   assert.strictEqual(cmd.length, 3);
 });
 
+test("#2351：rewind_result 帧转发（另一个客户端改写本会话历史时的重载信号）", async () => {
+  // 同一个缝（`_classify` 兜底只记日志、不发事件），但两头都要看：daemon 现在把
+  // `rewind_result` 广播给订阅该会话的每个连接，改写的是同一份 `history.jsonl`——
+  // 中间层不转发，别的客户端做的那次 rewind 在 GUI 里就是「什么都没发生」，屏幕继续
+  // 显示一份已经不存在于磁盘的历史。自己那次由主进程转发（`main.js`），不走这里。
+  const warned = [];
+  const client = new DaemonClient({ logger: { info: () => {}, warn: (m) => warned.push(m) } });
+  await connectClient(client);
+  const seen = [];
+  client.onEvent((type, data) => seen.push([type, data]));
+
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  const frame = {
+    type: "rewind_result",
+    session_id: "s1",
+    ok: true,
+    record_index: 2,
+    kept_count: 2,
+    removed_count: 1,
+    removed: [{ record_index: 2, kind: "message", role: "assistant" }],
+  };
+  send(frame);
+
+  // ① 按原名转发 —— 渲染层 switch 的就是这个名字
+  assert.deepStrictEqual(seen.map(([t]) => t), ["rewind_result"]);
+  // ② 负载原样带过去：删哪几行由渲染层决定，中间层不做二次解释
+  assert.strictEqual(seen[0][1].session_id, "s1");
+  assert.deepStrictEqual(seen[0][1].removed, frame.removed);
+  assert.strictEqual(seen[0][1].kept_count, 2);
+  // ③ 不再落入兜底
+  assert.deepStrictEqual(warned.filter((m) => m.includes("unknown frame")), []);
+});
+
 test("rant 2026-09-30T09:47:11：turn_start/turn_end 广播转发（GUI 会话计时基准）", async () => {
   // 这个 bug 的形状是「daemon 发了、渲染层要了、中间层丢了」：`turn_start`/`turn_end`
   // 落进 `_classify` 的兜底分支，只记日志、不发事件 —— 于是 `daemonBridge.ts` 的
