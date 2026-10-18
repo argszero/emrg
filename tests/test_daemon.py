@@ -5569,3 +5569,77 @@ def test_a_missing_exit_record_is_still_created(tmp_path, monkeypatch):
     _write_exit_record("normal", 0, None)
 
     assert json.loads(target.read_text(encoding="utf-8").splitlines()[0])["reason"] == "normal"
+
+
+# ── input history is the daemon's, per session (issue #2349) ──────────────
+#
+# Recall used to be a list inside the client process: one list for every session the
+# client opened, gone on exit, and unavailable to the other client. The daemon now files
+# each accepted prompt under its own session, and answers `list_input_history` from there.
+
+
+def test_the_input_history_reading_is_per_session(tmp_path):
+    """Two sessions' prompts never mix — the defect this store exists to fix.
+
+    Driven through the dispatch, because the answer a client renders is the frame the
+    dispatch sends, not the store it read.
+    """
+    server = _make_server()
+    for sid, prompts in (("s_a", ["a-one", "a-two"]), ("s_b", ["b-one"])):
+        session = server._get_or_create_session(sid, tmp_path)
+        for text in prompts:
+            session.append_input_history(text)
+
+    frames = _drive(
+        server, {"type": "list_input_history", "session_id": "s_a", "cwd": str(tmp_path)}
+    )
+
+    assert len(frames) == 1, frames
+    assert frames[0]["type"] == "input_history"
+    assert [e["text"] for e in frames[0]["entries"]] == ["a-one", "a-two"]
+    assert frames[0]["has_more"] is False
+
+
+def test_the_entries_are_oldest_first_and_a_limit_takes_the_newest(tmp_path):
+    """A window is asked for from the newest end — recall walks backwards from the prompt
+    just typed — but the entries inside it are still handed over oldest-first, because
+    that is the order the list is walked."""
+    server = _make_server()
+    session = server._get_or_create_session("s", tmp_path)
+    for text in ("one", "two", "three"):
+        session.append_input_history(text)
+
+    frames = _drive(
+        server,
+        {"type": "list_input_history", "session_id": "s", "cwd": str(tmp_path), "limit": 2},
+    )
+
+    frame = frames[0]
+    assert [e["text"] for e in frame["entries"]] == ["two", "three"]
+    assert frame["has_more"] is True, "older entries exist beyond the window"
+
+
+def test_the_reading_requires_a_session_and_a_cwd(tmp_path):
+    """The family's rule: a question that cannot be answered says so instead of
+    answering about some other session."""
+    server = _make_server()
+
+    frames = _drive(server, {"type": "list_input_history", "session_id": "s"})
+
+    assert frames[0]["type"] == "input_history"
+    assert "requires session_id and cwd" in frames[0]["error"]
+
+
+def test_an_out_of_domain_limit_is_refused_rather_than_coerced(tmp_path):
+    """`limit="abc"` is a client bug, and silently reading it as "no limit" would answer a
+    different question than the one asked."""
+    server = _make_server()
+    server._get_or_create_session("s", tmp_path).append_input_history("one")
+
+    frames = _drive(
+        server,
+        {"type": "list_input_history", "session_id": "s", "cwd": str(tmp_path), "limit": "abc"},
+    )
+
+    assert frames[0]["type"] == "input_history"
+    assert "integer limit and offset" in frames[0]["error"]

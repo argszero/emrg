@@ -1044,3 +1044,122 @@ class TestSessionFilesAskTheKindBeforeOpening:
         assert [r["content"] for r in session._read_history()] == ["hi"]
         assert Session.load("s1", tmp_path).message_count == 1
         assert [r["session_id"] for r in Session.list_sessions(tmp_path)] == ["s1"]
+
+
+class TestInputHistory:
+    """The prompts the host typed, kept per session by the daemon (issue #2349).
+
+    Recall used to be a list inside the client process: one list for every session the
+    client opened, gone when it exited, and unavailable to the other client. A session
+    store is what gives it the three properties the client cannot — per session, durable,
+    shared — and it is deliberately **not** `history.jsonl`, because that file also holds
+    the per-turn `context` record and one `summary` per compaction, both of which reach the
+    model as user messages although nobody typed them.
+    """
+
+    def _session(self, tmp_path, name="s1"):
+        return Session(name, tmp_path)
+
+    def test_a_prompt_is_recorded_and_read_back(self, tmp_path):
+        session = self._session(tmp_path)
+
+        session.append_input_history("fix the flaky test")
+
+        records = session.read_input_history()
+        assert [r["text"] for r in records] == ["fix the flaky test"]
+        assert records[0]["timestamp"], "a record carries when it was typed"
+
+    def test_the_order_is_the_order_they_were_typed_and_recall_walks_it_backwards(self, tmp_path):
+        session = self._session(tmp_path)
+        for text in ("first", "second", "third"):
+            session.append_input_history(text)
+
+        assert [r["text"] for r in session.read_input_history()] == ["first", "second", "third"]
+
+    def test_consecutive_identical_prompts_collapse(self, tmp_path):
+        """Pressing up three times should reach the third *distinct* prompt.
+
+        The collapse is consecutive, not global: a prompt repeated after something else is
+        two entries, because that is two places in the conversation the host may want to
+        return to.
+        """
+        session = self._session(tmp_path)
+        for text in ("run the tests", "run the tests", "run the tests", "and again", "run the tests"):
+            session.append_input_history(text)
+
+        assert [r["text"] for r in session.read_input_history()] == [
+            "run the tests",
+            "and again",
+            "run the tests",
+        ]
+
+    def test_an_empty_prompt_is_not_an_entry(self, tmp_path):
+        """A submit that carried no text is not something the host can recall."""
+        session = self._session(tmp_path)
+
+        session.append_input_history("   ")
+        session.append_input_history("")
+
+        assert session.read_input_history() == []
+
+    def test_the_file_is_capped_oldest_first(self, tmp_path):
+        """A long-lived session's recall cost stays flat: the cap drops from the old end."""
+        from emrg.session import _INPUT_HISTORY_MAX
+
+        session = self._session(tmp_path)
+        for i in range(_INPUT_HISTORY_MAX + 5):
+            session.append_input_history(f"prompt {i}")
+
+        texts = [r["text"] for r in session.read_input_history()]
+        assert len(texts) == _INPUT_HISTORY_MAX
+        assert texts[-1] == f"prompt {_INPUT_HISTORY_MAX + 4}", "the newest is kept"
+        assert texts[0] == "prompt 5", "the oldest five were dropped, and no more"
+
+    def test_it_is_its_own_file_so_a_rewind_or_a_compaction_cannot_take_it(self, tmp_path):
+        """The separation from `history.jsonl` is the design, so it is measured.
+
+        `rewind` truncates the conversation and `compact` rewrites it into a summary; the
+        text the host typed is exactly what they want back after either. And a `context`
+        record — the injected clock, which also reaches the model as a user message — must
+        never be recallable, which it cannot be if it never enters this file.
+        """
+        session = self._session(tmp_path)
+        session.append_input_history("the prompt I want back")
+        session.append_message({"type": "message", "role": "user", "content": "the prompt I want back"})
+        session.append_message({"type": "context", "role": "user", "content": "[context] 2026-10-18T15:00"})
+        # what compact does: rewrite history into one summary record
+        session._history_path.write_text(
+            json.dumps({"type": "summary", "content": "a compacted conversation"}) + "\n",
+            encoding="utf-8",
+        )
+
+        assert [r["text"] for r in session.read_input_history()] == ["the prompt I want back"]
+        assert "[context]" not in session._input_history_path().read_text(encoding="utf-8")
+
+    def test_a_corrupt_line_is_skipped_rather_than_losing_the_rest(self, tmp_path):
+        """The ledger is appended to by a running daemon; a half-written tail is not
+        evidence that the other entries are absent."""
+        session = self._session(tmp_path)
+        session.append_input_history("kept")
+        path = session._input_history_path()
+        path.write_text(path.read_text(encoding="utf-8") + '{not json\n', encoding="utf-8")
+
+        assert [r["text"] for r in session.read_input_history()] == ["kept"]
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+    def test_a_fifo_input_history_does_not_wedge_the_write(self, tmp_path):
+        """The same rule every other file in this directory keeps: ask the kind first.
+
+        Both ends are guarded — the appender reads the file before it rewrites it, so the
+        read is the first open and would block there without the check.
+        """
+        # The directory has to exist before the pipe can be planted in it, and creating
+        # the Session first would be the very call under test: make the tree by hand.
+        self._session_dir(tmp_path).mkdir(parents=True)
+        os.mkfifo(self._session_dir(tmp_path) / "input_history.jsonl")
+        session = Session("s1", tmp_path)
+        with pytest.raises(NotARegularFile):
+            within(DEADLINE_SECONDS, lambda: session.append_input_history("hi"))
+
+    def _session_dir(self, tmp_path, name="s1"):
+        return tmp_path / ".emrg" / "sessions" / name
