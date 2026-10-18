@@ -1555,6 +1555,66 @@ def test_an_origin_the_ledger_holds_is_not_a_fault(mod, monkeypatch, capsys, tmp
     assert "origin an issue declares resolves in the rant ledger" in out, out
 
 
+def test_the_ok_line_is_silent_about_origins_when_nothing_declares_one(
+    mod, monkeypatch, capsys
+) -> None:
+    """The other direction of the same clause: not read means not claimed.
+
+    No issue carries an `Origin:` line any more — R5 keeps the pairing in the rant entry's
+    own `progress` (issue #2352) — so the origin joint is a no-op on any queue filed after
+    that change. Printing "every origin an issue declares resolves in the rant ledger" over
+    a run that resolved nothing is a verdict about work that did not happen: an OK clause
+    that cannot fail is not a check. Paired with the test above, which is the positive case
+    and asserts the clause **is** printed when an issue really declares one.
+    """
+    _install(mod, monkeypatch, _linked_pair())
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 0, out
+    ok_line = out.split("OK:", 1)[1]
+    assert "origin" not in ok_line.lower(), ok_line
+    # The clauses it did measure are still there — silence about one joint is not silence.
+    assert "every open issue has exactly one open PR declaring it" in ok_line
+    assert "every open PR declares an open issue" in ok_line
+
+
+def test_a_number_that_cannot_be_read_is_not_reported_as_open(mod, monkeypatch) -> None:
+    """"Could not be asked" is not "open": the reader's next move differs, so it is `""`.
+
+    `review-queue.py` spends this on the numbers an entry's `progress` names and the open
+    listing does not hold, which is the closed case. A failed lookup folded into "open"
+    would render a finished issue as live work.
+    """
+    def boom(args):
+        raise RuntimeError("gh failed (rc=1): gh api repos/x/y/issues/1 --jq .state")
+
+    monkeypatch.setattr(mod, "_gh", boom)
+
+    assert mod.issue_state(REPO, 1) == ""
+
+
+def test_a_number_that_is_neither_open_nor_closed_is_not_invented(mod, monkeypatch) -> None:
+    """The endpoint can answer something else; only the two real states are passed on."""
+    monkeypatch.setattr(mod, "_gh", lambda args: "transferred\n")
+
+    assert mod.issue_state(REPO, 1) == ""
+
+
+def test_an_issue_state_is_read_with_jq_so_no_payload_shape_leaks(mod, monkeypatch) -> None:
+    """The call, not just the answer: one field, from the endpoint that answers for both."""
+    asked: list[list[str]] = []
+
+    def fake(args):
+        asked.append(list(args))
+        return "closed\n"
+
+    monkeypatch.setattr(mod, "_gh", fake)
+
+    assert mod.issue_state(REPO, 2342) == "closed"
+    assert asked == [["api", f"repos/{REPO}/issues/2342", "--jq", ".state"]]
+
+
 def test_an_origin_the_ledger_does_not_hold_is_a_fault(mod, monkeypatch, capsys, tmp_path) -> None:
     """An unresolvable handle is the chain broken at its first joint.
 

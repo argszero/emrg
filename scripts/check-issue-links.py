@@ -113,10 +113,12 @@ States
                  declares a number that is not among the open issues (a closed issue, or
                  a PR number with the wrong keyword form). The row says which
     origin-unresolved
-                 an open issue declares its origin (`Origin: rant <timestamp>`, R5) and the
-                 rant ledger does not hold that timestamp, so the chain's first joint is
-                 broken: the issue's reader cannot reach the requirement the issue exists to
-                 carry
+                 an open issue still declares its origin the old way (`Origin: rant
+                 <timestamp>`, the convention R5 carried before issue #2352) and the rant
+                 ledger does not hold that timestamp. New issues declare none — the pairing
+                 lives in the entry's `progress` — so this fires only on issues filed before
+                 that change, and the state is kept because silently dropping it would
+                 report those issues as if the line had never been written
     origin-duplicate
                  two or more open issues declare the same rant origin and at least one
                  carries no `Part: n/N` — which is what makes a deliberate split of one rant
@@ -136,6 +138,17 @@ A rant timestamp is a **host-local** handle, so the resolution is a local file r
 read the host's live ledger) and it is attempted **only when an open issue declares an origin**:
 a queue where nobody declares one costs no file read, and a host without a ledger does not
 have a linked queue turned into exit 2 by a check nobody asked for.
+
+**That joint is now history, and the `progress` field carries the pairing** (issue #2352). The
+ledger is one file per installation, so a citation into it names a record a second reader can
+never open; and what the citation stood in for — the observed behaviour, where it was observed,
+what was expected — is exactly what a second reader needs written out. So the issue is a
+self-contained statement that does not refer to the record at all, the link is **one-way**: the
+entry knows its issue, through the number written into its `progress` as `issue #N` when the
+issue is opened (R5), and `review-queue.py` reads it from there. This tool still resolves an
+`Origin:` line when it finds one, because issues filed before that rule carry one and a reading
+that stopped resolving them would report their work as unlinked; nothing new depends on it, and
+the OK line states the clause **only when the resolution actually ran**.
 
 What the resolution cannot decide, stated rather than implied: `submit_rant cleanup` keeps all
 pending and in-progress rants plus the **ten most recent completed** ones, so an origin can be
@@ -169,8 +182,10 @@ neither: a ledger that does not hold the timestamp holds nothing to copy.
 Exit codes
 ----------
 0  every open issue has exactly one open PR declaring it, each declaration is named back
-   in the issue, every open PR declares an open issue, and every origin an issue declares
-   resolves in the rant ledger
+   in the issue, and every open PR declares an open issue — plus, when an issue still
+   declares a rant origin (the pre-`progress` convention), that the origin resolves in the
+   rant ledger. A queue where nothing declares one says nothing about origins, because a
+   clause about a step that did not run cannot fail and is therefore not a check
 1  at least one row is in a state above that is not `linked`
 2  the question could not be answered (gh failed, a payload did not parse, or an issue
    declared an origin and the ledger named to resolve it could not be read) — never
@@ -1058,6 +1073,29 @@ def load_queue(repo: str, state: str = "open", since: str | None = None) -> Queu
     return queue
 
 
+def issue_state(repo: str, number: int) -> str:
+    """One number's own `state` — `"open"`, `"closed"`, or `""` when it cannot be read.
+
+    The queue listing is where an open issue is found, and `review-queue.py` reads that
+    listing first, so this is spent only on the numbers it cannot hold: an issue a rant
+    entry's `progress` names, which has since been closed by the merge of its own PR. That
+    is the case worth a call of its own — without it the row says `no issue yet` for work
+    that is finished, which is the duplicate this family exists to prevent (measured
+    2026-10-02: a release rant rendered `no issue yet` while its issue existed and had been
+    closed when its PR merged).
+
+    An unreadable answer is `""`, never `"open"`: a number that cannot be resolved is a
+    question, and the caller renders it as one instead of choosing the reassuring side.
+    """
+    try:
+        # `--jq` rather than parsing the payload here: this endpoint also returns PRs, and
+        # both answer `state` the same way, so the caller gets one field and no shape.
+        state = _gh(["api", f"repos/{repo}/issues/{number}", "--jq", ".state"]).strip()
+    except RuntimeError:
+        return ""
+    return state if state in ("open", "closed") else ""
+
+
 def timeline(repo: str, number: int) -> list[dict]:
     """Every event on issue-or-PR `number`'s timeline (paginated)."""
     return _paged_json(
@@ -1642,11 +1680,20 @@ def main(argv: list[str] | None = None) -> int:
         for row in ordered:
             print(render(row))
         if not bad:
+            clauses = [
+                "every open issue has exactly one open PR declaring it",
+                "each declaration is named back in the issue",
+                "every open PR declares an open issue",
+            ]
+            if declared:
+                # Only when that joint ran. R5 keeps the pairing in the rant entry's own
+                # `progress` and no new issue carries an `Origin:` line, so a queue where
+                # nothing declares one would print a clause about a step that measured
+                # nothing — and an OK clause that cannot fail is not a check (issue #2352).
+                clauses.append("every origin an issue declares resolves in the rant ledger")
             print(
-                f"\nOK: every open issue has exactly one open PR declaring it, each "
-                f"declaration is named back in the issue, every open PR declares an "
-                f"open issue, and every origin an issue declares resolves in the rant "
-                f"ledger ({len(rows)} subject(s) read)"
+                f"\nOK: {', '.join(clauses[:-1])}, and {clauses[-1]} "
+                f"({len(rows)} subject(s) read)"
             )
         else:
             print(
