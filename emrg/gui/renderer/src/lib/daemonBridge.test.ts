@@ -663,6 +663,40 @@ describe("createDaemonBridge", () => {
     expect(await noWire.listInputHistory(null)).toBe(false);
   });
 
+  it("notePromptSubmitted 把刚发的一条接在列表末尾，且照 daemon 的规则折叠连续重复", async () => {
+    const listInputHistory = vi.fn().mockResolvedValue({ entries: ["a", "b"], hasMore: false });
+    const bridge = createDaemonBridge({
+      onEvent: vi.fn(() => vi.fn()),
+      emrg: { sendMessage: vi.fn(), listInputHistory },
+      transcript: createTranscriptStore(),
+    });
+    await bridge.listInputHistory("s1");
+    bridge.notePromptSubmitted("s1", "c");
+    expect(bridge.store.get().inputHistoryBySid["s1"]).toEqual(["a", "b", "c"]);
+    // 连续同一条不再追加：daemon 的文件里也只有一条（它自己的折叠规则）。
+    bridge.notePromptSubmitted("s1", "c");
+    expect(bridge.store.get().inputHistoryBySid["s1"]).toEqual(["a", "b", "c"]);
+    // 空白不算一次输入。
+    bridge.notePromptSubmitted("s1", "   ");
+    expect(bridge.store.get().inputHistoryBySid["s1"]).toEqual(["a", "b", "c"]);
+    // 别的会话不受影响。
+    expect(bridge.store.get().inputHistoryBySid["s2"]).toBeUndefined();
+  });
+
+  it("notePromptSubmitted 在列表还没读到时什么都不做：不凭自己发过什么编出一份历史", () => {
+    const bridge = createDaemonBridge({
+      onEvent: vi.fn(() => vi.fn()),
+      emrg: { sendMessage: vi.fn() },
+      transcript: createTranscriptStore(),
+    });
+    bridge.notePromptSubmitted("s1", "第一句");
+    // 关键：没有键，而不是 ["第一句"]——否则"我这个客户端说过什么"就被当成了"这个
+    // 会话里有什么"，而那正是 issue #2349 要消灭的两回事。
+    expect(bridge.store.get().inputHistoryBySid["s1"]).toBeUndefined();
+    bridge.notePromptSubmitted(null, "x");
+    expect(bridge.store.get().inputHistoryBySid).toEqual({});
+  });
+
   it("写帧在 transcript 留一行，list 不留：读是刷新，不是事件", () => {
     const { emit, transcript, bridge } = setup();
     emit({

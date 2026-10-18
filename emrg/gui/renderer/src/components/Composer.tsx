@@ -145,6 +145,21 @@ export interface ComposerProps {
    */
   inputHistory?: string[] | null;
   /**
+   * Called once a prompt has actually been accepted by the daemon (issue #2349,
+   * part 2/2).
+   *
+   * The recall list is the daemon's, and this component neither holds nor extends
+   * it — but between a read and the next session switch the list would stay frozen
+   * where the session was opened, so ↑ in a fresh session would recall nothing this
+   * host just typed. The parent hangs this callback on the daemon's own write rule
+   * (append, collapsing consecutive duplicates), and the next read replaces the
+   * list whole.
+   *
+   * Only a *successful* send reaches it: a failed send means the daemon accepted
+   * nothing, so there is nothing to be recallable.
+   */
+  onPromptSent?: (text: string) => void;
+  /**
    * 父级接管「额外可写根」入口时传入：点击只上报意图（打开管理对话框）。
    * 不传 = 不渲染入口（单挂载/单测），与 `onSandboxChange` 的约定一致。
    */
@@ -236,6 +251,7 @@ export function Composer({
   onSandboxChange,
   sandboxRoots = null,
   inputHistory = null,
+  onPromptSent,
   onManageSandboxRoots,
   editorRef,
 }: ComposerProps) {
@@ -293,6 +309,10 @@ export function Composer({
   inputHistoryRef.current = inputHistory;
   const historyIndexRef = useRef(-1);
   const historySavedRef = useRef("");
+  // 回调也要 ref 桥接：submit 是每次渲染重建的函数，但发送发生在 await 之后，
+  // 那一刻要用的是最新的父级实现。
+  const onPromptSentRef = useRef(onPromptSent);
+  onPromptSentRef.current = onPromptSent;
   // 格式命令 ref 桥接（editor/菜单闭包只创建一次 → 变化值走 ref）
   const fmtRef = useRef<Record<string, () => void>>({});
   fmtRef.current = {
@@ -714,6 +734,10 @@ export function Composer({
       // 发送成功 → 清 pending（图片已随消息交给 daemon；失败保留以便重发）
       pendingRef.current = [];
       setPending([]);
+      // 召回列表跟上这一条（issue #2349 part 2/2）：daemon 刚接受了它，所以它的文件
+      // 现在以这段文字结尾。只报**成功**的发送——失败时 daemon 什么都没收下，也就
+      // 没有可翻回来的东西；列表的权威副本仍是 daemon 的，下次会话切换整份替换。
+      onPromptSentRef.current?.(value);
     } catch {
       setInternalBusy(false);
       // G49：失败恢复输入框，文案不责怪用户（copy.sendFailed）；markdown 回填

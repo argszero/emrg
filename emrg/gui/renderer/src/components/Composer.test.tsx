@@ -28,6 +28,8 @@ function setup(
     sandboxRoots?: string[] | null;
     /** 会话的输入历史（daemon 报的那份，最旧在前）；null = 还没问过（issue #2349） */
     inputHistory?: string[] | null;
+    /** 发送成功后上报这一条（父级据此把召回列表接上，issue #2349 part 2/2） */
+    onPromptSent?: (text: string) => void;
     /** 父级接管「额外可写根」入口：点击只上报意图（打开管理对话框） */
     onManageSandboxRoots?: () => void;
     saveImage?: (payload: { sessionId?: string | null; data: string; label: string; mime?: string }) =>
@@ -1243,6 +1245,31 @@ describe("Composer — 输入历史召回（issue #2349 part 2/2）", () => {
 
     s.press("ArrowUp");
     expect(content(s)).toBe("second");
+  });
+
+  it("发送成功之后上报这一条；发送失败则不上报（daemon 什么都没收下）", async () => {
+    const store = createTranscriptStore();
+    const onPromptSent = vi.fn();
+    const sendMessage = vi.fn(async () => ({ requestId: "r1" }));
+    const s = setup(store, { inputHistory: ["old"], sendMessage, onPromptSent } as never);
+    await waitEditor(s);
+
+    s.type("hello");
+    s.press("Enter");
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
+    expect(onPromptSent).toHaveBeenCalledWith("hello");
+    s.unmount();
+
+    const failing = vi.fn(async () => {
+      throw new Error("boom");
+    });
+    const onFailed = vi.fn();
+    const s2 = setup(createTranscriptStore(), { inputHistory: ["old"], sendMessage: failing, onPromptSent: onFailed } as never);
+    await waitEditor(s2);
+    s2.type("nope");
+    s2.press("Enter");
+    await waitFor(() => expect(failing).toHaveBeenCalledTimes(1));
+    expect(onFailed).not.toHaveBeenCalled();
   });
 
   it("会话切换之后指针归零：不会把上一个会话的草稿塞进新会话", async () => {

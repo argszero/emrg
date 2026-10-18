@@ -436,6 +436,27 @@ export interface DaemonBridge {
    * look identical from the keyboard, so the absence of a key is the honest state.
    */
   listInputHistory(sid: string | null): Promise<boolean>;
+  /**
+   * Add a prompt this client just sent to that session's recall list, so ↑ finds it
+   * immediately (issue #2349, part 2/2).
+   *
+   * The store is still the daemon's reading, and this does not change that: it
+   * mirrors the daemon's own write — the prompt it just accepted, deduplicated
+   * against the previous entry by the rule the daemon applies (`session.py`'s
+   * consecutive-duplicate collapse) — and the next session switch re-reads the
+   * authoritative file and replaces the whole list. Without it the recall is useless
+   * in the one shape the host uses most: type five prompts, press ↑, and find the
+   * list frozen where the session was opened.
+   *
+   * Two cases do nothing at all:
+   *
+   * - **The list has not been read** (absent key). Inventing a one-entry list there
+   *   would claim a history this client has never seen, and the recall would then
+   *   behave differently from the same session after a restart.
+   * - **It duplicates the newest entry**, because that entry is what the daemon's
+   *   file already holds.
+   */
+  notePromptSubmitted(sid: string | null, text: string): void;
 }
 
 export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
@@ -1054,6 +1075,31 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
     }
   }
 
+  /**
+   * Mirror a prompt this client just sent into that session's recall list.
+   *
+   * The daemon has accepted it, so its file now ends with this text (unless it was
+   * already the last entry — the daemon collapses consecutive duplicates). This is
+   * the same rule, applied to the list this client was handed, so the list keeps
+   * meaning "what the session holds" rather than "what this client sent": the next
+   * read overwrites it whole, and any drift is corrected rather than accumulated.
+   */
+  function notePromptSubmitted(sid: string | null, text: string): void {
+    const prompt = text.trim();
+    if (!sid || !prompt) return;
+    store.update((state) => {
+      const current = state.inputHistoryBySid[sid];
+      // Not read yet: there is no list to extend, and making one up would show this
+      // client's own past as if it were the session's.
+      if (!current) return state;
+      if (current.length > 0 && current[current.length - 1] === prompt) return state;
+      return {
+        ...state,
+        inputHistoryBySid: { ...state.inputHistoryBySid, [sid]: [...current, prompt] },
+      };
+    });
+  }
+
   return {
     store,
     dispose,
@@ -1063,5 +1109,6 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
     setSandbox,
     setSandboxRoots,
     listInputHistory,
+    notePromptSubmitted,
   };
 }
