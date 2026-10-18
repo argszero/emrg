@@ -834,7 +834,7 @@ export function Shell() {
                 // 刚刚发出去的那条也进召回列表（issue #2349 part 2/2）：daemon 已经接受了
                 // 它，所以它的文件现在就以这段文字结尾；不跟上，↑ 在「刚打完五句话的新
                 // 会话」里就只能翻到会话打开那一刻为止——而那正是宿主最常按 ↑ 的时候。
-                onPromptSent={(text) => bridge.notePromptSubmitted(activeSid, text)}
+                onPromptSent={(sid, text) => bridge.notePromptSubmitted(sid, text)}
                 onManageSandboxRoots={() => dialogHost.current?.openSandbox([])}
               />
             </>

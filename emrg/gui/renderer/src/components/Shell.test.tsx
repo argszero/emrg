@@ -1030,4 +1030,39 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
     pressInComposer("ArrowUp");
     await waitFor(() => expect(composerText()).toBe("second"));
   });
+
+  it("发送途中切会话：这条 prompt 记进它发出去的那个会话，不进宿主切过去的会话（veto cyc20261019-023629，issue #2349）", async () => {
+    // 实测形状：send `typed in s1` → 在 send 解析之前切到 s2 → 在 s2 按 ↑。
+    // 若上报闭包住「渲染时 activeSid」，s2 的召回列表会凭空多出一条它的 daemon 文件里
+    // 不存在的 prompt —— 正是 issue #2349 要消灭的那件事（新会话翻出上一个会话的输入）。
+    const m = mockEmrg();
+    let release: (v: { requestId: string }) => void = () => {};
+    m.sendMessage.mockImplementation(() => new Promise<{ requestId: string }>((r) => { release = r; }));
+    m.listInputHistory.mockImplementation((p: { sessionId: string }) =>
+      Promise.resolve({ entries: p.sessionId === "s1" ? ["first"] : ["second"], hasMore: false }),
+    );
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }, { sid: "s2", title: "Beta" }]));
+    await waitFor(() => expect(m.listInputHistory).toHaveBeenCalledWith({ sessionId: "s1" }));
+    await settle();
+
+    await typeIntoComposer("typed in s1");
+    pressInComposer("Enter");
+    await waitFor(() => expect(m.sendMessage).toHaveBeenCalledTimes(1));
+
+    // 发送还没解析就先切走：现在激活的是 s2，并已读到 s2 自己的列表 ["second"]。
+    await userEvent.click(screen.getAllByTestId("open-session-item")[1]);
+    await waitFor(() => expect(m.listInputHistory).toHaveBeenCalledWith({ sessionId: "s2" }));
+    await settle();
+    // 放行那次发送：它属于 s1，必须落在 s1 名下。
+    await act(async () => {
+      release({ requestId: "req-9" });
+    });
+    await settle();
+
+    // s2 的列表仍是它自己的：↑ 得到 "second"，不是 "typed in s1"。
+    pressInComposer("ArrowUp");
+    await waitFor(() => expect(composerText()).toBe("second"));
+  });
 });

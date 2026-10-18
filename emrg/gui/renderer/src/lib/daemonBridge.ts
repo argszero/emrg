@@ -1042,12 +1042,16 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
    * Read one session's input history from the daemon and store it (issue #2349,
    * part 2/2).
    *
-   * Two things this deliberately does *not* do:
+   * What it deliberately does *not* do:
    *
-   * - **It does not append what this client sends.** The daemon files every prompt
-   *   it accepts; a client that also pushed its own sends would double-count them
-   *   whenever the daemon's file already had the prompt, and would miss the ones
-   *   typed in the other client. Re-reading is the whole point.
+   * - **It does not append what this client sends** — that is `notePromptSubmitted`'s
+   *   job, and it is a *mirror*, not a second authority: it appends the prompt the
+   *   daemon has just accepted, collapsing a repeat of the newest entry exactly as
+   *   the daemon does, and the next read here replaces the list whole. Neither half
+   *   counts on its own: without the mirror, ↑ in a session the host has been typing
+   *   in stops at the moment the session was opened; without this read, a list that
+   *   only ever grew by what this client sent would miss the other client, a rewind
+   *   and a compaction.
    * - **It stores nothing on failure.** An error and an empty history must not look
    *   the same from the keyboard, so a failed read leaves the key absent — the
    *   composer then treats the recall as unavailable rather than as "you typed

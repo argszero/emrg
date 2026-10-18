@@ -157,8 +157,16 @@ export interface ComposerProps {
    *
    * Only a *successful* send reaches it: a failed send means the daemon accepted
    * nothing, so there is nothing to be recallable.
+   *
+   * The **session id goes with the text**, and it is the id the send itself used —
+   * not whatever is active when the await resolves. `submit` already keeps that id
+   * for everything else it does with this message (`store.addUserMessage` and
+   * `sendFn({ sessionId })`), and this is the same message: a host who switches
+   * sessions while a send is in flight would otherwise have the prompt filed under
+   * the session they switched *to*, whose daemon file does not contain it — which is
+   * the defect issue #2349 was opened about, one layer down.
    */
-  onPromptSent?: (text: string) => void;
+  onPromptSent?: (sid: string, text: string) => void;
   /**
    * 父级接管「额外可写根」入口时传入：点击只上报意图（打开管理对话框）。
    * 不传 = 不渲染入口（单挂载/单测），与 `onSandboxChange` 的约定一致。
@@ -737,7 +745,7 @@ export function Composer({
       // 召回列表跟上这一条（issue #2349 part 2/2）：daemon 刚接受了它，所以它的文件
       // 现在以这段文字结尾。只报**成功**的发送——失败时 daemon 什么都没收下，也就
       // 没有可翻回来的东西；列表的权威副本仍是 daemon 的，下次会话切换整份替换。
-      onPromptSentRef.current?.(value);
+      onPromptSentRef.current?.(sid, value);
     } catch {
       setInternalBusy(false);
       // G49：失败恢复输入框，文案不责怪用户（copy.sendFailed）；markdown 回填

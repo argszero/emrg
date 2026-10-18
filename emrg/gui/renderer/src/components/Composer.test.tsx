@@ -29,7 +29,7 @@ function setup(
     /** 会话的输入历史（daemon 报的那份，最旧在前）；null = 还没问过（issue #2349） */
     inputHistory?: string[] | null;
     /** 发送成功后上报这一条（父级据此把召回列表接上，issue #2349 part 2/2） */
-    onPromptSent?: (text: string) => void;
+    onPromptSent?: (sid: string, text: string) => void;
     /** 父级接管「额外可写根」入口：点击只上报意图（打开管理对话框） */
     onManageSandboxRoots?: () => void;
     saveImage?: (payload: { sessionId?: string | null; data: string; label: string; mime?: string }) =>
@@ -1251,20 +1251,21 @@ describe("Composer — 输入历史召回（issue #2349 part 2/2）", () => {
     const store = createTranscriptStore();
     const onPromptSent = vi.fn();
     const sendMessage = vi.fn(async () => ({ requestId: "r1" }));
-    const s = setup(store, { inputHistory: ["old"], sendMessage, onPromptSent } as never);
+    const s = setup(store, { sid: "s1", inputHistory: ["old"], sendMessage, onPromptSent } as never);
     await waitEditor(s);
 
     s.type("hello");
     s.press("Enter");
     await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
-    expect(onPromptSent).toHaveBeenCalledWith("hello");
+    // 会话 id 随文字一起走，且是**这次发送用的那个**（sendMessage 拿到的是同一个）。
+    expect(onPromptSent).toHaveBeenCalledWith("s1", "hello");
     s.unmount();
 
     const failing = vi.fn(async () => {
       throw new Error("boom");
     });
     const onFailed = vi.fn();
-    const s2 = setup(createTranscriptStore(), { inputHistory: ["old"], sendMessage: failing, onPromptSent: onFailed } as never);
+    const s2 = setup(createTranscriptStore(), { sid: "s1", inputHistory: ["old"], sendMessage: failing, onPromptSent: onFailed } as never);
     await waitEditor(s2);
     s2.type("nope");
     s2.press("Enter");
@@ -1312,5 +1313,34 @@ describe("Composer — 输入历史召回（issue #2349 part 2/2）", () => {
     // （那条消息已经随发送离手，留着它会把旧草稿当成"用户还没发的东西"还回去）。
     s.press("ArrowDown");
     expect(content(s)).toBe("");
+  });
+
+  it("会话在发送途中被切走：上报的仍是**这次发送**的会话 id，不是切过去的那个", async () => {
+    // issue #2349 part 2/2（veto cyc20261019-023629 的实测）：onPromptSent 若闭包住
+    // 「渲染时 activeSid」，await 解析时 ref 已指向新渲染的闭包 ⇒ 这条 prompt 会被记进
+    // 宿主**切过去**的会话，而那个会话的 daemon 文件里没有它。这里让 send 挂住、把组件
+    // 重渲染成 s2，再放行 await：上报必须仍是 s1。
+    const store = createTranscriptStore();
+    let release: (v: { requestId: string }) => void = () => {};
+    const sendMessage = vi.fn(() => new Promise<{ requestId: string }>((r) => { release = r; }));
+    const onPromptSent = vi.fn();
+    const s = setup(store, { sid: "s1", inputHistory: ["old"], sendMessage, onPromptSent } as never);
+    await waitEditor(s);
+
+    s.type("typed in s1");
+    s.press("Enter");
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+
+    // 发送还没解析，宿主切到 s2（Shell 会因此重渲染、把新的 onPromptSent 挂进 ref）。
+    s.rerender(
+      <I18nProvider lang="zh">
+        <Composer store={store} sid="s2" sandbox="workspace-write" inputHistory={["second"]} onPromptSent={onPromptSent} />
+      </I18nProvider>,
+    );
+    await act(async () => {
+      release({ requestId: "r1" });
+    });
+    await waitFor(() => expect(onPromptSent).toHaveBeenCalledTimes(1));
+    expect(onPromptSent).toHaveBeenCalledWith("s1", "typed in s1");
   });
 });
