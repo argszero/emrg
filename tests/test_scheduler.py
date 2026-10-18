@@ -1231,6 +1231,49 @@ def test_open_source_template_parallel_recon_c15():
     assert "May run Recon in parallel this round" in out, "状态机应允许并行 Recon"
 
 
+def test_open_source_entry_check_reads_the_claim_thread():
+    """open_source_prompt.md §3.1.1 reads the thread a claim is written in (issue #2367).
+
+    The template claims an issue **by commenting on it** (§1.1, §3.2.1) and used to check
+    for claims with `--json state,assignees`. A comment is invisible to `assignees`, so a
+    cycle following the template exactly read "unclaimed" and started work a contributor
+    already had. Measured 2026-10-18 on issue #2349: `{"assignees":[],"state":"OPEN"}` with
+    the take-up comment sitting in its thread for 21 hours.
+
+    Both directions are pinned: the reading renders **and** the assignees-only command is
+    not left standing as the sole check, because a fix that added the thread beside the old
+    form would still let a reader run the one that cannot see a comment.
+    """
+    import jinja2
+
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "emrg" / "server" / "open_source_prompt.md"
+    )
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(template_path.read_text(encoding="utf-8"))
+    out = template.render(
+        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
+        timestamp="20260824",
+        task={"role": "committer", "project": "aitokenpool"},
+        project={}, git_path="git", gh_path="gh",
+    )
+    # 1) the entry check asks for the thread, which is where a claim is written
+    assert "assignees,comments" in out, "入口检查应读取评论线程"
+    assert "read the thread, not only the assignees" in out, "读线程的要求应渲染"
+    # 2) and the assignees-only form is gone — not merely accompanied. The trailing ` 2>&1`
+    #    is what makes this precise: the new command's `--json state,assignees,comments`
+    #    contains the old prefix, and a looser needle would match it and pass on a tree
+    #    that still offered the blind check.
+    assert "--json state,assignees 2>&1" not in out, "不得保留只看 assignee 的入口检查"
+    # 3) the rule the command serves, and the remedy for a stale take-up
+    assert "A take-up is a comment" in out, "认领是评论这一事实应写明"
+    assert "ask on the issue before assuming it was abandoned" in out, "陈旧认领的处置应写明"
+    # 4) the two carriers still agree: §1.1 keeps telling a cycle to claim by comment
+    assert "say so on the issue itself" in out, "§1.1 的留言认领规则仍在"
+
+
 def test_open_source_template_empty_recon_names_the_extension_surface():
     """§2's empty-Recon sentence counts §1.6 among the readings that showed nothing (issue #2371).
 
