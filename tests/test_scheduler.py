@@ -1231,6 +1231,48 @@ def test_open_source_template_parallel_recon_c15():
     assert "May run Recon in parallel this round" in out, "状态机应允许并行 Recon"
 
 
+def test_open_source_template_reads_the_extension_surface():
+    """open_source_prompt.md §1.6 makes the project's extension surface a candidate source
+    (issue #2365): a contribution need not pass through the upstream, so a cycle reading
+    only §1.1's issue list can report "no candidate" while a whole channel sits one layer
+    over — which is exactly what a host had to write into a task's `extra_prompt` to get.
+
+    Pinned as the *rules*, not as prose: the reading exists, §2's empty-Recon sentence
+    counts it, a candidate's layer must be named, and the publish loop is stated. Deleting
+    §1.6 reddens every assertion but the last one — which is the point of the last one.
+    """
+    import jinja2
+
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "emrg" / "server" / "open_source_prompt.md"
+    )
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(template_path.read_text(encoding="utf-8"))
+    out = template.render(
+        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
+        timestamp="20260824",
+        task={"role": "committer", "project": "aitokenpool"},
+        project={}, git_path="git", gh_path="gh",
+    )
+    # 1) the section exists and says what a contribution through that layer even is
+    assert "The project's extension surface" in out, "§1.6 扩展面阅读应渲染"
+    assert "A contribution need not pass through the upstream" in out, "贡献不必经过上游应写明"
+    assert "need no maintainer to merge anything" in out, "扩展独立发布、无需维护者合并应写明"
+    # 2) §2's empty-Recon sentence counts the surface among the readings that showed it —
+    #    otherwise a cycle that skipped §1.6 can still print an "empty" verdict
+    assert "no gap inside the project's extension surface" in out, "空 Recon 结论须含扩展面阅读"
+    # 3) a candidate's layer must be named: core-only is a reading too, "no candidate" alone
+    #    is a conclusion the reading did not support
+    assert "Name the layer every candidate lands in" in out, "候选须标层"
+    assert "only the core" in out, "核心层也是可行动读法，须写明"
+    # 4) publishing closes the loop back to the thread that asked for it
+    assert "After publishing, close the loop" in out, "发布后须回帖闭环"
+    # 5) and the surface does not displace §1.1: an issue is still a candidate source
+    assert "I'd like to work on this" in out, "§1.1 认领规则仍在"
+
+
 def test_promote_template_learn_latest_state_04():
     """promote_prompt.md §0.4 requires learning the project's latest state
     before promoting (rant 2026-08-14T22:13:57, mirrors open-source B.2b #790)."""
