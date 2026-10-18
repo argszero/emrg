@@ -696,6 +696,30 @@ vision = false
       return { messages: frame.messages || [], hasMore: !!frame.has_more };
     });
 
+    ipcMain.handle("emrg:listInputHistory", async (_e, { sessionId } = {}) => {
+      // Issue #2349 part 2/2 — the GUI half of the daemon-owned input history.
+      //
+      // The list is the *session's*, not this client's: the daemon files each prompt
+      // it accepts and answers `list_input_history` from `<session_dir>/input_history.jsonl`,
+      // which is what makes recall survive a client restart, a rewind, a compaction and
+      // the other client. So the only thing this handler may do is ask — it holds no
+      // copy, and a GUI that cached one would be recalling its own past, not the host's.
+      //
+      // `cwd` resolves from the session exactly as `emrg:listHistory` does (rant
+      // 2026-08-25T17:38:56): a hardcoded DEFAULT_CWD reads every session from the
+      // wrong project and answers an empty list that looks like "nothing typed yet".
+      if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
+      const payload = { session_id: sessionId, cwd: resolveSessionCwd(sessionId) || DEFAULT_CWD };
+      const frame = await requireConn().sendCommandAndWait("list_input_history", payload, 5000);
+      // `entries` arrives oldest-first within the returned window (newest last), which
+      // is the order the arrow keys walk; hand the renderer the texts only.
+      const entries = Array.isArray(frame.entries) ? frame.entries : [];
+      return {
+        entries: entries.map((entry) => String((entry && entry.text) || "")).filter((text) => text !== ""),
+        hasMore: !!frame.has_more,
+      };
+    });
+
     ipcMain.handle("emrg:rewindSession", async (_e, { sessionId, recordIndex }) => {
       // GUI / 指令 P2：/rewind — 回退到指定历史消息点（daemon 协议 rewind_session 已存在）
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");

@@ -41,6 +41,9 @@ function appState(over: Partial<DaemonAppState> = {}): DaemonAppState {
     sandboxBySid: {},
     sandboxRootsBySid: {},
     sandboxRootsNoticeBySid: {},
+    // Nothing has asked this session for its input history yet (issue #2349,
+    // part 2/2) — absent is "not read", which is not the same as an empty list.
+    inputHistoryBySid: {},
     upgradeBanner: null,
     pendingApproval: null,
     ...over,

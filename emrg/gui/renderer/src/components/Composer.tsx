@@ -130,6 +130,44 @@ export interface ComposerProps {
    */
   sandboxRoots?: string[] | null;
   /**
+   * The prompts the host typed in this session, oldest first, exactly as the daemon
+   * holds them (issue #2349, part 2/2 — the GUI half of the input-history work).
+   *
+   * Same authority rule as `sandboxRoots`: the daemon files every accepted prompt
+   * in `<session_dir>/input_history.jsonl`, so this component recalls from a list it
+   * was handed rather than from one it keeps. A client-side list is what the issue
+   * was opened about — it served every session at once, died with the process, and
+   * could not be shared with the other client.
+   *
+   * `null`/`undefined` = nobody has asked about this session yet; `[]` = the session
+   * has nothing typed in it. Both make the arrow keys move the cursor, which is the
+   * same thing the host sees, so only the *presence* of entries changes behaviour.
+   */
+  inputHistory?: string[] | null;
+  /**
+   * Called once a prompt has actually been accepted by the daemon (issue #2349,
+   * part 2/2).
+   *
+   * The recall list is the daemon's, and this component neither holds nor extends
+   * it — but between a read and the next session switch the list would stay frozen
+   * where the session was opened, so ↑ in a fresh session would recall nothing this
+   * host just typed. The parent hangs this callback on the daemon's own write rule
+   * (append, collapsing consecutive duplicates), and the next read replaces the
+   * list whole.
+   *
+   * Only a *successful* send reaches it: a failed send means the daemon accepted
+   * nothing, so there is nothing to be recallable.
+   *
+   * The **session id goes with the text**, and it is the id the send itself used —
+   * not whatever is active when the await resolves. `submit` already keeps that id
+   * for everything else it does with this message (`store.addUserMessage` and
+   * `sendFn({ sessionId })`), and this is the same message: a host who switches
+   * sessions while a send is in flight would otherwise have the prompt filed under
+   * the session they switched *to*, whose daemon file does not contain it — which is
+   * the defect issue #2349 was opened about, one layer down.
+   */
+  onPromptSent?: (sid: string, text: string) => void;
+  /**
    * 父级接管「额外可写根」入口时传入：点击只上报意图（打开管理对话框）。
    * 不传 = 不渲染入口（单挂载/单测），与 `onSandboxChange` 的约定一致。
    */
@@ -220,6 +258,8 @@ export function Composer({
   onCommand,
   onSandboxChange,
   sandboxRoots = null,
+  inputHistory = null,
+  onPromptSent,
   onManageSandboxRoots,
   editorRef,
 }: ComposerProps) {
@@ -268,6 +308,19 @@ export function Composer({
   storeRef.current = store;
   const sidRef = useRef(sid);
   sidRef.current = sid;
+  // 输入历史召回（issue #2349 part 2/2）：列表来自 daemon（per-session、耐久、跨客户端），
+  // 本组件只走指针。这三样都是 tiptap 一次性闭包内的活动状态，所以走 ref 桥接：
+  //   * inputHistoryRef —— prop 的实时镜像（列表随会话切换、或 daemon 重新读过而变）；
+  //   * historyIndexRef —— 当前召回位置，-1 = 未在召回中；
+  //   * historySavedRef —— 第一次按 ↑ 之前宿主正在写的那份草稿，走到最新一条再按 ↓ 时还给他。
+  const inputHistoryRef = useRef<string[] | null>(inputHistory);
+  inputHistoryRef.current = inputHistory;
+  const historyIndexRef = useRef(-1);
+  const historySavedRef = useRef("");
+  // 回调也要 ref 桥接：submit 是每次渲染重建的函数，但发送发生在 await 之后，
+  // 那一刻要用的是最新的父级实现。
+  const onPromptSentRef = useRef(onPromptSent);
+  onPromptSentRef.current = onPromptSent;
   // 格式命令 ref 桥接（editor/菜单闭包只创建一次 → 变化值走 ref）
   const fmtRef = useRef<Record<string, () => void>>({});
   fmtRef.current = {
@@ -380,6 +433,53 @@ export function Composer({
             setMenu(CMD_MENU_CLOSED);
             return true;
           }
+        }
+        // 输入历史召回（issue #2349 part 2/2，GUI 半边）：↑ 往回走、↓ 往前走到最新一条再
+        // 一次就还回草稿。三条边界与 TUI 同语义，且都不是"顺手"能对的：
+        //   1. **只在可视行的边界上**——`endOfTextblock` 问的是"这个方向还能不能在本段落
+        //      里移动光标"，所以多行草稿内部的方向键仍然是光标移动，召回只在首行按 ↑ /
+        //      末行按 ↓ 时发生；
+        //   2. **未在召回中时 ↓ 什么也不做**——否则往下一行打字会突然吞掉光标；
+        //   3. **草稿先存再覆盖**，并在走过最新一条之后原样还回去。
+        // 列表为 null（还没问过 daemon）或空（这个会话没输入过）时一律放行，于是"读不到
+        // 历史"和"历史是空的"在键盘上表现一致，正是宿主感受到的那个事实。
+        if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+          const list = inputHistoryRef.current;
+          const box = editorBoxRef.current;
+          const up = event.key === "ArrowUp";
+          if (!list || list.length === 0 || !box) return false;
+          if (!box.view.endOfTextblock(up ? "up" : "down")) return false;
+          const cur = historyIndexRef.current;
+          // ↓ 且不在召回中：光标照常下移。
+          if (!up && cur < 0) return false;
+          const next = up
+            ? cur < 0
+              ? list.length - 1
+              : Math.max(0, cur - 1)
+            : cur + 1 < list.length
+              ? cur + 1
+              : -1;
+          event.preventDefault();
+          historyIndexRef.current = next;
+          if (next < 0) {
+            // 走过最新一条：召回结束，草稿原样回来（空草稿就是清空框）。
+            box.commands.setContent(historySavedRef.current);
+            historySavedRef.current = "";
+          } else {
+            if (cur < 0) {
+              const draft = (
+                box.storage as unknown as { markdown: { getMarkdown(): string } }
+              ).markdown.getMarkdown();
+              historySavedRef.current = normalizePlaceholders(
+                draft,
+                pendingRef.current.map((p) => p.label),
+              );
+            }
+            box.commands.setContent(list[next]);
+          }
+          // 召回文本的末尾是宿主下一步要接着打的地方。
+          box.commands.focus("end");
+          return true;
         }
         // Escape 停止回复（rant 2026-09-02T20:30:05：busy 时副入口，对齐 TUI ESC 中断肌肉记忆）。
         // 菜单开着时上方分支已拦截 Esc 只关菜单不误停；非 busy 时 Esc 放行（无副作用）。
@@ -511,6 +611,10 @@ export function Composer({
       setHasText(false);
     }
     prevSidRef.current = sid;
+    // 召回指针属于会话（issue #2349 part 2/2）：换了会话，位置与草稿快照都归零，
+    // 否则在新会话里按 ↓ 会把上一个会话的草稿塞进来。
+    historyIndexRef.current = -1;
+    historySavedRef.current = "";
     // 会话切换：pending 图片属旧会话输入（TUI 语义——占位符即图的生命周期），丢弃
     pendingRef.current = [];
     setPending([]);
@@ -587,6 +691,10 @@ export function Composer({
     const md = normalizePlaceholders(mdRaw, pendingRef.current.map((p) => p.label));
     const value = md.trim();
     if (!value) return;
+    // 发送即召回结束（issue #2349 part 2/2）：下一次 ↑ 从最新一条重新开始，而保存的草稿
+    // 已经随这条消息离手——留着它会在 ↓ 走到尽头时把上一条消息塞回空输入框。
+    historyIndexRef.current = -1;
+    historySavedRef.current = "";
     // 图片收敛（TUI 同语义）：占位符仍在文本中的保留（删了占位符即弃图）；
     // position = 字面占位符在文本中的字符偏移（daemon 按 position 切块）
     const images = resolveSendImages(pendingRef.current, value);
@@ -634,6 +742,10 @@ export function Composer({
       // 发送成功 → 清 pending（图片已随消息交给 daemon；失败保留以便重发）
       pendingRef.current = [];
       setPending([]);
+      // 召回列表跟上这一条（issue #2349 part 2/2）：daemon 刚接受了它，所以它的文件
+      // 现在以这段文字结尾。只报**成功**的发送——失败时 daemon 什么都没收下，也就
+      // 没有可翻回来的东西；列表的权威副本仍是 daemon 的，下次会话切换整份替换。
+      onPromptSentRef.current?.(sid, value);
     } catch {
       setInternalBusy(false);
       // G49：失败恢复输入框，文案不责怪用户（copy.sendFailed）；markdown 回填

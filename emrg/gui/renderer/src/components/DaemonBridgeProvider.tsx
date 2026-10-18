@@ -69,6 +69,15 @@ interface EmrgWindow {
       requestId: string;
       approved: boolean;
     }) => Promise<{ ok?: boolean }>;
+    /**
+     * The prompts the host typed in one session, as the daemon holds them
+     * (issue #2349, part 2/2). Named here for the same reason as the four above:
+     * preload.js exposes `emrg:listInputHistory`, and a name missing from *this*
+     * literal reaches the bridge as `undefined`, which the bridge reports as
+     * "this build cannot do it" — so the composer's ↑ has no list to walk, in a
+     * build that ships the whole recall path.
+     */
+    listInputHistory?: (p: { sessionId: string }) => Promise<{ entries?: unknown[]; hasMore?: boolean }>;
   };
 }
 
@@ -127,6 +136,15 @@ export function DaemonBridgeProvider({ children }: { children: ReactNode }) {
           const emrg = (window as unknown as EmrgWindow).emrg;
           if (!emrg?.respondApproval) throw new Error("respondApproval unavailable");
           return emrg.respondApproval(p);
+        },
+        // The session's input history, on the same terms as the four above: read
+        // `window.emrg` per call, and throw when the channel is missing rather than
+        // resolve an empty list — "this build cannot ask" and "the host typed nothing"
+        // must not look the same from the keyboard (issue #2349, part 2/2).
+        listInputHistory: async (p) => {
+          const emrg = (window as unknown as EmrgWindow).emrg;
+          if (!emrg?.listInputHistory) throw new Error("listInputHistory unavailable");
+          return emrg.listInputHistory(p);
         },
       },
       transcript,

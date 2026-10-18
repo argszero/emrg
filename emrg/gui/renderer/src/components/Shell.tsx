@@ -193,6 +193,21 @@ export function Shell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rewoundCount, activeSid]);
 
+  /**
+   * 会话的输入历史（issue #2349 part 2/2，GUI 半边）。
+   *
+   * 列表属于**会话**、由 daemon 落盘（每接受一条 prompt 就写 `<session_dir>/
+   * input_history.jsonl`），所以每次切到某个会话都重新问一次，而不是让 Composer
+   * 自己记：换会话、重开客户端、rewind、compact 之后它都还是对的，因为唯一的
+   * 写入者不是这个进程。读失败时 store 里保持"没有这个键"（= 还没读到），Composer
+   * 于是把方向键留给光标——一份读不到的列表和一个空列表在键盘上不该有两种表现。
+   */
+  useEffect(() => {
+    if (!activeSid) return;
+    void bridge.listInputHistory(activeSid);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSid]);
+
   // ── workspace 面板数据加载（vanilla loadTaskMeta/renderRantList 语义） ──
   async function loadProjects() {
     const b = wsBridge();
@@ -813,6 +828,13 @@ export function Shell() {
                 // `resume_result.meta.sandbox_roots` 是后开会话唯一的来源；这里只显示，
                 // 并在有人问过之前保持 `null`（= 未知，不是 0）。
                 sandboxRoots={activeSid ? (appState.sandboxRootsBySid[activeSid] ?? null) : null}
+                // 会话的输入历史（issue #2349 part 2/2）：同一份权威——列表是 daemon 的，
+                // 由上面的 effect 按会话读取；`null` = 还没问过（方向键因此照常移动光标）。
+                inputHistory={activeSid ? (appState.inputHistoryBySid[activeSid] ?? null) : null}
+                // 刚刚发出去的那条也进召回列表（issue #2349 part 2/2）：daemon 已经接受了
+                // 它，所以它的文件现在就以这段文字结尾；不跟上，↑ 在「刚打完五句话的新
+                // 会话」里就只能翻到会话打开那一刻为止——而那正是宿主最常按 ↑ 的时候。
+                onPromptSent={(sid, text) => bridge.notePromptSubmitted(sid, text)}
                 onManageSandboxRoots={() => dialogHost.current?.openSandbox([])}
               />
             </>

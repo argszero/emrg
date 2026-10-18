@@ -1132,6 +1132,41 @@ test("RESPONSE_TYPES 映射表与 daemon 命令名一致（修正 clear/rename/t
   assert.strictEqual(r11.rants.length, 1);
 });
 
+test("list_input_history → input_history（issue #2349 part 2/2：GUI 的输入历史召回）", async () => {
+  const client = new DaemonClient();
+  await connectClient(client);
+  // The daemon answers a `list_input_history` command with an `input_history` frame.
+  // Without the mapping the counter waits for a frame type nobody sends and the
+  // composer's recall times out into "you typed nothing" — the shape this test pins.
+  const p = client.sendCommandAndWait(
+    "list_input_history",
+    { session_id: "s1", cwd: tmpHome },
+    2000
+  );
+  await new Promise((r) => setTimeout(r, 10));
+  currentMockWs.emit(
+    "message",
+    Buffer.from(
+      JSON.stringify({
+        type: "input_history",
+        session_id: "s1",
+        entries: [
+          { index: 0, text: "first", timestamp: "2026-10-18T10:00:00" },
+          { index: 1, text: "second", timestamp: "2026-10-18T10:01:00" },
+        ],
+        has_more: false,
+      })
+    )
+  );
+  const r = await p;
+  assert.strictEqual(r.type, "input_history");
+  // Oldest first, newest last: that is the order the arrow keys walk.
+  assert.deepStrictEqual(
+    r.entries.map((e) => e.text),
+    ["first", "second"]
+  );
+});
+
 test("rant 18:23:15 P2/P3：RESPONSE_TYPES 覆盖任务/模板 CRUD（task_result / templates_list / template_result）", async () => {
   const client = new DaemonClient();
   await connectClient(client);
