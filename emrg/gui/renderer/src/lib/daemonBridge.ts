@@ -177,6 +177,22 @@ export interface DaemonAppState {
    * on head `4eb69bab`; reading a notice as "do not store" is the bug they cost.
    */
   sandboxRootsNoticeBySid: Record<string, SandboxRootsNotice>;
+  /**
+   * The prompts the host typed in each session, oldest first, as the daemon holds
+   * them (issue #2349, part 2/2: the GUI half of the daemon-owned input history).
+   *
+   * The daemon is the only writer of that list — it files every prompt it accepts
+   * into `<session_dir>/input_history.jsonl` — so this map is a *reading*, taken
+   * when a session is opened, and it is re-read rather than extended: a client that
+   * appended its own sends would be showing itself what it typed, not what the
+   * session holds, and the two part company the moment another client, a rewind or
+   * a compaction touches the same session.
+   *
+   * An absent key means "nobody has asked about this session yet", which is not the
+   * same as an empty list: a session nothing has been typed in and a session this
+   * client has not asked about are different states, and only the second is loading.
+   */
+  inputHistoryBySid: Record<string, string[]>;
   /** upgrade 事件（心跳检测 installed ≠ current → "重启生效"横幅；null=无待重启提示） */
   upgradeBanner: { current: string; installed: string } | null;
   /**
@@ -305,6 +321,7 @@ export function createDaemonAppStore(): SnapshotStore<DaemonAppState> {
     sandboxBySid: {},
     sandboxRootsBySid: {},
     sandboxRootsNoticeBySid: {},
+    inputHistoryBySid: {},
     upgradeBanner: null,
     pendingApproval: null,
   });
@@ -369,6 +386,13 @@ export interface DaemonBridgeDeps {
       op: "add" | "remove" | "list";
       path?: string;
     }): Promise<unknown>;
+    /**
+     * Read one session's input history (preload.listInputHistory；未接线时为
+     * undefined）。The daemon owns the list — it files every accepted prompt per
+     * session — so this is a reading of the session, never of this client
+     * (issue #2349, part 2/2).
+     */
+    listInputHistory?(p: { sessionId: string }): Promise<{ entries?: unknown[]; hasMore?: boolean }>;
   };
   transcript: TranscriptStore;
   t?: TranslateFn;
@@ -401,6 +425,17 @@ export interface DaemonBridge {
   setSandbox(sid: string | null, mode: string): Promise<boolean>;
   /** 会话的额外可写根：add / remove / list（daemon 裁定并回帧，客户端不自己记） */
   setSandboxRoots(sid: string | null, op: "add" | "remove" | "list", path?: string): Promise<boolean>;
+  /**
+   * Read one session's input history from the daemon, and store it (issue #2349,
+   * part 2/2).
+   *
+   * Returns false when there is nothing to ask with — no session, or a build whose
+   * preload predates this API — rather than leaving the session looking like it has
+   * an empty history. A *read failure* also answers false and stores nothing: an
+   * arrow key that silently recalls nothing and a list that could not be fetched
+   * look identical from the keyboard, so the absence of a key is the honest state.
+   */
+  listInputHistory(sid: string | null): Promise<boolean>;
 }
 
 export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
@@ -982,5 +1017,51 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
     return true;
   }
 
-  return { store, dispose, handleFrame, applyInit, respondApproval, setSandbox, setSandboxRoots };
+  /**
+   * Read one session's input history from the daemon and store it (issue #2349,
+   * part 2/2).
+   *
+   * Two things this deliberately does *not* do:
+   *
+   * - **It does not append what this client sends.** The daemon files every prompt
+   *   it accepts; a client that also pushed its own sends would double-count them
+   *   whenever the daemon's file already had the prompt, and would miss the ones
+   *   typed in the other client. Re-reading is the whole point.
+   * - **It stores nothing on failure.** An error and an empty history must not look
+   *   the same from the keyboard, so a failed read leaves the key absent — the
+   *   composer then treats the recall as unavailable rather than as "you typed
+   *   nothing".
+   *
+   * The reply is per-session, so a late answer for a session the host has already
+   * left is kept under *its own* id: switching back must not need a second read,
+   * and nobody else's session is overwritten by it.
+   */
+  async function listInputHistory(sid: string | null): Promise<boolean> {
+    if (!sid) return false;
+    const ask = emrg.listInputHistory;
+    if (typeof ask !== "function") return false;
+    try {
+      const answer = await ask({ sessionId: sid });
+      const entries = Array.isArray(answer?.entries) ? answer.entries : [];
+      const texts = entries.map((entry) => String(entry ?? "")).filter((text) => text !== "");
+      store.update((state) => ({
+        ...state,
+        inputHistoryBySid: { ...state.inputHistoryBySid, [sid]: texts },
+      }));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  return {
+    store,
+    dispose,
+    handleFrame,
+    applyInit,
+    respondApproval,
+    setSandbox,
+    setSandboxRoots,
+    listInputHistory,
+  };
 }

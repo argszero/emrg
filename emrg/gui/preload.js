@@ -36,6 +36,10 @@ const api = {
   // the daemon holds a confined call open until a client answers.
   respondApproval: (payload) => ipcRenderer.invoke("emrg:respondApproval", payload),
   listHistory: (payload) => ipcRenderer.invoke("emrg:listHistory", payload),
+  // Issue #2349 part 2/2: the prompts the host typed in this session, owned by the
+  // daemon (per session, durable, shared between clients). The composer's up/down
+  // arrow recall reads from here rather than from a list of its own.
+  listInputHistory: (payload) => ipcRenderer.invoke("emrg:listInputHistory", payload),
   rewindSession: (payload) => ipcRenderer.invoke("emrg:rewindSession", payload),
   listMemories: (payload) => ipcRenderer.invoke("emrg:listMemories", payload),
   readMemory: (payload) => ipcRenderer.invoke("emrg:readMemory", payload),

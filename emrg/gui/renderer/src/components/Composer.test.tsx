@@ -26,6 +26,8 @@ function setup(
     onSandboxChange?: (mode: string) => void;
     /** 会话额外可写根（daemon 报的那份）；null = 没人问过（rant 2026-10-09T09:43:39） */
     sandboxRoots?: string[] | null;
+    /** 会话的输入历史（daemon 报的那份，最旧在前）；null = 还没问过（issue #2349） */
+    inputHistory?: string[] | null;
     /** 父级接管「额外可写根」入口：点击只上报意图（打开管理对话框） */
     onManageSandboxRoots?: () => void;
     saveImage?: (payload: { sessionId?: string | null; data: string; label: string; mime?: string }) =>
@@ -55,7 +57,7 @@ function setup(
       dom.dispatchEvent(new KeyboardEvent("keydown", { key, code, bubbles: true, cancelable: true, ...mods }));
     });
   };
-  return { ...utils, editor, input, type, press };
+  return { ...utils, editor, input, type, press, editorRef };
 }
 
 /** 等待 editorRef 挂载（immediatelyRender:false → useEffect 后才有实例） */
@@ -1169,5 +1171,96 @@ describe("Composer — 图片粘贴/拖拽（rant 2026-09-30T09:35:04）", () =>
       await waitFor(() => expect(saveImage).toHaveBeenCalledTimes(i + 1));
       expect(input.value).toBe("");
     }
+  });
+});
+
+describe("Composer — 输入历史召回（issue #2349 part 2/2）", () => {
+  /** 编辑器当前内容（markdown 序列化，同发送路径读的那一份） */
+  const content = (s: ReturnType<typeof setup>) => {
+    const ed = s.editor()!;
+    return (ed.storage as unknown as { markdown: { getMarkdown(): string } }).markdown.getMarkdown().trim();
+  };
+
+  it("↑ 从最新一条往回走，↓ 走到最新一条再按一次把原草稿还回来", async () => {
+    const store = createTranscriptStore();
+    const s = setup(store, { inputHistory: ["one", "two", "three"] });
+    await waitEditor(s);
+
+    s.type("draft");
+    expect(content(s)).toBe("draft");
+
+    s.press("ArrowUp");
+    expect(content(s)).toBe("three");
+    s.press("ArrowUp");
+    expect(content(s)).toBe("two");
+    s.press("ArrowUp");
+    expect(content(s)).toBe("one");
+    // 最旧一条就是尽头：再按 ↑ 停在原处，不会绕回最新。
+    s.press("ArrowUp");
+    expect(content(s)).toBe("one");
+
+    s.press("ArrowDown");
+    expect(content(s)).toBe("two");
+    s.press("ArrowDown");
+    expect(content(s)).toBe("three");
+    // 走过最新一条 → 召回结束，宿主自己那份草稿回来（不是历史里的任何一条）。
+    s.press("ArrowDown");
+    expect(content(s)).toBe("draft");
+  });
+
+  it("历史为空或还没读到 → 方向键不拦，输入框原样不动", async () => {
+    for (const inputHistory of [[], null] as (string[] | null)[]) {
+      const store = createTranscriptStore();
+      const s = setup(store, { inputHistory });
+      await waitEditor(s);
+      s.type("keep me");
+      s.press("ArrowUp");
+      s.press("ArrowDown");
+      expect(content(s)).toBe("keep me");
+      s.unmount();
+    }
+  });
+
+  it("未在召回中时 ↓ 不抢：没有草稿快照可还，内容不变", async () => {
+    const store = createTranscriptStore();
+    const s = setup(store, { inputHistory: ["only"] });
+    await waitEditor(s);
+    s.type("typing");
+    s.press("ArrowDown");
+    expect(content(s)).toBe("typing");
+  });
+
+  it("发送之后指针归零：下一次 ↑ 又从最新一条开始", async () => {
+    const store = createTranscriptStore();
+    const sendMessage = vi.fn(async () => ({ requestId: "r1" }));
+    const s = setup(store, { inputHistory: ["first", "second"], sendMessage });
+    await waitEditor(s);
+
+    s.type("hello");
+    s.press("Enter");
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
+    expect(content(s)).toBe("");
+
+    s.press("ArrowUp");
+    expect(content(s)).toBe("second");
+  });
+
+  it("会话切换之后指针归零：不会把上一个会话的草稿塞进新会话", async () => {
+    const store = createTranscriptStore();
+    const s = setup(store, { sid: "s1", inputHistory: ["a1"] });
+    await waitEditor(s);
+
+    s.type("draft A");
+    s.press("ArrowUp");
+    expect(content(s)).toBe("a1");
+
+    s.rerender(
+      <I18nProvider lang="zh">
+        <Composer store={store} sid="s2" sandbox="workspace-write" inputHistory={["b1"]} editorRef={s.editorRef} />
+      </I18nProvider>,
+    );
+    // 新会话按 ↓：未在召回中，所以什么都不还。
+    s.press("ArrowDown");
+    expect(content(s)).not.toBe("draft A");
   });
 });

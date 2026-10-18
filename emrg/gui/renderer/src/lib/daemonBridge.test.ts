@@ -626,6 +626,43 @@ describe("createDaemonBridge", () => {
     expect(await noWire.setSandboxRoots("s1", "list")).toBe(false);
   });
 
+  it("listInputHistory 把 daemon 的答复写进 store：按会话分开，空的文本条目被丢掉", async () => {
+    const listInputHistory = vi.fn().mockResolvedValue({
+      entries: ["first", "", "second"],
+      hasMore: false,
+    });
+    const bridge = createDaemonBridge({
+      onEvent: vi.fn(() => vi.fn()),
+      emrg: { sendMessage: vi.fn(), listInputHistory },
+      transcript: createTranscriptStore(),
+    });
+    expect(await bridge.listInputHistory("s1")).toBe(true);
+    expect(listInputHistory).toHaveBeenCalledWith({ sessionId: "s1" });
+    // 顺序就是 daemon 给的顺序（最旧在前、最新在后），因为方向键就是按这个顺序走的。
+    expect(bridge.store.get().inputHistoryBySid["s1"]).toEqual(["first", "second"]);
+    // 别的会话不受影响：答案按它自己的 sid 归档。
+    expect(bridge.store.get().inputHistoryBySid["s2"]).toBeUndefined();
+  });
+
+  it("listInputHistory 读失败 / 没接线 / 没会话 → false，且 store 里连键都不留", async () => {
+    const failing = createDaemonBridge({
+      onEvent: vi.fn(() => vi.fn()),
+      emrg: { sendMessage: vi.fn(), listInputHistory: vi.fn().mockRejectedValue(new Error("timeout")) },
+      transcript: createTranscriptStore(),
+    });
+    expect(await failing.listInputHistory("s1")).toBe(false);
+    // 关键：不能写一个空数组——那样"读不到"和"这个会话没输入过"在键盘上就无法区分了。
+    expect(failing.store.get().inputHistoryBySid["s1"]).toBeUndefined();
+
+    const noWire = createDaemonBridge({
+      onEvent: vi.fn(() => vi.fn()),
+      emrg: { sendMessage: vi.fn() },
+      transcript: createTranscriptStore(),
+    });
+    expect(await noWire.listInputHistory("s1")).toBe(false);
+    expect(await noWire.listInputHistory(null)).toBe(false);
+  });
+
   it("写帧在 transcript 留一行，list 不留：读是刷新，不是事件", () => {
     const { emit, transcript, bridge } = setup();
     emit({

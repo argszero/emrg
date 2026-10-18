@@ -125,6 +125,10 @@ const RESPONSE_TYPES = {
   list_models: "models_list",
   list_projects: "projects_list",
   list_history: "history_list",
+  // The prompts the host typed in one session (issue #2349, part 2/2): the daemon
+  // answers a `list_input_history` command with an `input_history` frame, so the
+  // mapping is required for the GUI's composer recall to be able to wait for it.
+  list_input_history: "input_history",
   list_tasks: "tasks_list",
   list_rants: "rants_list",
   list_memories: "memories_list",
