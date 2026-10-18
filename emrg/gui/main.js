@@ -403,11 +403,17 @@ vision = false
     });
 
     // rant 2026-09-02T15:23:53：图片落盘——<projectRoot>/.emrg/sessions/<sid>/images/
-    // {safeLabel}_{blake2b4}.{ext}（TUI 同款命名约定：label 清洗 + 8-hex hash 前缀，
-    // 同图重复粘贴去重）。⚠️ 哈希算法与 TUI 不同：TUI 用 Python blake2b(digest_size=4)
-    // （Node crypto 不支持变长 blake2b），GUI 取 blake2b-512 前 8 hex —— 两端同字节
-    // 文件名 hash 不同（同一图在 TUI/GUI 各贴一次会各存一份，功能无碍，仅存储），
-    // GUI 自身去重自洽（同字节 → 同文件名 → 跳过写盘）。
+    // {safeLabel}_{hash8}.{ext}（TUI 同款命名约定：label 清洗 + 8-hex hash 前缀，
+    // 同图重复粘贴去重）。⚠️ 哈希算法与 TUI 不同：TUI 用 Python blake2b(digest_size=4)，
+    // GUI 用 sha256 前 8 hex —— 两端同字节的文件名 hash 不同（同一图在 TUI/GUI 各贴
+    // 一次会各存一份，功能无碍，仅存储），GUI 自身去重自洽（同字节 → 同文件名 → 跳过写盘）。
+    //
+    // ⚠️ 算法只能从**打包运行时**支持的摘要里选，不能从开发机上的 node 选（issue #2363）：
+    // Electron 自带的 Node 编译在 BoringSSL 上，它报的摘要是 md4/md5/ripemd160/sha1/
+    // sha224/sha256/sha384/sha512/sha512-256，**没有 blake2b**。这里原本用 blake2b512，
+    // 开发机的 node 有它就全绿，而打包版每次调用都抛 `Digest method not supported`
+    // —— 图片输入因此从未成功过一次。改了算法只要保住「同字节 → 同文件名」这条去重性质
+    // 即可，那是这个 hash 唯一的职责。守卫：test/image-hash.test.js。
     ipcMain.handle("emrg:saveImage", async (_e, { sessionId, data, label, mime } = {}) => {
       // 每次拒绝都留一行日志（rant 2026-09-30T09:35:04 要求 3）：此前被 throw 拒绝时
       // 一行都不写，于是「IPC 从未被走到」与「走到了但被拒」在日志里完全无法区分
@@ -431,7 +437,7 @@ vision = false
       fs.mkdirSync(imagesDir, { recursive: true });
       // 文件名字面清洗镜像 TUI safe_label（. 保留以便 .png 类后缀友好，去尾部 ._）
       const safeLabel = label.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 40).replace(/[._]+$/, "") || "image";
-      const h = crypto.createHash("blake2b512").update(buf).digest("hex").slice(0, 8);
+      const h = crypto.createHash("sha256").update(buf).digest("hex").slice(0, 8);
       const filename = `${safeLabel}_${h}.${ext}`;
       const finalPath = path.join(imagesDir, filename);
       if (!fs.existsSync(finalPath)) fs.writeFileSync(finalPath, buf); // 同名去重
