@@ -1231,15 +1231,49 @@ def test_open_source_template_parallel_recon_c15():
     assert "May run Recon in parallel this round" in out, "状态机应允许并行 Recon"
 
 
+def test_open_source_template_empty_recon_names_the_extension_surface():
+    """§2's empty-Recon sentence counts §1.6 among the readings that showed nothing (issue #2371).
+
+    This carrier is deliberately a test of its own. §2 is a separate hunk of the template, so
+    deleting §1.6 leaves it standing — measured 2026-10-18: with §1.6 removed this assertion
+    stays green, and removing only §2's clause reddens **here** while §1.6's own test stays
+    green. Two carriers, two tests, so a failure names the carrier that broke instead of a test
+    that merely failed on its first assertion — a single test cannot show which of its assertions
+    survive an arm, because it stops at the first red one.
+
+    What it protects: a cycle that skipped the extension-surface reading can still print an
+    "empty" verdict unless §2's list of readings names it.
+    """
+    import jinja2
+
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "emrg" / "server" / "open_source_prompt.md"
+    )
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(template_path.read_text(encoding="utf-8"))
+    out = template.render(
+        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
+        timestamp="20260824",
+        task={"role": "committer", "project": "aitokenpool"},
+        project={}, git_path="git", gh_path="gh",
+    )
+    assert "no gap inside the project's extension surface" in out, "空 Recon 结论须含扩展面阅读"
+
+
 def test_open_source_template_reads_the_extension_surface():
     """open_source_prompt.md §1.6 makes the project's extension surface a candidate source
     (issue #2365): a contribution need not pass through the upstream, so a cycle reading
     only §1.1's issue list can report "no candidate" while a whole channel sits one layer
     over — which is exactly what a host had to write into a task's `extra_prompt` to get.
 
-    Pinned as the *rules*, not as prose: the reading exists, §2's empty-Recon sentence
-    counts it, a candidate's layer must be named, and the publish loop is stated. Deleting
-    §1.6 reddens every assertion but the last one — which is the point of the last one.
+    Pinned as the *rules*, not as prose: the reading exists, a candidate's layer must be named,
+    and the publish loop is stated. Deleting §1.6 reddens every assertion here **but the last**
+    — which is the point of the last one: §1.1's claim line must survive the surface arriving, or
+    the surface would displace the issue list. §2's empty-Recon sentence is no longer counted
+    here; it is its own carrier with its own test (#2371), because one test stops at its first
+    failing assertion and so cannot show a reader which of the others an arm leaves alive.
     """
     import jinja2
 
@@ -1260,16 +1294,14 @@ def test_open_source_template_reads_the_extension_surface():
     assert "The project's extension surface" in out, "§1.6 扩展面阅读应渲染"
     assert "A contribution need not pass through the upstream" in out, "贡献不必经过上游应写明"
     assert "need no maintainer to merge anything" in out, "扩展独立发布、无需维护者合并应写明"
-    # 2) §2's empty-Recon sentence counts the surface among the readings that showed it —
-    #    otherwise a cycle that skipped §1.6 can still print an "empty" verdict
-    assert "no gap inside the project's extension surface" in out, "空 Recon 结论须含扩展面阅读"
-    # 3) a candidate's layer must be named: core-only is a reading too, "no candidate" alone
+    # 2) a candidate's layer must be named: core-only is a reading too, "no candidate" alone
     #    is a conclusion the reading did not support
     assert "Name the layer every candidate lands in" in out, "候选须标层"
     assert "only the core" in out, "核心层也是可行动读法，须写明"
-    # 4) publishing closes the loop back to the thread that asked for it
+    # 3) publishing closes the loop back to the thread that asked for it
     assert "After publishing, close the loop" in out, "发布后须回帖闭环"
-    # 5) and the surface does not displace §1.1: an issue is still a candidate source
+    # 4) and the surface does not displace §1.1: an issue is still a candidate source. This is
+    #    the assertion an arm deleting §1.6 leaves green **on purpose**.
     assert "I'd like to work on this" in out, "§1.1 认领规则仍在"
 
 
