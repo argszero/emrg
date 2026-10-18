@@ -1208,11 +1208,20 @@ def test_open_source_template_parallel_recon_c15():
     # 1) the new section exists
     assert "The healthy rule" in out, "C.1.5 并行 Recon 节应渲染"
     assert "not maintenance-only" in out, "Tracking 非纯维护说明应渲染"
-    # 2) healthy = MERGEABLE + CI green + no unaddressed feedback + no rebase due
+    # 2) healthy = MERGEABLE + CI green + no unaddressed feedback + no BLOCKING maintenance
     assert "MERGEABLE" in out, "健康判定含 MERGEABLE"
     assert "CI green" in out, "健康判定含 CI 绿"
     assert "No unaddressed feedback" in out, "健康判定含无未处理评审反馈"
-    assert "No rebase maintenance due" in out, "健康判定含无需 rebase 维护"
+    # the fourth condition names blocking maintenance only: counting a rebase the upstream
+    # merely made due as "unhealthy" would starve this stage on a fast-moving upstream, which
+    # is the very failure the section exists to prevent (issue #2360)
+    assert "No blocking maintenance due" in out, "健康判定含阻塞性维护"
+    assert "No rebase maintenance due" not in out, "健康判定不得把例行 rebase 计为不健康"
+    assert "not blocking" in out, "例行 rebase 非阻塞应写明"
+    # maintenance is done whatever else runs this round — it does not exclude Recon
+    assert "does not exclude Recon" in out, "维护与 Recon 应解耦"
+    # a candidate named by Recon must be claimed in the same round, or another contributor takes it
+    assert "claimed in that same round" in out, "Recon 候选应当轮认领"
     # 3) parallel output cap + direction diversity rules render
     assert "3 total same-day open PRs" in out, "同日 open PR 上限 3 个应渲染"
     assert "Direction diversity" in out, "方向多样性规则应渲染"
