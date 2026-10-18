@@ -165,7 +165,7 @@ REPO = "argszero/emrg"
 
 
 def could_declare_here(project: str, repo: str = REPO) -> bool:
-    """Whether an issue in `repo` could carry this rant's `Origin:` line.
+    """Whether an issue in `repo` could carry the handle that pairs a rant with it.
 
     A rant's declaring issue is filed by its own project's task, in that project's
     repository, so the pairing is the project name (`emrg`) or its `owner/repo` form
@@ -190,7 +190,7 @@ def rendered_here(project: str, repo: str = REPO) -> bool:
 
     A row naming **no** project is deliberately *not* withheld, even though
     `could_declare_here` is false for it: that predicate is about whether an issue **in this
-    repo** could carry the rant's `Origin:` line, and a project-less row is not another
+    repo** could carry the pairing, and a project-less row is not another
     project's work — it is undeclared, which is a thing the cycle has to look at. The rows
     this table prints exist because a cycle reading the queue *alone* concluded "nothing to
     review" while three pending rants had no issue (measured 2026-09-29), so hiding an
@@ -562,7 +562,11 @@ _issue_links: object | None = None
 
 
 def issue_links():
-    """The sibling that owns the rant↔issue handle (`Origin: rant <timestamp>`, R5)."""
+    """The sibling that owns the rant↔issue handle (`issue #N` in the entry, R5).
+
+    Also the fallback the older `Origin: rant <timestamp>` line resolves through, and the
+    only reader of the ledger's file format — so both consumers ask one object.
+    """
     global _issue_links
     if _issue_links is None:
         _issue_links = _sibling("check-issue-links.py", "review_queue_issue_links")
@@ -645,7 +649,7 @@ def open_prs(repo: str = REPO) -> list[int]:
 
 @dataclass
 class Rant:
-    """One open rant (`pending` / `in_progress`) and the issue that declares it.
+    """One open rant (`pending` / `in_progress`) and the issue it was paired with.
 
     Rendered because a rant appears in **no other row of this reading**: the PR rows,
     the vote counts, the freshness lines and the issue link states can all be clean
@@ -657,11 +661,20 @@ class Rant:
     evolve". §2's rant curation reads the ledger directly, which is why the trap bit
     only the cycles that read the queue alone.
 
-    `issues` is empty when no open issue declares this rant's timestamp as its origin —
-    rendered as `no issue yet`, which is R5's "the issue and its PR are born together"
-    seen from the queue's side. Several numbers mean several issues claim one rant, a
-    fault `check-issue-links.py` reports as a duplicate rather than something to merge
-    here, so this row names them all and picks none.
+    **The number comes from the entry's own `progress`** (R5, issue #2352): taking a rant
+    on means writing `issue #N` there the moment the issue is opened, and that entry is
+    where the pairing is durable — it is the one record that is per-installation *and*
+    holds the whole history, while the issue is neither. The `Origin:` line an older issue
+    carries is still resolved as a fallback, for entries filed before that rule; nothing
+    new depends on it.
+
+    Three states, because they are three instructions to the reader: `#N` (an open issue —
+    work is filed), `#N closed` (its PR merged, or it was closed without one — read it
+    before filing anything, the duplicate this row exists to prevent) and `no issue yet`.
+    A number the API could not resolve is `#N unread`, never folded into `no issue yet`:
+    "not there" and "could not be asked" are different answers. Several numbers mean
+    several issues claim one rant, a fault `check-issue-links.py` reports as a duplicate
+    rather than something to merge here, so this row names them all and picks none.
 
     `project` is the ledger row's own field, carried because it is what §2.2 decides on:
     a rant belongs to this cycle when it names this task's project or its `owner/repo`,
@@ -678,11 +691,48 @@ class Rant:
     message: str = ""
     issues: list[int] = field(default_factory=list)
     closed_issues: list[int] = field(default_factory=list)
+    unread_issues: list[int] = field(default_factory=list)
     project: str = ""
 
 
+#: The handle R5 writes into a rant's `progress`: the word `issue` and the number. Anchored
+#: on that word rather than on a bare `#N`, because the same line normally names the PR too
+#: (`issue #2110 (closed) → PR #2111 merged`) and a PR number is not what this row reports.
+#: The tail continues the list only in the forms a writer actually uses for it — `#1/#2`,
+#: `#1, #2`, `#1 and #2` — so a sentence that mentions an unrelated number later stays out.
+_PROGRESS_ISSUE = re.compile(r"(?i)\bissues?\s*#(\d+)((?:\s*(?:,|/|&|\band\b)\s*#\d+)*)")
+_PROGRESS_MORE = re.compile(r"#(\d+)")
+
+
+def _progress_issues(progress: object) -> list[int]:
+    """The issue numbers an entry's `progress` names, in the order it names them.
+
+    Every entry the tool has handled spells the pairing this way (`issue #1985 (closed
+    COMPLETED) → PR #1986 merged`), and R5 now writes it as the *only* durable record of
+    which issue a rant became — so this is the reading, not a convenience: a row that
+    looked somewhere else would print `no issue yet` over work that is filed, and the
+    cycle reading it would file it again.
+
+    The first `issue #N` is the pairing; later ones belong to it only when they are
+    written as its continuation. A `progress` that names no issue is not an error — it is
+    a rant that has not been taken on (or one filed under the older convention, which the
+    caller resolves from the issue side).
+    """
+    text = progress if isinstance(progress, str) else ""
+    first = _PROGRESS_ISSUE.search(text)
+    if not first:
+        return []
+    numbers = [int(first.group(1))]
+    numbers.extend(int(n) for n in _PROGRESS_MORE.findall(first.group(2) or ""))
+    seen: list[int] = []
+    for number in numbers:
+        if number not in seen:
+            seen.append(number)
+    return seen
+
+
 def open_rant_rows(rants: str | None = None, repo: str = REPO) -> list[Rant]:
-    """Every `pending` / `in_progress` rant, newest first, with its declaring issue.
+    """Every `pending` / `in_progress` rant, newest first, with the issue it was paired with.
 
     Only the ledger's open states are rows: `completed` is history (R6's cleanup keeps
     the ten most recent), and rendering it would bury the work that is actually left.
@@ -692,6 +742,14 @@ def open_rant_rows(rants: str | None = None, repo: str = REPO) -> list[Rant]:
     sibling's `RuntimeError` when the ledger cannot be read — the caller reports that as
     unmeasurable (exit 2), never as "no rants", which is the same rule `open_prs` follows
     one direction over.
+
+    **The pairing is read from the entry first** — `issue #N` in its own `progress`, the
+    handle R5 writes at take-up — and from the issue side only when the entry names none:
+    the `Origin:` line an issue carries is the older convention, and dropping the fallback
+    would print `no issue yet` over every rant filed under it, inviting exactly the
+    duplicate this row exists to prevent. The two readings are never mixed on one row: the
+    issue a rant's own entry names is the one a cycle wrote down, and an issue-side
+    declaration cannot disagree with it without one of the two being stale.
     """
     links = issue_links()
     rows = links.load_rant_rows(links.rants_path(rants))
@@ -701,22 +759,36 @@ def open_rant_rows(rants: str | None = None, repo: str = REPO) -> list[Rant]:
     if not wanted:
         return []
 
-    declared = links.declared_origins(links.load_queue(repo).issues)
+    queue = links.load_queue(repo)
+    open_numbers = {
+        int(row["number"]) for row in queue.issues if isinstance(row.get("number"), int)
+    }
+    named = {
+        str(row.get("timestamp", "")): _progress_issues(row.get("progress"))
+        for row in wanted
+    }
+
+    declared = (
+        links.declared_origins(queue.issues)
+        if any(not numbers for numbers in named.values())
+        else {}
+    )
     by_timestamp: dict[str, list[int]] = {}
     for number, stamps in declared.items():
         for stamp in stamps:
             by_timestamp.setdefault(stamp, []).append(number)
 
-    # A rant whose declaring issue was closed (normally by the merge of its own PR) is
-    # invisible to the open reading above, so its row would claim `no issue yet` — the
-    # same words it prints for a rant that never had one. Measured 2026-10-02: the
-    # release rant rendered `no issue yet` while issue #1807 existed, declared the rant's
-    # timestamp, and had been closed when #1808 merged. R5 tells a cycle that taking up a
-    # rant means filing its issue, so that reading invites a duplicate issue for work
-    # already finished. The second reading is spent only when some open rant lacks an open
-    # declaring issue, and only over the window those rants could have been filed in.
+    # The fallback's second half: an issue filed under the older convention and closed by
+    # the merge of its own PR is invisible to the open reading above, so its row would claim
+    # `no issue yet` — the same words it prints for a rant that never had one. Measured
+    # 2026-10-02: the release rant rendered `no issue yet` while issue #1807 existed,
+    # declared the rant's timestamp, and had been closed when #1808 merged. R5 tells a cycle
+    # that taking up a rant means filing its issue, so that reading invites a duplicate
+    # issue for work already finished. The second reading is spent only when some open rant
+    # lacks an open declaring issue, and only over the window those rants could have been
+    # filed in.
     #
-    # "Those rants" is this repo's rants, not the whole ledger. The bound above is the
+    # "Those rants" is this repo's rants, not the whole ledger. The bound below is the
     # oldest instant that can *place* a row, and another project's rants cannot be placed
     # here at any bound — so letting them set the window buys nothing and costs the whole
     # ledger's history. Measured 2026-10-02 on this host: 40 open rants, of which 39 were
@@ -727,7 +799,8 @@ def open_rant_rows(rants: str | None = None, repo: str = REPO) -> list[Rant]:
     unplaced = [
         str(row.get("timestamp", ""))
         for row in wanted
-        if not by_timestamp.get(str(row.get("timestamp", "")))
+        if not named[str(row.get("timestamp", ""))]
+        and not by_timestamp.get(str(row.get("timestamp", "")))
         and could_declare_here(str(row.get("project", "") or ""), repo)
     ]
     if unplaced:
@@ -751,23 +824,42 @@ def open_rant_rows(rants: str | None = None, repo: str = REPO) -> list[Rant]:
                 for stamp in stamps:
                     closed_by_timestamp.setdefault(stamp, []).append(number)
 
-    return sorted(
-        (
+    out: list[Rant] = []
+    for row in wanted:
+        stamp = str(row.get("timestamp", ""))
+        numbers = named[stamp]
+        open_here: list[int] = []
+        closed_here: list[int] = []
+        unread_here: list[int] = []
+        for number in numbers:
+            if number in open_numbers:
+                open_here.append(number)
+                continue
+            # Not in the open listing, so the question is which of the two remaining
+            # states it is — and that costs one call per closed number, not per row: a
+            # rant whose issue is still open is answered by the listing already.
+            state = links.issue_state(repo, number)
+            if state == "open":
+                open_here.append(number)
+            elif state == "closed":
+                closed_here.append(number)
+            else:
+                unread_here.append(number)
+        if not numbers:
+            open_here = sorted(by_timestamp.get(stamp, []))
+            closed_here = sorted(closed_by_timestamp.get(stamp, []))
+        out.append(
             Rant(
-                timestamp=str(row.get("timestamp", "")),
+                timestamp=stamp,
                 status=str(row.get("status", "")),
                 message=str(row.get("message", "")),
-                issues=sorted(by_timestamp.get(str(row.get("timestamp", "")), [])),
-                closed_issues=sorted(
-                    closed_by_timestamp.get(str(row.get("timestamp", "")), [])
-                ),
+                issues=sorted(open_here),
+                closed_issues=sorted(closed_here),
+                unread_issues=sorted(unread_here),
                 project=str(row.get("project", "") or ""),
             )
-            for row in wanted
-        ),
-        key=lambda rant: rant.timestamp,
-        reverse=True,
-    )
+        )
+    return sorted(out, key=lambda rant: rant.timestamp, reverse=True)
 
 
 @dataclass
@@ -1363,7 +1455,7 @@ def render(reading: Reading, action: Action) -> str:
 
 
 def render_rant(rant: Rant) -> str:
-    """One rant's row: its handle, its state, the issue that declares it, and its project.
+    """One rant's row: its handle, its state, the issue it was paired with, and its project.
 
     The excerpt is flattened to a single line and capped, because a rant body is prose
     with headings and newlines and this row's job is to be *recognisable* in a list —
@@ -1373,20 +1465,20 @@ def render_rant(rant: Rant) -> str:
     status or as an issue number, and so a row without one is visible as such: §2.2 makes
     a rant that names no project *(nor this task's)* one to ignore entirely.
 
-    `no issue yet` means what it says: no issue in **either** state declares this rant.
-    An issue that was closed — normally by the merge of its own PR — renders as
-    `#1807 closed`, because the two are opposite instructions: the first says "file one",
-    and following it for an issue that already exists creates the duplicate this repo's
-    link reading exists to report. The row states that the issue is closed and stops
-    there: a close by merge and a close without one are not distinguishable from here,
-    so the cycle reads the issue rather than being told which it was.
+    `no issue yet` means what it says: the entry names no issue and no issue in **either**
+    state declares this rant. An issue that was closed — normally by the merge of its own
+    PR — renders as `#1807 closed`, because the two are opposite instructions: the first
+    says "file one", and following it for an issue that already exists creates the
+    duplicate this repo's link reading exists to report. The row states that the issue is
+    closed and stops there: a close by merge and a close without one are not
+    distinguishable from here, so the cycle reads the issue rather than being told which
+    it was. `#N unread` is the fourth answer and a different one again: the entry names a
+    number the API would not resolve, which is a question for the reader, not an absence.
     """
-    if rant.issues:
-        where = ", ".join(f"#{n}" for n in rant.issues)
-    elif rant.closed_issues:
-        where = ", ".join(f"#{n} closed" for n in rant.closed_issues)
-    else:
-        where = "no issue yet"
+    tokens = [f"#{n}" for n in rant.issues]
+    tokens += [f"#{n} closed" for n in rant.closed_issues]
+    tokens += [f"#{n} unread" for n in rant.unread_issues]
+    where = ", ".join(tokens) if tokens else "no issue yet"
     excerpt = " ".join(rant.message.split())
     if len(excerpt) > 110:
         excerpt = excerpt[:109] + "…"
@@ -1498,6 +1590,11 @@ def _as_json(
             "timestamp": rant.timestamp,
             "status": rant.status,
             "issues": rant.issues,
+            # The other two answers a pair of numbers can be in, named as fields rather
+            # than left to be inferred from an empty `issues`: a consumer that read only
+            # `issues == []` would count a closed issue and a never-filed rant the same.
+            "closed_issues": rant.closed_issues,
+            "unread_issues": rant.unread_issues,
             "message": rant.message,
             "project": rant.project,
             # The prose rendering withholds another project's rows (a cycle's report is

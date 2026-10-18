@@ -30,6 +30,10 @@ Named limits
 ------------
 * This pins the *presence* of the rule, not obedience to it: no test shows that an agent
   reading the template closes an issue instead of re-testing it.
+* It pins the prompt's half of issue #2352 only. The other two carriers — the row in
+  `scripts/review-queue.py` that reads the pairing, and the OK line in
+  `scripts/check-issue-links.py` — are pinned by their own test files, which is where the
+  behaviour they describe is measured.
 * It does not check that `scripts/check-issue-links.py` exists — the reading lands on the same
   branch as this sentence (#1643), and a template sentence is not the tool.
 """
@@ -69,12 +73,18 @@ REQUIRED_TERMS: tuple[str, ...] = (
     "A re-measurement is not progress",        # what is not work
     "closed with that reading",                # the remedy for landed work
     "never a pass",                            # an unreadable queue is not a clean one
-    # The first link of the chain, written at take-up rather than left for a later cycle.
-    # Pinned as the literal the design asks for — the *shape*, placeholder included — because
-    # a rewording to a bare "reference the rant" is exactly the drift this pin exists to stop.
-    "Origin: rant <the rant's ISO timestamp>", # the issue's first line
-    "timestamp is its handle",                 # ... and why it is that timestamp
-    "back into that rant's `progress`",        # the number written where the rant carries it
+    # The first link of the chain, written at take-up rather than left for a later cycle —
+    # and written **one way only** (issue #2352): the entry knows its issue, the issue does
+    # not know its entry. The older `Origin: rant <timestamp>` line on the issue is gone,
+    # because the ledger is one file per installation and a citation into it names a record
+    # a second reader cannot open; the issue has to stand on its own instead. Pinned as the
+    # rules that replaced it, because "reference the rant somewhere" is exactly the drift
+    # this pin exists to stop.
+    "it does not refer to it at all",          # the issue names no part of the record
+    "written for a reader who has never seen the record",  # ... and says it whole instead
+    "the link is **one way**",                 # the direction, stated rather than implied
+    "into that rant's `progress`",             # the number written where the rant carries it
+    "as `issue #N`",                           # ... in the form `scripts/review-queue.py` reads
 )
 
 #: Where the *other* end of the chain is written: the section a cycle has just pushed from,

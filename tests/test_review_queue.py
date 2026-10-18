@@ -2458,6 +2458,8 @@ class FakeLinks:
         self.queue_calls: list[tuple[str, str, str | None]] = []
         self.read: Path | None = None
         self.origins_asked: list[list[dict]] = []
+        self.states: dict[int, str] = {}
+        self.states_asked: list[int] = []
 
     def rants_path(self, override=None):
         return Path(override) if override else self.path
@@ -2473,6 +2475,15 @@ class FakeLinks:
         if state == "closed":
             return types.SimpleNamespace(issues=self.closed_issues)
         return types.SimpleNamespace(issues=self.issues)
+
+    def issue_state(self, repo, number):
+        """The sibling's one-number reader: `state` for a number the open listing lacks.
+
+        Spent only on a number a rant entry's `progress` names and the open queue does not
+        hold, which is the closed-or-gone case. `""` is "could not be read", never "open".
+        """
+        self.states_asked.append(number)
+        return self.states.get(int(number), "")
 
     def declared_origins(self, issues):
         """The sibling's reading, as its own tests pin it: the `Origin: rant <ts>` line."""
@@ -2491,8 +2502,11 @@ def _links(monkeypatch, tool, rows, issues=(), path="/tmp/rants.jsonl", closed_i
     return links
 
 
-def _row(stamp, status="pending", message="a rant"):
-    return {"timestamp": stamp, "status": status, "message": message, "project": "emrg"}
+def _row(stamp, status="pending", message="a rant", progress=None):
+    row = {"timestamp": stamp, "status": status, "message": message, "project": "emrg"}
+    if progress is not None:
+        row["progress"] = progress
+    return row
 
 
 def test_only_open_rants_become_rows_and_the_newest_is_first(monkeypatch):
@@ -2802,3 +2816,129 @@ def test_a_run_that_judged_nothing_is_retriggered_not_read_for_a_cause(mod, monk
     )
     assert "ci-red" not in out
     assert "cast-vote.py" not in out, "a head whose run judged nothing is not votable"
+
+
+# --------------------------------------------------------------------------- #
+# The pairing is read from the entry's own `progress` (R5, issue #2352)
+# --------------------------------------------------------------------------- #
+
+
+def test_the_issue_a_rants_progress_names_is_the_one_on_its_row(monkeypatch):
+    """The handle R5 writes at take-up, read from where it was written.
+
+    `Origin: rant <ts>` on the issue was the older convention, and it cannot survive a
+    second reader: the ledger is one file per installation, so a citation into it names a
+    record nobody else can open — and the issue is supposed to stand on its own anyway.
+    The pairing moved into the entry's `progress`, which is per-host as well but is the
+    record the host's own ledger already keeps, so this row reads it there.
+    """
+    tool = _fresh_tool()
+    _links(
+        monkeypatch,
+        tool,
+        [_row("2026-10-17T19:15:27+08:00", "in_progress",
+              progress="issue #2352 open, PR pending")],
+        issues=[(2352, "a body with no origin line at all")],
+    )
+
+    (rant,) = tool.open_rant_rows(None, tool.REPO)
+
+    assert (rant.issues, rant.closed_issues, rant.unread_issues) == ([2352], [], [])
+    assert "  #2352  " in tool.render_rant(rant)
+
+
+def test_an_issue_the_entry_names_and_that_is_closed_says_so(monkeypatch):
+    """The middle state, and why it is not `no issue yet`: the two are opposite advice.
+
+    An entry whose issue was closed (normally by the merge of its own PR) has been filed.
+    Printing `no issue yet` over it tells the next cycle to open another one, which is the
+    duplicate this row exists to prevent. The number is not in the open listing, so one
+    call answers which of the remaining states it is — and it is asked once, not once per
+    reading of the row.
+    """
+    tool = _fresh_tool()
+    links = _links(
+        monkeypatch,
+        tool,
+        [_row("2026-10-17T11:18:41+08:00", "in_progress", progress="issue #2342 closed by PR #2343")],
+    )
+    links.states = {2342: "closed"}
+
+    (rant,) = tool.open_rant_rows(None, tool.REPO)
+
+    assert (rant.issues, rant.closed_issues) == ([], [2342])
+    assert "#2342 closed" in tool.render_rant(rant)
+    assert "no issue yet" not in tool.render_rant(rant)
+    assert links.states_asked == [2342]
+
+
+def test_a_number_the_api_will_not_resolve_is_unread_not_absent(monkeypatch):
+    """"Not there" and "could not be asked" are different answers, and the row says which.
+
+    Folding an unreadable number into `no issue yet` is the family's standing defect — a
+    question rendered as a confident absence — and here it would also invite a duplicate
+    issue over a pairing the cycle did write down.
+    """
+    tool = _fresh_tool()
+    links = _links(
+        monkeypatch,
+        tool,
+        [_row("2026-10-17T19:15:27+08:00", "in_progress", progress="issue #9999")],
+    )
+    links.states = {9999: ""}
+
+    (rant,) = tool.open_rant_rows(None, tool.REPO)
+
+    assert (rant.issues, rant.closed_issues, rant.unread_issues) == ([], [], [9999])
+    row = tool.render_rant(rant)
+    assert "#9999 unread" in row
+    assert "no issue yet" not in row
+
+
+def test_an_entry_that_names_its_own_issue_is_not_re_read_from_the_issue_side(monkeypatch):
+    """One reading per row: the entry's word is the pairing, not a candidate for review.
+
+    Two readings that can disagree are two answers to "which issue is this rant", and the
+    one that would win here — an issue-side declaration left over from the older
+    convention — would point the cycle at the wrong issue. So the issue side is consulted
+    only when the entry names none, and the assertion is on the *call*, not on the text.
+    """
+    tool = _fresh_tool()
+    stamp = "2026-10-17T19:15:27+08:00"
+    links = _links(
+        monkeypatch,
+        tool,
+        [_row(stamp, "in_progress", progress="issue #2352")],
+        issues=[
+            (2352, "no origin line"),
+            (1111, f"Origin: rant {stamp}\n\nthe stale declaration"),
+        ],
+    )
+
+    (rant,) = tool.open_rant_rows(None, tool.REPO)
+
+    assert rant.issues == [2352], "the entry's own handle wins"
+    assert links.origins_asked == [], (
+        "the issue-side reading is the fallback, so a row that already has a pairing must "
+        "not spend it"
+    )
+    assert links.states_asked == [], "and an open issue is answered by the listing already"
+
+
+def test_an_entry_with_no_progress_still_reads_the_issue_side(monkeypatch):
+    """The fallback is what keeps older entries from rendering as never filed.
+
+    Measured 2026-10-02: a release rant rendered `no issue yet` while its issue existed and
+    had been closed when its PR merged. Dropping the fallback would restore that reading
+    for every entry written before the pairing moved into `progress`.
+    """
+    tool = _fresh_tool()
+    stamp = "2026-09-30T09:17:54+08:00"
+    links = _links(monkeypatch, tool, [_row(stamp)], issues=[(1771, f"Origin: rant {stamp}")])
+
+    (rant,) = tool.open_rant_rows(None, tool.REPO)
+
+    assert rant.issues == [1771]
+    assert links.states_asked == [], (
+        "the entry names no number, so there is nothing for the one-number reader to ask"
+    )
