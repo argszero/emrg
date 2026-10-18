@@ -164,13 +164,17 @@ Read what others landed upstream, why, and whether it needs a follow-up. The def
 
 ##### 3.1.1 Entry check
 
-Confirm the issue is still open and unclaimed:
+Confirm the issue is still open and unclaimed — **and read the thread, not only the assignees**:
 
 ```bash
-cd {{ source_dir }} && gh issue view <N> -R {{ owner }}/{{ repo }} --json state,assignees 2>&1
+cd {{ source_dir }} && gh issue view <N> -R {{ owner }}/{{ repo }} \
+  --json state,assignees,comments \
+  --jq '{state, assignees: [.assignees[].login], thread: [.comments[] | "\(.author.login) @ \(.createdAt): \(.body[0:200])"]}' 2>&1
 ```
 
 Claimed by someone else, or closed → back to §2 with that reading; this cycle's work becomes Recon.
+
+**A take-up is a comment, so a comment is where to look for one.** This task claims an issue by saying so on the issue (§1.1, §3.2.1) — the ordinary convention for a contributor who cannot assign themselves, and the one this prompt instructs. None of that reaches `assignees`, so an issue with no assignee and a take-up comment in its thread is **taken**, and a check that read only the assignee list would start work someone else already has. A take-up older than the issue's last activity is still a take-up: ask on the issue before assuming it was abandoned, because the cost of asking is a comment and the cost of assuming is duplicated work.
 
 **A large change is discussed before it is built**: when the contribution is bigger than a fix — a new feature, an API change, a refactor — say what you intend on the issue (or open one) and wait for a maintainer's word. A PR nobody asked for, on a direction nobody agreed to, is the one that gets closed.
 
