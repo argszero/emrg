@@ -3552,3 +3552,57 @@ class TestWSInputHistory:
                     await cleanup()
 
         asyncio.run(_test())
+
+    def test_a_scheduled_task_is_not_filed_as_input_history(self):
+        """A cycle's own prompt is not something the host typed (issue #2369's veto).
+
+        `TaskHandler` sends its rendered prompt down the same `task` path a client uses,
+        so "a task arrived" is not a predicate on the host's typing. Filed anyway, every
+        cycle would put one ~44 KB prompt into the evolution session's recall list — the
+        session the host types in — and rewrite that whole file on each append to do it.
+
+        Both directions are asserted here, because one alone cannot tell the filter
+        working from the recorder being off: this message says it is scheduled and files
+        nothing, and the client-shaped message in the test above files its prompt.
+        """
+
+        async def _send(ws, msg):
+            await ws.send(json.dumps(msg, ensure_ascii=False))
+            while True:
+                resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                if resp.get("done"):
+                    return
+
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        sid = "emrg-task"
+                        # Field for field what scheduler.py puts on the wire — the
+                        # producer's own half is pinned in tests/test_scheduler.py.
+                        await _send(ws, {
+                            "type": "task",
+                            "id": "evolution-2026-10-18T08:00:00",
+                            "session_id": sid,
+                            "cwd": str(cwd),
+                            "prompt": "a rendered task prompt, not a typed one",
+                            "stream": True,
+                            "timestamp": "2026-10-18T08:00:00",
+                            "sandbox": "workspace-write",
+                            "input_history": False,
+                        })
+
+                        path = cwd / ".emrg" / "sessions" / sid / "input_history.jsonl"
+                        assert not path.is_file(), (
+                            "a scheduled task's prompt was filed as input history: "
+                            + (path.read_text(encoding="utf-8") if path.is_file() else "")
+                        )
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+
+        asyncio.run(_test())

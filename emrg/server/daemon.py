@@ -1562,7 +1562,17 @@ class EmrgServer:
                     # busy check so a prompt queued behind a running turn is recallable
                     # too — the host typed it, whether or not it ran yet.
                     session = self._get_or_create_session(session_id, Path(cwd))
-                    session.append_input_history(req.prompt)
+                    # …for the prompts the **host** typed. A scheduled task is not one:
+                    # `TaskHandler` builds its prompt from a template and sends it down
+                    # this same path, so filing on "a task arrived" would put one ~44 KB
+                    # task prompt per cycle into the evolution session's recall list and
+                    # rewrite that whole file on every append to do it. The producer
+                    # says which it is (issue #2369's veto), and the absence of that
+                    # word is a client — the only other producer is the upgrade
+                    # session, which builds a `TaskRequest` and calls the tool loop
+                    # directly rather than sending a message.
+                    if data.get("input_history", True):
+                        session.append_input_history(req.prompt)
                     # Rant 2026-08-20T18:18: Ask/Auto modes removed — every
                     # interactive message allows tools; the sandbox tier
                     # (req.sandbox, per-message) controls file permissions.
