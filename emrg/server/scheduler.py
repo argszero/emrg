@@ -2686,6 +2686,14 @@ class TaskHandler:
                 "prompt": prompt,
                 "stream": True,
                 "timestamp": cycle_time.isoformat(),
+                # This prompt is **not something the host typed**: the scheduler built
+                # it from a template, so it does not belong in the session's recall
+                # list. Saying so on the message is what makes it a fact about the
+                # producer rather than a guess about the session — a test on the id
+                # would be a test on a name, and every producer would have to be
+                # enumerated again the next time one is added. The daemon files input
+                # history for the messages that do not say this (the clients).
+                "input_history": False,
                 # Structural dirty-tree guard (community issue #979): effective
                 # sandbox per cycle. Since #1563 (`69745b8c`, 2026-09-24) a dirty
                 # tree no longer forces read-only: `_effective_sandbox` converges

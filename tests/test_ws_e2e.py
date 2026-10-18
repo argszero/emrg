@@ -3444,3 +3444,165 @@ class TestWSResolveSessionCwd:
             finally:
                 await cleanup()
         asyncio.run(_test())
+
+
+class TestWSInputHistory:
+    """The daemon files each accepted prompt, per session (issue #2349).
+
+    Unit tests cover the store and the handler separately; only this path shows the
+    **wiring** — that the prompt a client sends becomes a record, and that the reading
+    answers with it. Sending it is what a client does; the file is what makes recall
+    survive the client, so both are asserted here.
+    """
+
+    def test_a_sent_prompt_is_recorded_and_can_be_read_back(self):
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        sid = "s_input_history"
+                        task = {
+                            "type": "task",
+                            "id": "t-ih-1",
+                            "session_id": sid,
+                            "cwd": str(cwd),
+                            "prompt": "the prompt recall should find",
+                            "stream": True,
+                            "timestamp": "2026-10-18T00:00:00",
+                        }
+                        await ws.send(json.dumps(task, ensure_ascii=False))
+                        while True:
+                            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                            if resp.get("done"):
+                                break
+
+                        path = cwd / ".emrg" / "sessions" / sid / "input_history.jsonl"
+                        assert path.is_file(), (
+                            "the daemon accepted the task and never filed the prompt — "
+                            "recall would be empty after a restart"
+                        )
+                        records = [
+                            json.loads(line)
+                            for line in path.read_text(encoding="utf-8").splitlines()
+                            if line.strip()
+                        ]
+                        assert [r["text"] for r in records] == ["the prompt recall should find"]
+
+                        await ws.send(json.dumps({
+                            "type": "list_input_history",
+                            "session_id": sid,
+                            "cwd": str(cwd),
+                        }))
+                        while True:
+                            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                            if resp.get("type") == "input_history":
+                                break
+                        assert [e["text"] for e in resp["entries"]] == [
+                            "the prompt recall should find"
+                        ], resp
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+
+        asyncio.run(_test())
+
+    def test_a_second_session_reads_its_own_list_and_not_the_first_ones(self):
+        """The defect stated as an acceptance: the up arrow in a freshly opened session
+        must never recall what the host typed in the previous one."""
+
+        async def _send_task(ws, cwd, sid, prompt):
+            await ws.send(json.dumps({
+                "type": "task", "id": f"t-{sid}", "session_id": sid,
+                "cwd": str(cwd), "prompt": prompt, "stream": True,
+                "timestamp": "2026-10-18T00:00:00",
+            }, ensure_ascii=False))
+            while True:
+                resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                if resp.get("done"):
+                    return
+
+        async def _read(ws, cwd, sid):
+            await ws.send(json.dumps({
+                "type": "list_input_history", "session_id": sid, "cwd": str(cwd),
+            }))
+            while True:
+                resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                if resp.get("type") == "input_history":
+                    return [e["text"] for e in resp["entries"]]
+
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        await _send_task(ws, cwd, "s_first", "only in the first session")
+                        await _send_task(ws, cwd, "s_second", "only in the second session")
+
+                        assert await _read(ws, cwd, "s_first") == ["only in the first session"]
+                        assert await _read(ws, cwd, "s_second") == ["only in the second session"]
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+
+        asyncio.run(_test())
+
+    def test_a_scheduled_task_is_not_filed_as_input_history(self):
+        """A cycle's own prompt is not something the host typed (issue #2369's veto).
+
+        `TaskHandler` sends its rendered prompt down the same `task` path a client uses,
+        so "a task arrived" is not a predicate on the host's typing. Filed anyway, every
+        cycle would put one ~44 KB prompt into the evolution session's recall list — the
+        session the host types in — and rewrite that whole file on each append to do it.
+
+        Both directions are asserted here, because one alone cannot tell the filter
+        working from the recorder being off: this message says it is scheduled and files
+        nothing, and the client-shaped message in the test above files its prompt.
+        """
+
+        async def _send(ws, msg):
+            await ws.send(json.dumps(msg, ensure_ascii=False))
+            while True:
+                resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                if resp.get("done"):
+                    return
+
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        sid = "emrg-task"
+                        # Field for field what scheduler.py puts on the wire — the
+                        # producer's own half is pinned in tests/test_scheduler.py.
+                        await _send(ws, {
+                            "type": "task",
+                            "id": "evolution-2026-10-18T08:00:00",
+                            "session_id": sid,
+                            "cwd": str(cwd),
+                            "prompt": "a rendered task prompt, not a typed one",
+                            "stream": True,
+                            "timestamp": "2026-10-18T08:00:00",
+                            "sandbox": "workspace-write",
+                            "input_history": False,
+                        })
+
+                        path = cwd / ".emrg" / "sessions" / sid / "input_history.jsonl"
+                        assert not path.is_file(), (
+                            "a scheduled task's prompt was filed as input history: "
+                            + (path.read_text(encoding="utf-8") if path.is_file() else "")
+                        )
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+
+        asyncio.run(_test())

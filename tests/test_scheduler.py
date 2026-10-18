@@ -1699,6 +1699,60 @@ def _make_cycle_handler(tmp_path, frames):
     return handler, _CapturedLog()
 
 
+def test_a_scheduled_task_message_declares_its_prompt_is_not_host_input(tmp_path):
+    """The `task` message a cycle sends says the prompt is **not** the host's typing
+    (issue #2369's veto): the daemon files input history for the messages that do not
+    say so, and this is the only producer that must not be filed.
+
+    Pinned on the message the handler really puts on the wire, not on a keyword in the
+    source: a field added here and never read, or read and never sent, are different
+    defects, and only sending it through the ws double shows which one you have. The
+    daemon's half is `tests/test_ws_e2e.py::TestWSInputHistory`.
+    """
+    import json as _json
+
+    from websockets.exceptions import ConnectionClosed as _Closed
+    from websockets.frames import Close as _Close
+
+    from emrg.server import scheduler as mod
+
+    sent: list[dict] = []
+
+    class _FakeWS:
+        async def send(self, msg):
+            sent.append(_json.loads(msg))
+
+        async def recv(self):
+            raise _Closed(_Close(1000, ""), None)
+
+        async def close(self):
+            pass
+
+    async def _fake_connect():
+        return _FakeWS()
+
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    handler._build_evolution_prompt = lambda: "a rendered task prompt"
+    orig_connect = mod.connect_to_server
+    mod.connect_to_server = _fake_connect
+    try:
+        asyncio.run(handler._run_evolution_cycle())
+    finally:
+        mod.connect_to_server = orig_connect
+
+    assert sent, "the cycle sent no task message at all"
+    msg = sent[0]
+    assert msg["type"] == "task"
+    assert msg.get("input_history") is False, (
+        "the scheduled task message no longer says its prompt is not host input — the "
+        "daemon will file one task prompt per cycle into the session's recall list"
+    )
+    # And the field is not there at the cost of the message: these are what the daemon
+    # needs to run the turn at all.
+    for key in ("session_id", "cwd", "prompt", "timestamp"):
+        assert key in msg, key
+
+
 def test_evolution_cycle_truncated_not_empty_not_complete(tmp_path):
     """Truncated done frame → flagged truncated, NOT a complete cycle, slowdown
     state untouched (no vibe signal from a truncated round)."""

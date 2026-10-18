@@ -1555,6 +1555,24 @@ class EmrgServer:
                     except Exception as e:
                         await self._send(ws, {"error": f"invalid task: {e}"})
                         continue
+                    # The prompt becomes recallable input history **here**, where the
+                    # daemon accepts it, and not in a client (issue #2349): a list held by
+                    # the client is per process, per client and lost on exit, and the two
+                    # clients would need two stores that can disagree. Recorded before the
+                    # busy check so a prompt queued behind a running turn is recallable
+                    # too — the host typed it, whether or not it ran yet.
+                    session = self._get_or_create_session(session_id, Path(cwd))
+                    # …for the prompts the **host** typed. A scheduled task is not one:
+                    # `TaskHandler` builds its prompt from a template and sends it down
+                    # this same path, so filing on "a task arrived" would put one ~44 KB
+                    # task prompt per cycle into the evolution session's recall list and
+                    # rewrite that whole file on every append to do it. The producer
+                    # says which it is (issue #2369's veto), and the absence of that
+                    # word is a client — the only other producer is the upgrade
+                    # session, which builds a `TaskRequest` and calls the tool loop
+                    # directly rather than sending a message.
+                    if data.get("input_history", True):
+                        session.append_input_history(req.prompt)
                     # Rant 2026-08-20T18:18: Ask/Auto modes removed — every
                     # interactive message allows tools; the sandbox tier
                     # (req.sandbox, per-message) controls file permissions.
@@ -1576,7 +1594,9 @@ class EmrgServer:
                         if _cancel_event:
                             _cancel_event.set()
                         _tool_task.cancel()
-                    session = self._get_or_create_session(session_id, Path(cwd))
+                    # `session` was resolved above, where the prompt was recorded as input
+                    # history — the same object, so the tier is read off the session this
+                    # turn's prompt was just filed under.
                     # The turn's tier is the **session's** (rant 2026-09-30T09:30:16):
                     # resolved here, where the turn begins as a client's, and carried
                     # on the request the loop reads — the injection rule
@@ -3479,6 +3499,53 @@ class EmrgServer:
                 "session_id": session_id,
                 "messages": history_messages,
                 "has_more": has_more,
+            })
+
+        elif msg_type == "list_input_history":
+            # The prompts the host typed, per session (issue #2349). A reading, not a
+            # recording: the daemon files each prompt when it accepts the `task`, so a
+            # client that never asked would still find its history here after a restart,
+            # in the other client, and after a rewind or a compaction.
+            session_id = msg.get("session_id", "")
+            cwd = msg.get("cwd", "")
+            if not session_id or not cwd:
+                await self._send(ws, {
+                    "type": "input_history",
+                    "error": "list_input_history requires session_id and cwd",
+                })
+                return
+            session = self._get_or_create_session(session_id, Path(cwd))
+            records = session.read_input_history()
+            try:
+                limit = msg.get("limit")
+                limit = int(limit) if limit is not None else None
+                offset = int(msg.get("offset", 0) or 0)
+            except (TypeError, ValueError):
+                await self._send(ws, {
+                    "type": "input_history",
+                    "error": "list_input_history takes an integer limit and offset",
+                })
+                return
+            # Counted back from the **newest**, like `list_history`'s offsets: recall walks
+            # backwards from the prompt just typed, so "the most recent N" is the window a
+            # client actually asks for. `entries` is still handed over oldest-first within
+            # that window, because that is the order the list is walked.
+            total = len(records)
+            end = max(0, total - max(0, offset))
+            start = max(0, end - limit) if limit is not None else 0
+            entries = [
+                {
+                    "index": i,
+                    "text": str(records[i].get("text", "")),
+                    "timestamp": str(records[i].get("timestamp", "")),
+                }
+                for i in range(start, end)
+            ]
+            await self._send(ws, {
+                "type": "input_history",
+                "session_id": session_id,
+                "entries": entries,
+                "has_more": start > 0,
             })
 
         elif msg_type == "rewind_session":

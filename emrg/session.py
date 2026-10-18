@@ -34,6 +34,12 @@ logger = logging.getLogger(__name__)
 _LLM_LOG_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 _LLM_LOG_BACKUP_COUNT = 2
 
+#: How many prompts a session's input history keeps (issue #2349). Recall is a list walked
+#: backwards from the newest, so what matters is that a long-lived session's cost stays
+#: flat — 200 is far past what anyone scrolls to and small enough that the file is one
+#: cheap read on every append.
+_INPUT_HISTORY_MAX = 200
+
 
 def generate_session_id(cwd: Path) -> str:
     """Generate a human-friendly session ID: s_YYMMDD_HHMM_xxxxxxxx.
@@ -641,6 +647,70 @@ class Session:
                         records.append(json.loads(line))
                     except json.JSONDecodeError:
                         logger.warning("corrupt line in history.jsonl, skipping")
+        return records
+
+    def _input_history_path(self) -> Path:
+        """Where the prompts the host typed are kept, per session (issue #2349)."""
+        return self._dir / "input_history.jsonl"
+
+    def append_input_history(self, text: str) -> None:
+        """Record one accepted prompt as recallable input history.
+
+        A **separate file** from `history.jsonl`, deliberately, and the separation is the
+        whole design: `history.jsonl` also holds the per-turn `context` record and one
+        `summary` record per compaction, and both reach the model as user messages while
+        nobody typed them — a filter over `role == "user"` would hand the host their own
+        injected clock text as a recallable command. It also lets recall survive what
+        conversation history does not: `rewind` truncates the conversation and `compact`
+        rewrites it, and the text the host typed is exactly what they want back afterwards.
+
+        Consecutive identical prompts collapse into one entry, because pressing up three
+        times to reach the third distinct prompt is the point of recalling a list; the file
+        is capped at `_INPUT_HISTORY_MAX` entries, dropping the oldest, so a long-lived
+        session's recall cost stays flat.
+        """
+        prompt = (text or "").strip()
+        if not prompt:
+            return
+        records = self.read_input_history()
+        if records and str(records[-1].get("text", "")) == prompt:
+            return
+        records.append({"timestamp": datetime.now().isoformat(), "text": prompt})
+        if len(records) > _INPUT_HISTORY_MAX:
+            records = records[-_INPUT_HISTORY_MAX:]
+
+        path = self._input_history_path()
+        _refuse_a_non_regular_subject(path)
+        # Rewritten whole rather than appended to: the cap is enforced on write, and a
+        # half-written tail is what an append-then-truncate would produce if the process
+        # died between the two. The temporary file is a sibling so the rename stays on one
+        # filesystem, which is what makes it atomic.
+        tmp = path.with_name(path.name + ".tmp")
+        _refuse_a_non_regular_subject(tmp)
+        with open(tmp, "w", encoding="utf-8") as f:
+            for record in records:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        os.replace(tmp, path)
+
+    def read_input_history(self) -> list[dict]:
+        """The recorded prompts, oldest first — the order recall walks backwards through."""
+        path = self._input_history_path()
+        if not path.exists():
+            return []
+        _refuse_a_non_regular_subject(path)
+        records: list[dict] = []
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    logger.warning("corrupt line in input_history.jsonl, skipping")
+                    continue
+                if isinstance(record, dict) and isinstance(record.get("text"), str):
+                    records.append(record)
         return records
 
     def get_messages_for_llm(self, since: str = "") -> list[dict]:

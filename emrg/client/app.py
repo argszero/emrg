@@ -1277,6 +1277,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
 
     async def read_server():
         nonlocal stream_buffer, status, history, chat, busy, server_id, need_new_assistant, session_id, session_title, msg_count, _welcomed
+        nonlocal history_index, history_saved_input
         nonlocal turn_ended_cancelled, cancel_receipt_held
         nonlocal current_model, current_vision, current_sandbox, current_roots
         nonlocal _last_center, _elapsed_task, conn
@@ -1874,6 +1875,30 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     term.render()
                     continue
 
+                # The prompts the host typed in **this** session (issue #2349). The
+                # daemon owns them, so this is an adoption rather than a merge: the list
+                # is what the session's file holds, which is what makes recall survive a
+                # client restart, a rewind, a compaction, and the other client.
+                if data.get("type") == "input_history":
+                    err = data.get("error", "")
+                    if err:
+                        # Recall is a convenience; failing to load it must not take the
+                        # session down. Said once, on the transcript, because a silently
+                        # empty list and a list that could not be read look identical to
+                        # the arrow keys.
+                        chat.add("system", f"Could not load input history: {err}")
+                        term.render()
+                        continue
+                    if data.get("session_id") == session_id:
+                        history[:] = [
+                            str(entry.get("text", ""))
+                            for entry in data.get("entries", [])
+                            if entry.get("text")
+                        ]
+                        history_index = -1
+                        history_saved_input = ""
+                    continue
+
                 # History list (for /rewind)
                 if data.get("type") == "history_list":
                     nonlocal rewind_sel
@@ -2320,6 +2345,19 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     parked_user_rows.clear()
                     chat.dirty = True
                     _replay_pending = (session_id, meta)
+                    # Recall belongs to the session, so the list this client held is
+                    # dropped with the transcript and re-read from the daemon (issue
+                    # #2349): one list shared across sessions means the up arrow in a
+                    # freshly opened session recalls what the host typed in the previous
+                    # one, and a list held only here is gone when the client exits.
+                    history.clear()
+                    history_index = -1
+                    history_saved_input = ""
+                    await conn.send_command(
+                        "list_input_history",
+                        session_id=session_id,
+                        cwd=cwd,
+                    )
                     await conn.send_command(
                         "list_history",
                         session_id=session_id,
@@ -3565,7 +3603,13 @@ Streaming
                 # answers with `user_message` (rant 2026-10-09T09:25:00).
                 rid = new_task_id()
                 parked_user_rows.park(rid, chat.add("user", inp.text))
-                history.append(text); stream_buffer = ""
+                # Mirror the daemon's rule here so the list this client walks back
+                # through is the one the daemon will hold: consecutive identical prompts
+                # collapse, and the authoritative copy is re-read on the next session
+                # switch (issue #2349).
+                if text.strip() and (not history or history[-1] != text.strip()):
+                    history.append(text.strip())
+                stream_buffer = ""
                 history_index = -1  # reset history navigation on submit
                 chat.add("assistant", "")
                 msg_count += 1; _update_left_extra()
