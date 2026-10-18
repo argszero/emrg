@@ -1290,4 +1290,27 @@ describe("Composer — 输入历史召回（issue #2349 part 2/2）", () => {
     s.press("ArrowDown");
     expect(content(s)).not.toBe("draft A");
   });
+
+  it("召回中发送：这条离手，指针归零、草稿快照作废（下一次 ↑ 从最新一条重来，↓ 不会把召回前的草稿塞回来）", async () => {
+    const store = createTranscriptStore();
+    const sendMessage = vi.fn(async () => ({ requestId: "r1" }));
+    const s = setup(store, { inputHistory: ["first", "second"], sendMessage });
+    await waitEditor(s);
+
+    // 先在召回里，然后发送：此刻 historyIndexRef 指向 "second"、草稿快照里躺着 "draft"。
+    s.type("draft");
+    s.press("ArrowUp");
+    expect(content(s)).toBe("second");
+    s.press("Enter");
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
+    expect(content(s)).toBe("");
+
+    // 指针已归零 ⇒ 下一次 ↑ 是最新一条，而不是从指针原地再退一格。
+    s.press("ArrowUp");
+    expect(content(s)).toBe("second");
+    // 草稿快照已作废 ⇒ 走过最新一条是空输入框，不是召回前那份 "draft"
+    // （那条消息已经随发送离手，留着它会把旧草稿当成"用户还没发的东西"还回去）。
+    s.press("ArrowDown");
+    expect(content(s)).toBe("");
+  });
 });

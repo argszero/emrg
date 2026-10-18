@@ -31,6 +31,9 @@ function mockEmrg() {
   const listMemories = vi.fn().mockResolvedValue([]);
   const listSkills = vi.fn().mockResolvedValue([]);
   const listHistory = vi.fn().mockResolvedValue({ messages: [] });
+  // Issue #2349 part 2/2: the prompts the host typed in this session, as the daemon
+  // holds them (oldest first) — the list the composer's ↑ walks.
+  const listInputHistory = vi.fn().mockResolvedValue({ entries: ["first", "second"], hasMore: false });
   // Batch 5 slice 8：任务 CRUD + Rant 提交（window.emrg 桥已暴露，main.js IPC 在列）
   const taskCreate = vi.fn().mockResolvedValue({ ok: true });
   const taskUpdate = vi.fn().mockResolvedValue({ ok: true });
@@ -54,6 +57,7 @@ function mockEmrg() {
     listMemories,
     listSkills,
     listHistory,
+    listInputHistory,
     taskCreate,
     taskUpdate,
     taskDelete,
@@ -75,6 +79,7 @@ function mockEmrg() {
     listTasks,
     listRants,
     listHistory,
+    listInputHistory,
     taskCreate,
     taskUpdate,
     taskDelete,
@@ -962,5 +967,67 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
     await waitFor(() =>
       expect(m.sendRant).toHaveBeenCalledWith({ message: "hello world", project: "emrg" }),
     );
+  });
+
+  // ── 输入历史召回（issue #2349 part 2/2）：三件分开测过的东西在**这里**被要求接上 ──
+  // bridge 有自己的测试（listInputHistory 写 store、notePromptSubmitted 追加），Composer
+  // 有自己的测试（方向键怎么走），Shell 两者都不测 —— 而那几条接线恰恰是上一张 ❌ 点名的
+  // 东西：删掉任意一条，其余全套仍然绿。这两条测试就是那些接线的看守。
+
+  /** 编辑器当前文本（tiptap contenteditable 的 textContent） */
+  const composerText = () => screen.getByTestId("composer-input").textContent;
+
+  /** 在输入框上按一个键（Composer 的 handleKeyDown 挂在同一个元素上） */
+  function pressInComposer(key: string) {
+    screen.getByTestId("composer-input").dispatchEvent(
+      new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }),
+    );
+  }
+
+  /** 等 bridge 把一次 IPC 答复落进 store（答复在微任务里落地） */
+  async function settle() {
+    await act(async () => {
+      await Promise.resolve();
+    });
+  }
+
+  it("会话一打开就去 daemon 取这个会话的输入历史，取到的那份直接给方向键用（issue #2349 part 2/2）", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(screen.getByTestId("composer-input")).toBeInTheDocument());
+    // ① 按**会话**读：列表的权威在 daemon，客户端手上没有自己的副本。
+    //    这条断言红 ⇒ 真机上方向键永远空着。
+    await waitFor(() => expect(m.listInputHistory).toHaveBeenCalledWith({ sessionId: "s1" }));
+    await settle();
+    // ② 读到的列表必须真的交到 Composer 手上（Shell → provider → prop → 方向键）：
+    //    任何一环缺名，IPC 通了、store 有了，键盘上仍然什么也不发生。
+    pressInComposer("ArrowUp");
+    await waitFor(() => expect(composerText()).toBe("second"));
+    pressInComposer("ArrowUp");
+    await waitFor(() => expect(composerText()).toBe("first"));
+    pressInComposer("ArrowDown");
+    await waitFor(() => expect(composerText()).toBe("second"));
+  });
+
+  it("刚发出去的那一条立刻进召回列表：↑ 先撞见它，再往回才是 daemon 交来的旧条目（issue #2349 part 2/2）", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(m.listInputHistory).toHaveBeenCalledWith({ sessionId: "s1" }));
+    await settle();
+    await typeIntoComposer("hello there");
+    pressInComposer("Enter");
+    await waitFor(() => expect(m.sendMessage).toHaveBeenCalled());
+    await settle();
+    // ③ 发送成功后 Shell 要把这一条接进列表（onPromptSent → notePromptSubmitted）。
+    //    删掉那条接线 ⇒ 这里只翻得到 "second"，也就是上一张 ❌ 描述的那个缺陷：
+    //    在刚打了五句话的会话里按 ↑，列表停在会话打开那一刻。
+    pressInComposer("ArrowUp");
+    await waitFor(() => expect(composerText()).toBe("hello there"));
+    pressInComposer("ArrowUp");
+    await waitFor(() => expect(composerText()).toBe("second"));
   });
 });
