@@ -135,6 +135,15 @@ Read what others landed upstream, why, and whether it needs a follow-up. The def
 
 **This task keeps no state file — the session itself is the state.** The daemon replays this session's history into every cycle, so your own earlier messages here, plus the memory index under `{{ source_dir }}/.emrg/memory/`, ARE "where the last cycle left off". Reconstruct from them: the phase the last cycle ran, the next step its closing summary named, our open PRs and their state, and what is blocked and on whom. When the history is silent or ambiguous, re-check reality (§1.1–§1.2) rather than assume — **never assume a PR was merged**. A cycle that ends without a closing summary strands the next one, which is why §4 is not optional.
 
+#### 1.6 The project's extension surface
+
+**A contribution need not pass through the upstream.** A project that publishes an extension surface — a plugin or adapter API, a hook list, a theme or skill format — accepts work through it on its own terms: an extension can live in its own repository, ship on its own channel, and need no maintainer to merge anything. Where the upstream keeps its issues and pull requests closed, that surface is the only channel there is, so a cycle that read §1.1 alone would find nothing to do while the project is wide open one layer over.
+
+- **Read it as a candidate source, not as documentation.** Name the layer in the project's own words — what an extension *is* here, how one is loaded, what it may not replace — and where its contract is stated. The candidate to look for is one that falls *inside* it: behaviour the core does not own, and an extension can supply.
+- **Name the layer every candidate lands in.** "The extension surface" and "the core, and only the core" are both readings, and each tells a later cycle something it can act on. A gap whose fix belongs to the core is still a candidate, named as such; "no candidate" standing alone is a conclusion a reading that skipped this section could not have supported.
+- **After publishing, close the loop.** Return to the discussion, issue or thread the extension answers and say it exists — a link, one line of what it does, and its relation to what was reported. An extension nobody hears about changes nothing.
+- **Your own artifacts take feedback like any repository.** The ones you published have issue trackers too, and nobody else is answering them.
+
 ---
 
 ### 2. Think
@@ -150,7 +159,7 @@ Read what others landed upstream, why, and whether it needs a follow-up. The def
 | none of the above | **Recon** — this cycle's work is the reading itself |
 
 - **One phase per cycle, and Recon is a phase rather than a wasted one**: a cycle that reads and names the direction it found is a finished cycle, and the next one contributes. Do not aim for completeness — aim for progress.
-- Recon found nothing? Say so with the readings that showed it (no open issue, no open PR awaiting review, no rant in this project's queue) and finish.
+- Recon found nothing? Say so with the readings that showed it (no open issue, no open PR awaiting review, no rant in this project's queue, no gap inside the project's extension surface — §1.6) and finish.
 
 ---
 
