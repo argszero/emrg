@@ -1344,3 +1344,74 @@ describe("Composer — 输入历史召回（issue #2349 part 2/2）", () => {
     expect(onPromptSent).toHaveBeenCalledWith("s1", "typed in s1");
   });
 });
+
+/**
+ * issue #2384 — `/rewind` 把选中的那条原文放回输入框。
+ *
+ * 与草稿恢复（`getComposerDraft`）的区别正是这条测试存在的原因：草稿是**受控值**，
+ * 输入框每次挂载读一次；而 rewind 的回填是宿主在输入框已经挂载、可能正在打字时发生的
+ * **一次性插入**。所以它按 `id` 应用一次，绝不覆盖宿主之后打的字，也绝不自动发送。
+ */
+describe("Composer — /rewind 回填（issue #2384）", () => {
+  const LONG = "第一行\n\n第二行：" + "x".repeat(300);
+
+  function mountWithInsert(text: string) {
+    const store = createTranscriptStore();
+    const sendMessage = vi.fn(async () => ({ ok: true }) as unknown as SendResult);
+    const editorRef: MutableRefObject<Editor | null> = { current: null };
+    const tree = (insert: { id: number; text: string } | null) => (
+      <I18nProvider lang="zh">
+        <Composer
+          store={store}
+          sid="s1"
+          sandbox="workspace-write"
+          editorRef={editorRef}
+          sendMessage={sendMessage}
+          insertRequest={insert}
+        />
+      </I18nProvider>
+    );
+    const utils = render(tree(null));
+    return { ...utils, store, sendMessage, editorRef, text: LONG, rerenderWith: (insert: { id: number; text: string } | null) => utils.rerender(tree(insert)) };
+  }
+
+  it("整段原文进输入框（不是 preview 截断），光标在末尾，且不自动发送", async () => {
+    const m = mountWithInsert(LONG);
+    await waitFor(() => expect(m.editorRef.current).not.toBeNull());
+    const editor = m.editorRef.current!;
+
+    act(() => {
+      m.rerenderWith({ id: 1, text: LONG });
+    });
+
+    // 逐字相等（走 tiptap 的 markdown 序列化，与草稿恢复同一条路）。
+    const md = (editor.storage as unknown as { markdown: { getMarkdown(): string } }).markdown.getMarkdown();
+    expect(md).toBe(LONG);
+    // 光标在末尾：紧接着插入的字符落在最后，而不是开头。
+    act(() => {
+      editor.commands.insertContent("!");
+    });
+    expect(editor.getText().trimEnd().endsWith("!")).toBe(true);
+    // 不自动发送：回填是给宿主改的，发不发由宿主决定。
+    expect(m.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("同一次请求只应用一次：宿主之后打的字不会被重渲染盖掉", async () => {
+    const m = mountWithInsert(LONG);
+    await waitFor(() => expect(m.editorRef.current).not.toBeNull());
+    const editor = m.editorRef.current!;
+
+    act(() => {
+      m.rerenderWith({ id: 1, text: LONG });
+    });
+    act(() => {
+      editor.commands.focus("end");
+      editor.commands.insertContent("追加");
+    });
+    // 同一个 id 再渲染一次（父级重渲染、会话无关的状态变化都会走到这里）。
+    act(() => {
+      m.rerenderWith({ id: 1, text: LONG });
+    });
+    expect(editor.getText()).toContain("追加");
+  });
+});

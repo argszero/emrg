@@ -114,6 +114,11 @@ export function Shell() {
   const [activeSid, setActiveSid] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<"sessions" | WorkspaceViewId>("sessions");
   const dialogHost = useRef<DialogHostHandle>(null);
+  // `/rewind` picked a message and that message's text goes back into the composer
+  // (issue #2384). A request, not a controlled value: the input's live content belongs
+  // to the host, so each pick carries a fresh id and the composer applies it once.
+  const [composerInsert, setComposerInsert] = useState<{ id: number; text: string } | null>(null);
+  const composerInsertSeq = useRef(0);
   // workspace 面板数据（Batch 5 接线：项目/任务/Rant 真实列表 + 项目会话）
   const [projects, setProjects] = useState<ProjectRec[]>([]);
   const [tasks, setTasks] = useState<TaskRec[]>([]);
@@ -836,6 +841,9 @@ export function Shell() {
                 // 会话」里就只能翻到会话打开那一刻为止——而那正是宿主最常按 ↑ 的时候。
                 onPromptSent={(sid, text) => bridge.notePromptSubmitted(sid, text)}
                 onManageSandboxRoots={() => dialogHost.current?.openSandbox([])}
+                // /rewind 的选中结果（issue #2384）：文本由 DialogHost 交上来，这里只
+                // 负责给它一个新 id——同一个 id 只应用一次，宿主之后打的字不会被盖掉。
+                insertRequest={composerInsert}
               />
             </>
           )}
@@ -849,6 +857,12 @@ export function Shell() {
           appState={appState}
           onSwitchSession={selectSession}
           onSandboxRootsOp={(op, path) => void bridge.setSandboxRoots(activeSid, op, path)}
+          // 回退选中的那条的**原文**交回输入框（issue #2384）：与 TUI 同一个行为，
+          // 两端在 rewind 之后的差别只剩下渲染方式。
+          onRewindPicked={(text) => {
+            composerInsertSeq.current += 1;
+            setComposerInsert({ id: composerInsertSeq.current, text });
+          }}
         />
         <ConfirmDialog request={dialogState.confirm} onDismiss={() => dispatch({ type: "close-confirm" })} />
         {/*

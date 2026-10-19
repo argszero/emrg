@@ -93,6 +93,8 @@ function setup(opts: {
   onSandboxRootsOp?: (op: "add" | "remove" | "list", path: string) => void;
   /** appState 覆盖（store 里已有的根/notice 由它注入） */
   state?: Partial<DaemonAppState>;
+  /** /rewind 选中之后把原文交回输入框（issue #2384；Shell 接 Composer 的插入请求） */
+  onRewindPicked?: (text: string) => void;
 } = {}) {
   const { bridge, calls } = mockEmrg(opts.over);
   const ref: RefObject<DialogHostHandle | null> = createRef();
@@ -109,6 +111,7 @@ function setup(opts: {
         appState={appState(opts.state)}
         onSwitchSession={onSwitchSession}
         onSandboxRootsOp={opts.onSandboxRootsOp}
+        onRewindPicked={opts.onRewindPicked}
       />
     </I18nProvider>,
   );
@@ -192,6 +195,49 @@ describe("DialogHost (Batch 5 slice 4)", () => {
     fireEvent.click(screen.getByText("#3"));
     await waitFor(() => expect(calls.rewindSession.length).toBe(1));
     expect(calls.rewindSession[0][0]).toMatchObject({ sessionId: "s1", recordIndex: 3 });
+  });
+
+  it("/rewind 选中之后交回的是那条的原文，不是行里的截断 preview", async () => {
+    // issue #2384：行里画的是 `preview`（60 字截断），拿它回填会把一条长消息截短，
+    // 而 `/rewind` 的用意正是「重新说一遍」。这里同时给出两者，断言交上去的是全文。
+    const full = "第一行\n\n第二行：" + "x".repeat(400);
+    const picked: string[] = [];
+    const { ref, calls } = setup({
+      sid: "s1",
+      onRewindPicked: (text) => picked.push(text),
+      over: {
+        listHistory: vi.fn().mockResolvedValue({
+          messages: [{ record_index: 7, content: full, preview: full.slice(0, 60) }],
+        }),
+      },
+    });
+    ref.current?.openRewind();
+    await waitFor(() => expect(screen.getByTestId("rewind-dialog")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("#7")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("#7"));
+    await waitFor(() => expect(calls.rewindSession.length).toBe(1));
+    await waitFor(() => expect(picked).toEqual([full]));
+  });
+
+  it("/rewind 的回退被拒绝时不回填输入框", async () => {
+    // 被拒绝的回退没有改写任何历史，宿主的输入框就不该被换掉。
+    const picked: string[] = [];
+    const { ref } = setup({
+      sid: "s1",
+      onRewindPicked: (text) => picked.push(text),
+      over: {
+        listHistory: vi.fn().mockResolvedValue({
+          messages: [{ record_index: 3, content: "hello world", preview: "hello world" }],
+        }),
+        rewindSession: vi.fn().mockRejectedValue(new Error("no such record")),
+      },
+    });
+    ref.current?.openRewind();
+    await waitFor(() => expect(screen.getByText("#3")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("#3"));
+    // 失败留在对话框里（不关闭、不静默），输入框一个字都不动。
+    await waitFor(() => expect(screen.getByTestId("rewind-dialog").textContent).toContain("no such record"));
+    expect(picked).toEqual([]);
   });
 
   it("/rename 无会话 → needSession；有会话 → 提交 renameSession", async () => {

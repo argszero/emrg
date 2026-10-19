@@ -304,7 +304,10 @@ class RewindSelector(Widget):
     """Interactive message picker for /rewind — arrow-key navigation with highlight.
 
     Renders a list of user messages with the selected one in reverse video.
-    Selecting a message rewinds the session to that point (truncates after it).
+    Selecting a message rewinds the session to that point: the daemon keeps the
+    records before the selected one and drops the selected message with everything
+    after it (`records[:record_index]`), and the client puts that message's text
+    back in the input box so it can be said again.
     """
 
     def __init__(self, messages: list[dict] | None = None):
@@ -334,6 +337,18 @@ class RewindSelector(Widget):
     def selected_record_index(self) -> int | None:
         if 0 <= self.selected_index < len(self.messages):
             return self.messages[self.selected_index].get("record_index")
+        return None
+
+    @property
+    def selected_message(self) -> dict | None:
+        """The entry under the cursor, whole — the caller reads its `content`.
+
+        The entry is what `list_history` sent: `content` is the message itself and
+        `preview` is an 80-character summary for the row. A caller that kept only
+        the index lost the text with this widget (issue #2384).
+        """
+        if 0 <= self.selected_index < len(self.messages):
+            return self.messages[self.selected_index]
         return None
 
     def render(self, ctx):

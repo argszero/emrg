@@ -174,6 +174,15 @@ export interface ComposerProps {
   onManageSandboxRoots?: () => void;
   /** 测试注入：挂载后回填 tiptap Editor 实例（命令驱动测试用） */
   editorRef?: MutableRefObject<Editor | null>;
+  /**
+   * 把一段文本放进输入框（issue #2384，GUI 半边）。
+   *
+   * `/rewind` 的用意是「这条说错了，我要重新说」，所以它除了改写历史，还要把那条
+   * 消息**原文**放回输入框：光标在末尾、不自动发送、多行照原样保留。父级给出的是
+   * 一次**请求**（`id` 单调递增），不是受控值——输入框的实时内容属于宿主，把外部
+   * 一次性的插入做成受控值，会让每个按键都变成一次覆盖。同 `id` 只应用一次。
+   */
+  insertRequest?: { id: number; text: string } | null;
 }
 
 const MAX_INPUT_HEIGHT = 150;
@@ -262,6 +271,7 @@ export function Composer({
   onPromptSent,
   onManageSandboxRoots,
   editorRef,
+  insertRequest = null,
 }: ComposerProps) {
   const { t } = useI18n();
   const [menu, setMenu] = useState<CmdMenuState>(CMD_MENU_CLOSED);
@@ -629,6 +639,24 @@ export function Composer({
       if (editorRef) editorRef.current = null;
     };
   }, [editor, editorRef]);
+
+  // 外部一次性插入（issue #2384，GUI 半边）：`/rewind` 选中那条的原文回到输入框。
+  //
+  // 以 `id` 去重而不是「值变了就覆盖」：宿主的实时输入属于宿主，一次请求只应生效
+  // 一次，否则之后每次重渲染都会把它写回输入框，把宿主接着打的字盖掉。光标置于末尾
+  // （`focus("end")`）、绝不自动发送——发不发由宿主决定。
+  const appliedInsertRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!insertRequest || !editor) return;
+    if (appliedInsertRef.current === insertRequest.id) return;
+    appliedInsertRef.current = insertRequest.id;
+    editor.commands.setContent(insertRequest.text);
+    editor.commands.focus("end");
+    setHasText(insertRequest.text.trim().length > 0);
+    setMenu(CMD_MENU_CLOSED);
+    // 草稿一起写：切走再回来的「重挂载」路径读的是 store，不是 editor。
+    storeRef.current.setComposerDraft(insertRequest.text, sidRef.current);
+  }, [insertRequest, editor, store]);
 
   // 格式栏激活态（Stage 2）：订阅 editor 事务，按钮高亮当前格式（无 deps → 每次事务重算）
   const active =

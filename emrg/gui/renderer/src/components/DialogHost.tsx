@@ -102,6 +102,15 @@ export interface DialogHostProps {
    * 只是发不出命令。
    */
   onSandboxRootsOp?: (op: "add" | "remove" | "list", path: string) => void;
+  /**
+   * `/rewind` 选中某一条之后，把那条的**原文**交给输入框（issue #2384）。
+   *
+   * 回退本身走 `rewindSession`，历史由 daemon 改写、转录由 Shell 依据广播重建；这里
+   * 交上去的只是文字。之所以在对话框这一层取：选中项与它的 `content` 只在这里同时
+   * 可见，行里显示的是被截断的 `preview`，用它回填会把一条长消息截成 60 字。未接线
+   * （单测 / 无 preload）时为 undefined：回退照常生效，只是不回填。
+   */
+  onRewindPicked?: (text: string) => void;
 }
 
 export interface DialogHostHandle {
@@ -128,7 +137,7 @@ export interface DialogHostHandle {
 }
 
 export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function DialogHost(
-  { sid, sessions, transcript, appState, onSwitchSession, onSandboxRootsOp },
+  { sid, sessions, transcript, appState, onSwitchSession, onSandboxRootsOp, onRewindPicked },
   ref,
 ) {
   const { t } = useI18n();
@@ -493,6 +502,11 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
           if (!b || !sid) return;
           try {
             await b.rewindSession({ sessionId: sid, recordIndex: index });
+            // 选中那条的**原文**（issue #2384）：行里画的是 `preview`（60 字截断），
+            // 拿它回填会把一条长消息截短，而 `/rewind` 的用意正是「重新说一遍」。
+            // 只在回退被接受之后交：被拒绝的回退不该改动宿主的输入框。
+            const picked = points?.find((p) => p.record_index === index);
+            if (picked) onRewindPicked?.(String(picked.content ?? picked.preview ?? ""));
             closeDialog("rewind");
           } catch (e) {
             setRewindError((e as Error)?.message ?? String(e));
