@@ -1186,6 +1186,41 @@ def test_open_source_template_full_code_study_b2b():
     assert "Only when you understand the author's design intent should you consider how to contribute" in out, "理解设计意图后才可贡献应渲染"
 
 
+def test_open_source_template_measures_the_shipped_artifact():
+    """open_source_prompt.md §3.1.3 measures a defect on what the project ships.
+
+    A defect is a claim about the released artifact, not about the checkout: a report
+    of an already-fixed defect, or a patch built on behaviour the release does not
+    have, spends the trust the next report needs (issue #2386).
+    """
+    import jinja2
+
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "emrg" / "server" / "open_source_prompt.md"
+    )
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(template_path.read_text(encoding="utf-8"))
+    out = template.render(
+        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
+        timestamp="20260814",
+        task={"role": "committer", "project": "aitokenpool"},
+        project={}, git_path="git", gh_path="gh",
+    )
+    # 1) a defect is measured on the shipped artifact, not only on the checkout
+    assert "A defect is a claim about what the project ships, so measure it there." in out, "shipped 产物节应渲染"
+    # 2) the report names which artifact the reading came from
+    assert "say which artifact the reading came from" in out, "应要求说明读的是哪个产物"
+    # 3) the fix-released check is spelled, with the command that answers it
+    assert "git merge-base --is-ancestor <fix-commit> <release-tag-commit>" in out, "应给出发布线是否已含修复的判定命令"
+    assert "already-fixed defect" in out, "应点明误报已修复缺陷的代价"
+    # 4) one reader is a hypothesis until a second, independent one agrees
+    assert "one reader is a hypothesis until a second, independent one agrees" in out, "应要求第二个独立读数"
+    # 5) the rule lives in the section that owns establishing ground truth, not at the file's end
+    assert out.index("A defect is a claim about what the project ships") < out.index("##### 3.1.4 Fork, clone and branch"), "规则应落在 §3.1.3 内"
+
+
 def test_open_source_template_parallel_recon_c15():
     """open_source_prompt.md Phase C.1.5 allows parallel Recon when all open
     PRs are healthy (rant 2026-08-24T14:05:06): a long-lived healthy PR must
