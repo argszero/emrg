@@ -260,7 +260,14 @@ class InputWidget(Widget):
             # there is none) — that is what separates "wrapped" from "a new line of
             # input", and it is the condition the cursor-at-the-end placeholder needs.
             line_end = e >= len(self.text) or self.text[e] == "\n"
-            spans = [Span(prompt, style=pstyle)]
+            # The prompt is the *input's* first column, not each row's: a wrapped row and a
+            # later line of a multi-line input are indented by the same width, so the column
+            # budget does not move. `vi` runs from `top`, so `vi == 0` is the input's first
+            # row only while nothing has scrolled — once the box has scrolled past it, no
+            # visible row carries the prompt, because drawing one would claim the visible
+            # text is where the input begins (rant 2026-10-19T10:00:02; `python_tui/widgets/
+            # composer.py` indents the same way).
+            spans = [Span(prompt if vi == 0 else " " * len(prompt), style=pstyle)]
             if s <= self.cursor < e:
                 local = self.cursor - s
                 spans.append(Span(chunk[:local], style=ctx.style))

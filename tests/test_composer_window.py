@@ -241,7 +241,14 @@ def test_the_painted_frame_holds_the_cursor_row_at_every_height():
         rows = [i for i, (line, _) in enumerate(frame) if "line 40" in line]
         assert rows, f"h={height}: the row the cursor is on is not on the screen"
         assert frame[rows[0]][1], f"h={height}: no cursor cell painted on that row"
-        counts[height] = sum(1 for line, _ in frame if "> line " in line)
+        counts[height] = sum(
+            1
+            for line, _ in frame
+            # The input's own rows, whatever the prompt rule draws: the first carries
+            # `> `, a continuation two spaces (rant 2026-10-19T10:00:02). Counting `"> line "`
+            # here was the old shape, in which every row repeated the prompt.
+            if line.startswith("> line ") or line.startswith("  line ")
+        )
 
     # The window tracks the terminal's height. Anchored on the height and NOT on the
     # function's own answer — a test that recomputes the value under test agrees with any
@@ -295,4 +302,67 @@ def test_a_long_paste_cannot_squeeze_the_chat_area_off_the_screen():
     budget = term._composer_budget(max_vp, 2)
     assert max_vp - 2 - budget >= Terminal.MIN_CHAT_ROWS - 1, (
         "the composer's budget must leave the chat area its floor"
+    )
+
+
+# ── the prompt belongs to the input's first row, not to every row ───────────────────────
+#
+# Rant 2026-10-19T10:00:02: the box drew `> ` at the head of **every** visible row, so a
+# multi-line input rendered as a column of prompts and a copy of three lines pasted back
+# three `>` characters. The prompt marks where the input begins, so it is drawn once — on
+# the first row, and only while that row is inside the window. Continuation rows carry the
+# same width as blank space, so the column budget (`ctx.width - 2`) does not move.
+
+_PROMPT = "> "
+
+
+def _body(w: InputWidget, budget: int, width: int = 40) -> list[str]:
+    """The text rows of the frame: everything between the two separator rules."""
+    return _lines(w, budget, width)[1:-1]
+
+
+def _first_reverse_cell(w: InputWidget, budget: int, width: int = 40) -> tuple[int, str]:
+    """(column from the row's left edge, the reversed cell) for the first reverse span."""
+    ctx = RenderContext(width=width, height=budget)
+    for line in w.render(ctx):
+        col = 0
+        for span in line.spans:
+            if span.style.reverse:
+                return col, span.text
+            col += len(span.text)
+    raise AssertionError("no reverse-video cell was drawn, so there is no cursor to read")
+
+
+@pytest.mark.parametrize("text", [_numbered(3), "x" * 100])
+def test_the_prompt_is_drawn_on_the_first_row_only(text):
+    """A multi-line input and a wrapped long line each draw exactly one `> `."""
+    body = _body(_composer(text), budget=20)
+    assert len(body) > 1, f"the case needs more than one row to say anything: {body}"
+    assert body[0].startswith(_PROMPT), f"the first row carries the prompt: {body[0]!r}"
+    for row in body[1:]:
+        assert row.startswith(" " * len(_PROMPT)), (
+            f"a continuation row is indented by the prompt's width: {row!r}"
+        )
+        assert _PROMPT not in row, f"only the first row may carry the prompt: {row!r}"
+
+
+def test_a_scrolled_box_draws_no_prompt():
+    """With the first row scrolled out, no visible row claims to be the input's start."""
+    w = _composer(_numbered(20))
+    body = _body(w, budget=8)
+    assert body, "the frame must still draw the rows around the cursor"
+    assert not any(row.startswith(_PROMPT) for row in body), (
+        f"the row that would carry the prompt has scrolled out of the window: {body}"
+    )
+
+
+def test_the_cursor_stays_on_its_character_and_its_column():
+    """The indent is blank space, so the cursor's character and column are unmoved."""
+    text = "line one\nline two"
+    cursor = text.index("two")
+    col, cell = _first_reverse_cell(_composer(text, cursor=cursor), budget=10)
+    assert cell == "t", f"the cursor sits on the character it names: {cell!r}"
+    assert col == len(_PROMPT) + cursor - (text.index("\n") + 1), (
+        f"the second row's cursor column is the prompt width plus its offset in that row, "
+        f"got {col}"
     )
