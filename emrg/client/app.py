@@ -1366,11 +1366,22 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         async def _reconnect():
             """Attempt reconnection — blocks until successful."""
             nonlocal conn, busy, _elapsed_task
+            nonlocal _resume_pending_sid, _replay_pending, _rewind_replay
             # stop elapsed timer
             if _elapsed_task is not None:
                 _elapsed_task.cancel(); _elapsed_task = None
             busy = False  # pending request is lost
             _queued_sends.clear()  # daemon drops the queue on disconnect (queued_cancelled)
+            # Every marker here names a question whose answer died with the
+            # connection, and each is matched by session id alone — so a stale one
+            # is not inert, it takes the *next* answer for that session. A fresh
+            # `/rewind` asks for the rows its picker draws and would have them
+            # painted as a rewind redraw instead: no selector, and a note about a
+            # cut that never happened (issue #2390). They are dropped with the
+            # queue, for the same reason.
+            _resume_pending_sid = None
+            _replay_pending = None
+            _rewind_replay = None
             chat.add("system", "⏸ server connection lost — reconnecting...")
             status.update(center="reconnecting...")
             term.render()
