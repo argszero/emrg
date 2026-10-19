@@ -262,11 +262,12 @@ class InputWidget(Widget):
             line_end = e >= len(self.text) or self.text[e] == "\n"
             # The prompt is the *input's* first column, not each row's: a wrapped row and a
             # later line of a multi-line input are indented by the same width, so the column
-            # budget does not move. When the box has scrolled past the first row, the row
-            # that would carry it is above the window and none is drawn — drawing one there
-            # would claim the visible text is the input's beginning (rant 2026-10-19T10:00:02;
-            # `python_tui/widgets/composer.py` indents the same way).
-            spans = [Span(prompt if (vi == 0 and top == 0) else " " * len(prompt), style=pstyle)]
+            # budget does not move. `vi` runs from `top`, so `vi == 0` is the input's first
+            # row only while nothing has scrolled — once the box has scrolled past it, no
+            # visible row carries the prompt, because drawing one would claim the visible
+            # text is where the input begins (rant 2026-10-19T10:00:02; `python_tui/widgets/
+            # composer.py` indents the same way).
+            spans = [Span(prompt if vi == 0 else " " * len(prompt), style=pstyle)]
             if s <= self.cursor < e:
                 local = self.cursor - s
                 spans.append(Span(chunk[:local], style=ctx.style))
