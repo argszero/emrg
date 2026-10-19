@@ -319,22 +319,41 @@ def test_the_pty_gate_answers_what_the_host_can_do(monkeypatch):
 
     A gate exercised one way only is the defect it was written to fix: on a host that
     cannot allocate a pty the refusal branch is the only one that ever runs, and on CI the
-    success branch is — so neither host has measured the other. Both are driven here, and
-    the success arm checks the descriptors come back closed rather than leaked.
+    success branch is — so neither host has measured the other. All three answers are
+    driven here, and the success arm checks the descriptors come back closed rather than
+    leaked.
+
+    Every ``os.openpty`` below is set with ``raising=False``, because on Windows the
+    attribute does not exist at all and the arm that speaks for that platform has to be
+    able to run *there*. Without it this test died before its first assertion with
+    ``AttributeError: <module 'os' (frozen)> has no attribute 'openpty'`` (run 39300601625,
+    ``test-windows``) — the same defect one level up: a guard written for a gate that could
+    not run on Windows could not run on Windows either.
     """
     closed: list[int] = []
 
     def _refuse():
         raise PermissionError(1, "Operation not permitted")
 
-    monkeypatch.setattr(os, "openpty", _refuse)
+    # The platform answer comes first because it is the one branch that never touches the
+    # attribute: Windows has no `os.openpty` at all, so driving it here measures that branch
+    # on every host instead of only on the Windows leg.
+    monkeypatch.setattr(sys, "platform", "win32")
+    refusal = pty_refusal()
+    assert refusal is not None, "Windows cannot allocate a pty"
+    assert "POSIX" in refusal, "and the reason must name why"
+
+    # A POSIX host whose sandbox refuses the allocation — the case #2392 was opened for.
     monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(os, "openpty", _refuse, raising=False)
     refusal = pty_refusal()
     assert refusal is not None, "a host that cannot allocate a pty must say so"
     assert "PermissionError" in refusal, "the reason must name the error it met"
     assert "unmeasurable" in refusal, "and must say the probe could not be measured"
 
-    monkeypatch.setattr(os, "openpty", lambda: (101, 102))
+    # A host that can allocate one: the four gated tests must stay runnable, and the probe
+    # must not leak the pair it opened.
+    monkeypatch.setattr(os, "openpty", lambda: (101, 102), raising=False)
     monkeypatch.setattr(os, "close", closed.append)
     assert pty_refusal() is None, "a host that can allocate one must let the tests run"
     assert closed == [101, 102], "the probe must close both descriptors it opened"
