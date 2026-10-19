@@ -1211,7 +1211,12 @@ def test_open_source_template_measures_the_shipped_artifact():
     # 1) a defect is measured on the shipped artifact, not only on the checkout
     assert "A defect is a claim about what the project ships, so measure it there." in out, "shipped 产物节应渲染"
     # 2) the report names which artifact the reading came from
-    assert "say which artifact the reading came from" in out, "应要求说明读的是哪个产物"
+    assert "a report says which artifact its reading came from" in out, "应要求说明读的是哪个产物"
+    # 2b) it does not contradict the sentence above it: latest code for design
+    # intent, what ships for the defect — and a project that publishes nothing
+    # still has an artifact in the branch or tag its users run
+    assert "The latest code is still what you read for design intent" in out, "应与「读最新代码」并存而非互斥"
+    assert "where the project publishes neither" in out, "应覆盖不发布产物的项目"
     # 3) the fix-released check is spelled, with the command that answers it
     assert "git merge-base --is-ancestor <fix-commit> <release-tag-commit>" in out, "应给出发布线是否已含修复的判定命令"
     assert "already-fixed defect" in out, "应点明误报已修复缺陷的代价"
