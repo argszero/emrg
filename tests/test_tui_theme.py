@@ -11,10 +11,12 @@ bound, and made the degrade rule vacuous, and confirmed each turn the matching t
 """
 from __future__ import annotations
 
+import ast
 import io
 import os
 import select
 import sys
+from pathlib import Path
 
 import pytest
 from rich.style import Style as RichStyle
@@ -424,24 +426,75 @@ def test_the_da1_sentinel_ends_the_wait_early():
         os.close(master); os.close(slave); os.close(devnull)
 
 
-def test_the_sentinel_test_is_not_gated_on_a_real_pty():
-    """The gate above must not spread to the one test here that needs no pty.
+def _pty_sites() -> tuple[set[str], set[str]]:
+    """(tests that call ``os.openpty()`` themselves, tests carrying ``_needs_a_real_pty``).
 
-    `test_the_probe_reads_the_sentinel_reply_that_follows_the_colour` injects its own
-    chunks and opens `/dev/null`, so a host that cannot allocate a pty can still measure
-    it — applying `_needs_a_real_pty` to it would turn a passing measurement into a skip,
-    and nothing would go red to say so (measured: 59 passed / 4 skipped becomes 58 / 5,
-    all green either way). Its POSIX mark answers a different question, which its own
-    docstring states: the read loop it pins is unreachable on Windows.
+    Both readings come from the **source**, because the question is which decorator a test was
+    written with — a fact about the file, identical on every host. Two runtime readings were
+    tried and neither discriminates where it matters (both measured, cycle cyc20261020-062113):
+
+    - matching the capability mark's ``reason`` **text** finds nothing on a host that *can*
+      allocate a pty, where the reason is ``""`` — silent on both CI legs;
+    - comparing the mark itself by **equality** reports the gate as present on Windows, where
+      ``pty_refusal()`` returns the very sentence ``_needs_posix_tty`` uses, so the two marks
+      are equal there and every POSIX-marked test looks gated.
+
+    A source scan is host-independent, so the arm below reads the same thing on Linux, Windows
+    and a POSIX host whose pty allocation is refused.
     """
-    fn = globals()["test_the_probe_reads_the_sentinel_reply_that_follows_the_colour"]
-    reasons = [mark.kwargs.get("reason", "") for mark in getattr(fn, "pytestmark", [])]
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    allocates: set[str] = set()
+    gated: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or not node.name.startswith("test_"):
+            continue
+        for sub in ast.walk(node):
+            if (
+                isinstance(sub, ast.Call)
+                and isinstance(sub.func, ast.Attribute)
+                and sub.func.attr == "openpty"
+                and isinstance(sub.func.value, ast.Name)
+                and sub.func.value.id == "os"
+            ):
+                allocates.add(node.name)
+        for decorator in node.decorator_list:
+            target = decorator.func if isinstance(decorator, ast.Call) else decorator
+            if isinstance(target, ast.Name) and target.id == "_needs_a_real_pty":
+                gated.add(node.name)
+    return allocates, gated
 
-    assert any("POSIX" in reason for reason in reasons), (
-        "the sentinel test must stay marked POSIX — its subject does not exist on Windows"
+
+def test_the_capability_gate_sits_on_exactly_the_tests_that_allocate_a_pty():
+    """Both directions of the gate, so neither can be got wrong without a red row.
+
+    **Under-gating** — a test that calls ``os.openpty()`` without the gate fails on a host that
+    cannot allocate a pty: the four red rows #2392 was opened for. This arm had never pinned
+    that direction.
+
+    **Over-gating** — `test_the_probe_reads_the_sentinel_reply_that_follows_the_colour` injects
+    its own chunks and opens `/dev/null`, so it needs no pty. Gating it turns a passing
+    measurement into a skip — measured on this PR's first draft: 60 passed / 4 skipped becomes
+    58 / 5, every row green either way, nothing to say the measurement was lost. Its POSIX mark
+    answers a different question, which its own docstring states.
+    """
+    allocates, gated = _pty_sites()
+
+    assert allocates, "the source scan found no test calling os.openpty() — the scan is broken"
+    assert gated == allocates, (
+        "the capability gate must sit on exactly the tests that allocate a pty; "
+        f"ungated: {sorted(allocates - gated)}; "
+        f"gated but allocates nothing: {sorted(gated - allocates)}"
     )
-    assert not any("cannot allocate a pty" in reason for reason in reasons), (
+
+    sentinel = "test_the_probe_reads_the_sentinel_reply_that_follows_the_colour"
+    assert sentinel not in allocates, (
+        "the sentinel test injects its own chunks and must not start allocating a pty"
+    )
+    assert sentinel not in gated, (
         "it needs no pty, so gating it on one drops a measurement this host can make"
+    )
+    assert _needs_posix_tty.mark in getattr(globals()[sentinel], "pytestmark", []), (
+        "and its POSIX mark stays — the read loop it pins is unreachable on Windows"
     )
 
 
