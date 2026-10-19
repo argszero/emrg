@@ -120,7 +120,11 @@ Exit codes
     0  the plan's final tree was built and its suite passed (with `--steps`: every
        step's tree passed)
     1  the plan's final tree was built and its suite FAILED - the finding (with
-       `--steps`: at least one step's tree failed, and the step is named)
+       `--steps`: at least one step's tree failed, and the step is named). One code for
+       both owners on purpose: the tree does fail either way, and a red tree read as
+       something softer is the "could not measure reported as passed" defect. Which of
+       the two it is, is on the **verdict line itself** (`_verdict_line`), because the
+       stream the verdict is written to is the stream a reader keeps.
     2  the question could not be answered (git/gh failure, a base that names only
        a local branch or cannot be fetched, or the suite could not be run at all):
        fail loud, never report health that was not measured
@@ -179,6 +183,15 @@ whose text form is cut to `…[git commit -q -F` (issue #1386). The cut row is o
 tree does not contain, and a row a tree does not contain cannot fail there - so a row the
 base fails too is laid at a PR's door with "re-push the PR that owns the failure", which is
 precisely the harm #1378 removed, restored for those rows.
+
+The split is answered twice, and the second answer is the one a reader keeps: the
+paragraphs below carry the remedies on stderr, and the verdict line carries the owner on
+stdout (`_verdict_line`). Measured (cycle `cyc20261019-123519`, issue #2380): both states
+printed the same `suite FAILED: <rows>` on stdout, with the ownership sentence only on
+stderr, so a run piped through `tail` - or captured by anything that keeps one stream -
+could not tell "a PR in this plan owns it" from "the base owns every row". Those two have
+opposite next moves, and for a PR with standing votes the wrong one is a refresh, which
+voids them.
 
 So the row list comes from the run's own **machine-readable** report: the suite is invoked
 with `--junitxml` and `-o junit_family=xunit1` (the family that writes `file`, without
@@ -1230,6 +1243,42 @@ def _still_red_on(tip: str, rows: list[str], scratch: Path) -> set[str]:
         _run(["git", "worktree", "remove", "--force", str(worktree)])
 
 
+def _owned_rows(failing: list[str], inherited: set[str]) -> list[str]:
+    """The failing rows no base tree fails: the one place the split is computed.
+
+    Both the stderr paragraphs and the stdout verdict line describe this split, and a
+    second copy of "which rows are the plan's" is a second answer to one question - the
+    kind that drifts while both copies stay green against their own fixtures.
+    """
+    return [row for row in failing if row not in inherited]
+
+
+def _verdict_line(summary: str, failing: list[str], inherited: set[str]) -> str:
+    """The red verdict, saying whose failure it is on the stream the verdict is written to.
+
+    Measured (cycle cyc20261019-123519, issue #2380): this line used to read
+    `suite FAILED: <rows>` in both states, with the ownership sentence on stderr - so a
+    reader that keeps stdout alone (a log capture, a pipe through `tail`) could not tell
+    a failure the plan's tree owns from one every tree has, and those two states have
+    opposite next moves (`fix it on the merged tree and re-push the PR that owns the
+    failure` versus `fix it on the base instead`; a re-push voids the PR's votes).
+
+    The exit code stays `1` for both - the tree really does fail, and reading a red tree
+    as anything softer would be the "could not measure reported as passed" defect. What
+    is added is the discriminator, on the line that already carries the verdict.
+    """
+    own = _owned_rows(failing, inherited)
+    if own:
+        return (
+            f"suite FAILED: {summary} - this plan's tree owns {len(own)} of "
+            f"{len(failing)} failing row(s)"
+        )
+    return (
+        f"suite FAILED: {summary} - every failing row fails on the base tree too, "
+        "so no PR in this plan owns it"
+    )
+
+
 def _ownership_lines(
     base_tree: str, failing: list[str], inherited: set[str]
 ) -> tuple[str, str]:
@@ -1259,7 +1308,7 @@ def _ownership_lines(
     stops earlier with rc 3), and each owned row does not fail on the base tree
     (`_still_red_on` ran it there - absent and passing are both "does not fail").
     """
-    own = [row for row in failing if row not in inherited]
+    own = _owned_rows(failing, inherited)
     plan = ""
     if own:
         plan = (
@@ -1554,8 +1603,8 @@ def main(argv: list[str] | None = None) -> int:
         if passed:
             print(f"suite OK: {summary}")
             return _verdict(0)
-        print(f"suite FAILED: {summary}")
         if not failing:
+            print(f"suite FAILED: {summary}")
             print(
                 "\nThe suite reported a red tree without naming an individual failing row, "
                 "so nothing here says whether this plan or the base owns it. Re-run the "
@@ -1563,6 +1612,7 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return _verdict(1)
+        print(_verdict_line(summary, failing, inherited))
         plan_text, base_text = _ownership_lines(base_tree, failing, inherited)
         if plan_text:
             print(plan_text, file=sys.stderr)
