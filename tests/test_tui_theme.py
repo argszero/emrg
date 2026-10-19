@@ -280,7 +280,67 @@ _needs_posix_tty = pytest.mark.skipif(
 )
 
 
-@_needs_posix_tty
+def pty_refusal() -> str | None:
+    """Why this host cannot give a test a real pty — `None` when it can.
+
+    The four tests below drive ``probe_background`` over a **real** pty, and their gate
+    used to ask one question: *is this Windows?* That is one way of being unable to make a
+    pty, not the only one — a sandbox that refuses ``os.openpty()`` (measured here:
+    ``PermissionError: [Errno 1] Operation not permitted``) and a container without
+    ``/dev/ptmx`` are POSIX hosts that cannot run those tests either. Under the old gate
+    they *failed* there, so every run on such a host ended with four red rows that were not
+    a regression, and the exemption lived in cycle records instead of in the output
+    (issue #2392). A capability the host cannot exercise is unmeasurable, not failed.
+
+    Kept apart from ``_needs_posix_tty`` on purpose: the sentinel test below is marked
+    POSIX for a different reason — it injects its own chunks and never allocates a pty —
+    so gating it on this capability would take away a measurement the host *can* make.
+    """
+    if sys.platform == "win32":
+        return "pty/termios are POSIX; the probe degrades to None on Windows"
+    try:
+        master, slave = os.openpty()
+    except OSError as exc:
+        return (
+            f"this host cannot allocate a pty ({exc.__class__.__name__}: {exc}); "
+            "the probe is unmeasurable here, not failing"
+        )
+    os.close(master)
+    os.close(slave)
+    return None
+
+
+_PTY_REFUSAL = pty_refusal()
+_needs_a_real_pty = pytest.mark.skipif(_PTY_REFUSAL is not None, reason=_PTY_REFUSAL or "")
+
+
+def test_the_pty_gate_answers_what_the_host_can_do(monkeypatch):
+    """The predicate in both directions, without depending on this host's own capability.
+
+    A gate exercised one way only is the defect it was written to fix: on a host that
+    cannot allocate a pty the refusal branch is the only one that ever runs, and on CI the
+    success branch is — so neither host has measured the other. Both are driven here, and
+    the success arm checks the descriptors come back closed rather than leaked.
+    """
+    closed: list[int] = []
+
+    def _refuse():
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "openpty", _refuse)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    refusal = pty_refusal()
+    assert refusal is not None, "a host that cannot allocate a pty must say so"
+    assert "PermissionError" in refusal, "the reason must name the error it met"
+    assert "unmeasurable" in refusal, "and must say the probe could not be measured"
+
+    monkeypatch.setattr(os, "openpty", lambda: (101, 102))
+    monkeypatch.setattr(os, "close", closed.append)
+    assert pty_refusal() is None, "a host that can allocate one must let the tests run"
+    assert closed == [101, 102], "the probe must close both descriptors it opened"
+
+
+@_needs_a_real_pty
 def test_the_probe_reads_a_reply_from_a_real_pty():
     """The read path itself, on a real pty — not a mock of the thing under test."""
     master, slave = os.openpty()
@@ -296,7 +356,7 @@ def test_the_probe_reads_a_reply_from_a_real_pty():
         os.close(master); os.close(slave); os.close(devnull)
 
 
-@_needs_posix_tty
+@_needs_a_real_pty
 def test_a_silent_terminal_does_not_hang_the_probe():
     """The bound is the point: a terminal that never answers must not wedge the client.
 
@@ -323,7 +383,7 @@ def test_a_stream_that_is_not_a_tty_is_never_queried():
     assert out.getvalue() == "", "a non-tty must not be written to at all"
 
 
-@_needs_posix_tty
+@_needs_a_real_pty
 def test_the_da1_sentinel_ends_the_wait_early():
     """A terminal that answers DA1 but not OSC 11 must not cost the whole timeout.
 
@@ -343,6 +403,27 @@ def test_the_da1_sentinel_ends_the_wait_early():
         assert elapsed < 1.0, f"the sentinel did not end the wait: {elapsed:.2f}s"
     finally:
         os.close(master); os.close(slave); os.close(devnull)
+
+
+def test_the_sentinel_test_is_not_gated_on_a_real_pty():
+    """The gate above must not spread to the one test here that needs no pty.
+
+    `test_the_probe_reads_the_sentinel_reply_that_follows_the_colour` injects its own
+    chunks and opens `/dev/null`, so a host that cannot allocate a pty can still measure
+    it — applying `_needs_a_real_pty` to it would turn a passing measurement into a skip,
+    and nothing would go red to say so (measured: 59 passed / 4 skipped becomes 58 / 5,
+    all green either way). Its POSIX mark answers a different question, which its own
+    docstring states: the read loop it pins is unreachable on Windows.
+    """
+    fn = globals()["test_the_probe_reads_the_sentinel_reply_that_follows_the_colour"]
+    reasons = [mark.kwargs.get("reason", "") for mark in getattr(fn, "pytestmark", [])]
+
+    assert any("POSIX" in reason for reason in reasons), (
+        "the sentinel test must stay marked POSIX — its subject does not exist on Windows"
+    )
+    assert not any("cannot allocate a pty" in reason for reason in reasons), (
+        "it needs no pty, so gating it on one drops a measurement this host can make"
+    )
 
 
 @_needs_posix_tty
@@ -384,7 +465,7 @@ def test_the_probe_reads_the_sentinel_reply_that_follows_the_colour(monkeypatch)
     )
 
 
-@_needs_posix_tty
+@_needs_a_real_pty
 def test_the_probe_leaves_nothing_queued_when_both_answers_arrive():
     """The end-to-end shape on a real pty: asked two questions, queue empty afterwards."""
     master, slave = os.openpty()
