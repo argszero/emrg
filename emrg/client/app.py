@@ -285,6 +285,72 @@ def _cards_from_tool_calls(tool_calls) -> list[ToolCard]:
     return cards
 
 
+def _rewind_fill_text(message: dict | None) -> str:
+    """The text a rewind puts back in the input box, taken from the picked entry.
+
+    `content`, never `preview`: the daemon sends the whole message as `content` and
+    an 80-character summary as `preview`, so filling the input from the summary would
+    hand the host a prompt they never wrote — truncated at exactly the point where
+    "/rewind then send it again" is supposed to reproduce what was there before
+    (issue #2384). Anything not a dict, and a missing body, fill nothing rather than
+    the word "None".
+    """
+    if not isinstance(message, dict):
+        return ""
+    return str(message.get("content") or "")
+
+
+def _rewind_note(record_index: int | None, removed: int, kept: int) -> str:
+    """The line a completed rewind leaves on the transcript.
+
+    It counts **records**, not messages: one turn with tool calls is several records,
+    so the old wording ("N messages removed") reported a cut many times larger than
+    the conversation it removed (issue #2384, item 3). The wording also says what is
+    above it on screen, because the screen is no longer blank.
+    """
+    where = "the rewind point" if record_index is None else f"message #{record_index}"
+    return (
+        f"↶ Rewound to {where} — {removed} record(s) removed, {kept} kept. "
+        "The transcript above is what survives."
+    )
+
+
+def _rewind_replay_request(session_id: str, cwd: str) -> dict:
+    """The question a rewind asks before it redraws its screen.
+
+    The TUI used to answer `rewind_result` by clearing the chat area and printing a
+    count, so the conversation that survived the cut vanished from the screen while
+    the daemon still held it (issue #2384, item 2). `include_records=True` is the
+    mode `/resume` redraws from — the daemon's own records, in record order, tool
+    pairs never cut apart — so a rewound session is painted by the same path as a
+    reopened one instead of by a second, hand-rolled guess. Returned as the keyword
+    arguments of `list_history` so the request has one definition.
+    """
+    return {"session_id": session_id, "cwd": cwd, "include_records": True}
+
+
+def _paint_replay_rows(chat, rows) -> None:
+    """Paint replay rows onto the chat area — one implementation for both callers.
+
+    `/resume` and `/rewind` both rebuild the screen from the daemon's records, and
+    the two used to be separate loops only because they were written apart; a second
+    copy of "how a record becomes a row" is a second answer to one question, which
+    drifts while both stay green. An assistant row is fed through `StreamingMarkdown`
+    for colour, a tool row is the widget itself (so the detail selector has something
+    to read), and everything else is a plain role row.
+    """
+    for kind, content, stamp in rows:
+        if kind == "assistant":
+            md = StreamingMarkdown()
+            md.feed(content)
+            md.timestamp = stamp
+            chat.add(md)
+        elif kind == "tool_card":
+            chat.add(content)
+        else:
+            chat.add(kind, content, timestamp=stamp)
+
+
 def _replay_rows(messages) -> list[tuple[str, object, str]]:
     """The rows a resumed session replays, from the daemon's record list.
 
@@ -1260,6 +1326,14 @@ async def interactive(init_auto_evolve: bool = False, console=None):
     # summarises, not before them.
     _replay_pending: tuple[str, dict] | None = None
 
+    # A rewind's own two pieces of state (issue #2384). `_rewind_fill` is the text of
+    # the message the host picked, whole, waiting for the honoured answer; a rewind
+    # that fails must leave the input box alone rather than clobber a draft with the
+    # text of a cut that did not happen. `_rewind_replay` names the redraw question
+    # in flight, so its answer is painted as a rewind rather than as a picker fill.
+    _rewind_fill: str = ""
+    _rewind_replay: dict | None = None
+
     # Command autocomplete state (shows dropdown when user types /)
     _autocomplete_active = False
     _autocomplete_widget: CommandDropdown | None = None
@@ -1287,6 +1361,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         nonlocal cwd, project_name, _task_list_intent, _task_open_pending
         nonlocal _resume_pending_sid
         nonlocal _replay_pending
+        nonlocal _rewind_fill, _rewind_replay
 
         async def _reconnect():
             """Attempt reconnection — blocks until successful."""
@@ -1731,18 +1806,49 @@ async def interactive(init_auto_evolve: bool = False, console=None):
 
                 # Rewind result
                 if data.get("type") == "rewind_result":
+                    nonlocal _rewind_fill
                     err = data.get("error", "")
+                    result_sid = data.get("session_id") or session_id
                     if err:
                         chat.add("system", f"Rewind failed: {err}")
+                        # The cut did not happen, so the text the picker handed over
+                        # is not a rewind's to fill: the input box keeps whatever the
+                        # host had in it.
+                        _rewind_fill = ""
+                    elif result_sid != session_id:
+                        # Another client rewound a session this one is not showing.
+                        # Its records changed, this screen's did not — repainting here
+                        # would show one session's history under another's name.
+                        chat.add("system",
+                                 f"Session {result_sid} was rewound by another client.")
                     else:
-                        # Clear the TUI chat display and reload history
+                        # The conversation survives the cut, so the screen is rebuilt
+                        # from the daemon's records rather than blanked (issue #2384):
+                        # clearing the chat area and printing a count erased everything
+                        # the host had just chosen to keep. This is the same path
+                        # `/resume` redraws by (rant 2026-09-29T15:52:49).
                         chat.rows.clear()
+                        parked_user_rows.clear()
                         chat.dirty = True
-                        removed = data.get("removed_count", 0)
-                        chat.add("system", f"↶ Session rewound — {removed} messages removed.")
                         msg_count = 0
-                        # Reload session state from server
-                        await conn.send_command("ping")
+                        info = {
+                            "session_id": session_id,
+                            "record_index": data.get("record_index"),
+                            "removed": data.get("removed_count", 0),
+                            "kept": data.get("kept_count", 0),
+                        }
+                        # The message the host picked goes back in the input box, whole
+                        # and editable: `/rewind` means "that was wrong, let me say it
+                        # again", and the text has been in hand since the picker was
+                        # filled (`_rewind_fill_text`). Never sent — the host decides.
+                        fill = _rewind_fill
+                        _rewind_fill = ""
+                        inp.text = fill
+                        inp.cursor = len(fill)
+                        inp.dirty = True
+                        _rewind_replay = info
+                        await conn.send_command(
+                            "list_history", **_rewind_replay_request(session_id, cwd))
                         _update_left_extra()
                     status.update(center=server_id or "emrg")
                     term.render()
@@ -1902,6 +2008,44 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                 # History list (for /rewind)
                 if data.get("type") == "history_list":
                     nonlocal rewind_sel
+                    # The answer to a rewind's own redraw question (issue #2384).
+                    # Told apart the same way the resume answer below is — by the
+                    # question that asked it — so neither a replay nor a picker fill
+                    # can be painted as the other.
+                    if _rewind_replay is not None and data.get("session_id") == _rewind_replay["session_id"]:
+                        info = _rewind_replay
+                        _rewind_replay = None
+                        err = data.get("error", "")
+                        if err:
+                            # The cut itself succeeded, so the session is shorter
+                            # than it was; what failed is redrawing it. Saying that
+                            # is the difference between "your transcript is gone"
+                            # and "it could not be read back".
+                            chat.add("system",
+                                     f"Rewound, but the transcript could not be reloaded: {err}")
+                            status.update(center=server_id or "emrg")
+                            term.render()
+                            continue
+                        records = data.get("messages", [])
+                        rows = _replay_rows(records)
+                        # A message record is one message; the tool results and the
+                        # compaction summaries in the same list are not, which is
+                        # why this counts kinds rather than rows (`_rewind_note`
+                        # keeps the same distinction in the line below).
+                        msg_count = sum(
+                            1 for r in records
+                            if isinstance(r, dict) and r.get("kind") == "message"
+                        )
+                        _paint_replay_rows(chat, rows)
+                        chat.add("system", _rewind_note(
+                            info.get("record_index"),
+                            info.get("removed", 0),
+                            info.get("kept", 0),
+                        ))
+                        _update_left_extra()
+                        term.render()
+                        continue
+
                     # A replay answer and a /rewind answer arrive on the same
                     # message type, and they are told apart by the question that
                     # asked: the records mode is only ever requested by the resume
@@ -1932,21 +2076,11 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                         if not isinstance(count, int) or count < 0:
                             count = len(rows)
                         msg_count = count
-                        for kind, content, stamp in rows:
-                            if kind == "assistant":
-                                # StreamingMarkdown for colour rendering (rant #28).
-                                md = StreamingMarkdown()
-                                md.feed(content)
-                                md.timestamp = stamp
-                                chat.add(md)
-                            elif kind == "tool_card":
-                                # A widget, handed straight to the chat: a resumed
-                                # session's cards must be the same objects a live
-                                # one builds, or the detail selector would have
-                                # nothing to read (rant 2026-09-30T09:17:54).
-                                chat.add(content)
-                            else:
-                                chat.add(kind, content, timestamp=stamp)
+                        # One painter for both replay callers (`/resume` here,
+                        # `/rewind` below): a resumed session's cards must be the
+                        # same objects a live one builds, or the detail selector
+                        # would have nothing to read (rant 2026-09-30T09:17:54).
+                        _paint_replay_rows(chat, rows)
                         title_extra = ""
                         if meta.get("title"):
                             title_extra = f" [{meta['title']}]"
@@ -2545,6 +2679,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         nonlocal turn_ended_cancelled, cancel_receipt_held
         nonlocal current_model, project_name, current_sandbox
         nonlocal session_sel, delete_sel, project_sel, model_sel, rewind_sel, task_sel
+        nonlocal _rewind_fill
         nonlocal sandbox_sel, tool_sel
         nonlocal _task_list_intent, _task_open_pending
         nonlocal _resume_pending_sid
@@ -2809,6 +2944,12 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                 return True
             if data == b"\r" or data == b"\n":  # Enter — confirm
                 idx = rewind_sel.widget.selected_record_index
+                # The words, not the row: `preview` is the 80-character summary the
+                # picker drew, and the point of a rewind is to say the same thing
+                # again (issue #2384). Taken here because the widget is dropped on the
+                # next line, and kept until the honoured answer: a failed rewind must
+                # not put it in the input box.
+                _rewind_fill = _rewind_fill_text(rewind_sel.widget.selected_message)
                 rewind_sel.active = False
                 chat.remove(rewind_sel.widget)
                 rewind_sel.widget = None
@@ -2818,6 +2959,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     status.update(center=f"rewinding to message #{idx}...")
                     term.render()
                 else:
+                    _rewind_fill = ""
                     chat.add("system", "No message selected.")
                     status.update(center=server_id or "emrg")
                     term.render()
