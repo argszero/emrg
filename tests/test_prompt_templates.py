@@ -1922,3 +1922,76 @@ def test_a_top_level_copy_that_cannot_render_is_named(tmp_path, monkeypatch, cap
         assert "list" in naming[0], (
             f"the warning must name the type it cannot interpolate: {naming[0]!r}"
         )
+
+
+# ── The promotion template must not forbid what its own density rule allows ──
+#
+# Measured 2026-10-19 on head a7087f61 (veto cyc20261019-073746): the new bullet said
+# "in someone else's space, carry value and **no mention at all**", and pointed at the
+# mention-density rule for support — while that rule says the opposite ("only a few
+# (≤30%) mention it naturally"). A reply *is* someone else's space, so the two
+# sentences gave one question two answers, and the template's own worked example ("one
+# natural sentence at the end") fell on the forbidden side. A round reading both either
+# drops every reply mention or ignores the new bullet; either way one instruction goes
+# unread, which is what the section exists to prevent.
+#
+# The rule below is the agreement, not the wording: while the density rule allows some
+# share of replies to mention the project, no other line may say the mention is banned.
+# It catches the defect in the direction that matters — re-adding an absolute — and it
+# stays silent when the bullet says "only where it genuinely fits".
+
+_PROMOTE_TEMPLATE = PROMPTS_DIR / "promote_prompt.md"
+
+#: The density rule's allowance, quoted from the template's own Step 2.
+_DENSITY_ALLOWANCE = "mention it naturally"
+
+
+def _absolute_mention_bans(text: str) -> list[str]:
+    """The lines that ban a mention outright while the template still allows one.
+
+    Empty when the two agree *and* when the template carries no density allowance at
+    all — a template that stopped promising the rule cannot be contradicted by it.
+    """
+    if _DENSITY_ALLOWANCE not in text:
+        return []
+    return [line.strip() for line in text.splitlines() if "no mention at all" in line]
+
+
+def test_the_promotion_template_does_not_forbid_what_its_density_rule_allows() -> None:
+    """One question, one answer: a reply may carry a natural mention, and no line bans it."""
+    text = _PROMOTE_TEMPLATE.read_text(encoding="utf-8")
+
+    assert _DENSITY_ALLOWANCE in text, (
+        "the mention-density allowance is gone from promote_prompt.md — this guard's subject "
+        "left with it, so it would pass vacuously"
+    )
+    bans = _absolute_mention_bans(text)
+    assert not bans, (
+        f"promote_prompt.md forbids every mention in a line that contradicts its own density "
+        f"rule: {bans} — a reply is someone else's space, so 'no mention at all' negates the "
+        "'≤30% mention it naturally' bound the same template states"
+    )
+
+
+def test_the_mention_ban_scanner_answers_both_ways() -> None:
+    """The instrument's controls: a planted absolute is flagged, agreement is not."""
+    planted = (
+        "**Mention density**: only a few (≤30%) mention it naturally.\n"
+        "- in someone else's space, carry value and no mention at all.\n"
+    )
+    assert _absolute_mention_bans(planted) == [
+        "- in someone else's space, carry value and no mention at all."
+    ], "the shape that was vetoed must be caught, or this guard proves nothing"
+
+    agreeing = (
+        "**Mention density**: only a few (≤30%) mention it naturally.\n"
+        "- in someone else's space, carry value first, with the mention only where it "
+        "genuinely fits — most replies carry none.\n"
+    )
+    assert _absolute_mention_bans(agreeing) == [], (
+        "the repaired shape must pass, or the guard forbids the fix it was written for"
+    )
+    assert _absolute_mention_bans("no density rule here at all\n") == [], (
+        "with no allowance in the text there is nothing to contradict; the scan must say so "
+        "rather than flag every mention of the phrase"
+    )
