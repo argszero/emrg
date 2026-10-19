@@ -1922,3 +1922,101 @@ def test_a_top_level_copy_that_cannot_render_is_named(tmp_path, monkeypatch, cap
         assert "list" in naming[0], (
             f"the warning must name the type it cannot interpolate: {naming[0]!r}"
         )
+
+
+# ── The vetoed absolute mention ban stays out of the promotion template ──
+#
+# Measured 2026-10-19 on head a7087f61 (veto cyc20261019-073746): the new bullet said
+# "in someone else's space, carry value and **no mention at all**", and pointed at the
+# mention-density rule for support — while that rule says the opposite ("only a few
+# (≤30%) mention it naturally"). A reply *is* someone else's space, so the two
+# sentences gave one question two answers, and the template's own worked example ("one
+# natural sentence at the end") fell on the forbidden side. A round reading both either
+# drops every reply mention or ignores the new bullet; either way one instruction goes
+# unread, which is what the section exists to prevent.
+#
+# What the test below pins is the **wording that was vetoed**, not the class of sentence
+# it belonged to: it fails if `no mention at all` comes back into a template that still
+# allows a share of mentions, and it says nothing about a rewording of the same ban
+# ("never mention the project there" passes, and the control below measures that).
+# The boundary is deliberate. A matcher broad enough to catch a paraphrase also flags the
+# two lines that must keep saying no — red line 4's normal-participation class ("NO
+# disclosure, NO project mention") and the density rule itself ("≥70% are pure value with
+# NO project mention") — so widening it trades a real regression pin for two false alarms
+# on rules that must stay. Whether the prose has drifted back is a reading of the bullet
+# at Mission & Values, which is what a reviewer of a change to that section does.
+
+_PROMOTE_TEMPLATE = PROMPTS_DIR / "promote_prompt.md"
+
+#: The density rule's allowance, quoted from the template's own Step 2.
+_DENSITY_ALLOWANCE = "mention it naturally"
+
+
+def _vetoed_mention_ban_lines(text: str) -> list[str]:
+    """The lines still carrying the phrasing the veto removed, `no mention at all`.
+
+    Scope, stated so the docstring cannot be read wider than the code: this is a literal
+    phrase match on the wording that was vetoed. A paraphrase of the same ban is not
+    caught (the control below measures that), because every matcher wide enough to catch
+    one also matches the two lines whose "NO project mention" is correct as written.
+
+    Empty when the two agree *and* when the template carries no density allowance at
+    all — a template that stopped promising the rule cannot be contradicted by it.
+    """
+    if _DENSITY_ALLOWANCE not in text:
+        return []
+    return [line.strip() for line in text.splitlines() if "no mention at all" in line]
+
+
+def test_the_vetoed_absolute_mention_ban_is_not_restored() -> None:
+    """The phrasing a veto removed stays out, while the density rule it contradicted stays in."""
+    text = _PROMOTE_TEMPLATE.read_text(encoding="utf-8")
+
+    assert _DENSITY_ALLOWANCE in text, (
+        "the mention-density allowance is gone from promote_prompt.md — this guard's subject "
+        "left with it, so it would pass vacuously"
+    )
+    bans = _vetoed_mention_ban_lines(text)
+    assert not bans, (
+        f"promote_prompt.md carries the vetoed absolute again: {bans} — a reply is someone "
+        f"else's space, so 'no mention at all' negates the '≤30% mention it naturally' bound "
+        f"the same template states"
+    )
+
+
+def test_the_mention_ban_scanner_answers_both_ways() -> None:
+    """The instrument's controls: the vetoed wording is flagged, agreement is not, and the
+    paraphrase it does *not* catch is measured here rather than claimed in prose."""
+    planted = (
+        "**Mention density**: only a few (≤30%) mention it naturally.\n"
+        "- in someone else's space, carry value and no mention at all.\n"
+    )
+    assert _vetoed_mention_ban_lines(planted) == [
+        "- in someone else's space, carry value and no mention at all."
+    ], "the shape that was vetoed must be caught, or this guard proves nothing"
+
+    agreeing = (
+        "**Mention density**: only a few (≤30%) mention it naturally.\n"
+        "- in someone else's space, carry value first, with the mention only where it "
+        "genuinely fits — most replies carry none.\n"
+    )
+    assert _vetoed_mention_ban_lines(agreeing) == [], (
+        "the repaired shape must pass, or the guard forbids the fix it was written for"
+    )
+    assert _vetoed_mention_ban_lines("no density rule here at all\n") == [], (
+        "with no allowance in the text there is nothing to contradict; the scan must say so "
+        "rather than flag every mention of the phrase"
+    )
+
+    # The measured boundary. Asserting it keeps the limitation honest: if a later edit widens
+    # the matcher, this arm is what turns red and says so, instead of the docstring quietly
+    # becoming a promise the code does not keep.
+    paraphrase = (
+        "**Mention density**: only a few (≤30%) mention it naturally.\n"
+        "- in someone else's space, carry value and never mention the project there.\n"
+    )
+    assert _vetoed_mention_ban_lines(paraphrase) == [], (
+        "a paraphrase of the ban is not what this scanner reads — that is the limit recorded "
+        "in its docstring, and widening past it flags two lines that must keep saying "
+        "'NO project mention'"
+    )
