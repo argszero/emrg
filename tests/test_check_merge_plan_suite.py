@@ -2259,6 +2259,61 @@ def test_a_failure_the_plan_inherits_is_not_laid_at_a_prs_door(
     assert "re-push the PR that owns the failure" not in proc.stderr
 
 
+def test_the_verdict_line_carries_the_ownership_a_stdout_reader_needs(
+    queue: tuple[Path, Path],
+) -> None:
+    """The split must reach stdout, where the verdict is, not only stderr.
+
+    Measured on a real merge gate run (cycle cyc20261019-123519): #2375's landing tree
+    failed four pty rows on this host and the base tree failed the same four, and the
+    only line saying so went to stderr. A caller that keeps stdout alone - a log
+    capture, a pipe, this repo's own habit of reading a gate's last line - therefore
+    reads `suite FAILED` and nothing else, which is the same string an owned failure
+    prints. R3's next move differs between the two states (a refresh voids the standing
+    votes), so a verdict that cannot be told apart is a verdict that can spend them.
+
+    Exit code stays 1 in both: the tree does fail. What changes is that the line says
+    whose failure it is.
+    """
+    repo, origin = queue
+    _base_with_a_red_row(repo, origin)
+    _branch_with(repo, "unrelated", {"notes.md": "unrelated\n"})
+    _publish(repo, origin, 4, "unrelated")
+
+    proc = _run_tool(repo, "4")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "suite FAILED" in proc.stdout
+    assert "the base tree too" in proc.stdout, (
+        "a reader that keeps only stdout must be able to tell an inherited failure "
+        "from the plan's own: " + proc.stdout
+    )
+
+
+def test_the_verdict_line_does_not_call_an_owned_failure_inherited(
+    queue: tuple[Path, Path],
+) -> None:
+    """The other arm: a plan that really owns the row must not read as inherited.
+
+    Without this, "say the base owns it" could be satisfied by printing the phrase
+    unconditionally, which would send a caller to fix master for a failure its own PR
+    introduced.
+    """
+    repo, origin = queue
+    _branch_with(repo, "guard", {"tests/test_no_token_under_data_or_src.py": GUARD_TEST})
+    _branch_with(repo, "violator", {"data/payload.txt": f"contains {TOKEN}\n"})
+    _publish(repo, origin, 1, "guard")
+    _publish(repo, origin, 2, "violator")
+
+    proc = _run_tool(repo, "1", "2")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "suite FAILED" in proc.stdout
+    assert "the base tree too" not in proc.stdout, (
+        "this plan owns the failure, so the verdict must not hand it to the base: "
+        + proc.stdout
+    )
+    assert "this plan's tree owns" in proc.stdout
+
+
 def test_a_failure_the_plan_produces_is_still_laid_at_its_door(
     queue: tuple[Path, Path],
 ) -> None:
