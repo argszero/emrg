@@ -19,6 +19,7 @@ draws into an in-memory widget.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -37,6 +38,7 @@ from emrg.client.app import (
 from emrg.client.widgets import ChatHistory, RewindSelector
 
 
+APP_PY = Path(__file__).resolve().parent.parent / "emrg" / "client" / "app.py"
 MULTILINE = "first line\n\nsecond line at some length: " + "x" * 300
 
 
@@ -154,3 +156,50 @@ def test_the_shared_painter_draws_both_replay_paths():
     assert chat.rows[0].text == "hello"
     # An assistant row is fed through the streaming widget, which keeps its buffer.
     assert chat.rows[1]._buffer == "there"
+
+
+def test_the_rewind_branch_asks_for_the_repaint_it_promises():
+    """The `rewind_result` branch sends the records request — the branch, not the helper.
+
+    The four tests above pin the pieces; none of them reaches the branch that uses them,
+    because it runs inside the frame loop and needs a connection and a terminal. So
+    deleting the send left every test in this file green while `chat.rows.clear()` ran
+    and nothing was painted back — the blank transcript of issue #2384 item 2, restored
+    in full. A surviving arm is a missing row, and this is the row (the technique is
+    `tests/test_app_cancel_session.py::_block_after`: read the branch out of the source,
+    and assert the *call*, not a helper it might have stopped calling).
+
+    The control is `chat.rows.clear()`: arm D keeps it, so it says the extraction found
+    the branch rather than collapsing — while the assertion above it is what goes red.
+    """
+    block = _block_after('if data.get("type") == "rewind_result":',
+                         '# Compact result')
+
+    assert '"list_history", **_rewind_replay_request(session_id, cwd)' in block, (
+        "a rewound session must be repainted from the daemon's records, so the branch "
+        "has to ask for them"
+    )
+    assert "_rewind_replay = info" in block, (
+        "the answer must be recognisable as a rewind's, or it is painted as a picker fill"
+    )
+    # The request is sent after the clear — a branch that clears and never asks is
+    # exactly the blank screen this issue is about.
+    assert block.index('"list_history"') > block.index("chat.rows.clear()"), (
+        "the repaint is what follows the blanking, not what precedes it"
+    )
+    assert block.index("_rewind_replay = info") < block.index('"list_history"'), (
+        "the in-flight marker must be set before the question is asked"
+    )
+    assert "chat.rows.clear()" in block, "the extraction is looking at the right branch"
+
+
+def _block_after(marker: str, stop: str) -> str:
+    """The text between `marker` and the next `stop`, or "" when not found.
+
+    Copied from `tests/test_app_cancel_session.py`, where the same problem — a branch
+    that only runs inside the frame loop — was solved the same way: assert the call in
+    the branch's own text, with a control that fails if the extraction collapsed.
+    """
+    src = APP_PY.read_text(encoding="utf-8")
+    assert marker in src, f"marker not found in app.py: {marker!r}"
+    return src.split(marker, 1)[1].split(stop, 1)[0]
