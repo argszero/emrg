@@ -30,9 +30,14 @@ one line per record, records on the `records_to_messages` shape -- `type: messag
 Exit codes: 0 a reading was taken; 2 nothing measurable -- no history file under the roots
 (or every one of them unreadable), which is never a pass.
 
-    check-batching-share.py                      # the host's whole corpus under ~/.emrg
-    check-batching-share.py --root ~/.emrg/evolution/emrg/.emrg --since 2026-10-21
-    check-batching-share.py --json               # the same reading for another program
+    check-batching-share.py                            # the host's whole corpus under ~/.emrg
+    check-batching-share.py ~/.emrg/evolution/emrg/.emrg --since 2026-10-21
+    check-batching-share.py --json                     # the same reading for another program
+
+A subject is a **corpus root** -- a directory to walk or one `history_*.jsonl` file -- and is a
+positional, like `check-icon-transparency.py`'s subjects: this tool's subject is a set of session
+histories, not a working tree, so it is classified among the guards that answer about something
+other than a tree and prints the roots it read instead of a `tree:` line.
 """
 
 from __future__ import annotations
@@ -216,11 +221,10 @@ def main(argv: list[str] | None = None) -> int:
         epilog="Exit 0 a reading was taken; 2 nothing measurable under the roots. Never 2 for 0.",
     )
     parser.add_argument(
-        "--root",
-        action="append",
-        default=None,
-        metavar="DIR",
-        help="a directory to walk for history_*.jsonl, or one such file; repeatable "
+        "roots",
+        nargs="*",
+        metavar="CORPUS",
+        help="a directory to walk for history_*.jsonl, or one such file; zero or more "
         "(default: ~/.emrg)",
     )
     parser.add_argument(
@@ -239,11 +243,11 @@ def main(argv: list[str] | None = None) -> int:
         print("\n".join(DEPENDENCY_MARKERS))
         return 0
 
-    roots = [Path(raw).expanduser() for raw in (args.root or ["~/.emrg"])]
+    roots = [Path(raw).expanduser() for raw in (args.roots or ["~/.emrg"])]
     files = history_files(roots)
     if not files:
         print(
-            "nothing measurable: no history_*.jsonl found under "
+            "not measurable: no history_*.jsonl under "
             + ", ".join(str(root) for root in roots),
             file=sys.stderr,
         )

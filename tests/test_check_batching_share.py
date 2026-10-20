@@ -96,7 +96,7 @@ def test_the_share_and_the_histogram_count_what_the_records_carry(tool, tmp_path
         ],
     )
 
-    rc, out, _err = _run(tool, "--root", str(root), capsys=capsys)
+    rc, out, _err = _run(tool, str(root), capsys=capsys)
 
     assert rc == 0, out
     assert "rounds:  3 assistant record(s)" in out
@@ -119,7 +119,7 @@ def test_a_record_without_tool_calls_is_not_a_round(tool, tmp_path, capsys):
         ],
     )
 
-    rc, out, _err = _run(tool, "--root", str(root), capsys=capsys)
+    rc, out, _err = _run(tool, str(root), capsys=capsys)
 
     assert rc == 0, out
     assert "rounds:  1 assistant record(s)" in out
@@ -135,7 +135,7 @@ def test_a_nested_content_object_is_read_the_same_way(tool, tmp_path, capsys):
         ],
     )
 
-    rc, out, _err = _run(tool, "--root", str(root), capsys=capsys)
+    rc, out, _err = _run(tool, str(root), capsys=capsys)
 
     assert rc == 0, out
     assert "rounds:  2 assistant record(s)" in out
@@ -152,7 +152,7 @@ def test_the_lone_intent_proxy_reads_both_directions(tool, tmp_path, capsys):
         ],
     )
 
-    rc, out, _err = _run(tool, "--root", str(root), capsys=capsys)
+    rc, out, _err = _run(tool, str(root), capsys=capsys)
 
     assert rc == 0, out
     assert "lone intents naming no awaited answer (lexical proxy): 1 of 2 (50.0%)" in out
@@ -174,7 +174,7 @@ def test_an_intent_that_is_not_json_counts_against_the_rule(tool, tmp_path, caps
               "function": {"name": "bash", "arguments": "not json"}}
     root = _corpus(tmp_path, [_round(broken)])
 
-    rc, out, _err = _run(tool, "--root", str(root), capsys=capsys)
+    rc, out, _err = _run(tool, str(root), capsys=capsys)
 
     assert rc == 0, out
     assert "lone intents naming no awaited answer (lexical proxy): 1 of 1 (100.0%)" in out
@@ -190,7 +190,7 @@ def test_since_counts_only_records_from_that_date_on(tool, tmp_path, capsys):
         ],
     )
 
-    rc, out, _err = _run(tool, "--root", str(root), "--since", "2026-10-20", capsys=capsys)
+    rc, out, _err = _run(tool, str(root), "--since", "2026-10-20", capsys=capsys)
 
     assert rc == 0, out
     assert "rounds:  1 assistant record(s)" in out
@@ -204,10 +204,10 @@ def test_no_history_file_answers_two_and_names_the_roots(tool, tmp_path, capsys)
     empty = tmp_path / "sessions"
     empty.mkdir()
 
-    rc, out, err = _run(tool, "--root", str(empty), capsys=capsys)
+    rc, out, err = _run(tool, str(empty), capsys=capsys)
 
     assert rc == 2, out
-    assert "nothing measurable" in err
+    assert "not measurable" in err
     assert str(empty) in err
 
 
@@ -216,7 +216,7 @@ def test_a_corpus_of_no_rounds_still_names_its_subject(tool, tmp_path, capsys):
     root = _corpus(tmp_path, [{"timestamp": "2026-10-20T10:00:00", "type": "message",
                                "role": "user", "content": "hello"}])
 
-    rc, out, _err = _run(tool, "--root", str(root), capsys=capsys)
+    rc, out, _err = _run(tool, str(root), capsys=capsys)
 
     assert rc == 0, out
     assert "1 history file(s)" in out
@@ -228,7 +228,7 @@ def test_json_carries_the_same_reading(tool, tmp_path, capsys):
     """Another program reads the same numbers, so the two forms must not disagree."""
     root = _corpus(tmp_path, [_round(_call("bash", "a"), _call("read", "b"))])
 
-    rc, out, _err = _run(tool, "--root", str(root), "--json", capsys=capsys)
+    rc, out, _err = _run(tool, str(root), "--json", capsys=capsys)
 
     assert rc == 0, out
     payload = json.loads(out)
@@ -239,11 +239,11 @@ def test_json_carries_the_same_reading(tool, tmp_path, capsys):
 
 
 def test_a_file_named_for_the_corpus_is_read_directly(tool, tmp_path, capsys):
-    """`--root` takes one history file too, which is how a single session is measured."""
+    """A subject may be one history file, which is how a single session is measured."""
     root = _corpus(tmp_path, [_round(_call("bash", "a"), _call("read", "b"))])
     single = root / "s_000000_0000_test" / "history_261020.jsonl"
 
-    rc, out, _err = _run(tool, "--root", str(single), capsys=capsys)
+    rc, out, _err = _run(tool, str(single), capsys=capsys)
 
     assert rc == 0, out
     assert "1 history file(s)" in out
