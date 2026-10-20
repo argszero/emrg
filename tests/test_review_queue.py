@@ -2942,3 +2942,48 @@ def test_an_entry_with_no_progress_still_reads_the_issue_side(monkeypatch):
     assert links.states_asked == [], (
         "the entry names no number, so there is nothing for the one-number reader to ask"
     )
+
+
+def test_two_open_prs_are_told_the_pair_question_is_a_separate_reading(mod, monkeypatch, capsys):
+    """Every row answers "what next for this PR"; landing two together is another question.
+
+    A queue of `vote` rows reads as "two things are ready", when the truth can be "these two
+    cannot both land as they stand". Measured before this note existed: two PRs each adding
+    tests at the same anchor in one file both read `vote`, and `check-merge-pairs.py` answered
+    **blocked in both directions**. The cost is the discovery time, not the conflict — the
+    second branch then had to merge master in and resolve that file, which moves its head, and
+    a head push voids every vote on it: measured after that resolution, two approvals turned
+    VOID and the PR fell from 2/3 to 1/3.
+
+    The note must name the reading and print a command that runs on this host, and it must not
+    claim that any pair conflicts — it points at the question, it does not answer it.
+    """
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 10, 0))
+    fresh = FakeFresh()
+    rc = _run(mod, monkeypatch, votes, fresh,
+              ["1", "2", "--cycle", CYCLE, "--cycles-log", str(NO_RECORDS)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "2 PR(s)" in out
+    notes = [line for line in out.splitlines() if "check-merge-pairs" in line]
+    assert len(notes) == 1, out
+    assert notes[0].startswith("note:"), notes[0]
+    assert "SEPARATE" in notes[0], notes[0]
+    assert f"{mod.RUNNER} scripts/check-merge-pairs.py" in notes[0], (
+        "the note must carry the runner the rest of the file prints - a bare "
+        "`scripts/check-merge-pairs.py` is not executable on this host"
+    )
+    assert "blocked" not in notes[0] and "conflict" not in notes[0], (
+        "the note points at the question; it does not claim a pair conflicts"
+    )
+
+
+def test_one_open_pr_is_not_told_about_a_pair_that_does_not_exist(mod, monkeypatch, capsys):
+    """The control: with a single PR there is no pair, so the note has no subject."""
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 10, 0))
+    fresh = FakeFresh()
+    rc = _run(mod, monkeypatch, votes, fresh, ["1", "--cycle", CYCLE, "--cycles-log", str(NO_RECORDS)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "1 PR(s)" in out
+    assert "check-merge-pairs" not in out, out
