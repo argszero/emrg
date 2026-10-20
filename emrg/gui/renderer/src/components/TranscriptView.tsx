@@ -413,6 +413,7 @@ function ToolRowView({
     >
       {row.status === "running" ? <span className="tool-spinner" /> : null}
       {ok ? <span className="tool-check">✓ </span> : null}
+      {row.callLabel ? <span className="tool-call-label">{row.callLabel}</span> : null}
       <span className="tool-name">{row.toolName}</span>
       <span className="tool-label">{label}</span>
       {row.intent ? <span className="tool-intent">{row.intent}</span> : null}

@@ -32,7 +32,16 @@ export interface HistoryMessageRecord {
   role?: string;
   content?: string;
   timestamp?: string;
-  tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }>;
+  /**
+   * `call_label` 不在落盘记录里：daemon 在 **`list_history` 读取时**把它算进每一项的副本
+   * （`daemon._tool_call_labels`），所以这个字段只在「已被投影过的记录」上出现。类型放宽
+   * 是因为这就是回放看到的东西，不是要写进磁盘（rant 2026-10-20T12:22:21）。
+   */
+  tool_calls?: Array<{
+    id?: string;
+    function?: { name?: string; arguments?: string };
+    call_label?: string;
+  }>;
 }
 
 /** 落盘记录里的一条工具结果（daemon `include_records` 的 `kind: "tool_result"`）。 */
@@ -75,7 +84,7 @@ export interface ReplaySink {
     sid?: string | null,
   ): void;
   handleToolStart(
-    data: { request_id?: string; tool_call_id: string; tool_name: string; intent?: string; arguments?: unknown },
+    data: { request_id?: string; tool_call_id: string; tool_name: string; intent?: string; arguments?: unknown; call_label?: string },
     sid?: string | null,
   ): void;
   handleToolEnd(
@@ -212,6 +221,10 @@ export function replayHistoryRecords(
             // 于是「打开旧会话」的折叠行与展开详情与实时不一致。归一成实时那一形状后透传
             // （截断/非法 JSON 由 toolCallArguments 与 formatToolArguments 兜底）。
             arguments: toolCallArguments(tc?.function?.arguments),
+            // daemon 的历史投影在每一项 tool_calls 上算好了 `call_label`（读时算的，
+            // 旧记录也有）——回放只是透传，走的是同一个 handleToolStart
+            // （rant 2026-10-20T12:22:21）。
+            call_label: tc?.call_label,
           },
           sid,
         );

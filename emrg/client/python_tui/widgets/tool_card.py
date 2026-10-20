@@ -68,6 +68,12 @@ class ToolCard(Widget):
     output: str = ""
     tool_call_id: str = ""
     arguments: dict = field(default_factory=dict)
+    #: Which call of its batch this is — `"(2/3) "`, trailing space included, or `""`
+    #: for a single call. **Printed, never computed here**: the daemon decides what a
+    #: batch is (`daemon._tool_call_labels`) so the two clients cannot disagree
+    #: (rant 2026-10-20T12:22:21). Empty for every frame and record that predates it,
+    #: which is why a turn from before this change renders exactly as it used to.
+    call_label: str = ""
     elapsed: float = 0.0
     _dirty: bool = True
 
@@ -102,8 +108,8 @@ class ToolCard(Widget):
         # nothing left to expand into — the detail lives in the selector, and a
         # chevron that promised an interaction the TUI does not have would be the
         # same defect the removed Tab handler was.
-        header = (f"{self.icon} {self.name}: {self.command}"
-                  if self.command else f"{self.icon} {self.name}")
+        header = (f"{self.icon} {self.call_label}{self.name}: {self.command}"
+                  if self.command else f"{self.icon} {self.call_label}{self.name}")
         lines = [Line(
             spans=[Span(text=header, style=style_str)],
             style=ctx.style,

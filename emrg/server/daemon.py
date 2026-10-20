@@ -566,6 +566,33 @@ def _abort_run_sentence(record: dict, round_num: int) -> str:
     )
 
 
+def _tool_call_labels(tool_calls) -> list[str]:
+    """The label each call of one assistant response carries, ready to print.
+
+    **This is the only place the rule lives.** A client that counted the calls
+    itself would be a second answer to the same question, and the two would drift
+    the first time either side changed — invisibly, because a wrong `(2/3)` looks
+    exactly like a right one. So the daemon decides here, hands out a finished
+    string, and every renderer prints what it was given.
+
+    A batch is **one assistant response's `tool_calls` array**: `y` is its length
+    and `x` counts from 1. The string carries its own trailing space, so a row is
+    `f"{icon} {label}{name}"` with no branch and no arithmetic on the client side.
+
+    A response that issued a single call gets `""` — `(1/1)` would be noise on
+    every ordinary turn, where the absence of a label already means "one call".
+
+    Calls whose permission was refused, whose execution failed, or whose tool name
+    was unknown are all still calls of this response: they are counted, because the
+    host reading the transcript wants to see the batch the model emitted, not the
+    subset that happened to succeed.
+    """
+    total = len(tool_calls or [])
+    if total < 2:
+        return [""] * total
+    return [f"({index}/{total}) " for index in range(1, total + 1)]
+
+
 def build_shell_tool(
     sandbox_config: Optional[SandboxConfig] = None,
     platform_name: str | None = None,
@@ -3431,7 +3458,17 @@ class EmrgServer:
                         }
                         tool_calls = r.get("tool_calls")
                         if tool_calls:
-                            item["tool_calls"] = tool_calls
+                            # Copies carrying the batch label, never a mutation of the
+                            # record: the label is computed here, at read time, so a
+                            # session written before this existed replays with it too
+                            # (rant 2026-10-20T12:22:21). A disk write would have made
+                            # the answer a property of when the session was recorded.
+                            labels = _tool_call_labels(tool_calls)
+                            item["tool_calls"] = [
+                                {**call, "call_label": labels[index]}
+                                if isinstance(call, dict) else call
+                                for index, call in enumerate(tool_calls)
+                            ]
                         history_messages.append(item)
                     elif rtype == "summary":
                         # One per compaction (#2351): the live stream announced it
@@ -4805,7 +4842,11 @@ class EmrgServer:
 
                 # Execute each tool.  tool_calls are already embedded in the
                 # assistant message above, so we only persist tool_results here.
-                for tc in openai_tool_calls:
+                # One batch, one computation (rant 2026-10-20T12:22:21): the label for
+                # every call of this response is decided before the loop, so the frame
+                # carries a finished string and no client has to count anything.
+                call_labels = _tool_call_labels(openai_tool_calls)
+                for call_index, tc in enumerate(openai_tool_calls):
                     tc_id = tc["id"]
                     tc_name = tc["function"]["name"]
                     tc_args_str = tc["function"]["arguments"]
@@ -4830,6 +4871,7 @@ class EmrgServer:
                         "tool_call_id": tc_id,
                         "arguments": args,
                         "intent": args.get("intent") or "",
+                        "call_label": call_labels[call_index],
                     })
 
                     # The pieces of a call the model must not choose (D1).
