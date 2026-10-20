@@ -312,6 +312,19 @@ NOT_TREE_READERS = {
         "answer anything (the repo it read is printed first instead)"
     ),
     "check-patch-files.py": "reads the patch files it is given as arguments",
+    "check-memory-rotation.py": (
+        "reads two host-state subjects it names before any verdict - the project register "
+        "(`~/.emrg/projects.yml`) and the rotation bookmark (a Markdown table of the newest "
+        "memory modification time already read per project) - then walks each project's "
+        "`.emrg/memory/` and `.emrg/sessions/*/memory/`, which are gitignored host data no "
+        "checkout carries. A working tree is not its subject and no tree's name would answer "
+        "anything: the questions are which projects moved and whether every registered "
+        "project has a row, and both are answered about the host's data. Its unmeasurable "
+        "answer (rc 2: no register, no bookmark, a stamp that cannot be ordered) and its "
+        "coverage faults (rc 1) are pinned by tests/test_check_memory_rotation.py - added by "
+        "issue #2408, where step 0 was a hand-written probe that read 30 of 31 rows and "
+        "reported 21 projects as changed against rows that already named their newest file"
+    ),
     "check-batching-share.py": (
         "reads a corpus of session history files - `history_*.jsonl` under the roots given "
         "as positional subjects, defaulting to the host's `~/.emrg` - and counts the tool "
