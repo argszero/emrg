@@ -232,9 +232,8 @@ def test_the_gui_reader_keys_on_the_same_sentinel():
     Issue #2256's table names two readers: ``emrg/gui/main.js::isKeyConfigured`` (G117,
     which opens the setup wizard) and ``LlmClient._headers`` (which refuses the request).
     Only the second was pinned when that fix landed. Renaming the GUI's comparison left this
-    whole module green — measured on master `f33bbc7e` with
-    ``run-mutation-arm.py --file emrg/gui/main.js --old 'key !== "sk-..."' --new
-    'key !== "some-other-placeholder"'`` → **SURVIVED, 4 passed**. The drift that hides there
+    whole module green — measured on master `f33bbc7e` by renaming that comparison in
+    `emrg/gui/main.js` by hand → **SURVIVED, 4 passed**. The drift that hides there
     is silent: move the constant and the writers' test above forces every template to follow,
     the refusal follows with the constant, and the GUI stops recognising the key the product
     writes — two halves of one rule, consistent with each other and wrong together.

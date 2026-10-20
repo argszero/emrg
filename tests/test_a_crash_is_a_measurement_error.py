@@ -19,8 +19,6 @@ sibling left unparsable:
     check-merge-freshness.py  -> exit 1   # the STALE verdict, whose remedy is a re-merge
                                           # and a push that voids every standing vote
     review-queue.py           -> exit 1   # a code this tool's table does not define at all
-    run-mutation-arm.py       -> exit 1   # == EXIT_SURVIVED, "the target still passed with
-                                          # the mutation in place"
 
 So this module pins the rule the family now shares: `_entry()` catches what leaves `main`,
 prints the cause, and answers `2`. The clause reads the tools the way the other family-wide
@@ -63,9 +61,7 @@ TOOLS = [
     "check-merge-pairs.py",
     "check-merge-order.py",
     "check-merge-landed.py",
-    "run-mutation-arm.py",
     "check-notary-credentials.py",
-    "check-install-drift.py",
     "check-icon-transparency.py",
     # Joined 2026-10-20 (`cyc20261020-121739`), and its shape is the reason the family
     # rule exists: it answers **1 = "a product still ships the previous prompt"**, a
@@ -212,10 +208,10 @@ def test_the_family_is_derived_from_the_source_not_listed():
     `DEVELOPMENT.md` sentence claiming the rule for "the gate family" was pinned by a module
     that could not measure the claim (measured 2026-10-06, `cyc20261006-091811`).
 
-    The set is required to be a **subset** of `TOOLS`, not equal to it: `run-mutation-arm.py`
-    is pinned here and loads nothing — it asks a gate as a subprocess — so equality would be
-    false. What is asserted is the direction that can rot: no sibling-loading gate escapes
-    the list.
+    The set is required to be a **subset** of `TOOLS`, not equal to it:
+    `check-notary-credentials.py` is pinned here and loads no sibling at all, so equality
+    would be false. What is asserted is the direction that can rot: no sibling-loading gate
+    escapes the list.
     """
     loaders = set()
     for path in sorted(SCRIPTS.glob("*.py")):

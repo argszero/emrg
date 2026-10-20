@@ -200,7 +200,7 @@ def test_the_refusal_has_one_wording() -> None:
 # the Windows leg reads them too.
 #
 # Each arm is checked against the **pre-change** tree, not only against a mutated one:
-# `run-mutation-arm.py` judges a *file*, so a sibling's red hides an arm that pins
+# A mutation arm judges a *file*, so a sibling's red hides an arm that pins
 # nothing. Measured 2026-10-12 (`cyc20261012-134702`), this file against `8c4a9f55`'s
 # `app.py`: the two arms that name a defect fail there, and the FIFO verdict arm failed
 # only once it asserted the subject's survival beside the answer.
