@@ -57,22 +57,24 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SYSTEM_PROMPT = REPO_ROOT / "emrg" / "server" / "prompts" / "system.j2"
 
-#: The block's identity in `system.j2`. The file spells the heading with the record appended
-#: (`## Plain language — how you address the host (issue #2171)`), so this is its prefix; a second
-#: copy appended anywhere in the template is still visible as a count of 2.
-PLAIN_HEADING = "## Plain language — how you address the host"
+#: The block's identity in `system.j2`. The rule now sits in `## Writing`, beside the language
+#: policy and the lead-with-the-point rule — one section for everything about how the reply
+#: reads, instead of one section per historical complaint. A second copy appended anywhere in
+#: the template is still visible as a count of 2.
+PLAIN_HEADING = "## Writing"
 
 #: Load-bearing terms, each a verbatim substring of the shipped wording, so this list cannot drift
 #: away from the sentence it checks without this file saying so. They cover the rule, both halves of
-#: its scope, the repair it asks for, the reason it is a requirement rather than a preference, and
-#: the public record beside the host-local citations.
+#: its scope, and the repair it asks for — the semantics the four host messages asked for, in the
+#: wording the prompt states them in. The history (how often the host had to ask, and where each
+#: message was recorded) is not part of the artifact any more: it is in the charter, in the pull
+#: request that landed the rule and in this project's memory.
 PLAIN_TERMS = (
-    "Write to the host in words they can read without your notes",  # the rule itself
-    "Never coin a term at the host",                                # the prohibition
-    "A shorthand is spelled on first use",                          # the repair
-    "Internal records are exempt",                                  # the half that prevents over-correction
-    "A request the host has had to make four times is a requirement, not a preference",
-    "issue #2171",                                                  # the record beside the citations
+    "The host reads only your reply",                                # the rule itself
+    "a term only your records use, or a shorthand you coined, resolves to nothing",  # the prohibition
+    "Name the thing in their terms, and spell a short form's full name on first use",  # the repair
+    "Internal records keep their own language",                      # the half that prevents over-correction
+    "Lead with the point",                                           # conclusion first
 )
 
 
@@ -167,10 +169,10 @@ def test_the_prohibition_and_the_exemption_are_pinned_together() -> None:
     the pleasant half fails here with the reason rather than passing as a wording change.
     """
     block = _block_after(SYSTEM_PROMPT.read_text(encoding="utf-8"), PLAIN_HEADING)
-    assert "Never coin a term at the host" in block, (
+    assert "a shorthand you coined, resolves to nothing" in block, (
         "the block no longer forbids coining a term at the host — the complaint it exists for"
     )
-    assert "Internal records are exempt" in block, (
+    assert "Internal records keep their own language" in block, (
         "the block no longer exempts internal records — read alone, the prohibition would strip the "
         "agent's own memory and notes of the vocabulary they are written in"
     )
@@ -190,7 +192,7 @@ def test_the_scan_reports_absence() -> None:
     assert doubled.count(PLAIN_HEADING) == 2
     # ... and the other direction, so the extractors are not reading a constant: a block that
     # carries one term must report exactly the terms it lacks.
-    partial = f"{PLAIN_HEADING}\n\nNever coin a term at the host\n"
-    assert _block_after(partial, PLAIN_HEADING).strip() == "Never coin a term at the host"
-    assert "Never coin a term at the host" not in _missing_terms(partial, PLAIN_TERMS)
+    partial = f"{PLAIN_HEADING}\n\nLead with the point\n"
+    assert _block_after(partial, PLAIN_HEADING).strip() == "Lead with the point"
+    assert "Lead with the point" not in _missing_terms(partial, PLAIN_TERMS)
     assert len(_missing_terms(partial, PLAIN_TERMS)) == len(PLAIN_TERMS) - 1

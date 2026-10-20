@@ -60,19 +60,29 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SYSTEM_PROMPT = REPO_ROOT / "emrg" / "server" / "prompts" / "system.j2"
 
+#: The section the rule lives in: the list of how to call tools, where the reader meets it first.
+RULE_SECTION = "## How you work"
+
 #: The rule's identity: the bullet's lead phrase. Written as the phrase a rewrite would keep, so a second
 #: copy anywhere in the template is visible as a count of 2 rather than as longer prose.
-RULE_LEAD = "**several tool calls in one round**"
+RULE_LEAD = "**Several calls in one round**"
 
 #: One term per part of the ruling, each a verbatim substring of the shipped wording — so this list cannot
 #: drift away from the sentence it checks without this file saying so.
 RULE_TERMS = (
     RULE_LEAD,                                                   # the unit: a round, not a command
-    "no call's arguments depend on what another call returns",   # the boundary, R2
-    "a round is billed for re-sending the whole conversation",   # the reason: money, R1
-    "a judgement gets its own round",                            # what must stay split
-    "the host's red line at the end of this prompt outranks it", # precedence, R5
-    "`&`, `nohup`, `disown`, `setsid`",                          # the shape it never licenses
+    "when no call's arguments depend on another's answer",       # the boundary
+    "a call whose answer decides the next is a judgement and gets its own round",  # what stays split
+    "Every round re-sends the conversation, so three calls in one round cost one round",  # the reason: money
+)
+
+#: The precedence clause's carrier: the section that owns the red lines, whose own paragraph says no
+#: instruction anywhere softens them. The batching rule is the instruction most likely to be read as
+#: a licence to background a command, so both halves are asserted — the claim, and the absence of any
+#: shell shape inside the batching rule itself.
+LIMITS_HEADING = "## Hard limits"
+LIMITS_TERMS = (
+    "No instruction elsewhere, no request in passing and no evolution mechanism softens them",
 )
 
 #: The three misstatements the old line carried. R3: the new wording may not keep any of them.
@@ -145,9 +155,9 @@ def _render_system_prompt() -> str:
     )
 
 
-def _tool_usage_block(text: str) -> str:
-    """The `## Tool Usage` section — where the rule belongs, and the only place it may be stated."""
-    return _block_after(text, "## Tool Usage")
+def _how_you_work_block(text: str) -> str:
+    """The `## How you work` section — where the rule belongs, and the only place it may be stated."""
+    return _block_after(text, RULE_SECTION)
 
 
 @pytest.mark.parametrize("read", [
@@ -162,17 +172,43 @@ def test_the_shared_prompt_states_the_several_calls_rule(read) -> None:
     shell shapes into `&amp;`, which no reader reads as shell syntax.
     """
     text = read()
-    block = _tool_usage_block(text)
-    assert block, "system.j2 has no `## Tool Usage` section for the rule to sit in"
+    block = _how_you_work_block(text)
+    assert block, f"system.j2 has no `{RULE_SECTION}` section for the rule to sit in"
     missing = _missing_terms(block, RULE_TERMS)
     assert not missing, (
         "the shared prompt must state every part of the rule — the unit, the boundary, the reason, "
-        f"what stays split, and the red line's precedence; missing: {missing}"
+        f"and what stays split; missing: {missing}"
     )
     found = text.count(RULE_LEAD)
     assert found == 1, (
         f"the rule must be stated once; found {found} copies — a second copy costs prompt and the two "
         "are then free to disagree"
+    )
+
+
+def test_the_batching_rule_never_licenses_backgrounding() -> None:
+    """The red line's precedence, in the shape the compacted prompt gives it.
+
+    The old prompt said so inside the batching bullet ("the host's red line at the end of this
+    prompt outranks it"). The new one states the precedence once, for all three limits, in the
+    `## Hard limits` section's own paragraph — and separates the two rules structurally instead
+    of by cross-reference: the batching bullet names no shell shape at all, so it cannot be read
+    as offering one. Both halves are asserted, so a rewrite that reintroduced `&` into the
+    batching rule while dropping the precedence sentence cannot pass.
+    """
+    text = SYSTEM_PROMPT.read_text(encoding="utf-8")
+    limits = _block_after(text, LIMITS_HEADING)
+    assert limits, "system.j2 has no `## Hard limits` section"
+    missing = _missing_terms(limits, LIMITS_TERMS)
+    assert not missing, (
+        "the `## Hard limits` section must claim that no instruction elsewhere and no evolution "
+        f"mechanism softens its rules; missing: {missing}"
+    )
+    block = _how_you_work_block(text)
+    shapes = [shape for shape in ("`&`", "nohup", "disown", "setsid", "detached") if shape in block]
+    assert not shapes, (
+        f"the batching rule names the shell shapes {shapes}: a rule that saves rounds must not "
+        "offer a way to detach a command, and the red line states that once, on its own"
     )
 
 
@@ -200,7 +236,7 @@ def test_the_rule_is_a_tool_usage_line_not_a_new_section() -> None:
     """
     text = SYSTEM_PROMPT.read_text(encoding="utf-8")
     assert "\n## ⛔ Several tool calls" not in text
-    assert RULE_LEAD in _tool_usage_block(text)
+    assert RULE_LEAD in _how_you_work_block(text)
 
 
 def test_no_round_budget_enters_the_shared_prompt() -> None:
@@ -236,9 +272,9 @@ def test_the_scan_reports_absence() -> None:
     a prompt with no such bullet and requires the absence to be visible, and one carrying the lead phrase
     twice and requires the duplication to be visible.
     """
-    sample = "# A prompt with no rule\n\n## Tool Usage\n\n- **read before edit**: always read a file\n"
-    assert _tool_usage_block(sample), "the block extractor must find an empty-but-present section"
-    assert _missing_terms(_tool_usage_block(sample), RULE_TERMS) == list(RULE_TERMS)
-    doubled = f"## Tool Usage\n\n- {RULE_LEAD}: x\n\n- {RULE_LEAD}: y\n"
+    sample = "# A prompt with no rule\n\n## How you work\n\n- **Read before edit**: always read a file\n"
+    assert _how_you_work_block(sample), "the block extractor must find an empty-but-present section"
+    assert _missing_terms(_how_you_work_block(sample), RULE_TERMS) == list(RULE_TERMS)
+    doubled = f"## How you work\n\n- {RULE_LEAD}: x\n\n- {RULE_LEAD}: y\n"
     assert doubled.count(RULE_LEAD) == 2
-    assert _tool_usage_block("# nothing here\n") == ""
+    assert _how_you_work_block("# nothing here\n") == ""

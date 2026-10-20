@@ -218,37 +218,41 @@ def test_system_prompt_environment_without_session(tmp_path):
 
 
 def test_system_prompt_rant_handling_section(tmp_path):
-    """Rant Handling section renders (rant 2026-08-17T11:51:59): agent must
-    know to detect rants in normal conversation, confirm with the user, and
-    only then call submit_rant."""
+    """The rants section renders (rant 2026-08-17T11:51:59): detect a rant in ordinary
+    conversation, ask what is unclear, and call `submit_rant` only with consent.
+
+    The section is `## Rants` in the compacted prompt and states the same three things
+    without the `/rant` prefix: a rant arrives as ordinary conversation, so there is no
+    mode to enter — which is why the prefix is no longer the carrier of consent. The
+    client expands `/rant` before the model sees it, and the consent rule here is the
+    one that governs every other route.
+    """
     server = _make_server()
     rendered = server._build_system_prompt()
-    assert "## Rant Handling" in rendered
+    assert "## Rants" in rendered
     assert "submit_rant" in rendered
-    assert "explicit" in rendered.lower()  # consent-before-call contract
-    assert "/rant" in rendered
+    assert "only once the host agrees" in rendered  # consent-before-call contract
+    assert "the call is the confirmation" in rendered
+    assert "If the host says never mind, do not call it" in rendered
 
 
 def test_system_prompt_says_a_task_cannot_write_its_own_prompt():
-    """A task's only channel to its own prompt text is a rant (host ruling
-    2026-10-09T14:34:54; PR #1986).
+    """A task's only channel to its own prompt is a rant (host ruling 2026-10-09T14:34:54).
 
-    The loop this closes, measured on 2026-10-09: the `competition` task wanted rules added
-    to `emrg/server/competition_prompt.md`, and it could do nothing about it from its own
+    The loop this closes, measured on 2026-10-09: the `competition` task wanted rules added to
+    `emrg/server/competition_prompt.md`, and it could do nothing about it from its own
     workspace. Two copies exist — the repository's, which nothing reads at runtime, and the
     install tree's, which is the one `_resolve_task_template` returns and which sits outside
     every task's workspace and is replaced whole by the next upgrade — so a task that writes
     the file it can reach is writing something no round reads, and a task that writes the one
-    that matters cannot. The host ruled it directly (2026-10-09T14:34:54, session
-    `emrg-evolution-competition-task`): 「你不能直接修改competition_prompt.md，丢宇emrg项目，
-    你只能提rant」.
+    that matters cannot.
 
-    Both halves of the citation are asserted, for the reason `check-rant-citations.py` gives:
-    the timestamp is **host-local** — that session exists only on the host that recorded it,
-    so the message does not resolve on a second host (issue #1252 measured 0 of 24) — while
-    `PR #1986` stays resolvable forever. A reader who cannot see the local store still has
-    the anchor, so asserting the timestamp alone would pin a reference half of whose
-    provenance can rot.
+    The ruling's citation (its timestamp, the pull request beside it, the command that re-finds
+    the message) is recorded in this project's memory and in the pull request that landed it;
+    the session prompt states the rule, the reason and the channel, and spends no prefix on the
+    provenance — which is the property the compacted prompt is built on and
+    `tests/test_system_prompt_structure.py::test_neither_the_file_nor_the_render_carries_provenance`
+    holds.
 
     Asserted on the **render**: `system.j2` is the single render site every session receives,
     so a rule placed here reaches a `competition` or `paper` session that opens no other
@@ -257,75 +261,50 @@ def test_system_prompt_says_a_task_cannot_write_its_own_prompt():
     """
     server = _make_server()
     rendered = server._build_system_prompt()
-    assert "A task cannot change its own prompt text" in rendered, (
+    assert "A task cannot change its own prompt" in rendered, (
         "the rendered system prompt does not say who owns a task's prompt file — the rule "
         "is then carried by no artifact a task session receives"
     )
-    assert "`project: emrg`" in rendered, (
+    assert "File a rant against `emrg`" in rendered, (
         "the rule must name the channel (a rant against `emrg`), because 'you may not write "
         "it' without a route leaves the task with nowhere to go"
     )
-    assert "install tree" in rendered, (
+    assert "replaced whole by the next upgrade" in rendered, (
         "the reason the write does not work is missing: without it the rule reads as a "
-        "policy preference rather than a description of two copies"
-    )
-    # A rule recorded as the host's is a message that can be pointed at: the quote is
-    # verbatim, the command that re-finds it is right beside it, and the reference carries
-    # the resolvable half too — the timestamp is host-local (issue #1252).
-    assert "2026-10-09T14:34:54" in rendered, (
-        "the host message the rule rests on is gone, so the rule rests on this instance's "
-        "inference instead"
-    )
-    assert "PR #1986" in rendered, (
-        "the citation keeps only its host-local half: a timestamp indexes one machine's "
-        "store, so a reader on a second host has nothing to resolve — the public record "
-        "spelled beside it is the anchor that survives"
-    )
-    # The scope is the half a reader on another host acts on. Without it the paragraph
-    # reads as a command that works everywhere, and a session that runs it and reads
-    # `NOT FOUND` (rc 1) concludes the host never said it — the failure mode this
-    # paragraph exists to close (reviewer finding on #1986, reproduced on two hosts).
-    assert "host-local" in rendered and "NOT FOUND" in rendered, (
-        "the paragraph no longer says the citation is host-local: that reading was taken "
-        "on the machine that recorded the message, and a reader elsewhere can only "
-        "reproduce it as `NOT FOUND` — stated, that is a scope; unstated, it is a "
-        "contradiction the reader cannot resolve"
-    )
-    assert "You cannot modify competition_prompt.md directly" in rendered, (
-        "the quotation from another language ships untranslated, against the Language "
-        "Policy block seven lines below that these paragraphs cite for their placement"
-    )
-    assert "丢宇emrg项目" in rendered, (
-        "the host's own words are not quoted verbatim — the message is re-findable only by "
-        "the exact string, and a paraphrase cannot be looked up"
-    )
-    assert "find-host-message.py --pattern '不能直接修改competition_prompt.md'" in rendered, (
-        "the render does not say how to re-find the message, so the next reader has to "
-        "trust this file"
+        "policy preference rather than a description of two copies — the install tree's copy "
+        "sits outside every workspace and is replaced whole by the next upgrade"
     )
 
 
 def test_system_prompt_temp_file_rules_section(tmp_path):
-    """Temp File Rules section renders with the session tmp dir (rant
-    2026-08-25T18:10:57): throwaway scripts must go under the session
-    directory's tmp/ subdir, not the project root / workdir / ~/.emrg root."""
+    """The temp-file rule renders with the session tmp dir (rant 2026-08-25T18:10:57):
+    throwaway scripts go under the session directory's tmp/ subdir, not the project root /
+    workdir / ~/.emrg root.
+
+    The rule is a bullet of `## Session and history` in the compacted prompt rather than a
+    `## Temp File Rules` section of its own — one rule, one heading, next to the topic it
+    serves (`tests/test_system_prompt_structure.py` holds the placement). What this measures
+    is unchanged: the rendered rule exists, it names the session's own path, and it names the
+    places the scripts must not go.
+    """
     server = _make_server()
     session = Session.create_with_id("tmpfile-test", tmp_path)
     rendered = server._build_system_prompt(session)
-    assert "## Temp File Rules" in rendered
+    assert "Throwaway scripts and payloads go under" in rendered
     assert "tmp/" in rendered
     # the rendered path must point into the session directory
     assert str(session.dir_path) in rendered
-    assert "never in the project root" in rendered or "project root" in rendered
+    assert "project root" in rendered
+    assert "the config root" in rendered
 
 
 def test_system_prompt_temp_file_rules_absent_without_session():
-    """Without a session the temp-file rules section is skipped (no path to
-    anchor it to), same as Session & History."""
+    """Without a session the session section is skipped (no path to anchor it to), and the
+    temp-file rule goes with it — it lives inside that section."""
     server = _make_server()
     rendered = server._build_system_prompt()
-    assert "## Temp File Rules" not in rendered
-    assert "## Session & History" not in rendered
+    assert "## Session and history" not in rendered
+    assert "Throwaway scripts and payloads go under" not in rendered
 
 
 def test_submit_rant_tool_registered():

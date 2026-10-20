@@ -35,14 +35,16 @@ from emrg.session import Session
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SYSTEM_PROMPT = REPO_ROOT / "emrg" / "server" / "prompts" / "system.j2"
 
-#: The hygiene section's identity in `system.j2`, written as its heading line so a second
-#: copy would be visible here rather than silently deepening the block.
-HYGIENE_HEADING = "**Memory Hygiene**"
+#: The section's identity in `system.j2`, written as its heading line so a second copy would be
+#: visible here rather than silently deepening the block. One `## Memory` section holds the format,
+#: the two numbers and the organisation rules; a second heading starting with `Memory` is the split
+#: `tests/test_system_prompt_structure.py` refuses.
+HYGIENE_HEADING = "## Memory"
 
 #: The row-bound sentence's identity: the line that states what a row is. Chosen as a phrase
 #: that survives rewording of the number, so this file keeps measuring the *bound's* carrier
 #: rather than one spelling of the sentence.
-BOUND_MARKER = "pure index"
+BOUND_MARKER = "The index is a pointer list"
 
 #: The variable the template must use. Named here so the assertion and the template cannot
 #: disagree about which name is the one.
@@ -51,34 +53,26 @@ BOUND_VAR = "{{ index_title_max_chars }}"
 #: The line cap's identity: the sentence that asks for compaction. Chosen as a phrase that
 #: survives rewording of the number, so this file keeps measuring the *cap's* carrier rather
 #: than one spelling of the sentence.
-LINE_CAP_MARKER = "consolidate: merge redundant memories"
+LINE_CAP_MARKER = "it is consolidated"
 
 #: The variable the line-cap sentence must use — the same name/value pairing as `BOUND_VAR`.
 LINE_CAP_VAR = "{{ memory_index_row_cap }}"
 
 
 def _hygiene_block(text: str) -> str:
-    """The lines of the memory-hygiene section, heading through the last bullet.
+    """The `## Memory` region, heading through the bullet list, excluding the next `## ` section.
 
-    Read as a *block* rather than line by line because the nesting is the point: a bound
-    stated under `{% if false %}` is in the file and in no render, and a check that scanned
-    the whole file for a phrase would pass it.
+    Read as a *region* rather than searched file-wide because the boundaries are the point: a
+    bound stated under `{% if false %}` is in the file and in no render, and a rewrite that moved
+    one of the two numbers into an unrelated section would still pass a scan of the whole file.
+    Both numbers must be inside this one section — they belong to the same list.
     """
-    lines = text.splitlines()
-    try:
-        # Prefix rather than equality: the heading line carries its rant citations after
-        # the marker (`**Memory Hygiene** (PR #941, …)`), and an exact match would miss the
-        # block it is looking for — the shape `test_language_policy_reach.py` records for
-        # the same reason.
-        start = next(i for i, line in enumerate(lines) if line.startswith(HYGIENE_HEADING))
-    except StopIteration:
+    start = text.find(HYGIENE_HEADING)
+    if start == -1:
         return ""
-    block: list[str] = []
-    for line in lines[start + 1:]:
-        if line.startswith("{%") or line.startswith("#") or not line.strip():
-            break
-        block.append(line)
-    return "\n".join(block)
+    rest = text[start + len(HYGIENE_HEADING):]
+    end = rest.find("\n## ")
+    return rest if end == -1 else rest[:end]
 
 
 def _bound_line(text: str) -> str:

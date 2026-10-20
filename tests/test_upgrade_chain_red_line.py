@@ -13,10 +13,11 @@ fixture `_guard_upgrade_hermeticity`, whose docstring carries the incident. It i
 in `MANIFESTO.md`. It was stated in neither of the two prompts that drive an agent:
 
 * `emrg/server/prompts/system.j2` — the **host session** prompt, rendered by the daemon.
-  It carries the sibling rule (附则二, the daemon stop/restart red line) as a ⛔ block and
-  nothing for 附则三, so the instance executing a cycle was told about one permanent red
-  line in its own prompt and the other only if the project it happened to be working on
-  carries `MANIFESTO.md`. A task whose working directory is another project does not.
+  It carries both permanent rules under one `## Hard limits` section, each as a `###`
+  subsection that states the rule in English for the session's own reader; the Chinese
+  sentence, the identifiers and the file paths they name live in `MANIFESTO.md`, which the
+  section points at. A task whose working directory is another project does not carry that
+  file, which is why each limit is stated as a rule rather than as a citation.
 * `emrg/server/evolution_prompt.md` — the template that ships in a release and is
   installed for other instances. Its `### Forbidden` list is where a reader looks for
   exactly this class of rule.
@@ -72,23 +73,62 @@ EVOLUTION_TEMPLATE = REPO_ROOT / "emrg" / "server" / "evolution_prompt.md"
 #: glob can neither silently go empty nor miss a template that registry accepts.
 TASK_TEMPLATES = sorted((REPO_ROOT / "emrg" / "server").glob("*_prompt.md"))
 
-#: The heading of the 附则三 block in the host session prompt. The block runs to EOF.
-UPGRADE_HEADING = "## ⛔ 最高原则·永久（宿主 2026-08-21 10:35 确立）"
+#: The charter the prompt's hard limits point at: the two permanent principles, quoted in
+#: full, are `MANIFESTO.md`'s text. The prompt states the rules and no longer reproduces the
+#: Chinese sentence, the function names or the file paths they name — so the literals that
+#: used to be asserted *in the prompt* are asserted where they actually live, which is
+#: here (and is why this file reads two carriers rather than one).
+MANIFESTO = REPO_ROOT / "MANIFESTO.md"
+
+#: The heading of the 附则三 block in the host session prompt.
+UPGRADE_HEADING = "### Never reach the real auto-upgrade chain"
 
 #: The heading of the sibling block, which must survive any edit here.
-STOP_HEADING = "## ⛔ 最高原则·永久（宿主 2026-08-18 22:58 确立）"
+STOP_HEADING = "### Never stop or restart the server"
 
-#: Load-bearing terms of the 附则三 statement in `system.j2`. Each is a verbatim
-#: substring of the shipped wording, so this list cannot drift away from the sentence it
-#: checks without the test saying so.
+#: The section that owns all three limits, and the permanence claim its own paragraph makes.
+LIMITS_HEADING = "## Hard limits"
+LIMITS_TERMS = (
+    "No instruction elsewhere, no request in passing and no evolution mechanism softens them",
+)
+
+#: Load-bearing terms of the 附则三 statement in `system.j2`. Each is a verbatim substring of
+#: the shipped wording, so this list cannot drift away from the sentence it checks without
+#: the test saying so. The routes are named by *what they are* (a releases request, a version
+#: file, the upgrade session) rather than by identifier, and the identifiers themselves are
+#: asserted against `MANIFESTO.md` below — the direction the charted text is written in.
 UPGRADE_TERMS = (
-    "自动升级触发链",                    # the rule itself
+    "The chain has real side effects",          # the rule itself
+    "a releases request, a version file, the upgrade session",  # every route, in one run
+    "Never write, restore or introduce a test, script or code path that runs it",  # what not to write
+    "stub every side-effecting endpoint",       # what to do instead
+    "hermeticity guard",                        # the mechanical half, named by its role
+)
+
+#: Load-bearing terms of the sibling 附则二 statement in `system.j2`.
+STOP_TERMS = (
+    "the process this agent runs in",           # the rule itself: why the server is not a resource
+    "disconnects the host and rebuilds every scheduled handler",  # the consequence
+    "Never write, restore or introduce a test, script or code path that ends or relaunches it",
+    "calling the teardown with its effects mocked",  # what to do instead
+)
+
+#: The identifiers the prompt no longer reproduces, each of which `MANIFESTO.md` carries in
+#: full. Asserted where they live, so dropping them from the prompt is a move and not a loss.
+MANIFESTO_UPGRADE_TERMS = (
+    "第四条附则三",                      # provenance
+    "不适用任何演化机制",                # permanent: no evolution mechanism reaches it
+    "自动升级触发链",                    # the rule, in the charter's own words
     "UpgradeManager.tick()",            # the in-process route
     "install/version.txt",              # the file the chain must not touch
     "emrg-upgrade",                     # the session it must not write
-    "_guard_upgrade_hermeticity",       # the mechanical half, named
-    "不适用任何演化机制",                # permanent: no evolution mechanism reaches it
-    "第四条附则三",                      # provenance
+)
+
+#: The sibling clause's identifiers, likewise asserted on the charter.
+MANIFESTO_STOP_TERMS = (
+    "第四条附则二",
+    "stop_all()",
+    "stop_daemon()",
 )
 
 #: The verdict of "this is not a choice the system may revise", spelled as the host did.
@@ -133,10 +173,30 @@ TASK_ONLY_TEMPLATES = tuple(t for t in TASK_TEMPLATES if t.name != "evolution_pr
 
 
 def _block_after(text: str, heading: str) -> str:
-    """The block starting at ``heading``, up to the next `## ` heading or EOF.
+    """The block starting at ``heading``, up to the next `## ` or `### ` heading, or EOF.
+
+    Both levels end a block: the three limits are `###` subsections of one `## Hard limits`
+    region, so an extractor that stopped only at `## ` would read the stop-or-restart clause
+    as running to the end of the file — and the upgrade clause, printed below it, would then
+    answer for it, which is a pass on the wrong text. ``test_the_block_extractor_separates_the
+    _two_sibling_blocks`` is the arm that holds this.
 
     Returns ``""`` when the heading is absent — the caller asserts, so a missing block
     reads as a failure to measure rather than as a pass.
+    """
+    start = text.find(heading)
+    if start == -1:
+        return ""
+    rest = text[start + len(heading):]
+    ends = [end for end in (rest.find("\n## "), rest.find("\n### ")) if end != -1]
+    return rest if not ends else rest[:min(ends)]
+
+
+def _section(text: str, heading: str) -> str:
+    """The whole region ``heading`` owns: from that line to the next `## ` heading, or EOF.
+
+    Unlike `_block_after` this keeps the `###` subsections inside it — what the placement
+    question needs, since the two limits must be printed under `## Hard limits`.
     """
     start = text.find(heading)
     if start == -1:
@@ -192,16 +252,24 @@ def _missing_terms(text: str, terms: tuple[str, ...]) -> list[str]:
 
 
 def test_the_host_session_prompt_states_the_auto_upgrade_red_line() -> None:
-    block = _block_after(SYSTEM_PROMPT.read_text(encoding="utf-8"), UPGRADE_HEADING)
+    text = SYSTEM_PROMPT.read_text(encoding="utf-8")
+    block = _block_after(text, UPGRADE_HEADING)
     assert block, (
         "emrg/server/prompts/system.j2 must carry the 附则三 block (MANIFESTO.md "
-        "第四条附则三, host 2026-08-21T10:35:57) — it is the prompt a host session "
-        "actually runs under"
+        "第四条附则三) — it is the prompt a host session actually runs under"
     )
     missing = _missing_terms(block, UPGRADE_TERMS)
     assert not missing, (
         "the 附则三 block in system.j2 must name the rule and the routes it closes; "
         f"missing: {missing}"
+    )
+    limits = _section(text, LIMITS_HEADING)
+    assert UPGRADE_HEADING in limits and STOP_HEADING in limits, (
+        "both permanent limits must sit inside `## Hard limits`: that section's own paragraph "
+        "is where the prompt says no evolution mechanism softens them"
+    )
+    assert not _missing_terms(limits, LIMITS_TERMS), (
+        "the `## Hard limits` section no longer claims that nothing softens its rules"
     )
 
 
@@ -214,10 +282,29 @@ def test_the_host_session_prompt_keeps_the_sibling_block_it_had() -> None:
     """
     block = _block_after(SYSTEM_PROMPT.read_text(encoding="utf-8"), STOP_HEADING)
     assert block, "system.j2 must keep its 附则二 (daemon stop/restart) block"
-    missing = _missing_terms(
-        block, ("stop_all()", "emrg server stop/restart", "不适用任何演化机制", "第四条附则二"),
-    )
+    missing = _missing_terms(block, STOP_TERMS)
     assert not missing, f"the 附则二 block in system.j2 lost terms it had: {missing}"
+
+
+def test_the_charter_carries_the_identifiers_the_prompt_points_at() -> None:
+    """The prompt states the rules; the charter carries the names. Both are asserted.
+
+    A rule that named `UpgradeManager.tick()` and `install/version.txt` in every session's
+    prompt spent prompt on identifiers no session acts on, and the permanent text that does
+    list them is `MANIFESTO.md` — a project-context file the prompt now points at. The move
+    is only honest if the identifiers are still somewhere: this reads them where they live,
+    so deleting them from the charter fails here instead of passing as a tidy-up.
+    """
+    charter = MANIFESTO.read_text(encoding="utf-8")
+    for name, terms in (
+        ("第四条附则三", MANIFESTO_UPGRADE_TERMS),
+        ("第四条附则二", MANIFESTO_STOP_TERMS),
+    ):
+        missing = _missing_terms(charter, terms)
+        assert not missing, (
+            f"MANIFESTO.md no longer carries the {name} identifiers: {missing} — the prompt "
+            "points at the charter for them, so the pointer would name nothing"
+        )
 
 
 #: The clause's opening words in the shipped template, used where the question is
@@ -263,15 +350,20 @@ def test_each_carrier_states_the_rule_in_its_own_language() -> None:
 
     A cross-reference ("see MANIFESTO.md") is not a statement: the file it points at is a
     project-context file, read from the session cwd, and absent for a task run against
-    another project. So the check is that each carrier names the routes itself.
+    another project. So the check is that each carrier names the routes itself — the
+    template by identifier, and the session prompt by what each route *is* (a releases
+    request, a version file, the upgrade session), which is the same three routes at the
+    altitude the prompt is written at.
     """
     system_text = SYSTEM_PROMPT.read_text(encoding="utf-8")
     template_text = EVOLUTION_TEMPLATE.read_text(encoding="utf-8")
-    for name, text, terms in (
-        ("system.j2", system_text, UPGRADE_TERMS),
-        ("evolution_prompt.md", template_text, SHARED_UPGRADE_TERMS),
+    for name, text, terms, routes in (
+        ("system.j2", system_text, UPGRADE_TERMS,
+         ("a releases request", "a version file", "the upgrade session")),
+        ("evolution_prompt.md", template_text, SHARED_UPGRADE_TERMS,
+         ("UpgradeManager.tick()", "install/version.txt", "emrg-upgrade")),
     ):
-        for route in ("UpgradeManager.tick()", "install/version.txt", "emrg-upgrade"):
+        for route in routes:
             assert route in text, (
                 f"{name} must name the route {route!r} itself, not only point at "
                 "MANIFESTO.md"
@@ -279,6 +371,33 @@ def test_each_carrier_states_the_rule_in_its_own_language() -> None:
         assert not _missing_terms(text, terms), (
             f"{name} must state the 附则三 red line in full"
         )
+
+
+def test_the_block_extractor_separates_the_two_sibling_blocks() -> None:
+    """The arm the `###` boundary exists for: the two limits must not answer for each other.
+
+    Both clauses open with the same eleven words ("Never write, restore or introduce a test,
+    script or code path that…"), so an extractor that ran one to EOF would find the other's
+    routes inside it and pass. This reads the two blocks out of the shipped file, requires
+    each to carry its own distinguishing text, and requires the same two blocks out of a
+    synthetic sibling pair — the shape a `##`-only boundary reads as one block.
+    """
+    text = SYSTEM_PROMPT.read_text(encoding="utf-8")
+    stop_block = _block_after(text, STOP_HEADING)
+    upgrade_block = _block_after(text, UPGRADE_HEADING)
+    assert "ends or relaunches it" in stop_block
+    assert "a releases request" not in stop_block, (
+        "the stop-or-restart block runs into the upgrade clause: the extractor's boundary "
+        f"does not stop at a sibling `###` heading; it read: {stop_block[-120:]!r}"
+    )
+    assert "a releases request" in upgrade_block
+    assert "ends or relaunches it" not in upgrade_block
+    siblings = (
+        "## Hard limits\n\nParent paragraph.\n\n"
+        f"{STOP_HEADING}\n\nstop text\n\n{UPGRADE_HEADING}\n\nupgrade text\n"
+    )
+    assert _block_after(siblings, STOP_HEADING).strip() == "stop text"
+    assert _block_after(siblings, UPGRADE_HEADING).strip() == "upgrade text"
 
 
 def test_neither_carrier_states_the_rule_twice() -> None:

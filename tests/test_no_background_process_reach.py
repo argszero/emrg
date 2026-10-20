@@ -44,28 +44,61 @@ SYSTEM_PROMPT = REPO_ROOT / "emrg" / "server" / "prompts" / "system.j2"
 
 #: The section's identity in `system.j2`. Written as the heading line, so a second copy
 #: appended anywhere in the template is visible as a count of 2.
-RED_LINE_HEADING = "## ⛔ Host red line — no background processes (host, 2026-09-28)"
+RED_LINE_HEADING = "### Never background a command"
+
+#: The section that owns it. The prompt states three hard limits under one `## Hard limits`
+#: heading, and that heading's own paragraph is where the permanence claim lives — so the
+#: rule's *place* inside that section is asserted here rather than assumed (a `###` printed
+#: under some unrelated `##` topic states the same words and governs nothing).
+LIMITS_HEADING = "## Hard limits"
+
+#: The permanence claim the section makes for all three limits: no instruction, no request in
+#: passing and no evolution mechanism softens them.
+LIMITS_TERMS = (
+    "No instruction elsewhere, no request in passing and no evolution mechanism softens them",
+)
 
 #: Load-bearing terms of the statement. Each is a verbatim substring of the shipped
 #: wording, so this list cannot drift away from the sentence it checks without this file
 #: saying so. One term per shape the prohibition names, so the clause cannot be softened
 #: into a general warning about caution; then what to do instead, the failure it names,
-#: and the permanence it claims.
+#: and the scope that makes a cycle obey it like any other session.
 RED_LINE_TERMS = (
-    "Never start a background process",       # the rule itself
+    "Run commands in the foreground",         # the rule itself
     "No `&`, no `nohup`, no `disown`, no `setsid`",  # every shell shape, in one run
     "detached child",                         # the launcher shape
     "one at a time, with a generous `timeout`",      # what to do instead
-    "the turn dies with its task attached",   # the failure, so the rule is not folklore
-    "no cycle may gate, skip or trade it away",
+    "a background child outlives the call's stdout pipe",  # the mechanism, not folklore
+    "the turn dies with its task attached",   # the failure
+    "in a cycle exactly as in a host conversation",   # a cycle is bound too
 )
 
 
 def _block_after(text: str, heading: str) -> str:
-    """The block starting at ``heading``, up to the next `## ` heading or EOF.
+    """The block starting at ``heading``, up to the next `## ` or `### ` heading, or EOF.
+
+    Both levels end a block: the three hard limits are `###` subsections of one `## Hard
+    limits` region, so an extractor that stopped only at `## ` would read the first limit as
+    continuing to EOF — the following two limits' text included, which is how an assertion
+    about one rule passes on another rule's words.
 
     Returns ``""`` when the heading is absent — the caller asserts, so a missing block
     reads as a failure to measure rather than as a pass.
+    """
+    start = text.find(heading)
+    if start == -1:
+        return ""
+    rest = text[start + len(heading):]
+    ends = [end for end in (rest.find("\n## "), rest.find("\n### ")) if end != -1]
+    return rest if not ends else rest[:min(ends)]
+
+
+def _section(text: str, heading: str) -> str:
+    """The whole region ``heading`` owns: from that line to the next `## ` heading, or EOF.
+
+    Unlike `_block_after` this keeps the `###` subsections inside it — which is what the
+    placement question needs: the rule must be printed *under* `## Hard limits`, and the
+    section's own paragraph is where the permanence claim is made.
     """
     start = text.find(heading)
     if start == -1:
@@ -98,7 +131,8 @@ def _render_system_prompt() -> str:
 
 
 def test_the_shared_prompt_states_the_no_background_red_line() -> None:
-    block = _block_after(SYSTEM_PROMPT.read_text(encoding="utf-8"), RED_LINE_HEADING)
+    text = SYSTEM_PROMPT.read_text(encoding="utf-8")
+    block = _block_after(text, RED_LINE_HEADING)
     assert block, (
         "emrg/server/prompts/system.j2 must carry the no-background-process red line — it "
         "is the only prompt every session is rendered under, and the rule lived in one "
@@ -106,6 +140,17 @@ def test_the_shared_prompt_states_the_no_background_red_line() -> None:
     )
     missing = _missing_terms(block, RED_LINE_TERMS)
     assert not missing, f"the red-line section must name every shape; missing: {missing}"
+    limits = _section(text, LIMITS_HEADING)
+    assert RED_LINE_HEADING in limits, (
+        "the no-background rule must sit inside `## Hard limits`: the section's own paragraph "
+        "is where the permanence claim is made, and a rule printed elsewhere in the file "
+        "carries none of it"
+    )
+    missing = _missing_terms(limits, LIMITS_TERMS)
+    assert not missing, (
+        "the `## Hard limits` section must claim that nothing softens its rules; missing: "
+        f"{missing}"
+    )
 
 
 def test_the_rendered_prompt_carries_the_rule_not_merely_the_template() -> None:
@@ -127,6 +172,14 @@ def test_the_rendered_prompt_carries_the_rule_not_merely_the_template() -> None:
     )
     missing = _missing_terms(block, RED_LINE_TERMS)
     assert not missing, f"the rendered red-line section is missing terms: {missing}"
+    limits = _section(rendered, LIMITS_HEADING)
+    assert RED_LINE_HEADING in limits, (
+        "the rendered prompt prints the rule outside `## Hard limits`, so the permanence the "
+        "section claims does not reach it"
+    )
+    assert not _missing_terms(limits, LIMITS_TERMS), (
+        "the rendered `## Hard limits` section lost its permanence claim"
+    )
     found = rendered.count(RED_LINE_HEADING)
     assert found == 1, (
         f"the rendered prompt must state the rule once; found {found} copies — a "
@@ -147,3 +200,17 @@ def test_the_scan_reports_absence() -> None:
     assert _missing_terms(sample, RED_LINE_TERMS) == list(RED_LINE_TERMS)
     doubled = f"{RED_LINE_HEADING}\n\n{RED_LINE_HEADING}\n\n- Must push\n"
     assert doubled.count(RED_LINE_HEADING) == 2
+    # The boundary control: two sibling `###` blocks under one parent. The extractor must end
+    # the first at the second, or the second rule's words answer for the first — which is the
+    # pass-on-the-wrong-text this helper exists to prevent.
+    siblings = (
+        "## Hard limits\n\nParent paragraph.\n\n"
+        f"{RED_LINE_HEADING}\n\nfirst rule text\n\n"
+        "### Never stop or restart the server\n\nsecond rule text\n"
+    )
+    first = _block_after(siblings, RED_LINE_HEADING)
+    assert first.strip() == "first rule text", (
+        "the block extractor ran past the sibling `###` heading; it read: "
+        f"{first!r}"
+    )
+    assert "second rule text" not in first
