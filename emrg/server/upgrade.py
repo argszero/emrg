@@ -334,8 +334,17 @@ class UpgradeManager:
         if not target:
             return  # nothing eligible this round
         local = self._read_local_version()
-        if local == target.lstrip("v"):
-            return  # already at target — nothing to do
+        # **Strictly newer, not merely different** (issue #2404). `_find_target_tag`
+        # picks the highest release outside the delay window and does not look at what
+        # is installed, so an *equality* test lets every older target through: with a
+        # newer release still inside its delay window, the newest eligible tag is
+        # older than the host, and the tick would start a session asking to downgrade.
+        # Observed live at 0.2.58 offered `v0.2.54`; the agent refused, but that made
+        # the install's safety a property of the agent's judgement rather than of this
+        # guard. An unreadable or absent `version.txt` reads as `""` → `()` and is
+        # still "not yet installed", so the documented trigger-on-`""` path survives.
+        if not is_newer(parse_version(target), parse_version(local)):
+            return  # same version, or a target older than what is installed
         if self._is_waiting(target):
             return  # an attempt at THIS tag did not move version.txt; still paying it off
         await self._trigger(target)
