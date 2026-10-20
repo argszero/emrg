@@ -1414,6 +1414,36 @@ def window_note(window: Window | None) -> str:
     return ""
 
 
+def pair_note(count: int) -> str:
+    """The reading that answers a question no row asks, when there is more than one PR.
+
+    Every row above answers "what is the next action for **this** PR". Whether two open PRs
+    can land **together** is a different question, with its own tool, and that tool is named
+    only in the merge-gate list a cycle reads when it is already merging — so a queue of
+    `vote` rows reads as "two things are ready" when the truth can be "these two cannot both
+    land as they stand".
+
+    Measured before this note existed: two PRs that each added tests at the same anchor in one
+    file both read `vote`, and `check-merge-pairs.py` answered **blocked in both directions**.
+    The cost is the discovery time rather than the conflict: the first merged, the second had
+    to merge master in and resolve that file, which moves its head — and a head push voids
+    every vote standing on it. Measured after that resolution: two approvals turned `VOID` and
+    the PR fell from 2/3 to 1/3, so two cycles of review were spent again on content that had
+    not changed.
+
+    The note does not claim that any pair conflicts, and does not fold the pairs itself:
+    building those trees is the pair tool's cost, and paying it on every queue run would make
+    every cycle pay for a question most of them do not have.
+    """
+    if count < 2:
+        return ""
+    return (
+        f"note: {count} open PR(s) - whether they can land together is a SEPARATE reading, "
+        f"not a merge order; the rows above answer only 'what next for this PR': "
+        f"$ {RUNNER} scripts/check-merge-pairs.py"
+    )
+
+
 def render(reading: Reading, action: Action) -> str:
     """One PR's block: what is true, then what to do, then the exact command."""
     head = reading.head[:8] if reading.head else "????????"
@@ -1782,6 +1812,9 @@ def main(argv: list[str] | None = None) -> int:
                 f"{kind} {count}" for kind, count in sorted(tally.items())
             )
             print(f"{len(readings)} PR(s): {summary}")
+            note = pair_note(len(readings))
+            if note:
+                print(note)
             if unread:
                 print(
                     f"unmeasurable: {', '.join(f'#{pr}' for pr in unread)} - "
