@@ -134,6 +134,43 @@ def test_tick_no_trigger_when_local_matches_target(monkeypatch, tmp_path):
     assert calls == [], "local == target → no trigger"
 
 
+def test_tick_no_trigger_when_the_eligible_target_is_older(monkeypatch, tmp_path):
+    """A downgrade is never an upgrade (issue #2404).
+
+    The reachable shape: the host already runs the newest release, but that release
+    is still inside the delay window, so `_find_target_tag` answers an *older* one.
+    An equality test passes it through and the tick starts a session asking to
+    downgrade; only a strictly-newer comparison stops it. Asserted on the trigger
+    calls, because a test that read the guard's own expression would be green for a
+    guard that is never reached.
+    """
+    releases = [_release("v0.2.56", 60 * 60 * 24 * 5)]
+    monkeypatch.setattr(
+        "emrg.server.upgrade.VERSION_FILE", tmp_path / "version.txt"
+    )
+    (tmp_path / "version.txt").write_text("0.2.58\n", encoding="utf-8")
+    calls = asyncio.run(_tick_with_releases(monkeypatch, releases))
+    assert calls == [], "an older target is not an upgrade target"
+
+
+def test_tick_still_triggers_when_version_txt_is_absent(monkeypatch, tmp_path):
+    """The strictly-newer guard must not eat the documented `""` path.
+
+    `_read_local_version` keeps `""` rather than refusing, which reads as "not yet
+    installed" — a trigger — and that is the semantics an absent `version.txt` has
+    had since the module was written. `parse_version("")` is `()`, which is never
+    newer, so the guard keeps the trigger only because it asks "is the target newer
+    than `()`" rather than "is the local version readable".
+    """
+    releases = [_release("v0.2.57", 60 * 60 * 24 * 2)]
+    monkeypatch.setattr(
+        "emrg.server.upgrade.VERSION_FILE", tmp_path / "version.txt"
+    )  # never written: the file does not exist
+    calls = asyncio.run(_tick_with_releases(monkeypatch, releases))
+    assert len(calls) == 1, "an absent version.txt is 'not yet installed', not 'up to date'"
+    assert "v0.2.57" in calls[0]["prompt"]
+
+
 def test_tick_disabled_by_config(monkeypatch, tmp_path):
     releases = [_release("v0.2.57", 60 * 60 * 24 * 2)]
     monkeypatch.setattr(
