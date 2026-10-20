@@ -135,6 +135,15 @@ One improvement per round: local validation → submit → record the score delt
 - Keep `best score` and the submission that produced it; never overwrite a better score with a worse one.
 - Note the submission budget/limits if the platform has any (many limit daily submissions).
 
+**Establish what the right answer is before changing what produces it.** "Adjust the thing, re-score, read the delta" is a valid unit only when the thing you adjusted is uniform. When the round's subject is *a class of cases handled wrongly*, a change applied to the whole class mixes the cases it fixed with the cases it broke into one score, and that score has two opposite causes inside it: it cannot be attributed, so the change can neither be kept nor reverted, and the submissions spent on it produced nothing. Work it in four steps instead:
+
+1. **Classify** the cases that are not right, and keep the classification where the next round can read it.
+2. **Draw a small sample from one class and submit it as a probe** — not the whole class.
+3. **Read the probe's outcome as that class's answer.** A probe whose result is not read has bought nothing; a class whose answer is established is a fact the remaining cases can be judged against.
+4. **Turn the answer into one concrete change** — a detector, a re-read rule, a corrected output format — recording what the answer was, where the previous behaviour went wrong, and what changed.
+
+Step 4 is the one most easily left out. A round that classified, counted or observed and stopped has not improved anything, whatever it wrote down. Widen from the sample to the whole class only when the sample's reading cannot be interpreted.
+
 #### Phase E — Deadline wrap-up
 
 Freeze before the deadline; select the best historical submission as the final entry; settle the prize/ranking outcome.
