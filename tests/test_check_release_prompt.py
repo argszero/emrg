@@ -23,11 +23,14 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import shutil
+import subprocess
 import sys
 import tarfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TOOL = REPO_ROOT / "scripts" / "check-release-prompt.py"
@@ -278,3 +281,219 @@ def test_a_tar_and_a_tgz_are_both_read_as_archives(tool, tmp_path, capsys):
         subject = _tarball(tmp_path / name, _tree_text())
         rc, out = _run(tool, subject, capsys=capsys)
         assert rc == 0, f"{name}: {out}"
+
+
+# --------------------------------------------------------------------------- the step
+#
+# The tool's own answers are measured above. What is measured here is that the release job
+# *runs* it: a guard wired into a workflow is only as good as the step that invokes it, and
+# nothing in this file said so until issue #2411. The gap is not hypothetical — the `v0.3.22`
+# release job (run `39373994491`) ran `Assert the artifacts declare the version the tag names`
+# and then went straight to `Create GitHub Release`, with no prompt assertion in between,
+# because that tag was cut before #2401 landed. Nothing in the repository could report it;
+# it took reading the run's step list.
+#
+# So these read the *parsed job*, never a copy of the text kept here, and the two executed
+# arms drive the step's own `run:` block rather than grepping it: an assertion that the text
+# "looks right" goes green the moment an edit keeps the words and moves the `exit`.
+
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "build-release.yml"
+
+#: The step that invokes this tool, found by the invocation rather than by its wording — a
+#: rename is a change to the workflow, not to what this file is about.
+INVOCATION = "scripts/check-release-prompt.py"
+
+#: The file that must be named when no product arrived. Spelled as the step spells it.
+PATTERN = "EMRG-*-linux-*.tar.gz"
+
+#: `windows-2025` has no `bash` of its own: `C:\Windows\System32\bash.exe` is WSL's
+#: launcher, `CreateProcess` finds it before `PATH`, and it answers "Windows Subsystem for
+#: Linux has no installed distributions." rather than running a script (measured 2026-10-02,
+#: #1812). `shutil.which("bash") is None` is therefore not the gate there — the launcher
+#: exists and is found — so the marker carries the platform and the skip below carries the
+#: missing shell on a POSIX host. Same shape as the sibling arms in
+#: `test_check_release_artifact_version.py` and `test_a_step_without_its_product_refuses.py`.
+_WINDOWS = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="these arms execute the step's shell text; that step is `shell: bash` on the runners "
+           "whose job invokes it, and Windows' `bash` is WSL's launcher",
+)
+
+
+def _release_steps() -> list[dict]:
+    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    return doc["jobs"]["release"]["steps"]
+
+
+def _invoking(steps: list[dict]) -> list[int]:
+    return [
+        index for index, step in enumerate(steps)
+        if isinstance(step.get("run"), str) and INVOCATION in step["run"]
+    ]
+
+
+def _the_step() -> dict:
+    """The one step that invokes the tool, refusing to guess if that is not the number."""
+    steps = _release_steps()
+    found = _invoking(steps)
+    assert len(found) == 1, (
+        f"the release job has to invoke `{INVOCATION}` in exactly one step; found {len(found)} "
+        f"step(s). With none, the assertion this guard exists for never runs and a release that "
+        f"carries the previous agent prompt is published as success (issue #2411). With two, one "
+        f"of them is not being read by anyone."
+    )
+    return steps[found[0]]
+
+
+def test_the_release_job_invokes_the_tool_in_exactly_one_step():
+    """A tool nobody runs answers nothing — the invocation is the load-bearing line."""
+    _the_step()
+
+
+def test_the_step_runs_after_the_artifacts_arrive_and_before_the_release_exists():
+    """Order, on the parsed job: a mismatch found after publication is a host-side incident.
+
+    Both bounds matter and each fails differently. Before `download-artifact` the step has no
+    subject at all — `artifacts/` is created by that step, so an earlier placement always
+    refuses and would read as a permanently red release. After `Create GitHub Release` the
+    product is already published, and the refusal arrives when a host can already install it.
+    """
+    steps = _release_steps()
+    index = _invoking(steps)[0]
+    download = [i for i, s in enumerate(steps)
+                if str(s.get("uses", "")).startswith("actions/download-artifact")]
+    assert download, "the release job downloads no artifacts, so this step has no subject"
+    assert index > max(download), (
+        "the prompt assertion runs before the artifacts are downloaded: `artifacts/` is created "
+        "by that step, so this one would refuse on every release"
+    )
+    names = [step.get("name") or step.get("uses") or "" for step in steps]
+    assert "Create GitHub Release" in names, (
+        "the release job no longer has a step named 'Create GitHub Release', so the order this "
+        "test is about cannot be read anymore — re-derive it rather than deleting the check"
+    )
+    assert index < names.index("Create GitHub Release"), (
+        "the prompt assertion runs after the release is created: a product carrying the previous "
+        "agent prompt would be published before anything reported the mismatch"
+    )
+
+
+def test_the_step_needs_no_uv_and_no_network():
+    """The release job installs nothing, so `uv run` there fails the build it guards."""
+    body = _the_step()["run"]
+    assert "uv " not in body, (
+        "the step invokes `uv`, and the release job has no uv environment to run it in"
+    )
+    assert f"python3 {INVOCATION}" in body, (
+        f"the step no longer invokes `python3 {INVOCATION}` — it may call something else under "
+        "the same name, which this file cannot vouch for"
+    )
+
+
+def _run_step(
+    tmp_path: Path, *, product: str | None, text: str | None = None
+) -> subprocess.CompletedProcess:
+    """Execute the step's own `run:` block in a tree shaped like the release job's.
+
+    `artifacts/` is the directory `download-artifact` writes, and `scripts/<tool>` is a
+    **symlink** to the real tool: it resolves `__file__` to its real path, so the step compares
+    against this tree's copy rather than against nothing — copying the file instead would make
+    the tool's own `REPO` point into the temporary tree and answer `2` for a reason that is not
+    the step's.
+
+    With `product` given, a real archive is written carrying `text` — this tree's copy by
+    default, so the passing direction is a passing *comparison* rather than merely a step that
+    did not print a refusal. A caller that passes `text` supplies a product whose prompt
+    differs, which is the one direction the step's own verdict exists for.
+    """
+    if shutil.which("bash") is None:  # pragma: no cover - a POSIX-less host
+        pytest.skip("no bash on PATH: these arms drive the step's shell text, which they cannot run")
+
+    (tmp_path / "artifacts").mkdir(parents=True, exist_ok=True)
+    scripts = tmp_path / "scripts"
+    scripts.mkdir(exist_ok=True)
+    (scripts / TOOL.name).symlink_to(TOOL)
+    if product is not None:
+        _tarball(tmp_path / "artifacts" / product, _tree_text() if text is None else text)
+
+    return subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", _the_step()["run"]],
+        cwd=str(tmp_path), capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
+    )
+
+
+@_WINDOWS
+def test_the_step_refuses_when_no_product_arrived(tmp_path):
+    """Issue #1913's family, on the step that guards the prompt: absent subject → refuse.
+
+    The step before this one in the job located its product and `exit 0`-ed with
+    `no pkg found, skipping`, so a tag run could publish a release with no macOS product and
+    every step reported success. The same edit here would let a release ship with no readable
+    product at all. So the assertion is on the exit status *and* on a refusal naming the
+    pattern: a bare non-zero would be satisfied by any failure, including one that says
+    nothing a reader can act on.
+    """
+    result = _run_step(tmp_path, product=None)
+    assert result.returncode != 0, (
+        "the step exited 0 with an empty `artifacts/`: a release whose product could not be "
+        f"read was reported as success\n{result.stdout[-800:]}"
+    )
+    assert "::error::" in result.stdout, (
+        f"the step refused without an ::error:: line, so CI shows no reason\n{result.stdout[-800:]}"
+    )
+    assert PATTERN in result.stdout, (
+        f"the refusal does not name {PATTERN!r}, so a reader cannot tell what was missing\n"
+        f"{result.stdout[-800:]}"
+    )
+
+
+@_WINDOWS
+def test_the_step_passes_when_the_correct_product_arrived(tmp_path):
+    """The other direction: a guard that refuses everything is not measuring its subject."""
+    result = _run_step(tmp_path, product="EMRG-0.3.99-linux-x86_64.tar.gz")
+    assert PATTERN not in result.stdout, (
+        "the step reported the absent-product refusal while a matching product was present, so "
+        f"it is not reading `artifacts/`\n{result.stdout[-800:]}"
+    )
+    assert result.returncode == 0, (
+        "a product carrying exactly this tree's prompt failed the step\n"
+        f"{result.stdout[-1200:]}\n{result.stderr[-800:]}"
+    )
+
+
+@_WINDOWS
+def test_the_step_refuses_when_the_product_carries_a_different_prompt(tmp_path):
+    """The direction the step exists for, and the one nothing reached until issue #2411.
+
+    Both arms above stop short of it, and structurally so rather than by oversight. The
+    absent-product arm is satisfied by the **early** `exit 1` in the empty-candidates branch,
+    which fires before any verdict is produced; the passing arm only ever exercises `rc=0`. So
+    the branch taken when the tool answers `1` — a product that arrived and carries the previous
+    agent prompt — was executed by nothing, and changing the step's last line from `exit "$rc"`
+    to `exit 0` left this whole file green while every release would publish the wrong prompt as
+    success. Measured on `f9dcb2cf` by two hosts independently before this arm existed.
+
+    Asserted on both halves, for the reason the second host gave: a bare non-zero exit would
+    still pass an edit that made the step refuse every product for an unrelated reason, so the
+    refusal has to be the *mismatch* refusal and it has to name the file.
+    """
+    differs = _tree_text() + "\n# a line this product does not ship\n"
+    result = _run_step(
+        tmp_path, product="EMRG-0.3.99-linux-x86_64.tar.gz", text=differs
+    )
+    assert result.returncode != 0, (
+        "a product carrying a different prompt exited 0: the release job reported success on an "
+        f"installer that hands a host the previous agent prompt\n{result.stdout[-1200:]}"
+    )
+    assert "::error::" in result.stdout, (
+        f"the step refused without an ::error:: line, so CI shows no reason\n{result.stdout[-1200:]}"
+    )
+    assert "carries a different" in result.stdout, (
+        "the failure is not the mismatch refusal — a step that refuses for another reason would "
+        f"satisfy a bare non-zero exit\n{result.stdout[-1200:]}"
+    )
+    assert RELATIVE in result.stdout, (
+        f"the refusal does not name {RELATIVE!r}, so a reader cannot tell which file differs\n"
+        f"{result.stdout[-1200:]}"
+    )
