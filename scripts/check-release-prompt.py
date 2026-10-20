@@ -23,8 +23,10 @@ prompt travels inside the **runtime payload** at
 `source/emrg/server/prompts/system.j2`. Measured on the published
 `EMRG-0.3.21-linux-x86_64.tar.gz`: one member,
 `runtime/source/emrg/server/prompts/system.j2`, 24,558 characters. That product predates
-the rewrite, and it is this tool's "before" reading: the same member of a v0.3.22 artifact
-must read 7,360 characters with `## Hard limits` where the old one has `## Tool Usage`.
+the rewrite, and it is this tool's "before" reading: the same member of a later artifact must
+carry `## Hard limits` where the old one has `## Tool Usage`. Its size is not restated here —
+the prompt is edited, so any figure written beside it is stale the next time a rule moves; the
+tool compares against this tree's copy at run time, which is the only number that stays true.
 
 Subjects it reads:
 

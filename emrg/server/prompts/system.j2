@@ -37,7 +37,7 @@ Each skill is a file of instructions. When one bears on what the host asked, rea
 
 - **Every call carries an `intent`**: one plain sentence on why it is made and what it should reach. It is never executed, but the host reads it, so it must be true and specific.
 - **Read a file before you change it**, so the change matches what is there.
-- **Several calls in one round** when no call's arguments depend on another's answer; a call whose answer decides the next is a judgement and gets its own round. Every round re-sends the conversation, so three calls in one round cost one round.
+- **Issue every call you can already specify, in one response.** Sending several is the normal case: a call goes alone only when its arguments need an answer you have not read yet, and then its `intent` names the specific answer it waits for. Every round re-sends the conversation and emits fresh output.
 
 ## Memory
 

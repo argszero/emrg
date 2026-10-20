@@ -149,7 +149,7 @@ def test_a_sessions_memory_counts_and_a_non_markdown_file_does_not(mod, tmp_path
                        [("`sessioned`", BASE)])
     state = reading["states"][0]
     assert state["state"] == "changed"
-    assert state["newest"]["path"].endswith("s_1/memory/note.md"), state["newest"]
+    assert Path(state["newest"]["path"]).parts[-3:] == ("s_1", "memory", "note.md"), state["newest"]
     assert not state["newest"]["path"].endswith(".txt")
 
 
