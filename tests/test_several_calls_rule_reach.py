@@ -28,12 +28,14 @@ them open.
 
 The default direction was reversed on 2026-10-20 (issue #2406), because the sentence above —
 kept word for word through that rewrite — put the burden of proof on showing independence and was
-never met: over every session on this host (**410,845 assistant rounds** carrying at least one tool
-call), **9.1%** hold two or more, and among the single-call rounds **96.3%** carried an `intent`
-naming no answer being waited for. The bullet now states issuing several as the normal case and
-requires a lone call's `intent` to name what it waits for, so the observable that separates "judged
-it necessary" from "did not engage" is the sentence itself. That is still a placement and wording
-guard: the share is re-measured in the PR that changes the wording, and only re-measured.
+never met. The reading is `scripts/check-batching-share.py`'s, not this file's: over every
+`history_*.jsonl` under `~/.emrg` (2026-07-27 .. 2026-10-20, **133,276 assistant rounds** carrying
+at least one tool call) **9.3%** hold two or more, and of the lone rounds **92.5%** carried an
+`intent` naming no awaited answer — a lexical proxy, whose markers the tool prints. The bullet now
+states issuing several as the normal case and requires a lone call's `intent` to name what it waits
+for, so the observable that separates "judged it necessary" from "did not engage" is the sentence
+itself. That is still a placement and wording guard: the share is re-measured by the instrument,
+over the window a later cycle names, never here.
 
 What is asserted
 ----------------
