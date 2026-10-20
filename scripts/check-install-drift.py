@@ -76,6 +76,18 @@ upgrade really does destroy was the one it stayed silent about. Drift whose byte
 only in such a ref is therefore reported - and the report **names the ref**, because that is
 where the edit is still recoverable from.
 
+**Which release that is gets its own reading, because the one above cannot see it.** Everything
+above is true of a tree five releases old - its files match the commits that shipped them - so
+the green verdict is silent about the daemon rendering that release's rules rather than the
+newest ones. Measured 2026-10-20: this host's install tree carries
+`emrg/server/evolution_prompt.md`'s pre-narrowing blob (the one `v0.3.14`-`v0.3.16` ship), five
+releases past the host's 2026-10-16 ruling that narrowed the abstention clause, and the reading
+above answered `0`. Every evolution cycle that day read the superseded rule out of the prompt
+the daemon rendered, and none of them could see it: nothing measured it. So a `behind:` line is
+printed under **both** verdicts - which release this tree is, which release is newest, and the
+paths that differ. Being behind is not drift (nothing is lost) and not clean (it is what runs),
+so it is stated rather than scored, and the exit code stays the drift reading's alone.
+
 The walk itself is asked with `--missing=print` and read for the objects it does list. A
 clone can hold a ref whose history it cannot fully read: measured on this host 2026-10-08
 (`cyc20261008-001036`), where `git rev-list --all --objects` exits 128 on `bad tree object
@@ -128,6 +140,7 @@ Named limits
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 import traceback
@@ -190,6 +203,101 @@ def _git(root: Path, *argv: str) -> str:
 def tracked_files(root: Path) -> set[str]:
     """Every path this checkout tracks, as posix-relative text."""
     return {name for name in _git(root, "ls-files", "-z").split("\0") if name}
+
+
+#: The spelling the release workflow gives a published version, and the only refs the
+#: "which release is this install tree" question may be answered from.
+RELEASE_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
+
+
+def release_tags(root: Path) -> list[str]:
+    """Every release tag this clone carries, newest first.
+
+    Version order, not creation order: `--sort=-v:refname` is git's own version sort, which
+    puts `v0.3.10` above `v0.3.9` where a lexical sort would put it below - the wrong sort does
+    not crash, it names a real release that is simply not the newest. A tag this clone does not
+    have cannot be named, and that is reported rather than guessed (see `behind_release`).
+    """
+    listing = _git(root, "tag", "--sort=-v:refname", "--list", "v*")
+    return [name for name in (line.strip() for line in listing.splitlines()) if RELEASE_TAG_RE.match(name)]
+
+
+def release_tree(root: Path, ref: str) -> dict[str, str]:
+    """`{path: blob id}` for one release ref, from a single `ls-tree`.
+
+    One call for the whole tree rather than a `rev-parse` per path: the question compares
+    every shared file at once, and this host's install tree shares ~380 of them, which at one
+    process each is a second of subprocesses per release examined.
+    """
+    blobs: dict[str, str] = {}
+    for line in _git(root, "ls-tree", "-r", ref).splitlines():
+        if "\t" not in line:
+            continue
+        meta, path = line.split("\t", 1)
+        parts = meta.split()
+        if len(parts) >= 3 and parts[1] == "blob":
+            blobs[path] = parts[2]
+    return blobs
+
+
+def behind_release(
+    install_dir: Path, root: Path, shared: list[tuple[Path, str]]
+) -> tuple[str | None, str | None, list[str], int]:
+    """`(newest tag, the tag this tree is, paths that differ from the newest, shared count)`.
+
+    The question the rest of this tool cannot answer, and the reason it is here: `scan` asks
+    whether a file's content is reachable from *any* ref a release is built from. An install
+    tree several releases old passes that test with a green verdict, because the old bytes are
+    in an older release's history - which is a release ref. Measured 2026-10-20 on this host:
+    the install tree carries `evolution_prompt.md`'s pre-narrowing blob (`af6e4ae5`, the one
+    `v0.3.14`-`v0.3.16` ship) while master and the five releases since carry the narrowed rule,
+    and the other reading answered `0` - "every file ... holds content the refs a release is
+    built from still reach". The daemon renders that file into every evolution cycle, so the
+    reading that said "shipped" said it about a superseded rule.
+
+    So the second question is: **which release is this tree, and is a newer one out?** It is
+    answered for the tree as a whole rather than file by file, and that distinction is
+    measured: attributing each file to "the newest release that still carries these bytes"
+    names a *later* tag for every file the next release did not touch, so a v0.3.16 tree
+    reported `v0.3.16` for one path and `v0.3.18` for another and named no version at all. The
+    tree's version is the newest tag whose content it matches on every shared path, which is
+    one fact about one directory.
+
+    A tree matching no tag is `None` and is not this reading's fault to explain: content in no
+    tag is the *other* reading's subject (a hand edit, which destroys on upgrade), and mixing
+    the two in one line leaves a reader unable to tell "an upgrade brings the rest" from "an
+    upgrade destroys this".
+
+    Absent files are out of scope: this compares the paths both trees carry, so a file the
+    newest release added is something an upgrade creates, not a lag in what this tree has.
+
+    `None` for the newest tag is "this clone carries no release tag", which the caller must
+    report as unmeasurable rather than as currency - `[]` with a tag is "measured, nothing lags".
+    """
+    if not shared:
+        return None, None, [], 0
+    tags = release_tags(root)
+    if not tags:
+        return None, None, [], len(shared)
+
+    ids = {relative: _git_stored_id(root, path, relative) for path, relative in shared}
+    # The tree's own version: the newest release it matches on every shared path. Walked from
+    # the newest so the first match is the answer, and the walk stops there.
+    install_release: str | None = None
+    for tag in tags:
+        blobs = release_tree(root, tag)
+        if all(blobs.get(relative) == blob for relative, blob in ids.items()):
+            install_release = tag
+            break
+
+    newest = tags[0]
+    newest_blobs = release_tree(root, newest)
+    differing = sorted(
+        relative
+        for relative, blob in ids.items()
+        if newest_blobs.get(relative) != blob
+    )
+    return newest, install_release, differing, len(shared)
 
 
 #: The ref namespaces a release is built from. Everything else a ref can live in
@@ -267,6 +375,77 @@ def refs_holding(root: Path, refs: list[str], blobs: set[str]) -> dict[str, list
     return found
 
 
+def shared_paths(install_dir: Path, root: Path) -> tuple[list[tuple[Path, str]], list[str]]:
+    """`(install path, install-relative path)` for the paths both trees carry, and the rest.
+
+    The walk both readings start from: a path is comparable only when this checkout tracks it,
+    because the id of the other side is asked of git at *that* path.
+    """
+    tracked = tracked_files(root)
+    shared: list[tuple[Path, str]] = []
+    skipped: list[str] = []
+    for path in sorted(install_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(install_dir).as_posix()
+        if relative not in tracked:
+            skipped.append(relative)
+            continue
+        shared.append((path, relative))
+    return shared, skipped
+
+
+#: How many lagging paths a `behind:` line names before counting the rest, matching the
+#: leftovers section's shape: enough to recognise the family, not a wall of paths.
+BEHIND_SHOWN = 10
+
+
+def _report_release(
+    install_dir: Path,
+    root: Path,
+    newest: str | None,
+    install_release: str | None,
+    differing: list[str],
+    checked: int,
+) -> None:
+    """Print which release this tree is, and whether a newer one exists.
+
+    Printed under **both** verdicts, because it is a second question and not a verdict: a tree
+    that lags is not drift (nothing here is lost) and is not clean either (the daemon renders
+    it). Leaving it out of the green branch is the defect this function exists to fix - the
+    green line said "a release's refs still reach this content", which is true of any older
+    release and therefore said nothing about being current.
+    """
+    if newest is None:
+        print(
+            f"behind: could not measure which release {install_dir} is - this checkout "
+            "carries no release tag, and the refs a release is built from cannot answer it "
+            "(an older release's bytes are in them too)"
+        )
+        return
+    if not differing:
+        print(
+            f"behind: none - {install_dir} carries what {newest} ships "
+            f"({checked} shared file(s) compared)"
+        )
+        return
+
+    version = install_release or "no single release"
+    print(
+        f"behind: {install_dir} is the {version} copy and the newest release is {newest}; "
+        f"{len(differing)} of {checked} shared file(s) differ, so whatever the daemon renders "
+        "from this tree is that release's copy"
+    )
+    for relative in differing[:BEHIND_SHOWN]:
+        print(f"    {relative}")
+    if len(differing) > BEHIND_SHOWN:
+        print(f"    ... and {len(differing) - BEHIND_SHOWN} more")
+    print(
+        f"    remedy: an upgrade to {newest} brings these. Until then a rule read from this "
+        "tree is the installed release's rule, not the newest one's."
+    )
+
+
 def scan(
     install_dir: Path, root: Path
 ) -> tuple[list[tuple[str, int, str]], list[str], int, int]:
@@ -279,18 +458,8 @@ def scan(
     refuses to report a green verdict over when it is 0; `missing` is how many objects the
     membership walk found absent from this clone, which `main` prints when it is not zero.
     """
-    tracked = tracked_files(root)
+    shared, skipped = shared_paths(install_dir, root)
     shipped, missing = shipping_objects(root)
-    shared: list[tuple[Path, str]] = []
-    skipped: list[str] = []
-    for path in sorted(install_dir.rglob("*")):
-        if not path.is_file():
-            continue
-        relative = path.relative_to(install_dir).as_posix()
-        if relative not in tracked:
-            skipped.append(relative)
-            continue
-        shared.append((path, relative))
 
     drifted: list[tuple[str, int, str]] = []
     for path, relative in shared:
@@ -356,7 +525,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Files in the live install tree whose content the refs a release is built from "
-            "do not hold: content an upgrade replaces."
+            "do not hold (content an upgrade replaces), and which release that tree is "
+            "(content an upgrade brings)."
         )
     )
     parser.add_argument(
@@ -399,6 +569,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         drifted, skipped, checked, missing = scan(install_dir, root)
+        shared, _ = shared_paths(install_dir, root)
+        newest, install_release, differing, _ = behind_release(install_dir, root, shared)
     except RuntimeError as exc:
         print(f"could not measure: {exc}", file=sys.stderr)
         return 2
@@ -466,6 +638,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{len(leftover)} named as leftovers above, "
             f"{len(caches)} interpreter cache file(s) not listed)"
         )
+        _report_release(install_dir, root, newest, install_release, differing, checked)
         return 0
 
 
@@ -477,6 +650,7 @@ def main(argv: list[str] | None = None) -> int:
         "install/upgrade replaces it whole, so the next one destroys it: move the change "
         "into the source checkout and ship it, or it is lost."
     )
+    _report_release(install_dir, root, newest, install_release, differing, checked)
     return 1
 
 
