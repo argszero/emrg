@@ -128,6 +128,20 @@ Named limits
 * Objects absent from this clone are not walked, and the count is printed when it is not
   zero. The set is therefore the history this clone can see, which is the only history it
   can promise a file is safe in.
+* **A release tag this clone cannot read is skipped and counted, never fatal.** Two tags on a
+  peer host answer `fatal: not a tree object`; raising on the first made the whole reading
+  `2`, which took the drift verdict down with the release question. `tags:` counts what was
+  skipped, the same way `membership:` counts what was not walked.
+* **"Newest" is the newest release tag *this clone carries***, and the line says so. A tag
+  list that stops short is ordinary - a checkout nobody has fetched lately - and a sentence
+  about releases may not stand on a reading of tags. The install tree's own `__version__`
+  names the tag to confirm first, so a stale list cannot make the tree's release unnameable.
+* **The direction is measured before a remedy is written.** An upgrade is recommended only
+  when the tree is demonstrably older than the newest readable tag; when the tree is newer
+  the line says the *tags* lag and names no upgrade, and when neither side could be ordered
+  it says the direction was not established and names no remedy at all.
+* The fallback walk stops after `TAGS_EXAMINED` tags and says when it stopped, so a bounded
+  search is never read as "this tree matches no release".
 * It compares **content, under git's own line-ending convention**: a file whose only
   difference from the committed blob is CRLF versus LF reads as *no* drift, because
   `hash-object --path=<rel>` cleans it exactly as `git add` did. That is deliberate - such
@@ -144,6 +158,7 @@ import re
 import subprocess
 import sys
 import traceback
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -209,6 +224,50 @@ def tracked_files(root: Path) -> set[str]:
 #: "which release is this install tree" question may be answered from.
 RELEASE_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
 
+#: How many release tags the fallback walk may read before it stops and says so. The walk is
+#: a fallback, not the only source (see `behind_release`), and a clone carrying a hundred tags
+#: is a hundred `ls-tree -r` calls on a run where nothing matches - measured 2026-10-20 on a
+#: peer host where the walk reached tag 12 of 118 before dying on an unreadable one.
+TAGS_EXAMINED = 20
+
+#: Where the install tree states its own version. A **local** fact, and the reason it matters
+#: is that it does not depend on this clone's tag list being complete or readable - the one
+#: input a stale or holed tag walk gets wrong (see `behind_release`).
+INSTALL_VERSION_PATH = "emrg/__init__.py"
+
+_VERSION_ASSIGNMENT_RE = re.compile(r"""__version__\s*=\s*["']([^"']+)["']""")
+_VERSION_PARTS_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+
+
+def install_version(install_dir: Path) -> str | None:
+    """The version the install tree says it is, or `None` when it does not say.
+
+    A claim about itself, not a reading of history: the file is `emrg/__init__.py`, which an
+    install carries and an upgrade replaces. `behind_release` uses it to pick the tag to
+    confirm, and names a release from it only when that tag's tree agrees on every shared
+    path, so a stale hand edit cannot borrow a release's name.
+    """
+    path = install_dir / INSTALL_VERSION_PATH
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = _VERSION_ASSIGNMENT_RE.search(text)
+    return match.group(1) if match else None
+
+
+def version_parts(text: str | None) -> tuple[int, int, int] | None:
+    """`"0.3.21"` → `(0, 3, 21)`, and `"v0.3.21"` → the same; `None` otherwise.
+
+    Only used to order two versions, which a string comparison gets wrong at `0.3.10` against
+    `0.3.9` - the same defect the tag sort is `--sort=-v:refname` to avoid, one layer down.
+    """
+    if not text:
+        return None
+    match = _VERSION_PARTS_RE.match(text.strip())
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
 
 def release_tags(root: Path) -> list[str]:
     """Every release tag this clone carries, newest first.
@@ -222,15 +281,28 @@ def release_tags(root: Path) -> list[str]:
     return [name for name in (line.strip() for line in listing.splitlines()) if RELEASE_TAG_RE.match(name)]
 
 
-def release_tree(root: Path, ref: str) -> dict[str, str]:
-    """`{path: blob id}` for one release ref, from a single `ls-tree`.
+def release_tree(root: Path, ref: str) -> dict[str, str] | None:
+    """`{path: blob id}` for one release ref, or `None` when this clone cannot read it.
 
     One call for the whole tree rather than a `rev-parse` per path: the question compares
     every shared file at once, and this host's install tree shares ~380 of them, which at one
     process each is a second of subprocesses per release examined.
+
+    `None` rather than an exception, because **a tag this clone cannot read is one release it
+    cannot name, not a reason to answer nothing**. Measured 2026-10-20 on a peer host
+    (`cyc20261020-100652`): two tags answered `fatal: not a tree object` - their trees are
+    absent from that clone, the same clone whose `membership:` line already reports 40 absent
+    objects - the walk raised on the first of them, and `main`'s `could not measure` took the
+    **drift verdict** down with it: `rc 2` where the reading before this one answered `0`. The
+    tolerance here is the one the membership walk already has, for the same reason: a narrowed
+    set is printed with its count, never traded for no reading at all.
     """
+    try:
+        listing = _git(root, "ls-tree", "-r", ref)
+    except RuntimeError:
+        return None
     blobs: dict[str, str] = {}
-    for line in _git(root, "ls-tree", "-r", ref).splitlines():
+    for line in listing.splitlines():
         if "\t" not in line:
             continue
         meta, path = line.split("\t", 1)
@@ -240,9 +312,32 @@ def release_tree(root: Path, ref: str) -> dict[str, str]:
     return blobs
 
 
+@dataclass(frozen=True)
+class ReleaseReading:
+    """What "which release is this tree, and is a newer one out" answered.
+
+    `newest` is the newest release **tag this clone carries** - worded as a tag because that
+    is what was read, and a sentence about *releases* may not stand on a reading of tags
+    (measured 2026-10-20: a peer host's clone stops three releases short, so the newest tag
+    was `v0.3.18` while the tree was `0.3.21`). `tree_version` is the install tree's own
+    claim, `direction` orders the two so the remedy cannot point backwards, and
+    `unreadable` / `truncated` say how much of the tag list could be read at all.
+    """
+
+    newest: str | None = None
+    install_release: str | None = None
+    differing: list[str] = field(default_factory=list)
+    compared: int = 0
+    tree_version: str | None = None
+    direction: str = "unknown"
+    unreadable: tuple[str, ...] = ()
+    truncated: bool = False
+
+
+
 def behind_release(
     install_dir: Path, root: Path, shared: list[tuple[Path, str]]
-) -> tuple[str | None, str | None, list[str], int]:
+) -> ReleaseReading:
     """`(newest tag, the tag this tree is, paths that differ from the newest, shared count)`.
 
     The question the rest of this tool cannot answer, and the reason it is here: `scan` asks
@@ -263,6 +358,22 @@ def behind_release(
     tree's version is the newest tag whose content it matches on every shared path, which is
     one fact about one directory.
 
+    Three things the tag walk alone gets wrong, all measured 2026-10-20 on a peer host
+    (`cyc20261020-100652`) and each answered here:
+
+    - **A tag this clone cannot read is skipped and counted**, never fatal - `release_tree`
+      returns `None` and the list lands in `unreadable`, which `main` prints. The drift verdict
+      is not collateral damage of the second question.
+    - **The tree's own version file names the tag to confirm first.** A tag list that stops
+      short of the install tree is ordinary on any checkout that has not fetched lately, and
+      walking it as the only source answers "no single release" about a tree that is exactly a
+      release - or, worse, names one *older* than the tree. `INSTALL_VERSION_PATH` is a local
+      fact, so it survives a stale list; the walk below is the fallback for an install that
+      does not carry the file.
+    - **The order of the two is established before a remedy is written.** `direction` is
+      `ahead` when the tree's own version is newer than the newest readable tag, and then no
+      upgrade is recommended: the tags are what lag.
+
     A tree matching no tag is `None` and is not this reading's fault to explain: content in no
     tag is the *other* reading's subject (a hand edit, which destroys on upgrade), and mixing
     the two in one line leaves a reader unable to tell "an upgrade brings the rest" from "an
@@ -271,33 +382,107 @@ def behind_release(
     Absent files are out of scope: this compares the paths both trees carry, so a file the
     newest release added is something an upgrade creates, not a lag in what this tree has.
 
-    `None` for the newest tag is "this clone carries no release tag", which the caller must
-    report as unmeasurable rather than as currency - `[]` with a tag is "measured, nothing lags".
+    `None` for the newest tag is "this clone carries no release tag it could read", which the
+    caller must report as unmeasurable rather than as currency - an empty `differing` with a
+    tag is "measured, nothing lags".
     """
     if not shared:
-        return None, None, [], 0
+        return ReleaseReading(compared=0)
     tags = release_tags(root)
     if not tags:
-        return None, None, [], len(shared)
+        return ReleaseReading(compared=len(shared))
 
     ids = {relative: _git_stored_id(root, path, relative) for path, relative in shared}
-    # The tree's own version: the newest release it matches on every shared path. Walked from
-    # the newest so the first match is the answer, and the walk stops there.
-    install_release: str | None = None
-    for tag in tags:
-        blobs = release_tree(root, tag)
-        if all(blobs.get(relative) == blob for relative, blob in ids.items()):
-            install_release = tag
-            break
+    tree_version = install_version(install_dir)
+    unreadable: list[str] = []
+    trees: dict[str, dict[str, str]] = {}
+    failed: set[str] = set()
 
-    newest = tags[0]
-    newest_blobs = release_tree(root, newest)
+    def tree_of(tag: str) -> dict[str, str] | None:
+        """One tag's blobs, read once; `None` for a tag this clone cannot read.
+
+        A failure is remembered as well as a success: the list below reads some tags twice
+        (once to find the newest readable one, once as the fallback walk), and a skipped tag
+        that is retried is counted twice in the note that reports it - measured on the arm
+        below before this cache existed, which read `2 release tag(s) ... (v0.3.9, v0.3.9)`.
+        """
+        if tag in trees:
+            return trees[tag]
+        if tag in failed:
+            return None
+        blobs = release_tree(root, tag)
+        if blobs is None:
+            failed.add(tag)
+            unreadable.append(tag)
+            return None
+        trees[tag] = blobs
+        return blobs
+
+    def matches(tag: str) -> bool:
+        blobs = tree_of(tag)
+        return blobs is not None and all(
+            blobs.get(relative) == blob for relative, blob in ids.items()
+        )
+
+    # The newest tag this clone can actually read: the first readable one in version order,
+    # since `release_tags` sorted them. An unreadable newest tag is a release this reading
+    # cannot name, so it is skipped and counted rather than reported as the answer.
+    newest: str | None = None
+    for tag in tags:
+        if tree_of(tag) is not None:
+            newest = tag
+            break
+    if newest is None:
+        return ReleaseReading(
+            compared=len(shared),
+            tree_version=tree_version,
+            unreadable=tuple(unreadable),
+            truncated=len(tags) > TAGS_EXAMINED,
+        )
+
+    # The tree's own version names the tag to confirm first - one `ls-tree` - and the bounded
+    # walk is the fallback, so a stale list cannot decide what the tree is.
+    install_release: str | None = None
+    candidate = f"v{tree_version}" if tree_version else None
+    if candidate and candidate in tags and matches(candidate):
+        install_release = candidate
+    else:
+        for tag in tags[:TAGS_EXAMINED]:
+            if matches(tag):
+                install_release = tag
+                break
+
+    newest_blobs = tree_of(newest) or {}
     differing = sorted(
         relative
         for relative, blob in ids.items()
         if newest_blobs.get(relative) != blob
     )
-    return newest, install_release, differing, len(shared)
+
+    direction = "current"
+    if differing:
+        tree_parts = version_parts(tree_version) or version_parts(install_release)
+        newest_parts = version_parts(newest)
+        if tree_parts and newest_parts and tree_parts > newest_parts:
+            direction = "ahead"
+        elif tree_parts and newest_parts and tree_parts < newest_parts:
+            direction = "behind"
+        else:
+            # No version on either side to order: the difference is real and the direction is
+            # not measured, which is what the report says rather than naming a release.
+            direction = "unknown"
+
+    return ReleaseReading(
+        newest=newest,
+        install_release=install_release,
+        differing=differing,
+        compared=len(shared),
+        tree_version=tree_version,
+        direction=direction,
+        unreadable=tuple(unreadable),
+        truncated=install_release is None and len(tags) > TAGS_EXAMINED,
+    )
+
 
 
 #: The ref namespaces a release is built from. Everything else a ref can live in
@@ -400,14 +585,7 @@ def shared_paths(install_dir: Path, root: Path) -> tuple[list[tuple[Path, str]],
 BEHIND_SHOWN = 10
 
 
-def _report_release(
-    install_dir: Path,
-    root: Path,
-    newest: str | None,
-    install_release: str | None,
-    differing: list[str],
-    checked: int,
-) -> None:
+def _report_release(install_dir: Path, reading: ReleaseReading) -> None:
     """Print which release this tree is, and whether a newer one exists.
 
     Printed under **both** verdicts, because it is a second question and not a verdict: a tree
@@ -415,41 +593,86 @@ def _report_release(
     it). Leaving it out of the green branch is the defect this function exists to fix - the
     green line said "a release's refs still reach this content", which is true of any older
     release and therefore said nothing about being current.
+
+    **The remedy follows the direction, or there is none.** "An upgrade to X brings these" is
+    true only when X is newer than the tree, and measured 2026-10-20 on a peer host it was
+    printed for a tree three releases *newer* than X - advice to downgrade, from a reading that
+    had never established which side was ahead. So the direction is stated, and when it was not
+    measured the line says that instead of naming a release.
     """
-    if newest is None:
+    if reading.newest is None:
+        if reading.unreadable:
+            shown = ", ".join(reading.unreadable[:5])
+            more = (
+                f" and {len(reading.unreadable) - 5} more"
+                if len(reading.unreadable) > 5
+                else ""
+            )
+            print(
+                f"behind: could not measure which release {install_dir} is - this checkout "
+                f"carries {len(reading.unreadable)} release tag(s) and none of them can be "
+                f"read here ({shown}{more})"
+            )
+            return
         print(
             f"behind: could not measure which release {install_dir} is - this checkout "
             "carries no release tag, and the refs a release is built from cannot answer it "
             "(an older release's bytes are in them too)"
         )
         return
-    if not differing:
+    if not reading.differing:
         print(
-            f"behind: none - {install_dir} carries what {newest} ships "
-            f"({checked} shared file(s) compared)"
+            f"behind: none - {install_dir} carries what {reading.newest} ships "
+            f"({reading.compared} shared file(s) compared)"
         )
         return
 
-    version = install_release or "no single release"
+    version = reading.install_release or "no single release"
     print(
-        f"behind: {install_dir} is the {version} copy and the newest release is {newest}; "
-        f"{len(differing)} of {checked} shared file(s) differ, so whatever the daemon renders "
-        "from this tree is that release's copy"
+        f"behind: {install_dir} is the {version} copy and the newest release tag this "
+        f"clone carries is {reading.newest}; {len(reading.differing)} of {reading.compared} "
+        "shared file(s) differ, so whatever the daemon renders from this tree is that "
+        "release's copy"
     )
-    for relative in differing[:BEHIND_SHOWN]:
+    for relative in reading.differing[:BEHIND_SHOWN]:
         print(f"    {relative}")
-    if len(differing) > BEHIND_SHOWN:
-        print(f"    ... and {len(differing) - BEHIND_SHOWN} more")
+    if len(reading.differing) > BEHIND_SHOWN:
+        print(f"    ... and {len(reading.differing) - BEHIND_SHOWN} more")
+    if reading.direction == "ahead":
+        print(
+            f"    direction: this tree reports {reading.tree_version or 'no version'}, which "
+            f"is newer than {reading.newest} - so nothing here is behind; the tags this "
+            f"clone carries are. An upgrade to {reading.newest} would move this tree "
+            "backwards."
+        )
+        print(
+            "    remedy: fetch the tags in the source checkout (`git fetch --tags`), so the "
+            "release this tree is can be named and an upgrade can be compared against it."
+        )
+        return
+    if reading.direction == "behind":
+        print(
+            f"    remedy: an upgrade to {reading.newest} brings these. Until then a rule read "
+            "from this tree is the installed release's rule, not the newest one's."
+        )
+        return
     print(
-        f"    remedy: an upgrade to {newest} brings these. Until then a rule read from this "
-        "tree is the installed release's rule, not the newest one's."
+        "    direction: not established - neither this tree's own version nor a tag it "
+        "matches could be read, so whether an upgrade to "
+        f"{reading.newest} moves it forward or backwards is not measured, and no remedy is "
+        "named."
     )
+
 
 
 def scan(
     install_dir: Path, root: Path
-) -> tuple[list[tuple[str, int, str]], list[str], int, int]:
-    """Return `(drifted, skipped, checked, missing)` for the files the two trees share.
+) -> tuple[list[tuple[str, int, str]], list[str], int, int, list[tuple[Path, str]]]:
+    """Return `(drifted, skipped, checked, missing, shared)` for the paths the trees share.
+
+    `shared` is returned rather than recomputed: the release reading starts from the same
+    walk, and calling `shared_paths` twice walked the whole install tree twice on every run
+    (`cyc20261020-092940`'s nit on this branch).
 
     `drifted` is `(path, size, note)` for a shared file whose content no shipped object
     holds - the note saying why, and naming the bookkeeping ref it is still recoverable
@@ -485,7 +708,7 @@ def scan(
         else:
             note = "no commit of this checkout holds this content"
         reported.append((relative, size, note))
-    return reported, skipped, len(shared), missing
+    return reported, skipped, len(shared), missing, shared
 
 
 def _entry() -> int:
@@ -568,9 +791,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     try:
-        drifted, skipped, checked, missing = scan(install_dir, root)
-        shared, _ = shared_paths(install_dir, root)
-        newest, install_release, differing, _ = behind_release(install_dir, root, shared)
+        drifted, skipped, checked, missing, shared = scan(install_dir, root)
+        reading = behind_release(install_dir, root, shared)
     except RuntimeError as exc:
         print(f"could not measure: {exc}", file=sys.stderr)
         return 2
@@ -583,6 +805,29 @@ def main(argv: list[str] | None = None) -> int:
             f"membership: {missing} object(s) reachable from the refs a release is built "
             "from are absent from this checkout and were not walked; content under a "
             "missing tree reads as drift"
+        )
+
+    if reading.unreadable:
+        # Same rule one layer over: a tag whose objects are absent names no tree here, so it
+        # is one release this reading cannot name - and the count is what stops the named
+        # ones being read as the whole list. Printed under both verdicts because it is a
+        # property of the reading, not of the files.
+        shown = ", ".join(reading.unreadable[:5])
+        more = (
+            f" and {len(reading.unreadable) - 5} more"
+            if len(reading.unreadable) > 5
+            else ""
+        )
+        print(
+            f"tags: {len(reading.unreadable)} release tag(s) this checkout carries cannot be "
+            f"read here ({shown}{more}) and were skipped; each is one release this reading "
+            "cannot name"
+        )
+    if reading.truncated:
+        print(
+            f"tags: the walk stopped after {TAGS_EXAMINED} release tag(s), so this tree "
+            "matched none of those - that is a bounded search, not a measurement that it "
+            "matches no release"
         )
 
     if checked == 0:
@@ -638,7 +883,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{len(leftover)} named as leftovers above, "
             f"{len(caches)} interpreter cache file(s) not listed)"
         )
-        _report_release(install_dir, root, newest, install_release, differing, checked)
+        _report_release(install_dir, reading)
         return 0
 
 
@@ -650,7 +895,7 @@ def main(argv: list[str] | None = None) -> int:
         "install/upgrade replaces it whole, so the next one destroys it: move the change "
         "into the source checkout and ship it, or it is lost."
     )
-    _report_release(install_dir, root, newest, install_release, differing, checked)
+    _report_release(install_dir, reading)
     return 1
 
 
