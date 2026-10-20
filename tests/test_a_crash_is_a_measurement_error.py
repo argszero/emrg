@@ -67,6 +67,12 @@ TOOLS = [
     "check-notary-credentials.py",
     "check-install-drift.py",
     "check-icon-transparency.py",
+    # Joined 2026-10-20 (`cyc20261020-121739`), and its shape is the reason the family
+    # rule exists: it answers **1 = "a product still ships the previous prompt"**, a
+    # verdict code, while the reading it performs can raise on a real subject — a
+    # container that will not parse, a member that is not UTF-8 — so an uncaught
+    # exception would be read as a finding about a product nobody opened.
+    "check-release-prompt.py",
 ]
 
 

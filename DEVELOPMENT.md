@@ -312,6 +312,16 @@ uv run --no-sync python3 scripts/check-release-artifact-version.py --from-tag v0
 
 Exit `0` = every declaration read names the claimed version; `1` = one names a different one (both values printed — this is the case where the bundle was rebuilt and the packaged GUI dist was not); `2` = nothing could be read — a container this tool does not open, a path that is not there, a header that will not parse — **never a pass**. Two readings the hand-run got wrong, and the tool now gets right: the app's manifest is selected by its own package **name**, because a real `app.asar` holds eight `package.json` files and a dependency's version is not the product's; and a declaration that was **read** but claims nothing (the payload's `卸载 EMRG.app` declares no version at all) is a note, not rc 2, while an unreadable one is never washed out by a readable sibling. The `.pkg` is reached the same way as the icon above — `pkgutil --expand`, then `gunzip -dc Payload | cpio -i -d` — and pointing this tool at the resulting directory runs the identical reading CI runs.
 
+**Does the product ship the prompt the release's tree carries?** (The host-side counterpart of the release job's `Assert the artifacts carry this tree's agent prompt` step.) The version assertion above reads what a product **declares**; this one reads what it **carries**. Without it the same defect sits one layer up: a product built from an older tree passes every version check and hands the host the **previous** system prompt while the release names the new one. Read the shipped copy out of the product itself:
+
+```bash
+uv run --no-sync python3 scripts/check-release-prompt.py dist/artifacts/EMRG-*-linux-*.tar.gz
+uv run --no-sync python3 scripts/check-release-prompt.py --file emrg/server/prompts/system.j2 <expanded-payload>
+# a subject is a runtime .tar.gz / .tgz, or an expanded payload directory
+```
+
+Exit `0` = every product carries this tree's copy byte for byte; `1` = one carries a different text — both character counts are printed, with the first differing line of each side; `2` = nothing could be read (a container this tool does not open, and it then names the command that reaches one; an archive with no such member; a path that is not there) — **never a pass**. The prompt does **not** live in `app.asar`: that bundle is the GUI (`emrg/gui/package.json`'s `build.files`), while the server is copied into `dist/runtime` by `packaging/build-runtime.sh` and travels at `runtime/source/emrg/server/prompts/system.j2`. Measured on the published `EMRG-0.3.21-linux-x86_64.tar.gz`: one such member, 24,558 characters — the text from before #2397. A `.pkg` or an AppImage is reached the same way as the two readings above (`pkgutil --expand`, `--appimage-extract`), and pointing this tool at the result runs the identical reading CI runs.
+
 **The host-side counterpart of the installer's compiled-extension guard** (#1544). The macOS build signs the app with `com.apple.security.cs.disable-library-validation` so a pip-installed C extension can load; the installer asserts that entitlement's **shape**, and this command asserts its **effect** — a wheel's `.so` really imports under the bundled interpreter. Run it before reporting "packaging is broken", or after an install, to tell the two apart:
 
 ```bash

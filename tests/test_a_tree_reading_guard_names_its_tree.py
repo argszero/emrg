@@ -284,6 +284,17 @@ NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE = {
         "verdict, so the rule is measured here even though the member is not in the bare "
         "loop above"
     ),
+    "check-release-prompt.py": (
+        "takes the product it compares as a required positional, so the bare run this "
+        "suite's loop performs is an argparse usage error (rc 2 with the usage text) "
+        "rather than this tool's invocation - and a clean checkout carries no artifact to "
+        "hand it. It does read a working tree (this checkout's copy of "
+        "emrg/server/prompts/system.j2, resolved from `REPO_ROOT`) and names it on the "
+        "report's first line, and that naming IS verified rather than classified: "
+        "`tests/test_check_release_prompt.py` drives it against products built under "
+        "`tmp_path` and pins the `tree:` line and each exit code (0 identical / 1 a "
+        "product carries a different text / 2 nothing could be read)"
+    ),
 }
 
 #: Answers about something other than a working tree, so the rule does not apply - each

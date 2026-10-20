@@ -832,6 +832,40 @@ jobs:
           fi
           exit "$rc"
 
+      # ── 提示词断言：产物里的那份是否就是这棵树的 ─────────────────────
+      # 上一步读的是产物**声明的版本**；这一条读的是产物**携带的内容**。发布链此前只
+      # 有前者，于是一个用旧树构建的产物能通过全部三道版本断言，却把**上一版提示词**
+      # 交给宿主 —— 同一个缺陷上一层：名字与产物一致，产物与源码不一致。
+      # 提示词不存在 `app.asar` 里（那只是 GUI：`emrg/gui/package.json` 的 `build.files`），
+      # 服务端由 `packaging/build-runtime.sh` 复制进 `dist/runtime`，所以它随
+      # `runtime/source/emrg/server/prompts/system.j2` 一起进归档。实测 v0.3.21 的 Linux
+      # 归档：只有这一个成员，24,558 字符，正是 #2397 改写前的那份。
+      # 同样跑在 **release 创建之前**：产品一旦发布，宿主装到的就是旧文本。
+      # 只有 Linux 归档是 ubuntu 腿能读的：`.pkg` / `.exe` / AppImage 都是本工具不解的
+      # 容器，它会以 rc 2 说出解开它们的命令，而不是把"读不到"报成"一样"。
+      - name: Assert the artifacts carry this tree's agent prompt
+        shell: bash
+        run: |
+          set -euo pipefail
+          # nullglob for the reason the two version steps above give.
+          shopt -s nullglob
+          candidates=(artifacts/EMRG-*-linux-*.tar.gz)
+          shopt -u nullglob
+          if [ "${#candidates[@]}" -eq 0 ]; then
+            echo "::error::no EMRG-*-linux-*.tar.gz among the downloaded artifacts — this step's subject is a product that carries the agent prompt, and a release whose product cannot be read must not be reported as success"
+            exit 1
+          fi
+          rc=0
+          python3 scripts/check-release-prompt.py "${candidates[@]}" || rc=$?
+          if [ "$rc" -eq 1 ]; then
+            echo "::error::an artifact carries a different emrg/server/prompts/system.j2 than this tree — the installer would hand a host the previous prompt while the release names the new one. Rebuild the product from the tagged tree. Both character counts and the first differing line are printed above."
+          elif [ "$rc" -eq 2 ]; then
+            echo "::error::no artifact's prompt could be read — 'could not measure' is not a pass: check that the Linux leg's runtime archive carries runtime/source/emrg/server/prompts/system.j2"
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error::scripts/check-release-prompt.py exited ${rc}, which is neither this tool's fault code (1) nor its unmeasurable one (2) — the tool itself failed, so nothing was read about the artifacts."
+          fi
+          exit "$rc"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
