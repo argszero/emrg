@@ -719,3 +719,274 @@ def test_interpreter_caches_are_counted_but_not_listed(
     )
     assert "1 interpreter cache file(s) not listed" in done.stdout, done.stdout
     assert "chat.pyc" not in done.stdout, done.stdout
+
+
+# ── the second question: which release is this tree, and is a newer one out? ─────────────
+#
+# `scan` asks whether a file's content is reachable from any ref a release is built from, and
+# an install tree several releases old passes it: the old bytes are in an older release's
+# history, which is a release ref. Measured 2026-10-20: this host's install tree carries the
+# pre-narrowing `evolution_prompt.md` while master and five releases since carry the narrowed
+# rule, and the drift reading answered `0`. The cases below pin the reading that can see it.
+
+
+def _recommit(root: Path, text: str, message: str) -> None:
+    """Change `SHARED` and commit, so each commit can carry its own release tag."""
+    (root / SHARED).write_text(text, encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", message)
+
+
+def test_a_tree_that_is_an_older_release_is_named_as_behind(
+    install_dir: Path, checkout: Path
+) -> None:
+    """The measured defect: a green drift verdict over a superseded install tree.
+
+    The tree holds `v0.3.1`'s bytes, `v0.3.2` changed them, and the drift reading still says
+    every file is reachable from a release ref - which is true, and is exactly why it cannot
+    answer this question. The `behind:` line has to name both versions, because "behind" with
+    no number is a warning nobody can act on.
+    """
+    _git(checkout, "tag", "v0.3.1")
+    _recommit(checkout, "narrowed content\n", "narrow the rule")
+    _git(checkout, "tag", "v0.3.2")
+
+    done = _run(install_dir, checkout)
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "still reach" in done.stdout, "the drift reading is unchanged: " + done.stdout
+    assert "behind:" in done.stdout, done.stdout
+    assert "v0.3.1 copy" in done.stdout, done.stdout
+    assert "newest release tag this clone carries is v0.3.2" in done.stdout, (
+        "the line must name the tree's own release and the newest one: " + done.stdout
+    )
+    assert SHARED in done.stdout, (
+        "the lagging path must be named, or the reader cannot tell which rule is stale: "
+        + done.stdout
+    )
+    assert "1 of 2 shared file(s) differ" in done.stdout, (
+        "the size of the gap is a derived number, so it is asserted rather than left to a "
+        "reader to infer from a path list: " + done.stdout
+    )
+    assert "remedy: an upgrade to v0.3.2 brings these" in done.stdout, (
+        "the remedy is only true in this direction, so the arm that establishes the "
+        "direction pins it: " + done.stdout
+    )
+
+
+def test_a_tree_that_is_the_newest_release_is_not_reported_as_behind(
+    install_dir: Path, checkout: Path
+) -> None:
+    """The other direction: a current tree must read as current, not merely stay silent.
+
+    Silence and "current" are different readings and a reader has to be able to tell them
+    apart - which is why the up-to-date branch prints `none` and the version it compared to.
+    """
+    _git(checkout, "tag", "v0.3.1")
+
+    done = _run(install_dir, checkout)
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "behind: none" in done.stdout, done.stdout
+    assert "carries what v0.3.1 ships" in done.stdout, done.stdout
+    assert "copy and the newest release tag" not in done.stdout, done.stdout
+
+
+def test_a_clone_with_no_release_tag_says_it_could_not_measure(
+    install_dir: Path, checkout: Path
+) -> None:
+    """No tags is `could not measure`, never "current".
+
+    The rest of the tool answers a question about history and stays valid without tags, so the
+    exit code is unchanged; what must not happen is the second reading claiming a currency it
+    never measured. This is the family rule the whole tool is written to.
+    """
+    done = _run(install_dir, checkout)
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "could not measure which release" in done.stdout, done.stdout
+    assert "carries no release tag" in done.stdout, done.stdout
+    assert "behind: none" not in done.stdout, (
+        "an unmeasured currency is not a clean one: " + done.stdout
+    )
+
+
+def test_the_newest_release_is_read_in_version_order_not_lexically(
+    install_dir: Path, checkout: Path
+) -> None:
+    """`v0.3.10` is newer than `v0.3.9`; a lexical sort says the opposite.
+
+    Pinned because the wrong sort does not crash or look odd - it names a real release that is
+    simply not the newest, and every subsequent sentence in the line inherits the mistake.
+    """
+    _git(checkout, "tag", "v0.3.9")
+    _recommit(checkout, "content that ships in 0.3.10\n", "v0.3.10 content")
+    _git(checkout, "tag", "v0.3.10")
+
+    done = _run(install_dir, checkout)
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "newest release tag this clone carries is v0.3.10" in done.stdout, done.stdout
+    assert "v0.3.9 copy" in done.stdout, done.stdout
+
+
+def test_a_tree_matching_no_release_names_no_version(tmp_path: Path, checkout: Path) -> None:
+    """A mixed tree is not any release, and the line must not name one it does not match.
+
+    Two files from two different releases: the tree is real and readable, so it is reported,
+    but calling it `v0.3.2` would be inventing a fact about which rule the daemon renders.
+    """
+    _git(checkout, "tag", "v0.3.1")
+    _recommit(checkout, "shared content for 0.3.2\n", "second release")
+    _git(checkout, "tag", "v0.3.2")
+    (checkout / "README.md").write_text("# a later readme\n", encoding="utf-8")
+    _git(checkout, "add", "-A")
+    _git(checkout, "commit", "-q", "-m", "third release")
+    _git(checkout, "tag", "v0.3.3")
+
+    tree = tmp_path / "mixed" / "source"
+    (tree / "emrg" / "server").mkdir(parents=True)
+    (tree / SHARED).write_text(RELEASED, encoding="utf-8")          # v0.3.1's copy
+    (tree / "README.md").write_text("# a later readme\n", encoding="utf-8")   # v0.3.3's copy
+
+    done = _run(tree, checkout)
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "no single release" in done.stdout, done.stdout
+    assert "newest release tag this clone carries is v0.3.3" in done.stdout, done.stdout
+
+
+def test_a_drift_verdict_still_carries_the_release_reading(
+    install_dir: Path, checkout: Path
+) -> None:
+    """Both facts, one run: the tree lags *and* holds content no commit has.
+
+    That is the historical incident's shape, and it is why the release line is printed under
+    both verdicts. A hand-edited tree matches no release, so it is named as such rather than
+    attributed to the one it is closest to - while the newest release is still named, because
+    that is the upgrade that replaces the edit.
+    """
+    _git(checkout, "tag", "v0.3.1")
+    _recommit(checkout, "narrowed content\n", "narrow the rule")
+    _git(checkout, "tag", "v0.3.2")
+    (install_dir / "README.md").write_text("# edited in place\n", encoding="utf-8")
+
+    done = _run(install_dir, checkout)
+
+    assert done.returncode == 1, "content in no commit is drift: " + done.stdout + done.stderr
+    assert "hold content no shipped commit has" in done.stdout, done.stdout
+    assert "behind:" in done.stdout, (
+        "a drift verdict must not swallow the release reading: " + done.stdout
+    )
+    assert "no single release" in done.stdout, done.stdout
+    assert "newest release tag this clone carries is v0.3.2" in done.stdout, (
+        done.stdout
+    )
+
+
+def test_a_release_tag_this_clone_cannot_read_is_skipped_not_fatal(
+    tmp_path: Path, install_dir: Path, checkout: Path
+) -> None:
+    """One unreadable tag must not take the drift verdict down with it.
+
+    Measured 2026-10-20 on a peer host (`cyc20261020-100652`): two release tags answer
+    `fatal: not a tree object` - their trees are absent from that clone, the same clone whose
+    `membership:` line already reports 40 absent objects - and the release walk raised on the
+    first of them, so `main` answered `could not measure` and **`2`** where the reading before
+    it answered `0`. A second question may not cost the first one's answer.
+
+    The hole is forged rather than waited for, as the absent-object arm does for membership: a
+    tag ref is written pointing at an object this clone does not have. The forgery is checked
+    before the assertion, so a fixture that fails to create the condition cannot pass.
+    """
+    _git(checkout, "tag", "v0.3.1")
+
+    ref = checkout / ".git" / "refs" / "tags" / "v0.3.9"
+    ref.parent.mkdir(parents=True, exist_ok=True)
+    ref.write_text("0" * 39 + "1\n", encoding="utf-8")
+
+    forged = subprocess.run(
+        ["git", "-C", str(checkout), "ls-tree", "-r", "v0.3.9"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert forged.returncode != 0, (
+        "the forgery did not create the condition: the tag still reads, so this case would "
+        "pass with or without the tolerance"
+    )
+
+    done = _run(install_dir, checkout)
+
+    assert done.returncode == 0, (
+        "an unreadable tag is one release this reading cannot name, not a reason to answer "
+        f"nothing: {done.stdout!r} {done.stderr!r}"
+    )
+    assert "still reach" in done.stdout, (
+        "the drift verdict is the reading's reason to exist and must survive: " + done.stdout
+    )
+    assert "tags: 1 release tag(s)" in done.stdout and "v0.3.9" in done.stdout, (
+        "the skipped tag has to be counted and named, or a narrowed list reads as the whole "
+        "one: " + done.stdout
+    )
+    assert "behind: none" in done.stdout, (
+        "the newest tag that *can* be read is still v0.3.1 and the tree is its copy, so the "
+        "verdict over what was readable is unchanged: " + done.stdout
+    )
+
+
+def test_a_tree_newer_than_every_release_tag_is_not_reported_as_behind(
+    tmp_path: Path, checkout: Path
+) -> None:
+    """The direction, not just the distance: advice to downgrade is the defect.
+
+    A checkout nobody has fetched lately carries tags that stop short of the install tree -
+    ordinary, and measured 2026-10-20 on a peer host where the newest tag was `v0.3.18` and
+    the tree reported `0.3.21`. The line printed there named `v0.3.18` as "the newest release"
+    and recommended "an upgrade to v0.3.18", for a tree three releases **newer**. The tree's
+    own version file is what answers it here, and the remedy has to follow.
+    """
+    (checkout / "emrg" / "__init__.py").write_text(
+        '__version__ = "0.3.1"\n', encoding="utf-8"
+    )
+    _git(checkout, "add", "-A")
+    _git(checkout, "commit", "-q", "-m", "the version file ships too")
+    _git(checkout, "tag", "v0.3.1")
+
+    # Two releases of work the tag list does not know about - committed, so the drift
+    # reading is green and the case is about the release line alone.
+    _recommit(checkout, "narrowed content\n", "the next release's content")
+    (checkout / "emrg" / "__init__.py").write_text(
+        '__version__ = "0.3.3"\n', encoding="utf-8"
+    )
+    _git(checkout, "add", "-A")
+    _git(checkout, "commit", "-q", "-m", "version 0.3.3")
+
+    tree = tmp_path / "install" / "source"
+    (tree / "emrg" / "server").mkdir(parents=True)
+    for name in (SHARED, "README.md", "emrg/__init__.py"):
+        shutil.copyfile(checkout / name, tree / name)
+
+    done = _run(tree, checkout)
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "still reach" in done.stdout, (
+        "the content is committed, so the drift reading is green and this case is about the "
+        "release line: " + done.stdout
+    )
+    assert "newer than v0.3.1" in done.stdout, (
+        "the line has to say which side is ahead, or the remedy is a guess: " + done.stdout
+    )
+    assert "0.3.3" in done.stdout, (
+        "the tree's own version is the local fact that answers this: " + done.stdout
+    )
+    assert "would move this tree backwards" in done.stdout, (
+        "an upgrade to an older tag is the advice that made this a defect: " + done.stdout
+    )
+    assert "remedy: an upgrade to v0.3.1 brings these" not in done.stdout, (
+        "the remedy must not recommend a downgrade: " + done.stdout
+    )
+    assert "git fetch --tags" in done.stdout, (
+        "what is actually wrong is the tag list, and the line must say so: " + done.stdout
+    )
