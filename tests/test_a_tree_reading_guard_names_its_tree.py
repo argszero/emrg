@@ -330,6 +330,17 @@ NOT_TREE_READERS = {
         "instead, as check-issue-links.py does)"
     ),
     "check-patch-files.py": "reads the patch files it is given as arguments",
+    "check-batching-share.py": (
+        "reads a corpus of session history files - `history_*.jsonl` under the roots given "
+        "as positional subjects, defaulting to the host's `~/.emrg` - and counts the tool "
+        "calls in each assistant record. A working tree is not its subject and no tree's "
+        "name would answer anything: the readings are about what agent rounds did, which "
+        "lives in gitignored host data a clean checkout does not carry. It names every root "
+        "it read, the file count and the record window before any number, as "
+        "check-icon-transparency.py prints the subject it read, and its empty-corpus "
+        "refusal (rc 2, with the roots named) is pinned by tests/test_check_batching_share.py "
+        "- added by issue #2406, whose two acceptance numbers had no command behind them"
+    ),
     "check-merge-freshness.py": "requires PR numbers; answers per head and its base",
     "check-merge-order.py": "requires PR numbers; names the base it plans against",
     "check-merge-pairs.py": "requires PR numbers; names the base it folds onto",
