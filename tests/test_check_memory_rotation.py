@@ -198,6 +198,56 @@ def test_a_memory_file_newer_than_the_row_still_reads_changed_beside_the_bookmar
     assert reading["states"][0]["newest"]["path"] == str(newer)
 
 
+def test_a_row_stamped_later_than_the_clock_is_unmeasurable(mod, tmp_path, monkeypatch):
+    """A row stamped after the reading refuses, because it would keep every file for ever.
+
+    `newest_memory` keeps the files strictly newer than the row's instant, so a row stamped
+    later than the clock keeps *nothing*: its project reads `unchanged`, and a bookmark with
+    a row for every project prints "every project is at or before its stamp" and exits 0 —
+    the silently-forever failure the module docstring already catalogues for the ISO `T`
+    form and for the sub-second comparison, with a stamp that parses. Measured in the cycle
+    that filed issue #2421: rows stamped `2099-01-01 00:00:00` answered `changed since their
+    bookmark: 0` with exit 0, while the same bookmark stamped in the past named both changed
+    files. The refusal is asserted through `main` as well, because it is the tool's own
+    reading and not only a function's return.
+    """
+    from datetime import datetime, timedelta
+
+    root = _root(tmp_path, "ahead")
+    _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
+    taken = datetime.strptime(BASE, mod.STAMP_FORMAT)
+    monkeypatch.setattr(mod, "now", lambda: taken)
+    ahead = (taken + timedelta(seconds=1)).strftime(mod.STAMP_FORMAT)
+    register = _projects(tmp_path / "projects.yml", [{"name": "ahead", "path": root}])
+    book = _bookmark(tmp_path / "ahead.md", [("`ahead`", ahead)])
+    with pytest.raises(mod.Unmeasurable) as excinfo:
+        mod.read(register, book)
+    message = str(excinfo.value)
+    assert ahead in message, message
+    assert taken.strftime(mod.STAMP_FORMAT) in message, message
+    assert "ahead" in message, message
+    assert mod.main(["--projects", str(register), "--bookmark", str(book)]) == 2
+
+
+def test_a_row_stamped_at_the_clock_is_read_normally(mod, tmp_path, monkeypatch):
+    """The other half of the same second: one second earlier is a reading, not a refusal.
+
+    These two rows differ by one second and by nothing else, so a guard that refused both
+    would look exactly like one that refused neither.
+    """
+    from datetime import datetime
+
+    root = _root(tmp_path, "at-the-clock")
+    _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
+    taken = datetime.strptime(BASE, mod.STAMP_FORMAT)
+    monkeypatch.setattr(mod, "now", lambda: taken)
+    register = _projects(tmp_path / "projects.yml", [{"name": "at-the-clock", "path": root}])
+    book = _bookmark(tmp_path / "at.md", [("`at-the-clock`", BASE)])
+    reading = mod.read(register, book)
+    assert reading["states"][0]["state"] == "unchanged"
+    assert mod.main(["--projects", str(register), "--bookmark", str(book)]) == 0
+
+
 def test_a_project_with_no_memory_root_and_one_whose_path_is_gone(mod, tmp_path):
     """Two states that are not a time: neither can be ordered against an mtime."""
     bare = _root(tmp_path, "bare")

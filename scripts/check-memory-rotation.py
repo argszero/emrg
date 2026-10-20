@@ -78,7 +78,8 @@ Exit codes
        a row naming no project, a row that matches more than one, or a row whose state
        field is none of the three forms above
     2  nothing was measured: no `projects.yml`, no bookmark, or a stamp that cannot be
-       ordered against an mtime - which is never a pass
+       ordered against an mtime - a value that does not parse, or one later than the
+       instant of the reading - which is never a pass
 
 What it does not do
 -------------------
@@ -105,6 +106,20 @@ from pathlib import Path
 #: Spelled as a constant because the comparison below is the only reader of it: a
 #: value that does not fit is unmeasurable, and this is the string that decides.
 STAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def now() -> datetime:
+    """The instant this reading is taken, as one function so a test can pin it.
+
+    It exists to answer one question a stamp cannot answer about itself: **is this row's
+    instant in the future?** `newest_memory` keeps the files strictly newer than a row's
+    stamp, so a stamp later than the clock keeps *nothing*, every project reads
+    `unchanged`, and the report prints "every project is at or before its stamp" with exit
+    0 - a clean verdict that never changes, because the row stays in the future until
+    somebody edits it (issue #2421). A function rather than a `datetime.now()` call at the
+    one site that needs it, so the boundary can be measured instead of raced.
+    """
+    return datetime.now()
 
 #: The two states a row may carry instead of a stamp. Both are the reader's own note
 #: about the project rather than a time, so neither can be ordered against an mtime.
@@ -468,6 +483,18 @@ def project_state(project: dict, row: dict | None, bookmark_path: Path | None = 
             f"the row for {name} carries {value!r}, which is not a {STAMP_FORMAT} stamp "
             f"and cannot be ordered against a file's mtime ({exc})"
         ) from exc
+    taken = now()
+    if stamp > taken:
+        # Ordered, but against nothing real: an mtime cannot be later than what a cycle has
+        # read, so every file on disk is older than this row's instant and the project would
+        # read `unchanged` for as long as the row stands (issue #2421).
+        raise Unmeasurable(
+            f"the row for {name} carries the stamp {value}, later than "
+            f"{taken.strftime(STAMP_FORMAT)} - the instant this reading was taken - so it "
+            f"records a memory modification that has not happened yet: every file on disk is "
+            f"older than it, and the project would read `unchanged` for as long as the row "
+            f"stands"
+        )
     state["bookmark"] = stamp.strftime(STAMP_FORMAT)
     if not root.is_dir():
         state.update(state="path missing", newest=None)
