@@ -390,7 +390,9 @@ def test_the_step_needs_no_uv_and_no_network():
     )
 
 
-def _run_step(tmp_path: Path, *, product: str | None) -> subprocess.CompletedProcess:
+def _run_step(
+    tmp_path: Path, *, product: str | None, text: str | None = None
+) -> subprocess.CompletedProcess:
     """Execute the step's own `run:` block in a tree shaped like the release job's.
 
     `artifacts/` is the directory `download-artifact` writes, and `scripts/<tool>` is a
@@ -399,8 +401,10 @@ def _run_step(tmp_path: Path, *, product: str | None) -> subprocess.CompletedPro
     the tool's own `REPO` point into the temporary tree and answer `2` for a reason that is not
     the step's.
 
-    With `product` given, a real archive carrying this tree's text is written, so the passing
-    direction is a passing *comparison*, not merely a step that did not print a refusal.
+    With `product` given, a real archive is written carrying `text` — this tree's copy by
+    default, so the passing direction is a passing *comparison* rather than merely a step that
+    did not print a refusal. A caller that passes `text` supplies a product whose prompt
+    differs, which is the one direction the step's own verdict exists for.
     """
     if shutil.which("bash") is None:  # pragma: no cover - a POSIX-less host
         pytest.skip("no bash on PATH: these arms drive the step's shell text, which they cannot run")
@@ -410,7 +414,7 @@ def _run_step(tmp_path: Path, *, product: str | None) -> subprocess.CompletedPro
     scripts.mkdir(exist_ok=True)
     (scripts / TOOL.name).symlink_to(TOOL)
     if product is not None:
-        _tarball(tmp_path / "artifacts" / product, _tree_text())
+        _tarball(tmp_path / "artifacts" / product, _tree_text() if text is None else text)
 
     return subprocess.run(
         ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", _the_step()["run"]],
@@ -455,4 +459,41 @@ def test_the_step_passes_when_the_correct_product_arrived(tmp_path):
     assert result.returncode == 0, (
         "a product carrying exactly this tree's prompt failed the step\n"
         f"{result.stdout[-1200:]}\n{result.stderr[-800:]}"
+    )
+
+
+@_WINDOWS
+def test_the_step_refuses_when_the_product_carries_a_different_prompt(tmp_path):
+    """The direction the step exists for, and the one nothing reached until issue #2411.
+
+    Both arms above stop short of it, and structurally so rather than by oversight. The
+    absent-product arm is satisfied by the **early** `exit 1` in the empty-candidates branch,
+    which fires before any verdict is produced; the passing arm only ever exercises `rc=0`. So
+    the branch taken when the tool answers `1` — a product that arrived and carries the previous
+    agent prompt — was executed by nothing, and changing the step's last line from `exit "$rc"`
+    to `exit 0` left this whole file green while every release would publish the wrong prompt as
+    success. Measured on `f9dcb2cf` by two hosts independently before this arm existed.
+
+    Asserted on both halves, for the reason the second host gave: a bare non-zero exit would
+    still pass an edit that made the step refuse every product for an unrelated reason, so the
+    refusal has to be the *mismatch* refusal and it has to name the file.
+    """
+    differs = _tree_text() + "\n# a line this product does not ship\n"
+    result = _run_step(
+        tmp_path, product="EMRG-0.3.99-linux-x86_64.tar.gz", text=differs
+    )
+    assert result.returncode != 0, (
+        "a product carrying a different prompt exited 0: the release job reported success on an "
+        f"installer that hands a host the previous agent prompt\n{result.stdout[-1200:]}"
+    )
+    assert "::error::" in result.stdout, (
+        f"the step refused without an ::error:: line, so CI shows no reason\n{result.stdout[-1200:]}"
+    )
+    assert "carries a different" in result.stdout, (
+        "the failure is not the mismatch refusal — a step that refuses for another reason would "
+        f"satisfy a bare non-zero exit\n{result.stdout[-1200:]}"
+    )
+    assert RELATIVE in result.stdout, (
+        f"the refusal does not name {RELATIVE!r}, so a reader cannot tell which file differs\n"
+        f"{result.stdout[-1200:]}"
     )
