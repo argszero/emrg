@@ -48,6 +48,13 @@ that read it). Per project it looks under `.emrg/memory/**/*.md` and under
 `.emrg/sessions/*/memory/**/*.md` - the two places the rotation's rule names - and
 keeps the newest file strictly newer than that project's stamp.
 
+**The bookmark is not memory content.** On this host it lives under the evolution
+project's own memory root, so counting it would make that project's newest file the clock
+itself: the row could never be current, and every run would report the project changed on
+the strength of the file that asks the question (issue #2422). It is excluded from the
+scan wherever it sits - inside a scanned root, or outside every root, where the exclusion
+is a no-op - and that exclusion is a stated rule rather than an invisible subtraction.
+
 Each project lands in exactly one state:
 
     changed          a memory file is newer than its stamp; the newest is printed
@@ -367,24 +374,41 @@ def memory_roots(root: Path) -> list[Path]:
     return found
 
 
-def memory_files(root: Path) -> list[Path]:
+def _same_file(a: Path, b: Path) -> bool:
+    """Whether two paths name one file, through symlinks and a relative spelling alike."""
+    try:
+        return os.path.realpath(a) == os.path.realpath(b)
+    except OSError:  # pragma: no cover - realpath does not raise for a missing tail
+        return False
+
+
+def memory_files(root: Path, exclude: Path | None = None) -> list[Path]:
     """Every `.md` under the project's memory roots - the files the rotation's rule binds.
 
     A directory is not a reading. Measured in the cycle that filed issue #2408: three
     projects on this host carry an **empty** `.emrg/sessions/*/memory/` directory, and a
     reading that counted the directory as "this project keeps memory" reported all three as
     contradicting their `no memory root` note. Nothing was there to read.
+
+    `exclude` is the bookmark itself, which is the clock and not memory content: on this
+    host it sits under the evolution project's own memory root, so counting it made that
+    project's row permanently stale and reported it changed on the strength of the file that
+    asks the question (issue #2422).
     """
     found = []
     for memory_root in memory_roots(root):
         for dirpath, _dirnames, filenames in os.walk(memory_root):
             for name in filenames:
-                if name.endswith(".md"):
-                    found.append(Path(dirpath) / name)
+                if not name.endswith(".md"):
+                    continue
+                path = Path(dirpath) / name
+                if exclude is not None and _same_file(path, exclude):
+                    continue
+                found.append(path)
     return found
 
 
-def newest_memory(root: Path, since: int) -> tuple[Path, float] | None:
+def newest_memory(root: Path, since: int, exclude: Path | None = None) -> tuple[Path, float] | None:
     """The newest `.md` under the project's memory roots that is strictly newer than `since`.
 
     `since` is a **whole second**, and an mtime is truncated to one before it is compared.
@@ -394,9 +418,12 @@ def newest_memory(root: Path, since: int) -> tuple[Path, float] | None:
     against stamps that already named their newest file - `.real` at `10:19:27.829` against
     a `10:19:27` row. Truncating both sides is what makes the reading idempotent, and it
     loses nothing: a file that really moved lands in a later second.
+
+    `exclude` is passed through to `memory_files`: the bookmark is the clock, and a scan
+    that counted it would report its own project changed every time it was written.
     """
     best: tuple[Path, float] | None = None
-    for path in memory_files(root):
+    for path in memory_files(root, exclude):
         try:
             mtime = path.stat().st_mtime
         except OSError:
@@ -408,8 +435,12 @@ def newest_memory(root: Path, since: int) -> tuple[Path, float] | None:
     return best
 
 
-def project_state(project: dict, row: dict | None) -> dict:
-    """One project's line: its state, and the reading behind it."""
+def project_state(project: dict, row: dict | None, bookmark_path: Path | None = None) -> dict:
+    """One project's line: its state, and the reading behind it.
+
+    `bookmark_path` is excluded from both memory scans below, because the bookmark is
+    this reading's clock and not one of its subjects (issue #2422).
+    """
     name = project["name"]
     raw_path = project.get("path") or ""
     state = {"name": name, "path": raw_path, "key": row["key"] if row else None}
@@ -422,7 +453,8 @@ def project_state(project: dict, row: dict | None) -> dict:
         # A note is a reading taken on a day, so it is re-measured rather than repeated: a
         # project that has since written a memory root is one the note would hide for ever,
         # which is the same class of stale-past-state defect as the truncated stamp above.
-        state.update(state=NO_MEMORY_ROOT if not memory_files(root) else "row says no memory root",
+        state.update(state=NO_MEMORY_ROOT if not memory_files(root, bookmark_path)
+                     else "row says no memory root",
                      bookmark=None, newest=None)
         return state
     if value.startswith(PATH_MISSING_PREFIX):
@@ -440,10 +472,10 @@ def project_state(project: dict, row: dict | None) -> dict:
     if not root.is_dir():
         state.update(state="path missing", newest=None)
         return state
-    if not memory_files(root):
+    if not memory_files(root, bookmark_path):
         state.update(state=NO_MEMORY_ROOT, newest=None)
         return state
-    newest = newest_memory(root, int(stamp.timestamp()))
+    newest = newest_memory(root, int(stamp.timestamp()), bookmark_path)
     if newest is None:
         state.update(state="unchanged", newest=None)
         return state
@@ -457,7 +489,8 @@ def read(projects_path: Path, bookmark_path: Path) -> dict:
     projects = load_projects(projects_path)
     rows = parse_bookmark(bookmark_path)
     by_path, orphans, ambiguous = resolve_rows(rows, projects)
-    states = [project_state(p, by_path.get(p.get("path") or p["name"])) for p in projects]
+    states = [project_state(p, by_path.get(p.get("path") or p["name"]), bookmark_path)
+              for p in projects]
     faults = []
     for state in states:
         if state["state"] == "no bookmark row":

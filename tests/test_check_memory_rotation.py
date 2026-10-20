@@ -162,6 +162,42 @@ def test_the_newest_of_several_is_the_one_named(mod, tmp_path):
     assert reading["states"][0]["newest"]["path"] == str(newest)
 
 
+def test_the_bookmark_does_not_count_as_memory_of_the_project_that_holds_it(mod, tmp_path):
+    """The clock is not a subject: the bookmark sits under the memory root it scans.
+
+    On this host the bookmark lives under the evolution project's own memory root, so a scan
+    that counted it made that project's row permanently stale — measured in the cycle that
+    filed issue #2422: a row written at `22:01:14` read as changed at `00:09:25`, naming the
+    bookmark itself. Here the project's memory file is older than its row and the bookmark
+    newer, so the bookmark is the only file that could make the project look changed.
+    """
+    root = Path(_root(tmp_path, "holder"))
+    _write_memory(root, ".emrg/memory/MEMORY.md", _stamp(mod))
+    register = _projects(tmp_path / "projects.yml", [{"name": "holder", "path": str(root)}])
+    book = _bookmark(root / ".emrg/memory/bookmark.md", [("`holder`", BASE)])
+    os.utime(book, (_stamp(mod, 60), _stamp(mod, 60)))
+    reading = mod.read(register, book)
+    assert reading["states"][0]["state"] == "unchanged", reading["states"][0]
+    assert mod.main(["--projects", str(register), "--bookmark", str(book)]) == 0
+
+
+def test_a_memory_file_newer_than_the_row_still_reads_changed_beside_the_bookmark(mod, tmp_path):
+    """The other direction, from the same tree: a real memory file is still reported.
+
+    Only the two files' mtimes differ from the test above, so an exclusion that swallowed
+    the whole scan — or one that hid the file the reading exists to find — fails here.
+    """
+    root = Path(_root(tmp_path, "holder-with-news"))
+    newer = _write_memory(root, ".emrg/memory/MEMORY.md", _stamp(mod, 60))
+    register = _projects(tmp_path / "projects.yml",
+                         [{"name": "holder-with-news", "path": str(root)}])
+    book = _bookmark(root / ".emrg/memory/bookmark.md", [("`holder-with-news`", BASE)])
+    os.utime(book, (_stamp(mod, 30), _stamp(mod, 30)))
+    reading = mod.read(register, book)
+    assert reading["states"][0]["state"] == "changed", reading["states"][0]
+    assert reading["states"][0]["newest"]["path"] == str(newer)
+
+
 def test_a_project_with_no_memory_root_and_one_whose_path_is_gone(mod, tmp_path):
     """Two states that are not a time: neither can be ordered against an mtime."""
     bare = _root(tmp_path, "bare")
