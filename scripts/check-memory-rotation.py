@@ -209,11 +209,26 @@ def _value_of(cells: list[str]) -> str | None:
 def parse_bookmark(path: Path) -> list[dict]:
     """Every body row of the bookmark's table, in file order, as key/value pairs.
 
-    A table this reader cannot read is **not** an empty table. A row whose key cell is a
-    code span - the shape every bookmark row has - but which carries no stamp and no note
-    in any of its cells is reported as unmeasurable, because reading it as "no row" would
-    report its project as never visited while its row sits in the file, and that is the
-    defect this tool was written to end (issue #2408).
+    A table this reader cannot read is **not** an empty table, and neither is a file this
+    reader cannot read as a table. Both are reported as unmeasurable, because reading
+    either as "no row" would report its projects as never visited while their rows sit in
+    the file, and that is the defect this tool was written to end (issue #2408). Two
+    shapes are refused for that reason (issue #2419):
+
+    * a file that carries **no table line at all** - the shape §1.5's prose describes,
+      "one line per project", which says nothing about a markdown table. Measured before
+      this arm existed: a `- `alpha` <stamp>` file, a prose file and a table of rows
+      written without code spans all read as `0 row(s)` and produced one "never been
+      visited" fault per registered project (exit 1), whose remedy is to re-read every
+      project rather than to fix the bookmark's shape;
+    * a **body** row that names its project in no code span, each offending line named.
+      A header is not a body row: markdown decides that by the separator under it, so a
+      header is skipped whether or not its first cell is a code span.
+
+    A table that really is empty - a header and no body rows - keeps the honest reading:
+    every project never visited, exit 1. That is a true statement about a first-ever
+    bookmark, and the guard above must not swallow it; a test pins both directions,
+    because those two files produce the same `0 row(s)` line and differ only in shape.
     """
     if not path.is_file():
         raise Unmeasurable(f"no bookmark at {path}")
@@ -224,19 +239,23 @@ def parse_bookmark(path: Path) -> list[dict]:
     lines = text.splitlines()
     rows = []
     unreadable = []
+    keyless = []
+    saw_table = False
     for index, line in enumerate(lines):
         if not _is_table_line(line):
             continue
+        saw_table = True
         cells = _cells(line)
         if not cells or all(SEPARATOR_CELL.match(cell) for cell in cells if cell):
             continue                      # the header's separator, not a body row
-        key_cell = KEY_CELL.match(cells[0]) if cells else None
-        if key_cell is None:
-            continue                      # prose, or a header written without a code span
         following = next((l for l in lines[index + 1:] if l.strip()), "")
         if _is_table_line(following) and all(
                 SEPARATOR_CELL.match(cell) for cell in _cells(following) if cell):
-            continue                      # a header written as `| `project` | stamp | … |`
+            continue                      # a header, with or without a code span
+        key_cell = KEY_CELL.match(cells[0]) if cells else None
+        if key_cell is None:
+            keyless.append(f"line {index + 1}: {line.strip()}")
+            continue
         value = _value_of(cells[1:])
         if value is None:
             unreadable.append(f"line {index + 1}: {line.strip()}")
@@ -244,6 +263,20 @@ def parse_bookmark(path: Path) -> list[dict]:
         key = key_cell.group("key")
         hint = key_cell.group("hint")
         rows.append({"key": f"{key} ({hint})" if hint else key, "value": value})
+    if not saw_table:
+        raise Unmeasurable(
+            f"the bookmark at {path} carries no markdown table - {len(lines)} line(s) read "
+            f"and not one of them is a `| ... |` row - so there are no rows here to read: a "
+            f"bookmark in another shape is not an empty bookmark, and reading it as one "
+            f"would report every registered project as never visited"
+        )
+    if keyless:
+        raise Unmeasurable(
+            f"the bookmark at {path} carries {len(keyless)} row(s) this reader cannot "
+            f"read - a table row names its project in its first cell, and these do not "
+            f"name it in a code span - so the reading below would call their projects "
+            f"never visited: " + "; ".join(keyless)
+        )
     if unreadable:
         raise Unmeasurable(
             f"the bookmark at {path} carries {len(unreadable)} row(s) this reader cannot "

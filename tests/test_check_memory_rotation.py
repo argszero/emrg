@@ -369,6 +369,79 @@ def test_a_header_written_with_a_code_span_is_not_a_body_row(mod, tmp_path):
     assert reading["faults"] == [], reading["faults"]
 
 
+def test_a_bookmark_in_another_shape_is_unmeasurable_rather_than_empty(mod, tmp_path):
+    """The shape §1.5's prose asks for - "one line per project" - is not a table.
+
+    Nothing in that sentence says markdown table with a code span in the first cell, so a
+    cycle that follows it writes a file this reader cannot parse. Read as an empty bookmark
+    that file produces one "never been visited" fault per project (exit 1), whose remedy is
+    to re-read all of them — the opposite of the truth, which is that the bookmark's shape
+    needs fixing. Measured on this host in the cycle that filed issue #2419: a bullet-list
+    bookmark and a prose-only bookmark both answered `0 row(s)` with a fault per project.
+    """
+    root = _root(tmp_path, "unlisted")
+    register = _projects(tmp_path / "projects.yml", [{"name": "unlisted", "path": root}])
+    for shape, text in (
+            ("one line per project",
+             f"# Rotation bookmark\n\n- `unlisted` {BASE} (cyc20261020-214924)\n"),
+            ("prose only", "# Rotation bookmark\n\nNothing has been read yet.\n")):
+        book = tmp_path / f"{shape.replace(' ', '-')}.md"
+        book.write_text(text, encoding="utf-8")
+        with pytest.raises(mod.Unmeasurable) as excinfo:
+            mod.read(register, book)
+        message = str(excinfo.value)
+        assert "no markdown table" in message, shape
+        assert str(book) in message, shape
+        assert "never visited" in message, shape
+
+
+def test_a_body_row_that_names_its_project_in_no_code_span_is_unmeasurable(mod, tmp_path):
+    """The same silence one level in: a real table whose keys are written plainly.
+
+    `KEY_CELL` requires the span, so such a row was skipped by the loop with no record
+    that it had been seen. Rows are there and the reading says `0 row(s)`, so the two
+    refusals are the same defect - a shape the reader does not know answered as an absence.
+    """
+    root = _root(tmp_path, "plain")
+    register = _projects(tmp_path / "projects.yml", [{"name": "plain", "path": root}])
+    book = tmp_path / "bookmark.md"
+    book.write_text("\n".join([
+        "# Bookmark", "",
+        "| project | newest read | files |",
+        "| --- | --- | --- |",
+        f"| plain | {BASE} | 0 |",
+    ]) + "\n", encoding="utf-8")
+    with pytest.raises(mod.Unmeasurable) as excinfo:
+        mod.read(register, book)
+    message = str(excinfo.value)
+    assert "cannot" in message and "never visited" in message
+    assert "line 5" in message and "| plain |" in message
+
+
+def test_a_bookmark_that_really_is_empty_still_reports_every_project_never_visited(mod, tmp_path):
+    """The control for the arm above: the same `0 row(s)`, and the honest answer.
+
+    A header and no body rows is a first-ever bookmark, so "never been visited" is true
+    and exit 1 is right. This file and the bullet-list file above differ only in shape,
+    and the guard must separate them — measured here rather than assumed, because a guard
+    that swallowed this case would turn an empty bookmark into "could not measure" and the
+    rotation would never start.
+    """
+    root = _root(tmp_path, "fresh")
+    register = _projects(tmp_path / "projects.yml", [{"name": "fresh", "path": root}])
+    book = tmp_path / "bookmark.md"
+    book.write_text("\n".join([
+        "# Bookmark", "",
+        "| project | newest read | files |",
+        "| --- | --- | --- |",
+    ]) + "\n", encoding="utf-8")
+    reading = mod.read(register, book)
+    assert reading["row_count"] == 0
+    assert reading["states"][0]["state"] == "no bookmark row"
+    assert len(reading["faults"]) == 1
+    assert "never been visited" in reading["faults"][0]
+
+
 def test_a_project_with_no_row_is_a_fault_and_is_reported_as_never_visited(mod, tmp_path):
     root = _root(tmp_path, "unrowded")
     reading = _reading(mod, tmp_path, [{"name": "unrowded", "path": root}], [])
