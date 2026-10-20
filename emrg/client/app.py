@@ -281,6 +281,10 @@ def _cards_from_tool_calls(tool_calls) -> list[ToolCard]:
             status="pending",
             tool_call_id=str(call.get("id") or ""),
             arguments=args,
+            # The daemon projects `call_label` into every history entry it returns,
+            # so a resumed session shows the same label the live one did — including
+            # a session recorded before the field existed (rant 2026-10-20T12:22:21).
+            call_label=str(call.get("call_label") or ""),
         ))
     return cards
 
@@ -1534,6 +1538,9 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                         status="running",
                         tool_call_id=ts.tool_call_id,
                         arguments=ts.arguments,
+                        # Printed as handed over: which call of its batch this is was
+                        # decided in the daemon (rant 2026-10-20T12:22:21).
+                        call_label=ts.call_label,
                     )
                     chat.add(card)
                     _last_center = f"running {ts.tool_name}..."

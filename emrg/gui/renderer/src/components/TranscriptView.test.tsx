@@ -400,6 +400,37 @@ describe("TranscriptView", () => {
     expect(full.textContent!.endsWith("…")).toBe(false);
   });
 
+  it("同批第几个显示在工具名之前，daemon 给什么就打印什么（rant 2026-10-20T12:22:21）", () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    store.handleToolStart(
+      { tool_call_id: "t1", tool_name: "bash", request_id: "r1", intent: "check config", call_label: "(2/3) " },
+      "s1",
+    );
+    const { container } = setup(store, "s1");
+    const row = container.querySelector(".tool-row")!;
+    const label = row.querySelector(".tool-call-label");
+    // 逐字比较：toHaveTextContent 会归一空白，正好抹掉那个尾随空格——而那个空格是
+    // 协议的一部分（label 自带尾随空格，客户端不再自己拼）。
+    expect(label!.textContent).toBe("(2/3) ");
+    // 位置：label 紧贴在工具名之前，不是名字后面、也不是 intent 后面
+    const name = row.querySelector(".tool-name")!;
+    expect(label!.nextElementSibling).toBe(name);
+    expect(name).toHaveTextContent("bash");
+    expect(row.textContent!.indexOf("(2/3) ")).toBeLessThan(row.textContent!.indexOf("bash"));
+  });
+
+  it("没有 call_label 时行与改动前逐字相同：不出现 (1/1)、不出现空括号", () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    store.handleToolStart({ tool_call_id: "t1", tool_name: "bash", request_id: "r1", intent: "check config" }, "s1");
+    const { container } = setup(store, "s1");
+    const row = container.querySelector(".tool-row")!;
+    // 缺字段 = 连节点都没有（空 span 也会让「逐字相同」不成立）
+    expect(row.querySelector(".tool-call-label")).toBeNull();
+    expect(row.querySelector(".tool-name")).toHaveTextContent(/^bash$/);
+    expect(row.textContent).not.toContain("(1/1)");
+    expect(row.textContent).not.toContain("(");
+  });
+
   it("失败工具行：failed label（tool.failText）且无耗时", () => {
     const store = createTranscriptStore({ t: (k) => k });
     store.handleToolStart({ tool_call_id: "t1", tool_name: "bash", request_id: "r1" }, "s1");

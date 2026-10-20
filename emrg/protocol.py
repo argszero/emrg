@@ -88,6 +88,13 @@ class ToolStart:
     tool_call_id: str = ""
     arguments: dict = field(default_factory=dict)
     intent: str = ""
+    #: Which call of its batch this is, as a finished string — `"(2/3) "` — or `""`
+    #: when the response issued a single call. Composed by the daemon
+    #: (`daemon._tool_call_labels`) and printed verbatim by every client: a client
+    #: that counted would be a second answer to a question the daemon already
+    #: answered (rant 2026-10-20T12:22:21). Absent on an older frame ⇒ `""`, which
+    #: is the same thing a single call shows.
+    call_label: str = ""
 
     @classmethod
     def from_dict(cls, d: dict) -> ToolStart:
@@ -97,6 +104,7 @@ class ToolStart:
             tool_call_id=d.get("tool_call_id", ""),
             arguments=d.get("arguments", {}),
             intent=d.get("intent", ""),
+            call_label=d.get("call_label", ""),
         )
 
 

@@ -185,6 +185,60 @@ describe("replayHistoryRecords is equivalent to the live stream", () => {
     expect(group.group.rows.map((r) => r.intent)).toEqual(["list the files", "read README"]);
   });
 
+  /** 所有工具行的 callLabel，按出现顺序——不假设是否已并进 group（取决于结果是否先到）。 */
+  function rowsWithLabel(replay: ReturnType<typeof createTranscriptStore>): Array<string | undefined> {
+    const out: Array<string | undefined> = [];
+    for (const entry of replay.getEntries(SID)) {
+      if (entry.kind === "tool-row") out.push((entry as { row: { callLabel?: string } }).row.callLabel);
+      if (entry.kind === "tool-group") {
+        for (const row of (entry as { group: { rows: Array<{ callLabel?: string }> } }).group.rows) {
+          out.push(row.callLabel);
+        }
+      }
+    }
+    return out;
+  }
+
+  it("carries the daemon's batch label out of tool_calls[].call_label (rant 2026-10-20T12:22:21)", () => {
+    // daemon 的历史投影在每一项 tool_calls 上算好 call_label；回放只透传，不自己数。
+    const records: HistoryRecord[] = [
+      { record_index: 0, kind: "message", role: "user", content: "q" },
+      {
+        record_index: 1,
+        kind: "message",
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          { id: "c1", function: { name: "bash", arguments: '{"command":"ls"}' }, call_label: "(1/2) " },
+          { id: "c2", function: { name: "read", arguments: '{"path":"a"}' }, call_label: "(2/2) " },
+        ],
+      },
+    ];
+    const replay = createTranscriptStore();
+    replayHistoryRecords(records, SID, replay);
+    expect(rowsWithLabel(replay)).toEqual(["(1/2) ", "(2/2) "]);
+  });
+
+  it("leaves callLabel undefined when the record carries none — the client never counts", () => {
+    const records: HistoryRecord[] = [
+      { record_index: 0, kind: "message", role: "user", content: "q" },
+      {
+        record_index: 1,
+        kind: "message",
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          { id: "c1", function: { name: "bash", arguments: '{"command":"ls"}' } },
+          { id: "c2", function: { name: "read", arguments: '{"path":"a"}' } },
+        ],
+      },
+    ];
+    const replay = createTranscriptStore();
+    replayHistoryRecords(records, SID, replay);
+    // 两条调用、没有字段 ⇒ 两条都不许冒出 (1/2)：客户端不自己算
+    expect(rowsWithLabel(replay)).toEqual([undefined, undefined]);
+  });
+
   it("does not invent an empty assistant bubble for a tool-only round", () => {
     const live = createTranscriptStore();
     feedLive(live, SID, { user: "q", rounds: [{ text: "", tools: [{ id: "c1", name: "bash", intent: "go", output: "ok" }] }, { text: "done", tools: [] }] });

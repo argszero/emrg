@@ -29,6 +29,13 @@ export interface ToolRow {
   status: "running" | "done" | "failed";
   intent?: string;
   /**
+   * 这条调用是同一批（一条 assistant 响应）里的第几个 —— `"(2/3) "`，自带尾随空格；
+   * 只有一条调用时是 `""`。**由 daemon 算好，这里只负责打印**：客户端自己数就会是同一个
+   * 问题的第二个答案，而错的 `(2/3)` 和对的看起来一模一样（rant 2026-10-20T12:22:21）。
+   * 旧帧与旧记录没有这个字段 ⇒ `undefined` ⇒ 渲染结果与改动前逐字相同。
+   */
+  callLabel?: string;
+  /**
    * 工具入参（rant 2026-09-30T09:17:54 → #1787）。实时是 daemon 解析好的对象；回放那一路
    * 记录里存的是 `function.arguments` 的 **JSON 字符串**，但 `historyReplay.toolCallArguments`
    * 照 daemon 的规矩（解析失败落 `{}`）先归一，所以两条路存下来的是同一形状——这正是
@@ -161,6 +168,8 @@ export interface ToolStartData {
   intent?: string;
   /** daemon 的 `tool_start` 帧本就带 `arguments`（解析好的对象）——此前在这里被丢掉。 */
   arguments?: unknown;
+  /** 同批第几个，daemon 算好的成品字符串（`"(2/3) "` / `""`）——rant 2026-10-20T12:22:21。 */
+  call_label?: string;
 }
 export interface ToolEndData {
   tool_call_id: string;
@@ -469,6 +478,8 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
         status: "running",
         intent: data.intent,
         arguments: data.arguments,
+        // daemon 给什么就存什么，不数、不拼（rant 2026-10-20T12:22:21）。
+        callLabel: data.call_label,
         outputExpanded: false,
         fullExpanded: false,
       };
