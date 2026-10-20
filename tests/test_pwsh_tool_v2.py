@@ -494,32 +494,39 @@ def test_a_dialect_that_is_not_mounted_receives_nothing(tmp_path):
 # ── the prompt: it names the tool that is registered ─────────────────────
 
 
-def test_the_prompt_names_the_dialect_it_was_given():
-    """Acceptance item 6, both directions, at the template level."""
-    for name, absent in (("pwsh", "bash"), ("bash", "pwsh")):
+def test_the_prompt_names_no_dialect_whatever_is_mounted():
+    """Acceptance item 6, at the template level — in the form the compacted prompt admits.
+
+    The item exists because something once named a dialect the caller never chose. The
+    compacted session prompt says nothing about the shell at all, so the defect cannot take
+    the old shape; what is checked here is the stronger form of the same claim: under either
+    mount, no dialect is named. A render that guesses is the accident, whichever name it
+    guesses.
+    """
+    for name in ("pwsh", "bash"):
         rendered = _get_jinja_env().get_template("system.j2").render(
             os_name="test", config_dir="/nonexistent", shell_tool=name
         )
-        assert f"use the {name} tool" in rendered
-        assert f"{absent} tool" not in rendered
+        for dialect in ("bash", "pwsh", "shell"):
+            assert f"use the {dialect} tool" not in rendered, (
+                f"the prompt names a shell dialect ({dialect!r}) — the registry decides which "
+                "tool is mounted, and the prefix must not guess one"
+            )
 
 
-def test_the_prompt_follows_the_registry_not_the_platform():
-    """The strongest form: mount the other dialect and the prompt changes with it.
+def test_the_prompt_does_not_depend_on_the_mounted_dialect():
+    """The strongest form the compacted prompt allows: mount the other dialect, the prefix stays.
 
-    A prompt rendered from the *platform* would pass the test above and still be
-    wrong wherever the mounted tool and the platform's default disagree.  The
-    registry here holds exactly one shell tool, mounted as the host would *not*
-    have mounted it, and the prompt must follow the registry.
-
-    Registering a second dialect into the daemon's own registry would not do:
-    the registry indexes by name, so adding ``pwsh`` beside ``bash`` produces two
-    entries, not a swap — which is why the roster must be a gate at build time
-    and not a mutable table at runtime.
+    A prompt rendered from the *platform*, or from the mounted tool, changes with its
+    environment; the compacted prompt is byte-identical under both mounts, which is what makes
+    it the same system message for every session on every host — the property the provider's
+    prompt cache is matched on. The registry half of this file is what still proves the mount
+    follows the tool that was registered, and it is read here so a change that stopped
+    mounting the other dialect cannot pass as "the prompt no longer mentions it".
     """
     server = _instantiate()
     host_dialect = server._mounted_shell_tool_name()
-    assert f"use the {host_dialect} tool" in server._build_system_prompt()
+    before = server._build_system_prompt()
 
     other = (
         SHELL_TOOL_NAME_WINDOWS if host_dialect == SHELL_TOOL_NAME_POSIX else SHELL_TOOL_NAME_POSIX
@@ -527,24 +534,28 @@ def test_the_prompt_follows_the_registry_not_the_platform():
     swapped = ToolRegistry()
     swapped.register(PwshToolV2() if other == SHELL_TOOL_NAME_WINDOWS else BashToolV2())
     server.tools = swapped
-    assert server._mounted_shell_tool_name() == other
-    assert f"use the {other} tool" in server._build_system_prompt()
+    assert server._mounted_shell_tool_name() == other, (
+        "mounting the other dialect did not move the mount: this test's premise is that the "
+        "registry really was swapped"
+    )
+    assert server._build_system_prompt() == before, (
+        "the system prompt changed with the mounted shell dialect: the prefix is then different "
+        "per host and per platform, which no cache survives"
+    )
 
 
 def test_a_bare_render_guesses_no_dialect():
     """A template rendered with no context must not invent a shell.
 
-    This is the shape of the defect itself: something names a dialect the caller
-    never chose.  Odd-looking to assert, but the alternative — defaulting to
-    ``bash`` — is exactly the accident, and it would be invisible because a bare
-    render is what template tests do.
+    This is the shape of the defect itself: something names a dialect the caller never chose.
+    Odd-looking to assert, but the alternative — defaulting to ``bash`` — is exactly the
+    accident, and it would be invisible because a bare render is what template tests do.
     """
     rendered = _get_jinja_env().get_template("system.j2").render(
         os_name="test", config_dir="/nonexistent"
     )
-    assert "use the shell tool" in rendered
-    assert "use the bash tool" not in rendered
-    assert "use the pwsh tool" not in rendered
+    for dialect in ("bash", "pwsh", "shell"):
+        assert f"use the {dialect} tool" not in rendered
 
 
 # ── the renderer's half (the cross-language boundary) ────────────────────

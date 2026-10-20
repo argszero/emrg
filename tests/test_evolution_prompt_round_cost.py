@@ -72,11 +72,20 @@ REQUIRED_TERMS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-#: The rule's unit and its criterion, as shipped in **both** carriers. Editing either one alone
-#: is the defect this pair catches, so `test_both_carriers_state_the_same_unit_and_criterion`
+#: The rule's unit, its criterion and its boundary, as shipped in **both** carriers. Editing either
+#: one alone is the defect this pair catches, so `test_both_carriers_state_the_same_unit_and_criterion`
 #: reads the live text of each rather than one file's expectations about the other.
-SHARED_UNIT = "several tool calls in one round"
-SHARED_CRITERION = "that is a judgement, and a judgement gets its own round"
+#:
+#: These are the longest phrases the two carriers genuinely share, and that is a measurement rather
+#: than a preference: R10 is a rulebook entry a cycle reads and `system.j2` is one bullet in every
+#: session's prefix, so the two state the same rule at different lengths — `several tool calls in one
+#: round, of any tool the cycle has (…)` against `**Several calls in one round** when no call's
+#: arguments depend on another's answer`. The phrases below are where they agree word for word (the
+#: concrete three-call case, the criterion's consequence, the boundary that decides it), and a drift
+#: in any of them still moves both — which is the property the comparison exists for.
+SHARED_UNIT = "three calls in one round"
+SHARED_CRITERION = "gets its own round"
+SHARED_BOUNDARY = "no call's arguments depend on"
 
 #: The unit this rule may no longer be stated in. The first version of R10 taught exactly
 #: these; the host retired the merge-several-calls-into-one reading explicitly at
@@ -174,7 +183,8 @@ def test_both_carriers_state_the_same_unit_and_criterion() -> None:
         ),
         "emrg/server/prompts/system.j2": SYSTEM_PROMPT.read_text(encoding="utf-8"),
     }
-    for marker, label in ((SHARED_UNIT, "unit"), (SHARED_CRITERION, "criterion")):
+    for marker, label in ((SHARED_UNIT, "unit"), (SHARED_CRITERION, "criterion"),
+                          (SHARED_BOUNDARY, "boundary")):
         missing = [name for name, text in carriers.items() if marker not in text]
         assert not missing, (
             f"the {label} `{marker}` is not in {missing}: R10 and system.j2 carry one rule, so "

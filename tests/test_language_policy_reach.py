@@ -48,20 +48,21 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SYSTEM_PROMPT = REPO_ROOT / "emrg" / "server" / "prompts" / "system.j2"
 
-#: The block's identity in `system.j2`. Written as the heading line, so a second copy
-#: appended anywhere in the template is visible as a count of 2.
-POLICY_HEADING = "## Language Policy — outward-facing output"
+#: The block's identity in `system.j2`. The policy now sits in `## Writing`, beside the other
+#: rules about how the reply reads; written as the heading line, so a second copy appended
+#: anywhere in the template is visible as a count of 2.
+POLICY_HEADING = "## Writing"
 
 #: Load-bearing terms of the statement. Each is a verbatim substring of the shipped
 #: wording, so the list cannot drift away from the sentence it checks without this file
 #: saying so. They cover both halves: what must be English, and what is exempt.
 POLICY_TERMS = (
-    "Outward-facing GitHub output is written in English",  # the rule itself
-    "PR titles and PR bodies",                            # the outward artifacts
+    "Outward-facing GitHub text is English",              # the rule itself
+    "PR titles and bodies",                               # the outward artifacts
     "review comments",                                    # the case a review cycle writes
-    "A quotation from another language is carried in English",  # the quotation rule
-    "Internal artifacts are exempt",                      # the half that keeps memory Chinese
-    "`.emrg/memory/`",                                    # where the exempt artifacts live
+    "A quotation from another language is carried in English with its source named",  # the quotation rule
+    "Internal records keep their own language",           # the half that keeps memory Chinese
+    "memory files, session notes, cycle records, run logs, closing summaries",  # where they live
 )
 
 #: The clause this rule replaced, and the reason there is a test for its absence: a
