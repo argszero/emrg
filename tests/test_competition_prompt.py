@@ -1004,3 +1004,35 @@ def test_the_rendered_hygiene_section_still_precedes_the_round_it_binds(rendered
         "§1's first sentence did not survive the render, so the round is sent the section "
         "without the rule that fixes its mis-reading"
     )
+
+
+def test_phase_d_establishes_the_answer_on_a_sample_before_changing_the_class():
+    """§Phase D must state how the right answer is established, not only that a round improves.
+
+    "Local validation → submit → record the delta" is a valid unit only when what was adjusted
+    is uniform. On a class of cases handled wrongly, a whole-class change mixes the cases it
+    fixed with the cases it broke into one unattributable score, so the round that made it can
+    neither keep the change nor revert it — and the submissions it spent bought nothing. The
+    four steps below are what separates a round that improved something from a round that
+    classified, counted or observed and stopped; the last one is the step most easily left out,
+    which is why it is asserted by name rather than implied.
+    """
+    text = PROMPT.read_text(encoding="utf-8")
+    start = text.index("#### Phase D — Iteration")
+    end = text.index("#### Phase E — Deadline wrap-up")
+    phase_d = text[start:end]
+    for step in (
+        "**Classify** the cases that are not right",
+        "**Draw a small sample from one class and submit it as a probe**",
+        "**Read the probe's outcome as that class's answer",
+        "**Turn the answer into one concrete change**",
+    ):
+        assert step in phase_d, f"§Phase D is missing the step {step!r}"
+    assert "not the whole class" in phase_d, (
+        "§Phase D must say the probe is a sample rather than the whole class — that is the "
+        "difference between an attributable reading and one number with two opposite causes"
+    )
+    assert "Step 4 is the one most easily left out" in phase_d, (
+        "§Phase D must name the step most easily skipped, or a round that only observed reads "
+        "as if it had improved something"
+    )
