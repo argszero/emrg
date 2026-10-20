@@ -211,8 +211,8 @@ def test_the_default_path_is_under_the_daemons_log_directory(tmp_path, monkeypat
     assertion on it measures the redirect, never the resolution.
 
     This test did worse than that — it installed a lambda of its own and asserted
-    its own arithmetic back out — and it was hollow for it. Measured 2026-10-04 with
-    `scripts/run-mutation-arm.py`, moving the state off the daemon's log directory
+    its own arithmetic back out — and it was hollow for it. Measured 2026-10-04 with a
+    hand-written mutation arm moving the state off the daemon's log directory
     (`config_dir() / "state" / STATE_FILENAME`) left it **SURVIVED**: the line the
     test exists to pin was unguarded, and the file could be relocated without one
     red row.

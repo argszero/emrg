@@ -202,9 +202,6 @@ uv run python -m emrg     # launch TUI
 uv run python -c "from emrg.client.app import run_client"   # import check
 uv run python -m emrg --help
 uv run --no-sync python3 scripts/check-rant-citations.py    # every citation names its public record
-uv run --no-sync python3 scripts/run-mutation-arm.py \
-    --file <file> --old <text> --new <text> \
-    --node <pytest node id> --expect <the assertion text>   # one judged mutation arm
 ```
 
 `scripts/check-rant-citations.py` answers one question about the instruction prose
@@ -219,41 +216,6 @@ covers the **running** copy — the one resolved from the loaded module, i.e.
 are swept like every other file's and the frozen-debt list is empty (the mechanisms that
 hold a site out of the rule are exercised by synthetic tests rather than by a real
 entry). `--measure` prints the whole inventory.
-
-`scripts/run-mutation-arm.py` runs **one mutation arm and judges it** — the evidence that a test depends
-on the line it claims to test. Break the line and the test must die; a test that survives it is not
-testing what it says. It exists because "the run failed, so the mutation was caught" is wrong in ways
-that look identical to success: a node id that does not resolve — a class method named without its
-class — makes pytest exit **4** having run *nothing*, and a mutation that breaks the module's syntax
-makes pytest *error* rather than fail, with a code that depends on **how the target was named**:
-**1** when a fixture imports the module at run time (the same code as a failing test), **2** when
-collection imports it and the target was named as a **path**, and **4** when it was named as a **node
-id** (pytest reports an uncollectable node as a usage error, so on that form the parse failure and a
-mistyped target are one code). The tool compiles the mutated text and names the syntax error it finds,
-so the report says which of the two it was. The judgement
-is three-valued rather than pass/fail — `KILLED`
-(the target failed on the `--expect` text), `SURVIVED` (it still passed), `UNJUDGEABLE` (the run
-separates neither; the reason is named and the assertion lines the run really echoed are printed, so the
-retry is one step). Exit `0`/`1`/`2` are those three; `3` TARGET-BROKEN (the target did not collect or
-pass *before* the mutation — the report names which cause it read: a target that does not resolve, an
-interpreter that cannot import pytest, or another module the run could not import, named from the run's
-own `No module named <name>` line — because that sentence names a missing *plugin* as readily as a
-missing pytest, and reading it as pytest made the report assert a cause nobody measured — and it also
-prints the nodes the pre-flight failed on, because those names settle the cause before the node id does:
-a list naming files other than the target's own is a tree that was already red before the arm ran, and
-the node-id remedy is then wrong — so withholding them left the reader with a remedy aimed at a cause
-that was not the cause), `4`
-NO-MUTATION (the anchor does not occur exactly once), `5`
-RESTORE-MISMATCH. It snapshots the file, pre-flights the target unmutated, pins `HOME`/`TMPDIR` for the
-child only, and restores **byte for byte** on every path, including its own failure — so an arm cannot
-leave a mutated tree behind. The interpreter the arm is judged under is resolved the same way
-`check-merge-plan-suite.py` resolves the suite's — the invoking interpreter, or the checkout's own
-`.venv` when that one cannot import pytest at all — and the report prints it, so the evidence names its
-environment instead of implying it. A gate that will not load is UNJUDGEABLE as well (exit `2`), naming
-the gate rather than raising a traceback: an arm whose interpreter could not be resolved has measured
-nothing, and a crash's exit code would be read as one of the verdicts it never reached. `--expect` is the failing assertion's own source line, not the test's
-message: pytest echoes that line, and a fragment copied from a message can be missed when an earlier
-assertion in the same test fires first.
 
 ### Electron GUI
 
@@ -402,44 +364,6 @@ than a corner of it: a loop whose bound cannot be read is exactly where the guar
 not answer `OK`, and it prints the header and its line so the reader can rewrite the loop
 or teach the reader the spelling.
 
-**The host-side counterpart of the install step.** The daemon renders a built-in task
-template from its own `__file__`, and on a running install that is
-`~/.emrg/install/source/` — a directory the installer wrote, which an upgrade replaces
-**whole**. It is not a git clone, so a file edited there lives in no commit: the edit looks
-like it took effect (it is what renders) and the next install destroys it silently. Ask
-before an upgrade, or whenever a prompt edit seems not to stick:
-
-```bash
-uv run --no-sync python3 scripts/check-install-drift.py
-# a different install tree or checkout:
-#   uv run --no-sync python3 scripts/check-install-drift.py --install-dir <tree> --root <checkout>
-```
-
-It asks one question per file the two trees share — is this content *anywhere* in the
-checkout's history? — and reads no version file at all, because membership is the whole
-question and the release an install happens to be never has to be established. The id it
-compares is `git hash-object --path=<repo-relative path>`'s, i.e. git's own convention:
-line-ending cleaning (`core.autocrlf`, and this repository's `*.cmd`/`*.bat`/`*.ps1
-text eol=crlf` rule) is applied on both sides, so a line-ending-only difference is not
-reported as an edit. Exit `0` =
-every shared file's content is in history; `1` = at least one is not, printed with its path
-and byte count and with what happens to it; `2` = could not measure (no install tree, no
-git checkout, `git` failed, or the two trees share no path at all) — **never a pass**. The
-`1` remedy is the point of the reading: move the change into the checkout and ship it, or
-it is lost.
-
-Measured 2026-10-07 on this host: exactly one shared file is flagged, and it is
-`emrg/server/competition_prompt.md` — the install copy is the `v0.3.7` bytes **plus** a
-hand-appended block that no ref of the repository carries (every other prompt file in the
-tree is byte-identical to `v0.3.7`, so the tree is that release with one hand-edit). The
-block records a host mandate, and the tag the release chain is part-way through (`v0.3.8`)
-contains none of it — so upgrading does not merely fail to ship that rule, it deletes it.
-The competition task hit the same wall from the other side on 2026-10-07: its rants record
-prompt edits refused by its sandbox (the install tree is outside the competition
-workspace), with the correct but incomplete conclusion that "the install tree copy is the
-one that takes effect" — true, and the reason such an edit has to reach the source
-checkout and ship.
-
 **The readable path to a failed run's cause.** `gh run view <id> --log` and `--log-failed` answer
 **0 bytes with exit 0** on a current host for every run, green or red (measured 2026-10-04 on `gh`
 2.58.0: v0.3.8's failed build `36956685533`, v0.3.7's green build `36658495939`, and a recent `Test`
@@ -483,13 +407,12 @@ so per job instead of reporting no cause.
 
 **A crash is a measurement error, not a verdict.** A tool that dies on an unhandled exception exits
 **`1`**, and `1` is a *verdict* in these tools' own tables — `check-merge-freshness.py` reads it as
-**STALE** (whose documented remedy is a re-merge and a push that voids every standing vote),
-`run-mutation-arm.py` as `EXIT_SURVIVED` ("the target still passed with the mutation in place"), and
+**STALE** (whose documented remedy is a re-merge and a push that voids every standing vote), and
 `review-queue.py` does not define `1` at all. Measured 2026-10-06 with a sibling left unparsable: those
-three exited `1` with no verdict-shaped line, so a caller reading the code read a verdict that was never
+two exited `1` with no verdict-shaped line, so a caller reading the code read a verdict that was never
 reached. So a crash has to leave as the tool's own "could not measure" answer, and the family pinned by
-`tests/test_a_crash_is_a_measurement_error.py` — **the gates that load a sibling by file path**, plus
-`run-mutation-arm.py`, which asks a gate as a subprocess and whose crash class is the same one — does it
+`tests/test_a_crash_is_a_measurement_error.py` — **the gates that load a sibling by file path**, and
+the ones that answer by running another tool as a subprocess — does it
 in one place: each ends its `__main__` block in `_entry()`, which runs `main()` and, if it raises, prints
 the traceback with a `<tool>: could not measure - <Type>: <message>` line and answers **`2`**. A gate
 that loads no sibling reaches the same rule by its own route and says so where it does —
@@ -501,23 +424,6 @@ so that branch could never fire — `tests/test_a_crash_is_a_measurement_error.p
 pins the entry point identical across the family (one rule, not a copy per tool free to drift apart), and
 derives the family from the source (a `spec_from_file_location` call in code), so a gate that loads a
 sibling and is not in that list fails the module instead of sitting silently outside it.
-
-**The reading that reports a stacked head.** `check-stacked-prs.py` asks whether an open PR would
-land another open PR's commits — the state a reviewer found by hand on #1879, where the branch had
-been cut from #1877's branch and the head carried its commits under a declaration naming neither.
-The tool landed 2026-10-06 (PR #1885) and was then named in **no tracked document**: its own
-docstring, its test, and the private `.emrg/` records were its only carriers, so the reviewer it
-exists for had no way to learn it exists — and it is the reading whose absence is *why it exists*.
-Its list would be `Agent.md`'s merge gates, and that file is **at its prompt cap** (the cap is
-`PROJECT_CONTEXT_MAX_CHARS`, imported and measured by `tests/test_check_stacked_prs.py`, not written
-here), so naming it there needs space freed from something else first: a content decision, not a
-line to squeeze in. This paragraph is therefore its home until that decision is made, and the test
-named above fails the day the cap stops blocking it, so the temporary home cannot outlive its
-reason:
-
-```bash
-uv run --no-sync python3 scripts/check-stacked-prs.py   # 0 clean · 1 a head carrying another open PR's commits · 2 the queue could not be read
-```
 
 CI runs tests and checks for conflict markers automatically via GitHub Actions (`.github/workflows/test.yml`).
 
@@ -619,50 +525,6 @@ daemon's own action, not a command a human has to be present to run: a guard who
 only exit is manual strands the tree, which is the shape of the measured 33-cycle
 loss above. Nothing is asked of the host.
 
-The same action is available from a shell, for a tree no cycle is about to touch:
-
-```bash
-uv run --no-sync python3 scripts/recover-worktree.py --repo <task-source-dir>
-uv run --no-sync python3 scripts/recover-worktree.py --repo <task-source-dir> --apply
-```
-
-The script owns no policy — it calls the daemon's implementation of both the
-criterion and the action, so a diagnosis you run by hand and the tier decision the
-daemon makes cannot drift apart. Without `--apply` it only reports. It asks the
-same question the guard asks, and then:
-
-- **refuses, naming the paths, when the work exists nowhere else.** Nothing is
-  written, and no stash is made. That is the guard working; commit, stash or copy
-  that content out deliberately and re-run.
-- **stashes it when it is reconstructible** (`git stash push --include-untracked`),
-  leaving the worktree clean and every byte in the stash. It never moves `HEAD`, so
-  it cannot orphan a commit, and the stash is what makes the action undoable —
-  which is why an agent is allowed to take it. Undo it with the spelling the
-  receipt names, `git stash apply --index stash@{N}` with the `N` that `git stash
-  list` prints for the named message: `--index` is what restores the staged side, and
-  a *bare* `git stash pop` is **not** the inverse of this action. It takes the newest
-  stash (this one only until the next is made), it brings a staged change back
-  unstaged, and it consumes the stash — so the exact spelling is gone with it. The
-  selector is the list's ordinal because no `@{…}` form names a stash **by message**
-  (`gitrevisions(7)` allows ordinals, dates, upstream and push): `stash^{/<message>}`
-  searches commit ancestry and stops resolving as soon as a later stash exists
-  (`apply` rc=1), while `stash@{/<message>}` resolves to the newest entry whatever
-  message it is given and so applies the **wrong** stash successfully — measured, both
-  (issue #1284, re-measured by
-  `tests/test_recover_worktree.py::test_the_advertised_selector_survives_a_later_stash`
-  after `::test_the_advertised_reversal_is_the_measured_one`).
-- **writes a receipt** into the git state dir (`emrg-recovery-receipt.json`), as
-  every release of a safety rule requires. Deliberately not beside the tree: a
-  receipt at `<repo>/.emrg/…` re-dirties the tree it just cleaned in any repository
-  that does not ignore `.emrg/`, which would re-arm the guard on the next cycle.
-  It is best-effort, so the report **says so** when one could not be written
-  (the action's detail and its log line, and `scripts/recover-worktree.py`'s
-  `receipt:` line) rather than naming a path for a file that does not exist
-  (issue #1284). The path is **normalised** before it is joined with the file name:
-  Windows git prints an absolute git dir with forward slashes (`C:/…/.git`), so a
-  verbatim answer made the reported path mixed-separator and unequal to
-  `str(Path(state) / name)` — green locally, red on the windows-2025 leg (#1292).
-
 Read-only blocks the destructive shapes the guard recognises: redirects to
 anything but `/dev/null`, `rm` / `rmdir`, `mv` / `cp` destinations, `truncate` /
 `tee` / `shred`, `sed -i`, `find -delete`, `git ... --output=<f>`, and every git
@@ -674,7 +536,7 @@ outside that shape list (`mkdir`, `touch`, an interpreter writing a file) still
 runs and a downgraded cycle can leave scratch files behind. The decision is per
 command string, not per statement: one blocked shape anywhere in the call refuses
 the whole call. Reads are unaffected — including the read-only git verbs the
-recovery tool's diagnosis uses — so the problem can still be diagnosed from inside
+daemon's own diagnosis uses — so the problem can still be diagnosed from inside
 a downgraded cycle; only the repair needs a writable tier.
 
 #### Diagnose before you repair
@@ -701,10 +563,9 @@ git merge-base --is-ancestor HEAD FETCH_HEAD \
 That is the common case in a workspace whose change was merged upstream after
 the local checkout: the working tree holds master's content while the index
 still matches the older HEAD, and the "uncommitted work" is already published.
-`scripts/recover-worktree.py --apply` clears the dirty state reversibly without
+The daemon's own recovery action clears the dirty state reversibly without
 moving `HEAD`; the sequence below is for when you also want to move the branch
-onto upstream, which is a decision the tool deliberately leaves to you. Recover
-with:
+onto upstream. Recover with:
 
 ```bash
 git fetch origin master

@@ -46,9 +46,9 @@ This test is the rule, in three parts
 * an AST sweep over **every** `scripts/*.py`: a tool that prints a `tree: ` line to
   stdout *and* writes to stderr must carry the call - unconditionally, so a tool that
   gains the shape without the remedy is caught wherever it came from. The class is the
-  **shape**, not a name: it used to glob `check*.py`, which is how three tools that
-  claim the convention in their own comments went unnoticed (`review-queue.py`,
-  `bump-version.py`, `run-mutation-arm.py` - issue #2049). The sweep also holds a
+  **shape**, not a name: it used to glob `check*.py`, which is how tools that claim
+  the convention in their own comments went unnoticed (`review-queue.py`,
+  `bump-version.py` - issue #2049). The sweep also holds a
   hand-written baseline of the tools known to have the shape, and asserts that the
   baseline and the class name the **same** tools - so a `tree: ` line that quietly
   disappears is visible, and a tool that joins without being held is not silent
@@ -95,7 +95,6 @@ SWEPT = {
     "bump-version.py",
     "check-citation-resolves.py",
     "check-doc-count.py",
-    "check-install-drift.py",
     "check-memory-index.py",
     "check-merge-landed.py",
     "check-node-test-count.py",
@@ -107,7 +106,6 @@ SWEPT = {
     "check_nonlocal.py",
     "check_unbound_reads.py",
     "review-queue.py",
-    "run-mutation-arm.py",
 }
 
 

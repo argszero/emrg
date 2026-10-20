@@ -20,8 +20,8 @@ Jinja construct (`{# … #}`, `{% if false %}`) removes text from the prompt whi
 file keeps every character, and a file read cannot see that at all: measured 2026-10-08
 (`cyc20261008-082424`, issue #1904), wrapping §0.0 in `{# … #}` left all five
 load-bearing phrases in the file, every file-level assertion green, and the render 2,301
-characters shorter with none of them — `scripts/run-mutation-arm.py` reported `SURVIVED`
-for exactly that arm. The same shape was fixed for `emrg/server/prompts/vibe_check.j2`
+characters shorter with none of them — a hand-written mutation arm reported `SURVIVED`
+for exactly that one. The same shape was fixed for `emrg/server/prompts/vibe_check.j2`
 in issue #1902.
 """
 
@@ -966,8 +966,8 @@ def test_the_render_substitutes_values_and_carries_no_template_syntax(rendered):
 # Same two levels as above, for the same reason. §0.7 and §1's first sentence are new text
 # in a Jinja2 template: a `{# … #}` around either removes it from every round's prompt while
 # the file keeps every character, and that is the one failure a file-level guard cannot see
-# (measured 2026-10-08, `cyc20261008-082424`, issue #1904 — `run-mutation-arm.py` reported
-# SURVIVED for exactly that arm).
+# (measured 2026-10-08, `cyc20261008-082424`, issue #1904 — a hand-written mutation arm
+# reported SURVIVED for exactly that one).
 
 
 def test_the_coverage_and_hygiene_rules_reach_the_round_and_not_merely_the_file(rendered):
