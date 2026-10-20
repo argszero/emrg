@@ -60,7 +60,7 @@ R10_HEADING = "#### R10. One round may carry several readings"
 #: rule's home; §1 is where the cycle is actually reading.
 REQUIRED_TERMS: dict[str, tuple[str, ...]] = {
     R10_HEADING: (
-        "issue them together",                      # the rule
+        "issue every call you can already specify",  # the rule, and its direction
         "several tool calls in one round",          # the unit, spelled as system.j2 spells it
         "Batch readings; never batch a judgement",  # the boundary
         "outranks",                                 # the red line's precedence, named
@@ -78,14 +78,15 @@ REQUIRED_TERMS: dict[str, tuple[str, ...]] = {
 #:
 #: These are the longest phrases the two carriers genuinely share, and that is a measurement rather
 #: than a preference: R10 is a rulebook entry a cycle reads and `system.j2` is one bullet in every
-#: session's prefix, so the two state the same rule at different lengths — `several tool calls in one
-#: round, of any tool the cycle has (…)` against `**Several calls in one round** when no call's
-#: arguments depend on another's answer`. The phrases below are where they agree word for word (the
-#: concrete three-call case, the criterion's consequence, the boundary that decides it), and a drift
-#: in any of them still moves both — which is the property the comparison exists for.
-SHARED_UNIT = "three calls in one round"
-SHARED_CRITERION = "gets its own round"
-SHARED_BOUNDARY = "no call's arguments depend on"
+#: session's prefix, so the two state the same rule at different lengths — `issue every call you can
+#: already specify, in one response: sending several tool calls in one round … is the normal case`
+#: against `**Issue every call you can already specify, in one response.** Sending several is the
+#: normal case: …`. The phrases below are where they agree word for word (the rule's direction,
+#: the boundary that decides a lone call, and what that lone call must still say), and a drift in
+#: any of them still moves both — which is the property the comparison exists for.
+SHARED_UNIT = "every call you can already specify"
+SHARED_CRITERION = "its arguments need an answer you have not read yet"
+SHARED_BOUNDARY = "names the specific answer it waits for"
 
 #: The unit this rule may no longer be stated in. The first version of R10 taught exactly
 #: these; the host retired the merge-several-calls-into-one reading explicitly at
@@ -151,7 +152,7 @@ def test_both_sides_of_the_loop_state_the_batching_rule() -> None:
 def test_the_rule_is_stated_once() -> None:
     """One home for the rule: a second copy drifts from the first."""
     text = TEMPLATE.read_text(encoding="utf-8")
-    found = text.count("issue them together")
+    found = text.count("issue every call you can already specify")
     assert found == 1, (
         f"the batching rule is stated {found} times in emrg/server/evolution_prompt.md; "
         "it lives in rulebook R10 and every other section cites R10"

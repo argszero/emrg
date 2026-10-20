@@ -26,6 +26,15 @@ So this is the placement defect `tests/test_language_policy_reach.py` and
 actor, stated in a carrier some actors never open — here, stated *incorrectly* in the one carrier all of
 them open.
 
+The default direction was reversed on 2026-10-20 (issue #2406), because the sentence above —
+kept word for word through that rewrite — put the burden of proof on showing independence and was
+never met: over every session on this host (**410,845 assistant rounds** carrying at least one tool
+call), **9.1%** hold two or more, and among the single-call rounds **96.3%** carried an `intent`
+naming no answer being waited for. The bullet now states issuing several as the normal case and
+requires a lone call's `intent` to name what it waits for, so the observable that separates "judged
+it necessary" from "did not engage" is the sentence itself. That is still a placement and wording
+guard: the share is re-measured in the PR that changes the wording, and only re-measured.
+
 What is asserted
 ----------------
 1. The rule is in `system.j2` **and in the render**, and once only: a block in the file that no render
@@ -65,15 +74,15 @@ RULE_SECTION = "## How you work"
 
 #: The rule's identity: the bullet's lead phrase. Written as the phrase a rewrite would keep, so a second
 #: copy anywhere in the template is visible as a count of 2 rather than as longer prose.
-RULE_LEAD = "**Several calls in one round**"
+RULE_LEAD = "**Issue every call you can already specify, in one response.**"
 
 #: One term per part of the ruling, each a verbatim substring of the shipped wording — so this list cannot
 #: drift away from the sentence it checks without this file saying so.
 RULE_TERMS = (
-    RULE_LEAD,                                                   # the unit: a round, not a command
-    "when no call's arguments depend on another's answer",       # the boundary
-    "a call whose answer decides the next is a judgement and gets its own round",  # what stays split
-    "Every round re-sends the conversation, so three calls in one round cost one round",  # the reason: money
+    RULE_LEAD,                                                   # the unit: one response, several calls
+    "a call goes alone only when its arguments need an answer you have not read yet",  # the boundary
+    "names the specific answer it waits for",                    # what the lone call must still say
+    "Every round re-sends the conversation and emits fresh output",  # the reason: money
 )
 
 #: The precedence clause's carrier: the section that owns the red lines, whose own paragraph says no
