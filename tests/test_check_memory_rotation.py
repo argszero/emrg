@@ -283,8 +283,90 @@ def test_a_bare_name_shared_by_two_projects_is_reported_rather_than_guessed(mod,
     assert any("names 2 projects" in f for f in reading["faults"])
     assert sum(1 for f in reading["faults"] if "never been visited" in f) == 2
 
-
 # -------------------------------------------------------- measuring, and never a pass
+
+
+def test_a_row_is_found_in_a_table_of_any_width(mod, tmp_path):
+    """§1.5 fixes what a row states, not how many columns the table lays it out in.
+
+    This installation writes three cells (`| `name` | stamp | files |`); another writes
+    four (`| project | path | stamp | read by |`), and three cells was the whole of the
+    pattern an earlier revision matched on. Measured against a four-column bookmark, that
+    pattern read **0 rows**, so every project came back `no bookmark row` and the report
+    said "every project is at or before its stamp" - a false statement about live data,
+    where the shape is exactly what the repository has twice refused to answer (#2275,
+    #2277: *could not read* narrowed into *read as empty*). Both files must read alike.
+    """
+    wide = _root(tmp_path, "wide")
+    narrow = _root(tmp_path, "narrow")
+    for root in (wide, narrow):
+        _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 60))
+    register = _projects(tmp_path / "projects.yml", [
+        {"name": "wide", "path": wide}, {"name": "narrow", "path": narrow}])
+
+    # The same two rows, in the two tables the two installations write. The wide one puts
+    # the project's path and the reading cycle on either side of the stamp, so a reader
+    # that counted cells would take the path for the value.
+    narrow_book = _bookmark(tmp_path / "narrow.md", [("`wide`", BASE), ("`narrow`", BASE)])
+    wide_book = tmp_path / "wide.md"
+    wide_book.write_text("\n".join([
+        "# Bookmark", "",
+        "| project | path | newest | read by |",
+        "| --- | --- | --- | --- |",
+        f"| `wide` | {wide} | {BASE} | cyc20261020-141450 |",
+        f"| `narrow` | {narrow} | {BASE} | cyc20261020-141450 |",
+    ]) + "\n", encoding="utf-8")
+
+    narrow_reading = mod.read(register, narrow_book)
+    wide_reading = mod.read(register, wide_book)
+    assert wide_reading["row_count"] == 2
+    assert wide_reading["faults"] == [], wide_reading["faults"]
+    assert [(s["key"], s["state"], s["bookmark"]) for s in wide_reading["states"]] == \
+           [(s["key"], s["state"], s["bookmark"]) for s in narrow_reading["states"]]
+    # And it is a reading, not an empty one that happens to agree: both files say `changed`.
+    assert [s["state"] for s in wide_reading["states"]] == ["changed", "changed"]
+
+
+def test_a_row_that_carries_no_stamp_is_unmeasurable_rather_than_dropped(mod, tmp_path):
+    """The other half: a table this reader cannot read must not answer as an empty one.
+
+    With the rows located by shape, the remaining failure is a row that names its project
+    in a code span and then carries neither a stamp nor a note in any cell. Dropping it
+    would report that project as never visited while its row sits in the file - the
+    original defect - so it is exit 2, and the message names the line it could not read.
+    """
+    root = _root(tmp_path, "unreadable")
+    register = _projects(tmp_path / "projects.yml", [{"name": "unreadable", "path": root}])
+    book = _bookmark(tmp_path / "bookmark.md", [("`unreadable`", "read on Tuesday")])
+    with pytest.raises(mod.Unmeasurable) as excinfo:
+        mod.read(register, book)
+    message = str(excinfo.value)
+    assert "cannot" in message and "never visited" in message
+    assert "line 5" in message and "`unreadable`" in message
+
+
+def test_a_header_written_with_a_code_span_is_not_a_body_row(mod, tmp_path):
+    """The rows are located by shape, so the header is the one shape that must not qualify.
+
+    A table may label its columns with code spans (`| `project` | `newest` |`), and read as a
+    body row that header would ask for a stamp the header does not carry - turning a
+    readable bookmark into an unmeasurable one. Markdown decides a header by the separator
+    under it, which is what this pins, and the body rows beneath it still read.
+    """
+    root = _root(tmp_path, "spanned")
+    _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 60))
+    register = _projects(tmp_path / "projects.yml", [{"name": "spanned", "path": root}])
+    book = tmp_path / "bookmark.md"
+    book.write_text("\n".join([
+        "# Bookmark", "",
+        "| `project` | `newest` | `files` |",
+        "| --- | --- | --- |",
+        f"| `spanned` | {BASE} | 0 |",
+    ]) + "\n", encoding="utf-8")
+    reading = mod.read(register, book)
+    assert reading["row_count"] == 1
+    assert reading["states"][0]["state"] == "changed"
+    assert reading["faults"] == [], reading["faults"]
 
 
 def test_a_project_with_no_row_is_a_fault_and_is_reported_as_never_visited(mod, tmp_path):

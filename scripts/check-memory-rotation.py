@@ -104,15 +104,38 @@ STAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 NO_MEMORY_ROOT = "no memory root"
 PATH_MISSING_PREFIX = "path missing"
 
-#: A bookmark body row: `| `key` | value | count |`, with an **optional** disambiguator
-#: that may sit inside the code span or just after it. Both forms are in this host's
-#: bookmark - `aitokenpool (github)` and `` `1` (Downloads/1) `` - and a parser that
-#: insisted on one of them dropped the other row in silence: measured in the cycle that
-#: filed issue #2408, a span-only pattern read 30 of 31 rows and reported the missing
-#: project as never visited.
-ROW = re.compile(
-    r"^\|\s*`(?P<key>[^`]+)`\s*(?:\((?P<hint>[^)]*)\))?\s*"
-    r"\|\s*(?P<value>[^|]+?)\s*\|\s*(?P<count>[^|]+?)\s*\|\s*$")
+#: A body row's **key cell**: a code span, with an optional disambiguator that may sit
+#: inside the span or just after it. Both forms are in this host's bookmark -
+#: `aitokenpool (github)` and `` `1` (Downloads/1) `` - and a parser that insisted on one
+#: of them dropped the other row in silence: measured in the cycle that filed issue #2408,
+#: a span-only pattern read 30 of 31 rows and reported the missing project as never
+#: visited.
+KEY_CELL = re.compile(r"^`(?P<key>[^`]+)`\s*(?:\((?P<hint>[^)]*)\))?$")
+
+#: What a row's **value cell** carries: a stamp, or one of the two notes. A cell may append
+#: a parenthetical - this host writes `path missing (gone from disk)`, another writes the
+#: stamp followed by the memory file it was read from - so the note is read from the cell
+#: with any trailing parenthetical removed.
+CELL_PARENTHETICAL = re.compile(r"\s*\([^)]*\)\s*$")
+
+#: A markdown table's separator line, one cell at a time: `---`, `:---`, `---:`, `:---:`.
+SEPARATOR_CELL = re.compile(r"^:?-+:?$")
+
+#: What a stamp cell looks like **before** it is parsed: a leading date. The cell is located
+#: by this shape and then parsed strictly by `project_state`, so a stamp written in a form
+#: this tool cannot order - the ISO `T` form, whose silent failure is one of the reasons the
+#: tool exists - is located here and refused there, with the value named in the message.
+#: Parsing here instead would answer "this row is unreadable", which is true but says less.
+DATE_SHAPED = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}[ T]")
+
+#: A row is **not** a fixed number of cells. §1.5 fixes what a row *states* - the project,
+#: the stamp, and the cycle that read it - not how many columns a table lays those out in:
+#: this installation writes three (`| `emrg` | stamp | files |`) and another writes four
+#: (`| project | path | stamp | read by |`). Measured on the three-cell-anchored pattern an
+#: earlier revision carried, the four-column file matched **0 rows**, and the reading that
+#: followed was a false statement about live data ("every project is at or before its
+#: stamp") rather than an unmeasurable one. So the value cell is found rather than counted:
+#: it is the first cell after the key that carries a stamp or a note, whatever its index.
 
 #: A project's memory, in the two places §1.5's rule names.
 MEMORY_SUBDIR = (".emrg", "memory")
@@ -154,22 +177,80 @@ def load_projects(path: Path) -> list[dict]:
     return records
 
 
+def _cells(line: str) -> list[str]:
+    """A table line's cells, stripped, with the two halves outside its outer pipes gone."""
+    return [cell.strip() for cell in line.strip()[1:-1].split("|")]
+
+
+def _is_table_line(line: str) -> bool:
+    """Whether this line is a row of a markdown table: it opens and closes on a pipe."""
+    stripped = line.strip()
+    return len(stripped) > 2 and stripped.startswith("|") and stripped.endswith("|")
+
+
+def _value_of(cells: list[str]) -> str | None:
+    """The stamp or note a row carries, from wherever its table puts it.
+
+    Found rather than counted, because the column's index belongs to the installation
+    writing the bookmark and not to §1.5's rule (see the block above `SEPARATOR_CELL`). A
+    cell qualifies when it is one of the two notes or opens on a date, so a path, a count
+    or a cycle id in the same row is skipped instead of mistaken for the value. Whether a
+    date-shaped cell is a stamp this tool can order is `project_state`'s question.
+    """
+    for cell in cells:
+        for candidate in (CELL_PARENTHETICAL.sub("", cell).strip(), cell):
+            if candidate == NO_MEMORY_ROOT or candidate.startswith(PATH_MISSING_PREFIX):
+                return candidate
+            if DATE_SHAPED.match(candidate):
+                return candidate
+    return None
+
+
 def parse_bookmark(path: Path) -> list[dict]:
-    """Every body row of the bookmark's table, in file order, as key/value pairs."""
+    """Every body row of the bookmark's table, in file order, as key/value pairs.
+
+    A table this reader cannot read is **not** an empty table. A row whose key cell is a
+    code span - the shape every bookmark row has - but which carries no stamp and no note
+    in any of its cells is reported as unmeasurable, because reading it as "no row" would
+    report its project as never visited while its row sits in the file, and that is the
+    defect this tool was written to end (issue #2408).
+    """
     if not path.is_file():
         raise Unmeasurable(f"no bookmark at {path}")
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, ValueError) as exc:
         raise Unmeasurable(f"the bookmark at {path} could not be read: {exc}") from exc
+    lines = text.splitlines()
     rows = []
-    for line in text.splitlines():
-        match = ROW.match(line)
-        if match:
-            key = match.group("key")
-            hint = match.group("hint")
-            rows.append({"key": f"{key} ({hint})" if hint else key,
-                         "value": match.group("value").strip()})
+    unreadable = []
+    for index, line in enumerate(lines):
+        if not _is_table_line(line):
+            continue
+        cells = _cells(line)
+        if not cells or all(SEPARATOR_CELL.match(cell) for cell in cells if cell):
+            continue                      # the header's separator, not a body row
+        key_cell = KEY_CELL.match(cells[0]) if cells else None
+        if key_cell is None:
+            continue                      # prose, or a header written without a code span
+        following = next((l for l in lines[index + 1:] if l.strip()), "")
+        if _is_table_line(following) and all(
+                SEPARATOR_CELL.match(cell) for cell in _cells(following) if cell):
+            continue                      # a header written as `| `project` | stamp | … |`
+        value = _value_of(cells[1:])
+        if value is None:
+            unreadable.append(f"line {index + 1}: {line.strip()}")
+            continue
+        key = key_cell.group("key")
+        hint = key_cell.group("hint")
+        rows.append({"key": f"{key} ({hint})" if hint else key, "value": value})
+    if unreadable:
+        raise Unmeasurable(
+            f"the bookmark at {path} carries {len(unreadable)} row(s) this reader cannot "
+            f"read - a row names its project in a code span and then no stamp and no note "
+            f"in any cell - so the reading below would call their projects never visited: "
+            + "; ".join(unreadable)
+        )
     return rows
 
 
