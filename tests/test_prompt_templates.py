@@ -2020,3 +2020,69 @@ def test_the_mention_ban_scanner_answers_both_ways() -> None:
         "in its docstring, and widening past it flags two lines that must keep saying "
         "'NO project mention'"
     )
+
+
+# --------------------------------------------------------------------------- published, not merged
+#
+# The open-source flow is written for a contribution that becomes a pull request, and that is
+# not the only channel a project offers. A project whose extension surface is *distributable* —
+# a plugin, a package, a standalone tool — takes contributions that never touch an upstream
+# branch, and publishing one of those is where the old prompt stopped saying anything. Measured
+# on this installation's own tasks: a block in one task's `extra_prompt` states the duty in full
+# (state the artifact where the gap was reported; keep answering the artifact's own issues and
+# PRs), and the template carried none of it.
+#
+# Pinned as verbatim phrases rather than a keyword, because the two carriers of this file are
+# the repository copy and the *rendered* prompt, and a rewrite that keeps the surrounding
+# paragraphs and drops this one leaves every keyword in place: the failure
+# `tests/test_competition_prompt.py` records, where a `{# … #}` around a block kept every term
+# in the file and removed all of them from the render.
+PUBLISHED_CONTRIBUTION_PHRASES = (
+    "Some contributions never become a pull request",
+    "publishing one is the halfway point",
+    "Say so where the gap was reported",
+    "Keep the artifact answerable",
+    "rather than into a wish beside it",
+)
+
+
+def _missing_phrases(text: str, phrases: tuple[str, ...]) -> list[str]:
+    """The pinned phrases this text does not carry, in the order they are pinned."""
+    return [phrase for phrase in phrases if phrase not in text]
+
+
+def test_the_open_source_prompt_says_a_published_contribution_is_not_finished_by_publishing():
+    """A contribution that lands through a published artifact still owes two duties.
+
+    Not decoration: without this paragraph the prompt's whole account of finishing a
+    contribution is "the PR merges", so a task contributing through a package or a plugin
+    reaches its own natural end — a published artifact — and is told nothing about announcing
+    it where the gap was reported or about the community feedback arriving in the artifact's
+    own repository, which is where that feedback actually arrives.
+    """
+    prompt = (PROMPTS_DIR / "open_source_prompt.md").read_text(encoding="utf-8")
+    missing = _missing_phrases(prompt, PUBLISHED_CONTRIBUTION_PHRASES)
+    assert not missing, (
+        "the open-source prompt no longer states what a contribution that is published rather "
+        f"than merged owes: {missing}. A published artifact nobody announces where the gap was "
+        "reported serves nobody, and its own issues and PRs are community feedback that lands "
+        "nowhere else."
+    )
+
+
+def test_the_published_contribution_pin_answers_both_ways():
+    """A pin is evidence only if removing the text makes it fail.
+
+    The synthetic arm below is why this file's shape is two tests rather than one assertion:
+    the matcher is exercised on a copy with exactly one phrase removed, so a matcher that
+    stopped discriminating — an `in` over an empty tuple, a phrase list emptied by an edit —
+    cannot pass by finding nothing.
+    """
+    prompt = (PROMPTS_DIR / "open_source_prompt.md").read_text(encoding="utf-8")
+    for phrase in PUBLISHED_CONTRIBUTION_PHRASES:
+        stripped = prompt.replace(phrase, "")
+        assert stripped != prompt, f"{phrase!r} is pinned but absent, so this arm measured nothing"
+        assert _missing_phrases(stripped, PUBLISHED_CONTRIBUTION_PHRASES) == [phrase], (
+            f"removing {phrase!r} did not make exactly that phrase read as missing, so this "
+            "pin would not notice its own rule being deleted"
+        )

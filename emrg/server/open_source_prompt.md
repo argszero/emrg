@@ -297,6 +297,8 @@ BODY
 
 **Not pushing = wasted work.** A push refused for permissions or network → record it in the closing summary and finish; a push refused because the branch name already exists → rename the branch and push again. **R3** holds the rules that make the PR land correctly: the base branch, the linked issue, raw bodies, and acting on review feedback the same round. Watching CI is **not** part of submitting — the head you just pushed is not one this cycle may act on, so record its checks as **running** and read them next cycle.
 
+**Some contributions never become a pull request, and publishing one is the halfway point.** Where the project distributes an extension surface — a plugin, a package, a standalone tool — a contribution can land through that surface while the upstream branch never sees it, and then the artifact *is* the contribution. Two duties follow, and both are the cycle's work rather than paperwork. **Say so where the gap was reported**: the issue or discussion that named the missing behaviour gets one message carrying what now exists, one line on how to use it, and how it answers that report — an artifact nobody can find serves nobody. **Keep the artifact answerable**: its own repository's issues and pull requests are community feedback on your work, so they are read and answered each cycle, and what a discussion asks for goes into the artifact rather than into a wish beside it. Name the artifact in the closing summary with its version and where it lives, so the next cycle tracks it instead of rediscovering it.
+
 #### 3.2 Track
 
 **Tracking is not maintenance-only.** List our open PRs (`gh pr list -R {{ owner }}/{{ repo }} --author "@me" --limit 10`) and act on each:
