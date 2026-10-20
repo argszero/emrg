@@ -206,6 +206,18 @@ def test_a_note_the_disk_contradicts_is_a_fault_in_both_directions(mod, tmp_path
     assert any("is on disk" in f for f in reading["faults"])
 
 
+def test_an_empty_memory_directory_is_nothing_to_read(mod, tmp_path):
+    """A directory is not a reading: three projects on this host carry an empty
+    `.emrg/sessions/*/memory/`, and counting the directory reported all three as
+    contradicting their `no memory root` note while nothing was there to read."""
+    empty = _root(tmp_path, "empty-root")
+    (Path(empty) / ".emrg" / "sessions" / "s_1" / "memory").mkdir(parents=True)
+    reading = _reading(mod, tmp_path, [{"name": "empty-root", "path": empty}],
+                       [("`empty-root`", "no memory root")])
+    assert reading["states"][0]["state"] == "no memory root"
+    assert reading["faults"] == [], reading["faults"]
+
+
 # ----------------------------------------------------------------------- the three keys
 
 

@@ -52,7 +52,8 @@ Each project lands in exactly one state:
 
     changed          a memory file is newer than its stamp; the newest is printed
     unchanged        nothing newer under either memory root
-    no memory root   the project is on disk and holds no memory directory at all
+    no memory root   the project is on disk and holds no memory file at all (a memory
+                     directory with nothing in it is nothing to read)
     path missing     the project's registered path is not on disk
 
 The last two are states a row may **carry as a note** instead of a stamp, and a note is a reading
@@ -252,6 +253,23 @@ def memory_roots(root: Path) -> list[Path]:
     return found
 
 
+def memory_files(root: Path) -> list[Path]:
+    """Every `.md` under the project's memory roots - the files the rotation's rule binds.
+
+    A directory is not a reading. Measured in the cycle that filed issue #2408: three
+    projects on this host carry an **empty** `.emrg/sessions/*/memory/` directory, and a
+    reading that counted the directory as "this project keeps memory" reported all three as
+    contradicting their `no memory root` note. Nothing was there to read.
+    """
+    found = []
+    for memory_root in memory_roots(root):
+        for dirpath, _dirnames, filenames in os.walk(memory_root):
+            for name in filenames:
+                if name.endswith(".md"):
+                    found.append(Path(dirpath) / name)
+    return found
+
+
 def newest_memory(root: Path, since: int) -> tuple[Path, float] | None:
     """The newest `.md` under the project's memory roots that is strictly newer than `since`.
 
@@ -264,20 +282,15 @@ def newest_memory(root: Path, since: int) -> tuple[Path, float] | None:
     loses nothing: a file that really moved lands in a later second.
     """
     best: tuple[Path, float] | None = None
-    for memory_root in memory_roots(root):
-        for dirpath, _dirnames, filenames in os.walk(memory_root):
-            for name in filenames:
-                if not name.endswith(".md"):
-                    continue
-                path = Path(dirpath) / name
-                try:
-                    mtime = path.stat().st_mtime
-                except OSError:
-                    continue
-                if int(mtime) <= since:
-                    continue
-                if best is None or mtime > best[1]:
-                    best = (path, mtime)
+    for path in memory_files(root):
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if int(mtime) <= since:
+            continue
+        if best is None or mtime > best[1]:
+            best = (path, mtime)
     return best
 
 
@@ -295,7 +308,7 @@ def project_state(project: dict, row: dict | None) -> dict:
         # A note is a reading taken on a day, so it is re-measured rather than repeated: a
         # project that has since written a memory root is one the note would hide for ever,
         # which is the same class of stale-past-state defect as the truncated stamp above.
-        state.update(state=NO_MEMORY_ROOT if not memory_roots(root) else "row says no memory root",
+        state.update(state=NO_MEMORY_ROOT if not memory_files(root) else "row says no memory root",
                      bookmark=None, newest=None)
         return state
     if value.startswith(PATH_MISSING_PREFIX):
@@ -313,7 +326,7 @@ def project_state(project: dict, row: dict | None) -> dict:
     if not root.is_dir():
         state.update(state="path missing", newest=None)
         return state
-    if not memory_roots(root):
+    if not memory_files(root):
         state.update(state=NO_MEMORY_ROOT, newest=None)
         return state
     newest = newest_memory(root, int(stamp.timestamp()))
