@@ -163,12 +163,19 @@ def test_the_chain_still_compares_the_way_this_guard_assumes() -> None:
     If `UpgradeManager.tick` ever stops comparing `version.txt` with the tag, the
     consequence this guard is built on disappears — and the guard, not the chain,
     is what would then be wrong.
+
+    What the chain must keep doing is **ordering** the installed version against the
+    tag's, and it does that with the module's own `parse_version` / `is_newer` rather
+    than by string equality (issue #2404: equality also admitted targets *older* than
+    the host). The direction still matters and is the same direction this guard
+    rests on: a tag announcing a version **above** the one `build-runtime.sh` writes
+    keeps every host re-triggering, because the installed version can never reach it.
     """
     source = (REPO_ROOT / "emrg" / "server" / "upgrade.py").read_text(encoding="utf-8")
-    assert 'target.lstrip("v")' in source, (
-        "emrg/server/upgrade.py no longer compares version.txt with "
-        'target.lstrip("v") — re-derive what a mismatched tag costs before '
-        "trusting the guard's docstring"
+    assert "is_newer(parse_version(target), parse_version(local))" in source, (
+        "emrg/server/upgrade.py no longer orders the tag's version against the "
+        "installed one — re-derive what a mismatched tag costs before trusting the "
+        "guard's docstring"
     )
 
 
