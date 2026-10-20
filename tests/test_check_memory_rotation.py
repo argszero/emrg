@@ -20,7 +20,10 @@ halves of "does it answer that question, and can a wrong answer look right":
 * **a reading that could not be taken is never a pass** - no register, no bookmark, a
   stamp that does not parse, and a row that matches two projects all answer exit **2**
   or exit **1** with the reason named, and `0` is reserved for a reading that covered
-  every project and every row.
+  every project and every row;
+* **a note from an earlier day is re-measured, not repeated** - `no memory root` and
+  `path missing` are readings, so a row carrying one the disk now contradicts is a fault
+  rather than a verdict that hides a project for ever.
 
 It **measures and never repairs**: one assertion reads the bookmark's bytes before and
 after a run, because a tool that quietly rewrote rows would hide exactly the drift its
@@ -170,6 +173,37 @@ def test_a_project_with_no_memory_root_and_one_whose_path_is_gone(mod, tmp_path)
     assert states["bare"]["state"] == "no memory root"
     assert states["gone"]["state"] == "path missing"
     assert reading["faults"] == []
+
+
+def test_a_note_the_disk_contradicts_is_a_fault_in_both_directions(mod, tmp_path):
+    """A row may carry `no memory root` / `path missing` instead of a stamp - and those are
+    readings from a day, not properties. Repeating a note would hide a project that started
+    writing memory or came back on disk, for ever: the class of stale-past-state defect the
+    sub-second comparison belongs to as well. Each direction is asserted, and each is
+    asserted where the note is still *true* too, so the fault cannot fire unconditionally.
+    """
+    now_memory = _root(tmp_path, "now-memory")
+    _write_memory(Path(now_memory), ".emrg/memory/MEMORY.md", _stamp(mod))
+    still_bare = _root(tmp_path, "still-bare")
+    back = _root(tmp_path, "back")
+    still_gone = str(tmp_path / "projects" / "still-gone")
+
+    reading = _reading(mod, tmp_path,
+                       [{"name": "now-memory", "path": now_memory},
+                        {"name": "still-bare", "path": still_bare},
+                        {"name": "back", "path": back},
+                        {"name": "still-gone", "path": still_gone}],
+                       [("`now-memory`", "no memory root"), ("`still-bare`", "no memory root"),
+                        ("`back`", "path missing (gone from disk)"),
+                        ("`still-gone`", "path missing (gone from disk)")])
+    states = {s["name"]: s["state"] for s in reading["states"]}
+    assert states["now-memory"] == "row says no memory root"
+    assert states["still-bare"] == "no memory root"
+    assert states["back"] == "row says path missing"
+    assert states["still-gone"] == "path missing"
+    assert len(reading["faults"]) == 2, reading["faults"]
+    assert any("has one now" in f for f in reading["faults"])
+    assert any("is on disk" in f for f in reading["faults"])
 
 
 # ----------------------------------------------------------------------- the three keys

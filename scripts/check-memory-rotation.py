@@ -54,6 +54,12 @@ Each project lands in exactly one state:
     unchanged        nothing newer under either memory root
     no memory root   the project is on disk and holds no memory directory at all
     path missing     the project's registered path is not on disk
+
+The last two are states a row may **carry as a note** instead of a stamp, and a note is a reading
+taken on a day rather than a property: both are re-measured on every run, and a note the disk now
+contradicts (`row says path missing`, `row says no memory root`) is a fault with the row named.
+Repeating a note would hide a project that came back, or one that started writing memory, for
+ever - the same stale-past-state defect as comparing a whole second against a sub-second mtime.
     no bookmark row  the project has a line in `projects.yml` and none in the
                      bookmark: it has never been visited, and §1.5 reads it
 
@@ -284,11 +290,17 @@ def project_state(project: dict, row: dict | None) -> dict:
         state.update(state="no bookmark row", bookmark=None, newest=None)
         return state
     value = row["value"]
+    root = Path(os.path.expanduser(raw_path))
     if value == NO_MEMORY_ROOT:
-        state.update(state=NO_MEMORY_ROOT, bookmark=None, newest=None)
+        # A note is a reading taken on a day, so it is re-measured rather than repeated: a
+        # project that has since written a memory root is one the note would hide for ever,
+        # which is the same class of stale-past-state defect as the truncated stamp above.
+        state.update(state=NO_MEMORY_ROOT if not memory_roots(root) else "row says no memory root",
+                     bookmark=None, newest=None)
         return state
     if value.startswith(PATH_MISSING_PREFIX):
-        state.update(state=PATH_MISSING_PREFIX, bookmark=None, newest=None)
+        state.update(state=PATH_MISSING_PREFIX if not root.is_dir() else "row says path missing",
+                     bookmark=None, newest=None)
         return state
     try:
         stamp = datetime.strptime(value, STAMP_FORMAT)
@@ -298,7 +310,6 @@ def project_state(project: dict, row: dict | None) -> dict:
             f"and cannot be ordered against a file's mtime ({exc})"
         ) from exc
     state["bookmark"] = stamp.strftime(STAMP_FORMAT)
-    root = Path(os.path.expanduser(raw_path))
     if not root.is_dir():
         state.update(state="path missing", newest=None)
         return state
@@ -325,6 +336,15 @@ def read(projects_path: Path, bookmark_path: Path) -> dict:
         if state["state"] == "no bookmark row":
             faults.append(f"{state['name']} ({state['path']}) has a line in the register and none in "
                           f"the bookmark: it has never been visited, and §1.5 reads it")
+    for state in states:
+        if state["state"] == "row says path missing":
+            faults.append(f"the bookmark's row for {state['name']} says its path is missing, but "
+                          f"{state['path']} is on disk: the row is a note from an earlier day and "
+                          f"needs a real stamp")
+        elif state["state"] == "row says no memory root":
+            faults.append(f"the bookmark's row for {state['name']} says it has no memory root, but "
+                          f"{state['path']} has one now: the row is a note from an earlier day and "
+                          f"needs a real stamp")
     for row in orphans:
         faults.append(f"the bookmark's row {row['key']!r} names no registered project")
     for item in ambiguous:
