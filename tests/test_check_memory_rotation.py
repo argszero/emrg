@@ -313,7 +313,7 @@ def test_a_row_is_found_in_a_table_of_any_width(mod, tmp_path):
         "# Bookmark", "",
         "| project | path | newest | read by |",
         "| --- | --- | --- | --- |",
-        f"| `wide` | {wide} | {BASE} | cyc20261020-141450 |",
+        f"| `wide` | {wide} | {BASE} (`MEMORY.md`) | cyc20261020-141450 |",
         f"| `narrow` | {narrow} | {BASE} | cyc20261020-141450 |",
     ]) + "\n", encoding="utf-8")
 
