@@ -159,9 +159,8 @@ TAKES_A_TREE_ARGUMENT = "check-citation-resolves.py"
 #: `ROOT_FLAG_BUT_NOT_POINTABLE` below is where naming it is a decision rather than an
 #: omission. Two members joined 2026-10-10 (`cyc20261010-132458`), found by the reading
 #: `test_every_guard_advertising_a_root_flag_is_accounted_for` — before it, the rule above
-#: was prose the table itself already broke: `check-gui-package-refs.py` AND
-#: `check-install-drift.py` both advertised `--root` and neither was listed, so nothing
-#: pointed either at a tree.
+#: was prose the table itself already broke: `check-gui-package-refs.py` advertised
+#: `--root` and was not listed, so nothing pointed it at a tree.
 POINTABLE_AT_A_TREE = {
     "check-citation-resolves.py": (),
     "check-retry-bounds.py": ("--root",),
@@ -169,7 +168,6 @@ POINTABLE_AT_A_TREE = {
     "check-undefined-names.py": ("--root",),
     "check-workflows.py": ("--root",),
     "check-gui-package-refs.py": ("--root",),
-    "check-install-drift.py": ("--root",),
 }
 
 #: Guards that advertise `--root` in their own `--help` and are deliberately **not** in the
@@ -243,16 +241,6 @@ NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE = {
         "a subprocess against a `tmp_path` tree and asserts the first line, which holds "
         "with or without the binary because the tree line is printed before the search"
     ),
-    "check-install-drift.py": (
-        "its subject is the host's installed tree (`~/.emrg/install/source`), not this "
-        "checkout: the verdict is about a *pair* of trees, and a bare checkout carries no "
-        "install, so running it here would measure the host rather than the rule - and on "
-        "a host with a hand-edited install tree its honest answer is rc 1, which is that "
-        "host's drift rather than this tree's defect. It reads a working tree (this "
-        "checkout, through git) and names both halves, and that naming IS verified rather "
-        "than classified: `tests/test_check_install_drift.py::test_the_report_names_both_trees_before_the_verdict` runs it "
-        "as a subprocess against a `tmp_path` install tree and checkout and pins both lines"
-    ),
     "check-merge-landed.py": (
         "needs `gh` and the network for the review half. It was classified as a "
         "NON-tree-reader when #1618 added it, by the bucket entry that says it 'reads "
@@ -323,12 +311,6 @@ NOT_TREE_READERS = {
         "subject is the remote queue, so there is no local tree whose name would "
         "answer anything (the repo it read is printed first instead)"
     ),
-    "check-stacked-prs.py": (
-        "reads every open PR's head and commit list from the GitHub API and reports which "
-        "open PR's head commit another one would land - the subject is the remote queue, so "
-        "no local tree's name would answer anything (the repo it read is printed first "
-        "instead, as check-issue-links.py does)"
-    ),
     "check-patch-files.py": "reads the patch files it is given as arguments",
     "check-memory-rotation.py": (
         "reads two host-state subjects it names before any verdict - the project register "
@@ -373,13 +355,6 @@ NOT_TREE_READERS = {
         "run from the GitHub API - the subject is the remote release queue, so no local tree "
         "would answer anything (the repo it read is printed first instead, as "
         "check-issue-links.py does)"
-    ),
-    "check-suite-durations.py": (
-        "reads each CI leg's Python-suite step duration out of the GitHub API's own step "
-        "records (`started_at`/`completed_at`) - the subject is the remote run queue, and "
-        "no local tree's name would answer anything about a Windows runner's wall clock "
-        "(the repo, and each run it read, are printed first instead, as check-issue-links.py "
-        "does). Added by issue #2296 R4"
     ),
 }
 

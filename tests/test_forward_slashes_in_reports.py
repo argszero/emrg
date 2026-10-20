@@ -7,8 +7,8 @@ POSIX, ``emrg\\bad.py`` on Windows. A report carrying that text is read across a
 by a host, by a CI log, by a sibling guard, and by the tests written against it -- so the
 separator it happens to carry is a fact about the machine that produced it, not about the
 finding. `tests/test_conflict_markers.py` states the rule for its own consumers ("every
-consumer below must use `.as_posix()`"), and `check-doc-count.py`, `check-install-drift.py`,
-`check-merge-plan-suite.py` and `check-rant-citations.py` already obey it. Nothing failed
+consumer below must use `.as_posix()`"), and `check-doc-count.py`, `check-merge-plan-suite.py`
+and `check-rant-citations.py` already obey it. Nothing failed
 when a new renderer did not, and three times in the last month one did not:
 
 * 2026-09-10, `check-conflict-markers` -- **two** CI rounds, the second because only the

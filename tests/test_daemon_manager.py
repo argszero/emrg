@@ -158,7 +158,7 @@ class TestCheckAndRestartIfStale:
         The rest of the state is pinned too, and that is not tidiness: a mutation that
         drops the early return sends the code down the path this test never meant to
         exercise, where an unpatched `os.kill` fires at the fixture's pid for real
-        (`scripts/run-mutation-arm.py` measured exactly that here on 2026-10-05 — the
+        (a hand-written mutation arm measured exactly that here on 2026-10-05 — the
         first version of this test pinned the connection but not the signal). With the
         source mtime, the kill and the cleanup all mocked, the same mutation reaches
         the assertion below and fails there.

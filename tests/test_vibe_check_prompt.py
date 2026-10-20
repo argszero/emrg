@@ -242,7 +242,7 @@ def test_the_exception_reaches_the_judge_and_not_merely_the_file() -> None:
     carries it. Measured 2026-10-08 (`cyc20261008-060209`): wrapping the block in
     `{# … #}` leaves every term in the file, so all the file-level assertions above stay
     green, while the render drops 182 characters and every one of those terms with them —
-    `scripts/run-mutation-arm.py` reported `SURVIVED` for exactly that arm. The exception
+    a hand-written mutation arm reported `SURVIVED` for exactly that one. The exception
     is only worth having if the model reads it.
 
     Both directions are asserted in one test on purpose: the render must carry what the
