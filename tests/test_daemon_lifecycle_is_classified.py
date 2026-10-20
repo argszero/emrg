@@ -99,6 +99,15 @@ THE_ACT = [
     "killall emrgd",
     'kill $(pgrep -f "python -m emrg")',
     "nice -n 5 pkill -f emrg.server",
+    # a signaller reached through the wrappers that hand it the argv: the
+    # command word is still the signaller, so these are the act
+    "sudo -u root kill $(pgrep -f emrg)",
+    "env kill $(pgrep -f emrg)",
+    "timeout 5 kill $(pgrep -f emrg)",
+    # `xargs` appends its input as argv, so the target is spelled *before* the
+    # signaller — a plain pipe into `kill -9` passes nothing and stays a guess
+    "pgrep -f emrg | xargs kill",
+    "ps aux | grep emrg | awk '{print $2}' | xargs kill",
     # a shell re-parsing the text, and a substitution naming the program
     "sh -c 'emrg server stop'",
     'bash -c "emrg server restart"',
@@ -123,6 +132,14 @@ NOT_THE_ACT = [
     "ls emrg",
     "cat emrg/tools/bash_tool.py",
     "grep -rn stop emrg/",
+    # the signaller half reads the command word too: here `kill` is a search
+    # pattern and `emrg/` the directory, so the read is a mention, exactly as
+    # `grep -rn stop emrg/` above already was
+    "grep -rn kill emrg/",
+    "git grep -n 'kill' -- emrg/tools/",
+    "grep kill argszero/emrg notes.txt",
+    # a pipeline that names the process but hands nothing to a signaller
+    "ps aux | grep emrg | tee /tmp/procs.txt",
     # a *quoted* mention is one argument, not a command line
     "echo 'emrg server stop'",
     # a signaller whose operand names somebody else — a stated limit, pinned
@@ -170,6 +187,38 @@ def test_the_classifier_names_the_spelling_it_saw():
     )
     assert _stops_or_restarts_the_daemon("emrg stop --skip-gui") == "emrg stop"
     assert _stops_or_restarts_the_daemon("pkill -f emrg.server") == "pkill emrg.server"
+
+
+def test_a_signaller_as_another_programs_argument_is_a_mention():
+    """`grep -rn kill emrg/` and `grep -rn stop emrg/` are the same read.
+
+    The lifecycle-verb half has always read a program named *after* its verb as a
+    mention, so `grep -rn stop emrg/` stayed allowed. The signaller half read any
+    `kill` token anywhere in the statement as the act, so the identical shape one
+    word over was refused as "it stops or restarts the emrg daemon" — a pair the
+    command never forms. Both halves now read the command word.
+    """
+    for cmd in (
+        "grep -rn stop emrg/",
+        "grep -rn kill emrg/",
+        "git grep -n 'kill' -- emrg/tools/",
+        "grep kill argszero/emrg notes.txt",
+    ):
+        assert _stops_or_restarts_the_daemon(cmd) is None, f"{cmd!r} was refused"
+
+
+def test_xargs_appends_its_input_as_argv_so_the_target_is_read_upstream():
+    """The pipeline that really signals the daemon, and the stated limit beside it.
+
+    `xargs` execs its command with its own input appended as argv, so in
+    `pgrep -f emrg | xargs kill` the target is spelled *before* the signaller —
+    the operand scan alone read that as allowed, which was a live route to the act
+    this rule exists to prevent. A plain pipe into a signaller passes no argv, so
+    nothing upstream is read for it; that is a limit, pinned rather than assumed.
+    """
+    hit = _stops_or_restarts_the_daemon("pgrep -f emrg | xargs kill")
+    assert hit is not None and "emrg" in hit
+    assert _stops_or_restarts_the_daemon("ps aux | grep emrg | kill -9") is None
 
 
 def test_the_verb_must_follow_the_program():

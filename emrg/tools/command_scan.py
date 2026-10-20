@@ -206,6 +206,15 @@ _DAEMON_LIFECYCLE_VERBS = frozenset({"stop", "restart"})
 _PROCESS_SIGNALLER_WORDS = frozenset({"pkill", "killall", "kill"})
 #: The sub-command word between the program and the verb (`emrg server stop`).
 _DAEMON_SUBCOMMAND_WORDS = frozenset({"server"})
+#: Programs that run the command after them rather than acting themselves, so a
+#: signaller they hand the argv to is still the command being run:
+#: `sudo -u root kill …`, `nice -n 5 pkill …`, `xargs kill …`.
+_WRAPPER_WORDS = frozenset({
+    "busybox", "caffeinate", "command", "doas", "env", "exec", "ionice", "nice",
+    "nohup", "stdbuf", "sudo", "time", "timeout", "xargs",
+})
+#: `NAME=value` in front of a command — `env`-style handover, not a command word.
+_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 _DAEMON_GROUPING_TOKENS = frozenset({"(", ")", "{", "}", "$", "`"})
 
@@ -262,6 +271,80 @@ def _operand_naming_emrg(tokens: list[str], start: int) -> str | None:
             return None
         if "emrg" in tok.lower():
             return tok
+    return None
+
+def _signaller_is_the_command(tokens: list[str], i: int) -> bool:
+    """Is the signaller at ``tokens[i]`` the command word, not somebody's argument?
+
+    The signaller half of this rule reads a *word*, and until it asked this
+    question that word could be any argument. Measured on `caf6d743`, the two
+    directions disagreed about the same command shape:
+
+    * ``grep -rn kill emrg/`` was **refused** — `kill` here is the pattern and
+      `emrg/` the directory, so the read was called "it stops or restarts the
+      emrg daemon". The lifecycle-verb half has always read the same shape as a
+      mention (`grep -rn stop emrg/` sits in the allowed list of
+      `tests/test_daemon_lifecycle_is_classified.py`); the two halves now agree.
+    * ``pgrep -f emrg | xargs kill`` was **allowed** — and that one really does
+      signal the daemon. `xargs` is the command there, so asking this question
+      would have *opened* it; the wrapper set below is what closes it.
+
+    So the walk starts at the statement's first token and steps over the words
+    that hand the argv on — wrappers (`sudo`, `nice`, `env`, `xargs`, `timeout`),
+    their flags, a flag's value (`sudo -u root kill`), a bare number (`timeout 5
+    kill`), and `NAME=value` assignments — then demands that the first remaining
+    word *be* the signaller.
+
+    The border test is the tokenizer's own, so newlines separate statements here
+    exactly as `;`, `&&` and `|` do: prose in a heredoc is a statement whose first
+    word is not a signaller.
+    """
+    j = i - 1
+    while j >= 0 and not _is_a_command_border(tokens[j]):
+        j -= 1
+    j += 1
+    takes_a_value = False
+    while j < i:
+        tok = tokens[j]
+        base = _basename(tok).lower()
+        if tok.startswith("-"):
+            takes_a_value = True
+        elif tok.isdigit():
+            takes_a_value = False
+        elif takes_a_value:
+            takes_a_value = False
+        elif base in _WRAPPER_WORDS or _ASSIGNMENT_RE.match(tok):
+            takes_a_value = False
+        else:
+            return False
+        j += 1
+    return True
+
+def _piped_target_naming_emrg(tokens: list[str], i: int) -> str | None:
+    """The name emrg is spelled under, when `xargs` is what will hand it to a signaller.
+
+    `xargs` execs its command with **its own input appended as argv**, so in
+    ``pgrep -f emrg | xargs kill`` the target is spelled *before* the signaller —
+    the opposite of every other spelling, and the reason the operand scan alone
+    read that pipeline as allowed (measured on `caf6d743`).
+
+    Read only when this statement's wrapper is `xargs`: a plain pipe into a
+    signaller (`… | kill -9`) passes nothing as argv, so looking back there would
+    be a guess rather than a reading. The walk stops at any border that is not a
+    single `|`, so `;`, `&&`, `||` and a newline all end the pipeline.
+    """
+    j = i - 1
+    while j >= 0 and not _is_a_command_border(tokens[j]):
+        j -= 1
+    if not any(_basename(t).lower() == "xargs" for t in tokens[j + 1 : i]):
+        return None
+    while j >= 0 and tokens[j] == "|":
+        k = j - 1
+        while k >= 0 and not _is_a_command_border(tokens[k]):
+            if "emrg" in tokens[k].lower():
+                return tokens[k]
+            k -= 1
+        j = k
     return None
 
 #: `env`'s string handover — the flag whose value `env` splits into an argv and
@@ -339,6 +422,12 @@ def stops_or_restarts_the_daemon(cmd: str, _depth: int = 0) -> str | None:
       `pkill -f 'python -m emrg'` without the name in the text, `kill 12345`.
       A process table is not a static reading, and widening the signaller to
       every interpreter name would refuse ordinary `pkill node` work;
+    * a signaller that is another program's *argument* rather than the command —
+      `grep -rn kill emrg/` searches a directory, and reading it as the act was
+      the over-block `_signaller_is_the_command` removes. The same reading
+      refuses `pgrep -f emrg | xargs kill`, where `xargs` hands its input on as
+      argv; a plain pipe into a signaller (`ps aux | grep emrg | kill -9`)
+      passes no argv, so nothing upstream is read for it;
     * a quoted argument of a program that cannot run it — `echo "emrg server
       stop"` is one argument and prints it. Reading every quoted argument as a
       command is the over-block #1513 removed from this file (`echo sh "patch
@@ -360,7 +449,11 @@ def stops_or_restarts_the_daemon(cmd: str, _depth: int = 0) -> str | None:
             # rather than a curiosity.
             entry = i + 1
         elif base in _PROCESS_SIGNALLER_WORDS:
+            if not _signaller_is_the_command(tokens, i):
+                continue
             named = _operand_naming_emrg(tokens, i + 1)
+            if named is None:
+                named = _piped_target_naming_emrg(tokens, i)
             if named is not None:
                 return f"{tok} {named}"
             continue
