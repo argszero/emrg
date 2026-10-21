@@ -160,6 +160,7 @@ from emrg.tools.edit_tool import EditTool
 from emrg.tools.glob_tool import GlobTool
 from emrg.tools.grep_tool import GrepTool
 from emrg.tools.submit_rant_tool import SubmitRantTool
+from emrg.tools.subagent_tool import SubagentTool
 from emrg.skills.loader import load_skills
 from emrg.skills.registry import ensure_catalog_file, load_catalog_skills, skill_is_managed
 from emrg.server.rants import append_rant, list_rants
@@ -176,6 +177,13 @@ logger = logging.getLogger(__name__)
 #: here because the injection site reads it twice — for the tier and for the
 #: roots — and two hand-written unions would be two chances to drift apart.
 _ROOT_CONSUMING_TOOLS = SHELL_TOOL_NAMES | {"write", "edit"}
+
+#: How much of a child session's final answer a `subagent` call returns, in
+#: characters (issue #2451). The answer is the one thing the parent gets back, so it
+#: needs a ceiling — a child that dumps a whole file would spend the parent's context
+#: on material the parent asked not to carry. Cut, and **said to be cut**, because a
+#: silently truncated report reads as a complete one.
+_SUBAGENT_ANSWER_CHARS = 6000
 
 # ── Jinja2 template environment for system prompt ──
 _jinja_env = None
@@ -771,6 +779,20 @@ class EmrgServer:
         self._session_pending: dict[str, list[tuple[TaskRequest, bool]]] = {}
         self._all_connections: set = set()              # all authenticated connections
 
+        # Subagent delegation (issue #2451): nine slots per parent session, and the
+        # instant each was last *freed*. Built on first use, with every slot closed
+        # at daemon start, so the first choice is decided by the slot number alone
+        # rather than by dictionary order. A daemon restart clears this table — the
+        # same event that ends any child still running, so the two agree.
+        self._subagent_slots: dict[str, dict[int, float]] = {}
+        self._subagent_busy: dict[str, set[int]] = {}
+        self._subagent_started = time.time()
+        # Sessions whose memory reflection is still running. A `subagent` call waits
+        # on its child's entry before it stamps that slot closed: the reflection is
+        # fire-and-forget, so a slot cleared while the previous child is still
+        # writing into it has its directory recreated underneath the clear.
+        self._memory_tasks: dict[str, asyncio.Task] = {}
+
         # Device-flow auth (rant 10:17 Stage 2b): background gh auth login --web task
         self._pending_web_auth: Optional[asyncio.Task] = None
         self._pending_web_auth_proc: Optional[asyncio.subprocess.Process] = None
@@ -789,6 +811,9 @@ class EmrgServer:
         self.tools.register(GlobTool())
         self.tools.register(GrepTool())
         self.tools.register(SubmitRantTool())
+        # The runner is the daemon's own method, so the tool has no path to the
+        # session machinery of its own: everything that owns state stays here.
+        self.tools.register(SubagentTool(self._run_subagent_tool))
         logger.info("tools registered: %s", self.tools.names)
 
         # Skills are **not** held here. A snapshot taken at startup cannot see a skill
@@ -4212,6 +4237,15 @@ class EmrgServer:
             # safe form is the unconditional one: whatever the session holds,
             # including nothing, is what the call runs with.
             args["writable_roots"] = session.sandbox_roots
+        if tc_name == "subagent":
+            # The parent's identity and cwd are facts the model must not choose
+            # (issue #2451): the slot is derived from both, so a caller that named
+            # its own would name a wrong one. Injected unconditionally, so a value
+            # the model put in the call is replaced rather than honoured — the same
+            # rule the writable roots follow, and for the same reason: the parent of
+            # a delegation cannot be the delegated.
+            args["_parent_session_id"] = session.session_id
+            args["_parent_cwd"] = str(session.cwd)
 
     async def _apply_escalation(
         self, tc_name: str, args: dict, session, req: TaskRequest,
@@ -7355,6 +7389,272 @@ class EmrgServer:
 
     # ── Memory reflection & consolidation ─────────────────────
 
+    # ── Subagent delegation (issue #2451) ─────────────────────────────────
+
+    #: How many child sessions one parent may have in play. Fixed, so the session
+    #: directories under a parent cannot grow without bound: a tenth concurrent
+    #: call waits for one to be released instead.
+    SUBAGENT_SLOTS = 9
+    #: The deepest session that may still delegate. A session at this depth refuses,
+    #: which bounds nesting without a timer, a budget or a guess.
+    SUBAGENT_MAX_DEPTH = 9
+
+    def _subagent_slot_closes(self, parent_session_id: str) -> dict[int, float]:
+        """This parent's slots: slot number → the instant it was last freed."""
+        table = self._subagent_slots.get(parent_session_id)
+        if table is None:
+            table = {n: self._subagent_started for n in range(1, self.SUBAGENT_SLOTS + 1)}
+            self._subagent_slots[parent_session_id] = table
+        return table
+
+    def _subagent_acquire(self, parent_session_id: str) -> int:
+        """Take the free slot closed longest ago; raise ``LookupError`` if none is free.
+
+        No ``await`` sits between the choice and the mark, so two calls cannot pick
+        the same slot: the daemon runs on one event loop and this is the whole of
+        the critical section.
+        """
+        busy = self._subagent_busy.setdefault(parent_session_id, set())
+        closes = self._subagent_slot_closes(parent_session_id)
+        free = [n for n in closes if n not in busy]
+        if not free:
+            raise LookupError("no free subagent slot")
+        slot = min(free, key=lambda n: (closes[n], n))
+        busy.add(slot)
+        return slot
+
+    def _subagent_release(self, parent_session_id: str, slot: int) -> None:
+        self._subagent_busy.get(parent_session_id, set()).discard(slot)
+        self._subagent_slot_closes(parent_session_id)[slot] = time.time()
+
+    def _memory_task_table(self) -> dict[str, "asyncio.Task"]:
+        """This daemon's session → pending memory write table, created on first use.
+
+        Lazily, because `_maybe_reflect_memory` is also called on a server built
+        without `__init__`: the reflection tests make one with `__new__` and hand it
+        only the attributes it reads, so a table that exists only in the constructor
+        turns every one of them into an `AttributeError` (measured — twelve red rows
+        when this table was first added).
+        """
+        table = getattr(self, "_memory_tasks", None)
+        if table is None:
+            table = self._memory_tasks = {}
+        return table
+
+    async def _await_memory_reflection(self, session_id: str) -> None:
+        """Wait for a session's pending memory write, if it has one.
+
+        The reflection is fire-and-forget, so nothing else in the daemon knows when
+        a session's memory has finished landing — and "the session is closed" has to
+        mean the whole teardown, this write included.
+        """
+        task = self._memory_task_table().pop(session_id, None)
+        if task is None or task.done():
+            return
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Cancellation belongs to the caller's turn, and the task keeps writing.
+            raise
+        except Exception:
+            logger.debug("memory reflection for %s failed", session_id, exc_info=True)
+
+    async def _run_subagent_tool(
+        self, *, parent_session_id: str, parent_cwd: str, prompt: str,
+        timeout_s: int, intent: str = "",
+    ) -> dict:
+        """Run one child session for one `subagent` call. Answers text or an error.
+
+        The bound is the call's own ``timeout_s`` and it covers **everything** —
+        waiting for a free slot included — so there is no second timeout to reason
+        about. When it fires, the child's turn is cancelled the way any cancelled
+        turn is (its own ``finally`` runs) and the slot is returned before this
+        returns, so a timed-out delegation leaves nothing occupied.
+
+        The bound is measured by *whether the child finished*, not by catching a
+        timeout exception: the tool loop absorbs the cancellation it receives (it
+        broadcasts the turn's `cancelled` frame and returns — that is what a user's
+        cancel does), so a cancelled child ends **normally**, and `wait_for` would
+        hand back a finished-looking failure. What separates the two outcomes is
+        the clock, so the clock is what is read.
+        """
+        state: dict = {"slot": None, "child": None}
+        child_task = asyncio.create_task(self._run_subagent_child(
+            parent_session_id=parent_session_id,
+            parent_cwd=parent_cwd,
+            prompt=prompt,
+            intent=intent,
+            state=state,
+        ))
+        try:
+            done, _ = await asyncio.wait({child_task}, timeout=timeout_s)
+        except asyncio.CancelledError:
+            # The parent's own turn was cancelled. The child is not left running
+            # behind it, and the slot is back before this returns.
+            child_task.cancel()
+            await asyncio.gather(child_task, return_exceptions=True)
+            raise
+        if done:
+            return child_task.result()
+        child_task.cancel()
+        # Awaited, never abandoned: this is where the child's own `finally` runs,
+        # so the slot, the busy flag and the memory write are all settled before
+        # the refusal is handed to the parent.
+        await asyncio.gather(child_task, return_exceptions=True)
+        label = f"[sub-{state['slot']}]" if state["slot"] else "[sub-?]"
+        logger.warning(
+            "%s delegate timed out after %ss: parent=%s child=%s",
+            label, timeout_s, parent_session_id, state["child"],
+        )
+        return {"error": (
+            f"subagent: the child did not finish within {timeout_s}s, so its turn "
+            "was cancelled and its slot returned before this call ended. Nothing "
+            f"from it was delivered. Child session: {state['child']}. Raise "
+            "`timeout_s`, or split the job into smaller ones."
+        )}
+
+    async def _run_subagent_child(
+        self, *, parent_session_id: str, parent_cwd: str, prompt: str,
+        intent: str, state: dict,
+    ) -> dict:
+        """The body of one delegation: pick a slot, run the child, report its answer."""
+        started = time.monotonic()
+        parent = self._get_or_create_session(parent_session_id, Path(parent_cwd))
+
+        depth = parent.depth
+        if depth >= self.SUBAGENT_MAX_DEPTH:
+            # A refusal, named: a silent no-op here reads as "the job ran and had
+            # nothing to say", which is the one thing it must not read as.
+            logger.info(
+                "[sub-0] delegate refused: delegation depth %d reached (parent=%s)",
+                depth, parent_session_id,
+            )
+            return {"error": (
+                f"subagent: refused — this session is already {depth} delegations "
+                f"deep and the limit is {self.SUBAGENT_MAX_DEPTH}. Nothing was "
+                "started. Do the work in this session, or have the session that "
+                "started this one do the delegating."
+            )}
+
+        while True:
+            try:
+                slot = self._subagent_acquire(parent_session_id)
+                break
+            except LookupError:
+                # All nine are held. Waiting is the specified behaviour, and the
+                # call's own timeout is what ends it.
+                await asyncio.sleep(0.05)
+
+        state["slot"] = slot
+        # The id carries the parent's, because the busy/cancel/turn tables are keyed
+        # by id across the whole daemon: a fixed `sub1` would make two parents'
+        # delegations indistinguishable there and each would block the other.
+        child_id = f"sub-{parent_session_id}-{slot}"
+        state["child"] = child_id
+        # The slot directory is the child's **cwd**, so the child's own session
+        # directory is built inside it like any other session's. That is what keeps
+        # a child's memory inside the parent's session tree without a second
+        # project root, and it is why nothing here fights `is_safe_session_id`,
+        # which constrains the id alone.
+        slot_cwd = (
+            Path(parent_cwd) / ".emrg" / "sessions" / parent_session_id
+            / "sub-agent" / f"sub{slot}"
+        )
+
+        try:
+            # Empty the slot before it is used. `Session.delete` is the only way to
+            # do it that also drops the global index entry, which a hand-rolled
+            # rmtree leaves pointing at a directory that no longer exists.
+            Session.delete(child_id, slot_cwd)
+            child = Session.create_with_id(child_id, slot_cwd)
+            child.set_depth(depth + 1)
+            # The child's tier is the parent's, never the child's own: authorization
+            # a caller can choose for the thing it is authorizing is not a boundary.
+            if parent.sandbox:
+                child.set_sandbox(parent.sandbox)
+            if parent.sandbox_roots:
+                try:
+                    child.set_sandbox_roots(parent.sandbox_roots)
+                except (ValueError, OSError):
+                    logger.warning(
+                        "[sub-%d] could not inherit the parent's writable roots", slot,
+                    )
+
+            req = TaskRequest(
+                id=f"subagent-{slot}-{int(started * 1000)}",
+                session_id=child_id,
+                cwd=str(slot_cwd),
+                prompt=prompt,
+                timestamp="",
+                sandbox=parent.sandbox,
+            )
+            assistants_before = sum(
+                1 for r in child._read_history() if r.get("role") == "assistant"
+            )
+            logger.info(
+                "[sub-%d] delegate start: parent=%s child=%s depth=%d intent=%s",
+                slot, parent_session_id, child_id, depth + 1,
+                redact_string(intent) if intent else "-",
+            )
+
+            self._session_busy[child_id] = True
+            cancel_event = asyncio.Event()
+            self._session_cancel[child_id] = cancel_event
+            try:
+                await self._run_tool_loop_locked(req, None, child, cancel_event)
+            finally:
+                # "Closed" is the whole teardown, the memory write included: this
+                # await is the one thing that makes the ordering observable, and
+                # without it the next child of this slot clears a directory the
+                # previous one is still writing into.
+                await self._await_memory_reflection(child_id)
+                self._session_busy[child_id] = False
+                self._session_cancel.pop(child_id, None)
+
+            records = child._read_history()
+            rounds = max(0, sum(
+                1 for r in records if r.get("role") == "assistant"
+            ) - assistants_before)
+            answer = ""
+            for record in reversed(records):
+                if record.get("role") != "assistant":
+                    continue
+                content = record.get("content")
+                if isinstance(content, str) and content.strip():
+                    answer = content
+                    break
+            elapsed = time.monotonic() - started
+            logger.info(
+                "[sub-%d] delegate done: child=%s rounds=%d elapsed=%.1fs",
+                slot, child_id, rounds, elapsed,
+            )
+            return {"text": self._subagent_report(child_id, slot_cwd, answer, rounds, elapsed)}
+        finally:
+            self._subagent_release(parent_session_id, slot)
+
+    @staticmethod
+    def _subagent_report(
+        child_id: str, slot_cwd: Path, answer: str, rounds: int, elapsed: float,
+    ) -> str:
+        """What the parent's round receives: the child's answer, and how it got there."""
+        if not answer:
+            answer = "(the child produced no final answer)"
+        elif len(answer) > _SUBAGENT_ANSWER_CHARS:
+            answer = (
+                answer[:_SUBAGENT_ANSWER_CHARS]
+                + f"\n\n… (truncated — the answer ran to {len(answer)} characters, "
+                f"the first {_SUBAGENT_ANSWER_CHARS} are shown)"
+            )
+        return (
+            "The child session finished.\n"
+            f"- session: {child_id}\n"
+            f"- cwd: {slot_cwd}\n"
+            f"- rounds: {rounds}\n"
+            f"- elapsed: {elapsed:.1f}s\n\n"
+            "Its final answer, and nothing else it said along the way:\n\n"
+            f"{answer}"
+        )
+
     def _maybe_reflect_memory(
         self, session: Session, user_prompt: str, assistant_content: str
     ) -> None:
@@ -7579,7 +7879,22 @@ class EmrgServer:
             except Exception:
                 logger.debug("memory reflection failed", exc_info=True)
 
-        asyncio.create_task(_reflect())
+        task = asyncio.create_task(_reflect())
+        # Kept, so the one caller that must know when this write has landed can ask
+        # (issue #2451): a `subagent` call does not close its child's slot until the
+        # child's memory is on disk. The entry is dropped by its own completion, and
+        # only by that task — a later reflection for the same session replaces it,
+        # and the reference check keeps the newcomer from being removed by the older
+        # task's callback.
+        tasks = self._memory_task_table()
+        tasks[session.session_id] = task
+
+        def _forget(done: "asyncio.Task", sid: str = session.session_id) -> None:
+            table = self._memory_task_table()
+            if table.get(sid) is done:
+                table.pop(sid, None)
+
+        task.add_done_callback(_forget)
 
 
 _EXIT_RECORD_PATH = logs_dir() / "emrgd-exit.log"

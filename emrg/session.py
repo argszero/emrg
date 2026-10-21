@@ -380,6 +380,13 @@ class Session:
         # Canonical spellings only — the writer canonicalizes before storing, so
         # a reader never has to wonder which spelling was meant.
         self._sandbox_roots: list[str] = []
+        # How many delegations deep this session is (issue #2451): 0 for a session
+        # a client or the scheduler started, parent + 1 for one a `subagent` call
+        # started. It lives in `meta.json` rather than in a daemon table because
+        # the *child* is the one that has to know its own depth — a child's
+        # `subagent` call reads this, and a daemon restart must not reset the
+        # count of a session that already exists on disk.
+        self._depth: int = 0
 
         # Lazy-initialized memory store
         self._memory_store = None
@@ -472,6 +479,11 @@ class Session:
             stored_roots = meta.get("sandbox_roots")
             if isinstance(stored_roots, list):
                 session._sandbox_roots = [r for r in stored_roots if isinstance(r, str)]
+            stored_depth = meta.get("depth")
+            # `isinstance(..., int)` is not enough on its own: `True` is an int, and
+            # a JSON `true` in this field would then read as depth 1.
+            if isinstance(stored_depth, int) and not isinstance(stored_depth, bool):
+                session._depth = max(0, stored_depth)
         logger.info("session loaded: %s (%d messages)", session_id, session._message_count)
         return session
 
@@ -521,6 +533,24 @@ class Session:
         self._updated_at = datetime.now().isoformat()
         self._save_meta_with_title(title)
         logger.info("session renamed: %s -> %s", self.session_id, title)
+
+    # ── Delegation depth ──────────────────────────────────────
+
+    @property
+    def depth(self) -> int:
+        """How many `subagent` delegations deep this session is; 0 at the top."""
+        return self._depth
+
+    def set_depth(self, depth: int) -> None:
+        """Persist this session's delegation depth into ``meta.json``.
+
+        The only writer of the key. Written only when non-zero, so a session that
+        was never delegated to keeps the meta shape it has always had — the same
+        reason the sandbox tier is written only when one was declared.
+        """
+        self._depth = int(depth)
+        self._save_meta()
+        logger.info("session delegation depth set: %s -> %d", self.session_id, self._depth)
 
     # ── Sandbox tier ──────────────────────────────────────────
 
@@ -968,6 +998,10 @@ class Session:
             meta["sandbox"] = self._sandbox
         if self._sandbox_roots:
             meta["sandbox_roots"] = list(self._sandbox_roots)
+        # Same rule as `sandbox`: a session nobody delegated to must not gain a
+        # key saying it is zero deep.
+        if self._depth:
+            meta["depth"] = self._depth
         if title is not None:
             meta["title"] = title
         else:

@@ -46,6 +46,7 @@ from emrg.tools import (
     grep_tool,
     pwsh_tool_v2,
     read_tool,
+    subagent_tool,
     submit_rant_tool,
     write_tool,
 )
@@ -207,6 +208,7 @@ DOMAINS = [
     (grep_tool.GrepTool(), "ignore_case", ("true or false",)),
     (bash_tool_v2.BashToolV2(), "timeout", ("positive",)),
     (pwsh_tool_v2.PwshToolV2(), "timeout", ("positive",)),
+    (subagent_tool.SubagentTool(lambda **kwargs: None), "timeout_s", ("at least 1",)),
 ]
 
 
@@ -403,6 +405,9 @@ TOOL_SET = [
     submit_rant_tool.SubmitRantTool(),
     bash_tool_v2.BashToolV2(),
     pwsh_tool_v2.PwshToolV2(),
+    # The runner is never called: this sweep reads `definition()` only, and the tool
+    # is here so its declared parameters are asked about like every other tool's.
+    subagent_tool.SubagentTool(lambda **kwargs: None),
 ]
 
 
