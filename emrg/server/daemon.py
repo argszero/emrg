@@ -786,10 +786,15 @@ class EmrgServer:
         self.tools.register(SubmitRantTool())
         logger.info("tools registered: %s", self.tools.names)
 
-        # Load skills
-        self.skills = load_skills()
-        if self.skills:
-            logger.info("skills loaded: %s", [s.name for s in self.skills])
+        # Skills are **not** held here. A snapshot taken at startup cannot see a skill
+        # installed or edited later, and it was taken from the daemon's own working
+        # directory rather than the session's — so `load_skills` runs live, with the
+        # session's cwd, each time a system prompt is built and each time
+        # `skills_available` is answered (rant 2026-10-21T09:30:39). This line only
+        # records what the daemon's own directory sees, for the log.
+        startup_skills = load_skills()
+        if startup_skills:
+            logger.info("skills at startup: %s", [s.name for s in startup_skills])
 
     async def serve(self) -> None:
         """Start listening for IPC connections (fixed-port, platform-adaptive)."""
@@ -1224,8 +1229,9 @@ class EmrgServer:
         while True:
             result = await run_update_check_once()
             if result.get("updated"):
+                # Nothing to refresh: the prompt reads the skills live, so the files
+                # this just rewrote are already what the next round sees.
                 logger.info("skills auto-updated: %s", result["updated"])
-                self.skills = load_skills()
             elif result.get("errors"):
                 logger.warning("skills update errors: %s", result["errors"])
             await asyncio.sleep(_UPDATE_TTL_SECONDS)
@@ -2444,11 +2450,16 @@ class EmrgServer:
             ctx["project_context"] = self._collect_project_context(session)
 
         # ── Skills ──
-        if self.skills:
+        # Read live, from **this session's** working directory: a skill installed,
+        # edited or deleted on disk has to reach the next prompt without a daemon
+        # restart, and a session's project skills are the ones under its own root
+        # rather than under the directory the daemon was started in.
+        skills = load_skills(session.cwd if session else None)
+        if skills:
             ctx["skills"] = [
                 {"name": s.name, "source": s.source, "path": s.path,
                  "description": s.description}
-                for s in self.skills
+                for s in skills
             ]
 
         # ── Memory ──
@@ -3160,7 +3171,11 @@ class EmrgServer:
             # Installable-skills catalog (rant 2026-08-08T10:14:29): list
             # catalog skills with installed/managed status.
             entries = load_catalog_skills()
-            installed = {s.name for s in self.skills}
+            # Live, not a snapshot: the question is whether a skill is on disk *now*,
+            # which is the same reason the prompt reads them live. This frame carries
+            # no cwd, so the project half is the daemon's own directory — the catalog
+            # installs into the user root, which is read either way.
+            installed = {s.name for s in load_skills()}
             result = [
                 {
                     "name": e.get("name", ""),
@@ -3186,10 +3201,8 @@ class EmrgServer:
                 })
                 return
             result = await install_skill(name, confirmed=confirmed)
-            if result.get("ok"):
-                # Reload so the next system-prompt build includes the skill
-                # (design: "下次构建系统提示即含该技能", no daemon restart needed).
-                self.skills = load_skills()
+            # No reload step: the prompt reads the skills live, so the file this just
+            # wrote is what the next system-prompt build sees.
             await self._send(ws, {"type": "skills_install_result", "name": name, **result})
 
         elif msg_type == "skills_update":

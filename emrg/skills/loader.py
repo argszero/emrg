@@ -1,8 +1,18 @@
 """Skill loader — parse Markdown skills with YAML frontmatter.
 
-Skills are filesystem-based Markdown packages. They live in:
-  - ~/.emrg/skills/*.md    (user skills)
-  - .emrg/skills/*.md      (project skills)
+Skills are filesystem-based Markdown packages. They live in two roots:
+
+  - ~/.emrg/skills/         (user skills)
+  - <project>/.emrg/skills/ (project skills)
+
+and each root is read in **both** layouts, `<name>.md` and `<name>/SKILL.md`
+(`_skill_files_in`). `<project>` is the nearest ancestor of the *session's*
+working directory carrying a `.git` (`_project_root`) — not the process's cwd,
+which for the daemon is `~/.emrg` and would give every session one project's
+skills.
+
+Nothing here is cached: every `load_skills` call re-reads the files, so a skill
+written, edited or deleted on disk reaches the next prompt without a restart.
 
 Each skill file has YAML frontmatter:
   ---
@@ -30,6 +40,11 @@ from typing import Optional
 # rather than restated, for the reason `emrg/memory.py` gives at the same import: the
 # boundary is one fact, and a second spelling of it is a second boundary that can drift.
 from emrg.tools.base import non_regular_kind
+
+# Where this instance's user skills live is `config_dir()/skills`, the same directory the
+# installer publishes into and the catalog is read from — one derivation, three readers,
+# and a test can redirect it in one place (`installer._resolve_dest` already does).
+from emrg.config import config_dir
 
 logger = logging.getLogger(__name__)
 
@@ -153,34 +168,109 @@ def _parse_skill_file(file_path: Path, source: str) -> Optional[Skill]:
     )
 
 
-def load_skills(project_dir: Optional[Path] = None) -> list[Skill]:
-    """Load all skills from user and project directories.
+def _project_root(start: Path) -> Path:
+    """The nearest ancestor of ``start`` carrying a ``.git``, else ``start`` itself.
 
-    User skills (~/.emrg/skills/) are loaded first, then project skills.
-    Skills with duplicate names: project overrides user.
+    A session is normally opened *inside* a project rather than at its top, while the
+    project's skills sit at the top — so the root has to be resolved rather than
+    assumed to be the directory the session happens to be in. A directory with no
+    repository above it is its own root, which is what a scratch or temp directory
+    wants and what keeps a skills directory beside the files being worked on usable.
     """
-    if project_dir is None:
-        project_dir = Path.cwd()
+    for candidate in (start, *start.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return start
+
+
+def _user_skills_root() -> Path:
+    """``~/.emrg/skills`` — the instance-wide root, taken from `config_dir()`."""
+    return config_dir() / "skills"
+
+
+def _skill_files_in(root: Path) -> list[Path]:
+    """Every skill file one root carries, in both layouts the ecosystem uses.
+
+    A skill is either a flat ``<root>/<name>.md`` or a bundle ``<root>/<name>/SKILL.md``.
+    Both must be read: the flat form is what this instance's installer publishes
+    (``installer.install_skill`` writes ``<name>.md``) and what the shipped catalog is,
+    while the bundle is the layout the skill spec documents and the only one that can
+    carry the files a skill references beside it.
+
+    When one root carries both for the same name the **bundle wins**: it is the form
+    that can hold the rest of the skill, so the flat file beside it is a leftover copy
+    of the same skill rather than a second one.
+
+    Only the shape is decided here. Whether an entry can be opened at all — a FIFO, a
+    socket, a file with no frontmatter — stays `_parse_skill_file`'s question, which is
+    why a flat entry is listed without being stat'ed first: a FIFO named `wedged.md`
+    must reach the kind check that skips it, not be filtered out here where the skip
+    would be silent (issue #2083).
+    """
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        logger.debug("skill: cannot list %s", root)
+        return []
+
+    flat: dict[str, Path] = {}
+    bundled: dict[str, Path] = {}
+    for entry in entries:
+        try:
+            is_dir = entry.is_dir()
+        except OSError:
+            continue
+        if is_dir:
+            body = entry / "SKILL.md"
+            if body.is_file():
+                bundled[entry.name] = body
+        elif entry.name.endswith(".md"):
+            flat[entry.stem] = entry
+
+    candidates = dict(flat)
+    candidates.update(bundled)
+    return [candidates[name] for name in sorted(candidates)]
+
+
+def _skills_under(root: Path, source: str, into: dict[str, Skill]) -> None:
+    """Read one root into ``into``, the later root winning on a shared name."""
+    for skill_file in _skill_files_in(root):
+        skill = _parse_skill_file(skill_file, source)
+        if skill:
+            into[skill.name] = skill
+            logger.debug("skill loaded: %s (%s) from %s", skill.name, source, skill_file)
+
+
+def load_skills(project_dir: Optional[Path] = None) -> list[Skill]:
+    """Load every skill from the user root and one project root, read live.
+
+    User skills (``~/.emrg/skills/``) are read first, then the project's
+    (``<root>/.emrg/skills/``); a skill of the same name: the project's wins.
+
+    ``project_dir`` is the **session's** working directory — deliberately not the
+    process's, which for the daemon is whatever it was started in and made every
+    session read the same project's skills. It resolves to the nearest ancestor
+    carrying a ``.git`` (`_project_root`). Called with nothing, it falls back to the
+    process cwd, for a caller that has no session at all.
+
+    Nothing is cached, here or above: every call re-reads the files, so a skill
+    installed, edited or deleted on disk reaches the next prompt without a restart.
+    The cost is one directory listing and a few small reads (0.074 ms median measured
+    for three skills), and the result is a deterministic function of the files — an
+    unchanged tree renders a byte-identical prompt prefix, so the provider's cache
+    still matches.
+    """
+    start = Path(project_dir) if project_dir is not None else Path.cwd()
+    project_root = _project_root(start)
 
     all_skills: dict[str, Skill] = {}
+    user_root = _user_skills_root()
+    if user_root.is_dir():
+        _skills_under(user_root, "user", all_skills)
 
-    # User skills (lower priority)
-    user_dir = Path.home() / ".emrg" / "skills"
-    if user_dir.is_dir():
-        for md_file in sorted(user_dir.glob("*.md")):
-            skill = _parse_skill_file(md_file, "user")
-            if skill:
-                all_skills[skill.name] = skill
-                logger.debug("skill loaded: %s (user)", skill.name)
-
-    # Project skills (higher priority — override user)
-    proj_dir = project_dir / ".emrg" / "skills"
-    if proj_dir.is_dir():
-        for md_file in sorted(proj_dir.glob("*.md")):
-            skill = _parse_skill_file(md_file, "project")
-            if skill:
-                all_skills[skill.name] = skill
-                logger.debug("skill loaded: %s (project)", skill.name)
+    project_skills_root = project_root / ".emrg" / "skills"
+    if project_skills_root.is_dir():
+        _skills_under(project_skills_root, "project", all_skills)
 
     return sorted(all_skills.values(), key=lambda s: s.name)
 
