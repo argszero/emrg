@@ -206,6 +206,57 @@ _DAEMON_LIFECYCLE_VERBS = frozenset({"stop", "restart"})
 _PROCESS_SIGNALLER_WORDS = frozenset({"pkill", "killall", "kill"})
 #: The sub-command word between the program and the verb (`emrg server stop`).
 _DAEMON_SUBCOMMAND_WORDS = frozenset({"server"})
+#: Programs that run the command after them rather than acting themselves, so a
+#: signaller they hand the argv to is still the command being run:
+#: `sudo -u root kill …`, `nice -n 5 pkill …`, `xargs kill …`.
+_WRAPPER_WORDS = frozenset({
+    "busybox", "caffeinate", "command", "doas", "env", "eval", "exec", "ionice",
+    "nice", "nohup", "parallel", "ssh", "stdbuf", "su", "sudo", "time",
+    "timeout", "watch", "xargs",
+}) | _COMMAND_WRAPPERS
+#: The union above is the cure for a measured hole, not tidiness. This module
+#: holds two vocabularies that answer the same question — which word hands the
+#: argv on — and until they were joined they disagreed by six words, every one a
+#: route to the daemon: on `743931f4`, `setsid pkill -f emrg`, `builtin kill
+#: $(pgrep -f emrg)`, `chroot / pkill -f emrg`, `unshare -r pkill -f emrg`,
+#: `nsenter -t 1 pkill -f emrg` and `chrt 1 pkill -f emrg` were all **allowed**,
+#: while `_runs_as_a_command` (a few hundred lines below) already read those six
+#: prefixes as commands. `-exec`/`-execdir` ride along and change nothing: a token
+#: starting with `-` is read as a flag before the list is consulted.
+#:
+#: The union keeps *this* walk rather than replacing it with `_runs_as_a_command`,
+#: because the two skip different things and each skip is load-bearing: the operand
+#: skip below is what `ssh localhost pkill -f emrg` and `parallel pkill -f emrg`
+#: need (the other walk reads `localhost` as the command and answers "not the
+#: act"), and the flag-value skip is what `sudo -u root kill` needs. Joining the
+#: vocabularies without keeping the walk would trade six holes for two.
+#: Wrappers that also consume one bare operand before the command: `ssh <host>
+#: pkill …`. The first argument is a destination, not the command, so it is
+#: stepped over rather than ending the walk. `chroot` puts a bare *path* there —
+#: `chroot / pkill -f emrg` — which is neither a flag's value nor a number, so the
+#: walk needs it named to get past the argument.
+_WRAPPERS_TAKING_AN_OPERAND = frozenset({"ssh", "su", "chroot"})
+#: Tokens that open a command line of their own rather than prefixing one: a
+#: grouping `(`, a command substitution `$(` or a backtick, and `-exec`/
+#: `-execdir`, which exec the command that follows. A signaller right after one
+#: of these is that command line's first word — and the border test deliberately
+#: leaves `$`, `(` and the backtick alone (so `kill $(pgrep -f emrg)` keeps its
+#: target), which is why the start has to be read here instead of as a border.
+_COMMAND_STARTERS = frozenset({"(", "`", "-exec", "-execdir"})
+#: Reserved words and operators that open a command position inside a statement:
+#: `{ cmd; }`, `! cmd`, and the compound forms `if …; then cmd`, `while …; do cmd`,
+#: `until …; do cmd`, `for x in …; do cmd`, `else cmd`. The walk below starts after
+#: the previous `;`, so after `then` or `do` it sees `then` / `do` as the first word
+#: and answers "not the act" — measured on `5b2a1411`/`0132a242`, every one of
+#: `{ pkill -f emrgd; }`, `if true; then pkill -f emrgd; fi`,
+#: `while true; do pkill -f emrgd; done` and `! pkill -f emrgd` was **allowed**,
+#: and each of them really signals the daemon. Named as a group rather than one at a
+#: time because these are several spellings of one position.
+_STATEMENT_OPENERS = frozenset({
+    "!", "{", "do", "elif", "else", "for", "if", "then", "until", "while",
+})
+#: `NAME=value` in front of a command — `env`-style handover, not a command word.
+_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 _DAEMON_GROUPING_TOKENS = frozenset({"(", ")", "{", "}", "$", "`"})
 
@@ -262,6 +313,100 @@ def _operand_naming_emrg(tokens: list[str], start: int) -> str | None:
             return None
         if "emrg" in tok.lower():
             return tok
+    return None
+
+def _signaller_is_the_command(tokens: list[str], i: int) -> bool:
+    """Is the signaller at ``tokens[i]`` the command word, not somebody's argument?
+
+    The signaller half of this rule reads a *word*, and until it asked this
+    question that word could be any argument. Measured on `caf6d743`, the two
+    directions disagreed about the same command shape:
+
+    * ``grep -rn kill emrg/`` was **refused** — `kill` here is the pattern and
+      `emrg/` the directory, so the read was called "it stops or restarts the
+      emrg daemon". The lifecycle-verb half has always read the same shape as a
+      mention (`grep -rn stop emrg/` sits in the allowed list of
+      `tests/test_daemon_lifecycle_is_classified.py`); the two halves now agree.
+    * ``pgrep -f emrg | xargs kill`` was **allowed** — and that one really does
+      signal the daemon. `xargs` is the command there, so asking this question
+      would have *opened* it; the wrapper set below is what closes it.
+
+    So the walk starts at the statement's first token and steps over the words
+    that hand the argv on — wrappers (`sudo`, `nice`, `env`, `xargs`, `eval`,
+    `watch`, `ssh`, `timeout`), their flags, a flag's value (`sudo -u root
+    kill`), a bare number (`timeout 5 kill`), a wrapper's own destination (`ssh
+    <host> pkill`) and `NAME=value` assignments — then demands that the first
+    remaining word *be* the signaller.
+
+    A command line does not always begin at the statement's first token, though,
+    and there the walk alone is too narrow: the command word also sits right
+    after a command substitution `$(` or a backtick, after a grouping `(`, after
+    `-exec`/`-execdir`, and after a statement opener (`{`, `!`, `then`, `do`,
+    `else`, …). A signaller in that position is the command word of the line it
+    opens, whatever precedes it (`echo $(pkill -f emrg)`, `x=$(pkill -f emrg)`,
+    `find . -exec pkill -f emrg`, `if true; then pkill -f emrg`). Those tokens are
+    deliberately *not* command borders — `kill $(pgrep -f emrg)` must keep its
+    target — so the position is read here instead of as a border.
+
+    The border test is the tokenizer's own, so newlines separate statements here
+    exactly as `;`, `&&` and `|` do: prose in a heredoc is a statement whose first
+    word is not a signaller.
+    """
+    j = i - 1
+    while j >= 0 and not _is_a_command_border(tokens[j]):
+        j -= 1
+    j += 1
+    # A signaller right after a token that opens a command line is that line's
+    # first word, whatever the statement around it looks like: `echo $(pkill -f
+    # emrg)`, `x=$(…)`, ``echo `pkill` ``, `find . -exec pkill -f emrg \;`.
+    if i > 0 and (
+        tokens[i - 1] in _COMMAND_STARTERS or tokens[i - 1] in _STATEMENT_OPENERS
+    ):
+        return True
+    takes_a_value = False
+    while j < i:
+        tok = tokens[j]
+        base = _basename(tok).lower()
+        if tok.startswith("-"):
+            takes_a_value = True
+        elif tok.isdigit():
+            takes_a_value = False
+        elif takes_a_value:
+            takes_a_value = False
+        elif base in _WRAPPER_WORDS:
+            takes_a_value = base in _WRAPPERS_TAKING_AN_OPERAND
+        elif _ASSIGNMENT_RE.match(tok):
+            takes_a_value = False
+        else:
+            return False
+        j += 1
+    return True
+
+def _piped_target_naming_emrg(tokens: list[str], i: int) -> str | None:
+    """The name emrg is spelled under, when `xargs` is what will hand it to a signaller.
+
+    `xargs` execs its command with **its own input appended as argv**, so in
+    ``pgrep -f emrg | xargs kill`` the target is spelled *before* the signaller —
+    the opposite of every other spelling, and the reason the operand scan alone
+    read that pipeline as allowed (measured on `caf6d743`).
+
+    Read only when this statement's wrapper is `xargs`: a plain pipe into a
+    signaller (`… | kill -9`) passes nothing as argv, so looking back there would
+    be a guess rather than a reading. The walk stops at any border that is not a
+    single `|`, so `;`, `&&`, `||` and a newline all end the pipeline.
+    """
+    j = i - 1
+    while j >= 0 and not _is_a_command_border(tokens[j]):
+        j -= 1
+    if not any(_basename(t).lower() == "xargs" for t in tokens[j + 1 : i]):
+        return None
+    while j >= 0 and tokens[j] == "|":
+        k = j - 1
+        while k >= 0 and not _is_a_command_border(tokens[k]):
+            if "emrg" in tokens[k].lower():
+                return tokens[k]
+            k -= 1
+        j = k
     return None
 
 #: `env`'s string handover — the flag whose value `env` splits into an argv and
@@ -339,6 +484,12 @@ def stops_or_restarts_the_daemon(cmd: str, _depth: int = 0) -> str | None:
       `pkill -f 'python -m emrg'` without the name in the text, `kill 12345`.
       A process table is not a static reading, and widening the signaller to
       every interpreter name would refuse ordinary `pkill node` work;
+    * a signaller that is another program's *argument* rather than the command —
+      `grep -rn kill emrg/` searches a directory, and reading it as the act was
+      the over-block `_signaller_is_the_command` removes. The same reading
+      refuses `pgrep -f emrg | xargs kill`, where `xargs` hands its input on as
+      argv; a plain pipe into a signaller (`ps aux | grep emrg | kill -9`)
+      passes no argv, so nothing upstream is read for it;
     * a quoted argument of a program that cannot run it — `echo "emrg server
       stop"` is one argument and prints it. Reading every quoted argument as a
       command is the over-block #1513 removed from this file (`echo sh "patch
@@ -352,6 +503,17 @@ def stops_or_restarts_the_daemon(cmd: str, _depth: int = 0) -> str | None:
     tokens = _tokenize_command(cmd)
     for i, tok in enumerate(tokens):
         base = _basename(tok).lower()
+        # `{pkill …` arrives as one token, so the signaller is not recognisable by
+        # the bare word: the brace fuses to it. Stripping it is a reading of the
+        # same position `{ pkill` occupies, and it is the one spelling the tokenizer
+        # does not separate — measured allowed on `5c9ed63b` as well, so it is a
+        # hole this rule inherits rather than one it opened.
+        opened_group = False
+        if base not in _PROCESS_SIGNALLER_WORDS and base not in _EMRG_PROGRAM_WORDS:
+            stripped = base.lstrip("{")
+            if stripped != base and stripped in _PROCESS_SIGNALLER_WORDS:
+                base = stripped
+                opened_group = True
         if base in _EMRG_PROGRAM_WORDS:
             entry = i
         elif tok == "-m" and tokens[i + 1 : i + 2] in (["emrg"], ["emrg.server"]):
@@ -360,7 +522,11 @@ def stops_or_restarts_the_daemon(cmd: str, _depth: int = 0) -> str | None:
             # rather than a curiosity.
             entry = i + 1
         elif base in _PROCESS_SIGNALLER_WORDS:
+            if not opened_group and not _signaller_is_the_command(tokens, i):
+                continue
             named = _operand_naming_emrg(tokens, i + 1)
+            if named is None:
+                named = _piped_target_naming_emrg(tokens, i)
             if named is not None:
                 return f"{tok} {named}"
             continue
