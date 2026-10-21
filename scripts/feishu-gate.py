@@ -38,8 +38,32 @@ timestamps. Consent is therefore positional: the request message's id is recorde
 request is sent, and a reply counts only when it **appears later in the stream than that
 message** — the same list, read in order.
 
+Spent before it is sent
+-----------------------
+"Spent on use" is enforced by writing the spend **before** the CLI is invoked, not after it
+answers. The record has to be older than the thing it records: a gate that marks the row
+`sent` only once the CLI has accepted the message leaves the row `pending` through any death
+in between — a crash, a kill, a machine that sleeps past the CLI's own patience — and the
+next `send` then passes every check and delivers the same message a second time.
+
+So `send` moves the row to `sending` and rewrites the ledger first, and calls the CLI after
+that. Every verb refuses a row that is not `pending`, so the claim is permanent unless the
+process that wrote it lives to release it. Whether it releases is a choice, and the choice is
+made by whether the failure can be read:
+
+* **A refusal it can read** — the CLI could not be run, or it exited non-zero and said why —
+  proves nothing left, so the row goes back to `pending` and the approval stays usable. A
+  fault with no consequence must not cost the host a second round of asking.
+* **An answer it cannot read** — a timeout, output that is not JSON, an answer carrying no
+  message_id — proves nothing either way, so the row stays `sending` and that approval is
+  gone. Failing closed costs one new request; failing open costs a second message to a third
+  party, which is the one thing this gate exists to prevent.
+
+A `sending` row is therefore the visible trace of an interrupted send: `list` prints it like
+any other row, and `send` refuses it with the remedy rather than as an unexplained state.
+
 What this cannot do, stated rather than left unsaid
---------------------------------------------------
+---------------------------------------------------
 It stops misuse, not deliberate forgery. The gate runs as the host's own user, and that
 identity can itself post as the host. It makes reusing an old approval, redirecting a send,
 swapping the body, or bypassing the gate impossible at the argument and ledger level; forging
@@ -85,6 +109,16 @@ AUTH_ARGS = ("auth", "status")
 
 class Refusal(Exception):
     """The gate declined, and nothing was sent."""
+
+
+class OutcomeUnknown(Refusal):
+    """The CLI ran, and the gate could not read what it answered.
+
+    A `send` that ends here proves nothing either way: the message may have left before the
+    CLI went quiet. It is its own class because the caller's next move differs from the one a
+    plain `Refusal` allows — see "One approval, one message, spent before it is sent" in this
+    module's docstring.
+    """
 
 
 # ── the workspace's own state ────────────────────────────────────────────
@@ -160,8 +194,13 @@ def run_cli(cli: str, args: tuple[str, ...] | list[str]) -> dict:
             argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=120, check=False,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except OSError as exc:
+        # Nothing ran, so nothing left: this is a refusal the caller may undo.
         raise Refusal(f"the CLI could not be run ({cli}): {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        # The timeout is the gate's own patience, not the CLI's verdict: a `send` that
+        # outlived it may well have gone out.
+        raise OutcomeUnknown(f"the CLI did not answer within its time: {exc}") from exc
     if done.returncode != 0:
         detail = (done.stderr or done.stdout or "").strip().splitlines()
         raise Refusal(
@@ -170,7 +209,7 @@ def run_cli(cli: str, args: tuple[str, ...] | list[str]) -> dict:
     try:
         return json.loads(done.stdout or "{}")
     except json.JSONDecodeError as exc:
-        raise Refusal(f"the CLI answered something that is not JSON: {exc}") from exc
+        raise OutcomeUnknown(f"the CLI answered something that is not JSON: {exc}") from exc
 
 
 def host_open_id(cli: str) -> str:
@@ -199,7 +238,7 @@ def send_message(cli: str, to: str, text: str) -> str:
     )
     message_id = data.get("message_id") if isinstance(data, dict) else None
     if not isinstance(message_id, str) or not message_id:
-        raise Refusal(f"the send answered no message_id: {data!r}")
+        raise OutcomeUnknown(f"the send answered no message_id: {data!r}")
     return message_id
 
 
@@ -324,7 +363,14 @@ def cmd_send(args: argparse.Namespace) -> None:
             f"one approval covers one message"
         )
     if row.get("status") != "pending":
-        raise Refusal(f"the token {args.token!r} is {row.get('status')!r}, not pending")
+        detail = f"the token {args.token!r} is {row.get('status')!r}, not pending"
+        if row.get("status") == "sending":
+            detail += (
+                "; a send that was interrupted before its answer left the approval spent — "
+                "whether the message went out is unknown, so ask the host again rather than "
+                "retrying this token"
+            )
+        raise Refusal(detail)
 
     created = datetime.fromisoformat(row["created_at"])
     if datetime.now(timezone.utc) - created > timedelta(seconds=args.max_age):
@@ -353,8 +399,28 @@ def cmd_send(args: argparse.Namespace) -> None:
             f"{args.token!r}; nothing was sent"
         )
 
-    message_id = send_message(cli, row["to"], path.read_text(encoding="utf-8"))
+    # The spend is written before the CLI is invoked, so that the record is older than the
+    # send it records: a process that dies in between leaves a row every verb refuses, not
+    # one the next `send` accepts. See "Spent before it is sent" in the module docstring for
+    # which failures release the claim and why.
+    row["status"] = "sending"
+    row["claimed_at"] = datetime.now(timezone.utc).isoformat()
+    rewrite_ledger(workspace, rows)
+
+    try:
+        message_id = send_message(cli, row["to"], path.read_text(encoding="utf-8"))
+    except OutcomeUnknown:
+        # Nothing here proves the message stayed: the claim stands, and this approval is gone.
+        raise
+    except Refusal:
+        # The CLI refused and said so — nothing was sent, so the approval stays spendable.
+        row["status"] = "pending"
+        row.pop("claimed_at", None)
+        rewrite_ledger(workspace, rows)
+        raise
+
     row["status"] = "sent"
+    row.pop("claimed_at", None)
     row["sent_at"] = datetime.now(timezone.utc).isoformat()
     row["sent_message_id"] = message_id
     rewrite_ledger(workspace, rows)

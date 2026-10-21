@@ -51,7 +51,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 FAKE_CLI = '''"""A stand-in for the Feishu CLI: records argv, answers fixed JSON, touches no network."""
-import json, os, sys
+import json, os, signal, sys
 from pathlib import Path
 
 argv = sys.argv[1:]
@@ -75,15 +75,27 @@ elif argv and argv[0] == "+chat-messages-list":
 elif argv and argv[0] == "+chat-messages-create":
     receive = argv[argv.index("--receive-id") + 1]
     text = argv[argv.index("--text") + 1]
+    if receive and receive == os.environ.get("FAKE_LARK_DECLINE_ON"):
+        print("the CLI declined this message", file=sys.stderr)
+        sys.exit(4)
     items = stream()
     message_id = f"om_{len(items) + 1}"
     items.append({
         "message_id": message_id,
+        "receive_id": receive,
         "sender_id": os.environ["FAKE_LARK_HOST"],
         "body": {"content": json.dumps({"text": text})},
     })
     save(items)
-    print(json.dumps({"message_id": message_id, "receive_id": receive}))
+    if receive == os.environ.get("FAKE_LARK_DIE_ON"):
+        # The message is out and the gate never learns it — the death this suite is about.
+        os.kill(os.getppid(), signal.SIGKILL)
+        os._exit(0)
+    if receive == os.environ.get("FAKE_LARK_MUMBLE_ON"):
+        # The message is out and the answer carries no message_id, so the gate cannot tell.
+        print(json.dumps({"receive_id": receive}))
+    else:
+        print(json.dumps({"message_id": message_id, "receive_id": receive}))
 else:
     print("unexpected argv: %r" % (argv,), file=sys.stderr)
     sys.exit(3)
@@ -137,6 +149,15 @@ def argv_lines(lark) -> list[list[str]]:
 
 def sends(lark) -> list[list[str]]:
     return [a for a in argv_lines(lark) if a and a[0] == "+chat-messages-create"]
+
+
+def third_party_messages(lark) -> list[dict]:
+    """What the stand-in CLI actually delivered to a recipient that is not the host."""
+    path = lark["stream"]
+    if not path.exists():
+        return []
+    items = json.loads(path.read_text(encoding="utf-8"))
+    return [item for item in items if item.get("receive_id") not in (None, HOST)]
 
 
 def request_one(lark, to: str = "ou_third_party", text: str = "the verbatim body") -> str:
@@ -247,6 +268,88 @@ def test_the_same_token_cannot_be_spent_twice(fake_lark):
     assert done.returncode == 1
     assert "already spent" in done.stderr
     assert len(sends(fake_lark)) == sends_after_first, "a spent approval must not resend"
+
+
+# ── the spend is recorded before the send it records ────────────────────────
+
+
+def test_a_gate_that_dies_after_the_send_leaves_the_approval_unspendable(fake_lark):
+    """The window a crash opens, and the reason the claim is written before the CLI runs.
+
+    The stand-in sends, then ends the gate before it can record the send. The row must
+    already have been unspendable when the CLI was invoked, so the next `send` refuses — and
+    because one refusal proves nothing on its own (a gate that refused everything would pass
+    the second half), the stream must hold exactly one message for the third party.
+    """
+    token = request_one(fake_lark)
+    host_replies(fake_lark, f"yes {token}")
+    fake_lark["env"]["FAKE_LARK_DIE_ON"] = "ou_third_party"
+
+    killed = gate(fake_lark, "send", "--token", token)
+
+    assert killed.returncode != 0, "the stand-in was to end the gate before it wrote"
+    assert [row["status"] for row in ledger(fake_lark)] == ["sending"], (
+        "the spend must be on disk before the CLI is invoked, so a death in between leaves a "
+        "row every verb refuses rather than one the next `send` accepts"
+    )
+    assert len(third_party_messages(fake_lark)) == 1, "this arm needs a message that did leave"
+
+    fake_lark["env"].pop("FAKE_LARK_DIE_ON")
+    again = gate(fake_lark, "send", "--token", token)
+
+    assert again.returncode == 1
+    assert "sending" in again.stderr, (
+        "the refusal must name the state and the remedy, not leave `sending` unexplained"
+    )
+    assert len(third_party_messages(fake_lark)) == 1, "one approval covers one message"
+
+
+def test_a_cli_refusal_does_not_burn_the_approval(fake_lark):
+    """The stated trade, one direction: a failure the gate can read sent nothing.
+
+    The CLI exited non-zero and said so, so the message did not leave and the approval goes
+    back to spendable — a fault with no consequence must not cost the host a second asking.
+    """
+    token = request_one(fake_lark)
+    host_replies(fake_lark, f"yes {token}")
+    fake_lark["env"]["FAKE_LARK_DECLINE_ON"] = "ou_third_party"
+
+    declined = gate(fake_lark, "send", "--token", token)
+
+    assert declined.returncode == 1
+    assert "exited 4" in declined.stderr
+    assert ledger(fake_lark)[0]["status"] == "pending", (
+        "a refusal that provably sent nothing must leave the approval spendable"
+    )
+    assert third_party_messages(fake_lark) == []
+
+    fake_lark["env"].pop("FAKE_LARK_DECLINE_ON")
+    assert gate(fake_lark, "send", "--token", token).returncode == 0
+    assert len(third_party_messages(fake_lark)) == 1
+
+
+def test_an_answer_the_gate_cannot_read_keeps_the_approval_spent(fake_lark):
+    """The same trade, the other direction: an unreadable answer proves nothing, so fail closed.
+
+    The stand-in delivered the message and answered without a message_id. Retrying would risk
+    a second delivery, so the row stays `sending` and the honest cost is one new request.
+    """
+    token = request_one(fake_lark)
+    host_replies(fake_lark, f"yes {token}")
+    fake_lark["env"]["FAKE_LARK_MUMBLE_ON"] = "ou_third_party"
+
+    done = gate(fake_lark, "send", "--token", token)
+
+    assert done.returncode == 1
+    assert "no message_id" in done.stderr
+    assert len(third_party_messages(fake_lark)) == 1, "this arm needs a message that did leave"
+    assert ledger(fake_lark)[0]["status"] == "sending"
+
+    fake_lark["env"].pop("FAKE_LARK_MUMBLE_ON")
+    assert gate(fake_lark, "send", "--token", token).returncode == 1
+    assert len(third_party_messages(fake_lark)) == 1, (
+        "an answer nobody could read must not license a second delivery"
+    )
 
 
 # ── (e) the bad arguments cannot be expressed ───────────────────────────────
