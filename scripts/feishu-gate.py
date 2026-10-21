@@ -50,6 +50,17 @@ mechanical — the same identity means the tool cannot check it.
 Everything the gate writes lives inside the workspace it runs in, at
 `<workspace>/.emrg/feishu/` (`requests.jsonl` plus `bodies/<token>.txt`). Nothing is written
 outside it.
+
+One transport limit, measured rather than assumed
+-------------------------------------------------
+The text travels to the CLI as a **single command-line argument**, and the request it builds
+is several lines. That is fine for a native program on either platform and for any program on
+POSIX. It is not fine on Windows for a `.cmd`/`.bat` shim — which is what npm installs — because
+the command interpreter parses the line before the shim runs and a newline inside an argument
+ends it: measured on the Windows CI leg, the CLI received `[EMRG approval request]` and nothing
+after it. So a Windows host must give `--cli` a native executable, and where it can only offer
+a shim the text would arrive truncated. Handing the CLI a file instead would need an interface
+this gate has no way to verify, so the limit is stated here rather than guessed around.
 """
 
 from __future__ import annotations
