@@ -211,7 +211,19 @@ if a platform forbids automated publishing, comply or mark the platform blocked.
 
 #### Step 1 — Find topics (recon)
 
-Search for topics related to {{ project.name }}:
+Recon has two directions, and **the inbound one comes first**: read what is already waiting on this account before looking for anything new.
+
+```bash
+# the threads this account opened elsewhere — its own open pull requests and issues
+gh search prs --author @me --state open --limit 20 --json repository,number,title,updatedAt
+gh search issues --author @me --state open --limit 20 --json repository,number,title,updatedAt
+# then the newest comment on each one that is not this account's own
+gh api repos/<owner>/<repo>/issues/<n>/comments --jq '.[-1] | "\(.user.login) @ \(.created_at): \(.body)"'
+```
+
+A maintainer who asks for a rebase, a test, clearer wording, or an answer has addressed a **request to this account**, and carrying it out is the round's first work — ahead of any new participation. A thread left waiting while the same account opens another costs twice from one cause: the request stands unanswered, and there is one more thread to keep up with. A request this round cannot carry out does not drop out of sight — it enters `promotion tracking` as the to-do, with the link and what was asked (§4.1).
+
+Then look outward. Search for topics related to {{ project.name }}:
 
 ```bash
 # Reddit example: search topics related to the project's domain
@@ -230,7 +242,7 @@ curl -s "https://hn.algolia.com/api/v1/search?query=<keywords>&tags=story"
 
 1. **Read the full discussion**: open the original post with the browser harness, read all replies (not just the OP), understand the context, existing viewpoints, and the asker's real concern.
 2. **Research related material**: verify third-party projects/terms/background involved in the discussion first (docs / repos / official sites) — no unfounded claims.
-3. **Verify locally**: if the discussion involves technical claims (performance, API, behavior), **write a test script / run a local verification before replying** — technical facts in your reply must be verified, not from memory or reasoning alone.
+3. **Verify locally**: if the discussion involves technical claims (performance, API, behavior), **write a test script / run a local verification before replying** — technical facts in your reply must be verified, not from memory or reasoning alone. **A count is such a claim**: how many tests a file holds, how many files a directory has, how many commits, versions, users or bytes — each is a number a command produced in this round, and it is quoted from that output. A count that no command produced, one carried over from an earlier round included, is taken out rather than softened, because a wrong count reads exactly like a verified one and the reader has no way to tell them apart.
 4. **Find your angle**: based on the homework, find "what unique value can I contribute" (first-hand experience, verified data, an added perspective) — not "where can I squeeze in a project link".
 5. **If homework is too costly or time is limited → skip that discussion** (record it in this round's closing summary as a `promotion opportunities` entry, join when you can do it properly) rather than posting a low-quality reply.
 
@@ -322,7 +334,7 @@ Every field below is REPLACED every round — this is a snapshot, not a log:
 - promotion target: <project repo URL>
 - promotion log: <last 5 promotion actions: time + channel + link + result>
 - promotion opportunities: <topics found during recon but not yet acted on>
-- promotion tracking: <posted promotions with replies / ongoing discussions / questions awaiting clarification; each with link and to-do>
+- promotion tracking: <posted promotions with replies / ongoing discussions / questions awaiting clarification / requests addressed to this account that it has not answered yet; each with link and its to-do>
 - last learned: <timestamp of the most recent §0.4 project learning + project commit HEAD (knowledge freshness)>
 - homework record: <which discussions were read / what materials researched / what was verified locally before this round's participation (commit HEAD + link + verification conclusion) — §2 homework trail, last 3 rounds>
 - flagged/negative: <flagged discussions/channels + time + cool-down status (like banned but reversible)>

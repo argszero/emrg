@@ -2124,3 +2124,62 @@ def test_the_published_contribution_pin_answers_both_ways():
             f"removing {phrase!r} did not make exactly that phrase read as missing, so this "
             "pin would not notice its own rule being deleted"
         )
+
+
+# --------------------------------------------------------------------------- the inbound half
+#
+# A round of the promotion task is written as four outward steps: find a topic, join it,
+# follow the threads it started, hand the feedback on. Every list such a round carries is
+# therefore a list of what it sent out, and nothing in the template answered the opposite
+# question — what has someone else asked this account to do, and is it still waiting.
+#
+# Measured cost, on a pull request this account had opened in another project: a maintainer
+# asked for a rebase in a comment, no round read it, and the request sat unanswered for nine
+# days while later rounds opened new threads instead. Carrying it out took minutes.
+#
+# The second half is the same defect one level down. A changelog entry published in that pull
+# request said a test file held "7 tests"; the file had held six since the branch was created,
+# and no command had counted anything. Step 2 already requires technical claims to be verified
+# locally, and a count does not read as a claim, so it passed under a rule written for prose.
+#
+# Pinned as verbatim phrases for the reason the pin above states: the file and the *render*
+# are two carriers, and a rewrite that keeps the surrounding paragraphs while dropping these
+# leaves every keyword in place.
+
+PROMOTE_INBOUND_PHRASES = (
+    "the inbound one comes first",
+    "addressed a **request to this account**",
+    "it enters `promotion tracking` as the to-do",
+    "requests addressed to this account that it has not answered yet",
+    "**A count is such a claim**",
+    "A count that no command produced",
+)
+
+
+def test_the_promote_prompt_reads_what_is_asked_of_it_and_counts_what_it_publishes():
+    """Both halves of a round the template was missing: inbound work, and measured numbers.
+
+    What this measures and what it does not: it pins that the two rules are still **stated**.
+    Whether a round ran the reading is that round's closing summary — not something a text
+    assertion can answer, so this guard has no verdict on behaviour.
+    """
+    text = _PROMOTE_TEMPLATE.read_text(encoding="utf-8")
+    missing = _missing_phrases(text, PROMOTE_INBOUND_PHRASES)
+    assert not missing, (
+        "the promote template no longer states what its four outward steps leave out: "
+        f"{missing}. Without the first, every list a round carries is one-directional and a "
+        "maintainer's request can wait indefinitely while the round finds new topics; without "
+        "the second, a published count is a number nothing counted."
+    )
+
+
+def test_the_inbound_pin_answers_both_ways():
+    """The control: removing one phrase makes exactly that phrase read as missing."""
+    text = _PROMOTE_TEMPLATE.read_text(encoding="utf-8")
+    for phrase in PROMOTE_INBOUND_PHRASES:
+        stripped = text.replace(phrase, "")
+        assert stripped != text, f"{phrase!r} is pinned but absent, so this arm measured nothing"
+        assert _missing_phrases(stripped, PROMOTE_INBOUND_PHRASES) == [phrase], (
+            f"removing {phrase!r} did not make exactly that phrase read as missing, so this "
+            "pin would not notice its own rule being deleted"
+        )
