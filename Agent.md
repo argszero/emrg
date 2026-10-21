@@ -1,6 +1,6 @@
 # EMRG — Agent.md
 
-> **Principles and conventions only** — what to obey, and how to decide. History belongs in the scripts' docstrings and `--help`, in commit messages, and in the evolution memory records, not here.
+> **Principles and conventions only** — what to obey and how to decide. History belongs in the scripts' docstrings and `--help`, in commit messages and in the evolution records, not here.
 
 ## Project Overview
 
@@ -41,7 +41,7 @@ The execution model, in this repo's own terms (`emrg/server/daemon.py`):
 What EMRG does today — capability statements, not a changelog.
 
 - **TUI client** — markdown/diffs, slash commands, autocomplete, pickers, clipboard images (`vision` per model), ESC interrupt, CJK-aware input
-- **Electron GUI** — streaming chat, tool-status cards, sessions, models, settings, onboarding, reconnect with daemon respawn; React + TypeScript under vitest
+- **Electron GUI** — streaming chat, tool-status cards, sessions, models, settings, onboarding, reconnect with daemon respawn; React + TypeScript; vitest
 - **Scheduled tasks** — `TaskHandler` for any registered project: builtin and custom types, CRUD, hot reload
 - **Rant-driven evolution** — host feedback through `/rant` drives the self-improvement cycles
 - **Memory** — project and session memory (YAML frontmatter + a Markdown index), compact/clear, a capped prompt footprint
@@ -57,9 +57,9 @@ One line per command: what it answers. Run the daemon in the foreground with `py
 GUI: `cd emrg/gui && npm test` (161: 98 daemon_client + 20 conn-manager + 7 integration + 7 nav-policy + 7 gui-state + 9 build-config + 6 boot-contract + 3 preload-api + 2 theme-guard + 2 image-hash) — syntax: `node --check main.js preload.js daemon_client.js`
 Renderer: `cd emrg/gui/renderer && npm run typecheck && npm test` (714: 5 snapshot-store + 13 utils + 3 ErrorBoundary + 2 App smoke + 11 commands + 4 copywriting + 11 i18n + 13 markdown + 29 transcript + 28 TranscriptView + 22 history + 25 historyReplay + 38 composer + 75 Composer + 6 LinkDialog + 16 sidebar + 18 Sidebar + 9 fileTree + 9 FileTree + 17 resultPanel + 8 ResultPanel + 27 workspaceView + 13 WorkspaceView + 10 dialog + 6 Dialog + 9 ConfirmDialog + 9 RenameDialog + 10 dialogLists + 3 HelpDialog + 9 MemoryDialog + 6 SkillsDialog + 8 openSession + 6 WelcomeDialog + 9 OpenSessionDialog + 7 NewSessionDialog + 7 rewind + 8 RewindDialog + 7 GithubDeviceDialog + 56 daemonBridge + 9 DaemonBridgeProvider + 48 Shell + 24 DialogHost + 26 SettingsPanel + 6 TaskFormDialog + 5 RantDialog + 4 vendorMarkdown + 6 ApprovalDialog + 14 SandboxRootsDialog)
 - CI: pytest on ubuntu **and windows-2025**, the GUI suites, and an actionlint gate over `.github/workflows/`; re-trigger a dropped push with `scripts/re-trigger-ci.sh <branch>`, never an empty commit
-- Merge gates, run before merging — each answers a question no other gate asks: `uv run --no-sync python3 scripts/check-vote-count.py` (approvals still valid) · `scripts/check-pr-base.py` (base reaches master) · `scripts/check-merge-freshness.py` (that green CI is about the landing tree) · `scripts/check-merge-order.py` (dirt and what it lands) · `scripts/check-merge-landing-diff.py` (what the landing changes) · `scripts/check-merge-pairs.py` / `scripts/check-merge-sequence.py` (two PRs together; every step of an order) · `scripts/check-merge-tree-health.py` (the merged tree passes one guard) · `scripts/check-merge-plan-suite.py` (the plan's final tree passes the suite) — all under `uv run --no-sync python3`
+- Merge gates, run before merging — each asks what no other gate asks: `uv run --no-sync python3 scripts/check-vote-count.py` (approvals still valid) · `scripts/check-pr-base.py` (base reaches master) · `scripts/check-merge-freshness.py` (that green CI is about the landing tree) · `scripts/check-merge-order.py` (dirt and what it lands) · `scripts/check-merge-landing-diff.py` (what the landing changes) · `scripts/check-merge-pairs.py` / `scripts/check-merge-sequence.py` (a pair, or a whole order) · `scripts/check-merge-tree-health.py` (the merged tree passes one guard) · `scripts/check-merge-plan-suite.py` (the plan's final tree passes the suite) — all under `uv run --no-sync python3`
 - Post-merge audit: `uv run --no-sync python3 scripts/check-merge-landed.py <N>` (did the merge land a tree its reviews named)
-- Other tools: `uv run --no-sync python3 scripts/check-node-test-count.py --write` (syncs the Node totals), `scripts/check-memory-index.py` (a MEMORY.md against the index rule), `scripts/check-patch-files.py` (a rebuilt patch carries its predecessor's files), `scripts/check-memory-rotation.py` (which projects' memory moved), `scripts/cast-vote.py` (a vote the counter counts), `bump-version.py`, `classify-conflict.py`, `sync-master-from-api.py`, `push-branch-from-api.py`
+- Other tools: `uv run --no-sync python3 scripts/check-node-test-count.py --write` (the Node totals), `scripts/check-memory-index.py` (a MEMORY.md against the index rule), `scripts/check-patch-files.py` (a rebuilt patch keeps its predecessor's files), `scripts/check-memory-rotation.py` (whose memory moved), `scripts/cast-vote.py` (a counted vote), `scripts/feishu-gate.py` (the third-party send's gate), `bump-version.py`, `classify-conflict.py`, `sync-master-from-api.py`, `push-branch-from-api.py`
 
 Every guard that reads a working tree names it before its verdict; a question it cannot answer is reported unmeasurable, never as a pass.
 
