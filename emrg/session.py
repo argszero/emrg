@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import ntpath
 import os
 import secrets
 from datetime import datetime
@@ -304,6 +305,39 @@ def _refuse_a_non_regular_subject(path: Path) -> None:
             f"never ends — so the call would never return, and neither would the "
             f"daemon, which runs every session read and write on its event loop."
         )
+
+
+#: Characters that make a name more than one path component, on either platform named
+#: here: `/` separates on POSIX and Windows, `\` separates on Windows and is an ordinary
+#: character on POSIX — refusing both is the point, because the same id reaches a path on
+#: whichever platform runs it.
+_NAME_SEPARATORS = ("/", "\\")
+
+
+def is_safe_session_id(session_id: object) -> bool:
+    """True when `session_id` names exactly one entry inside the sessions directory.
+
+    A session id arrives in a client message, so it is an input like any other:
+    `Path(cwd) / ".emrg" / "sessions" / session_id` hands `..` and an absolute id to the
+    kernel, which resolves them, and the caller then removes what it resolved to. Measured
+    2026-10-21: `Session.delete("../..", cwd)` walked `cwd/.emrg/sessions/../..` — the
+    project tree — and left it empty, `victim/` and `.emrg/` alike, then raised from
+    `shutil.rmtree`'s final `os.rmdir`.
+
+    So the id is checked before a path is built: non-empty, no NUL, not `.` or `..`, no
+    separator, and no drive. The drive is asked of **both** flavours — `os.path.splitdrive`
+    answers `("", "C:evil")` on this host and `ntpath.splitdrive` answers `("C:", "evil")`,
+    and a `C:`-relative id is a path, not a name, on the platform that can receive it.
+    """
+    if not isinstance(session_id, str) or not session_id:
+        return False
+    if "\0" in session_id or session_id in (".", ".."):
+        return False
+    if any(sep in session_id for sep in _NAME_SEPARATORS):
+        return False
+    if os.path.splitdrive(session_id)[0] or ntpath.splitdrive(session_id)[0]:
+        return False
+    return True
 
 
 class Session:
@@ -981,9 +1015,19 @@ class Session:
     def delete(session_id: str, cwd: Path) -> bool:
         """Delete a session directory and all its contents.
 
-        Returns True if the session was deleted, False if it didn't exist.
+        Returns True if the session was deleted, False if it didn't exist — and False,
+        with a warning, for an id that is not a single path component, because the id
+        comes from a client message and `shutil.rmtree` follows whatever it resolves to.
         """
         import shutil
+
+        if not is_safe_session_id(session_id):
+            logger.warning(
+                "refusing to delete a session named %r: a session id is one path "
+                "component, so nothing outside the sessions directory is reachable",
+                session_id,
+            )
+            return False
 
         session_dir = cwd / ".emrg" / "sessions" / session_id
         if session_dir.exists():

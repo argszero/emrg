@@ -5622,3 +5622,143 @@ def test_an_out_of_domain_limit_is_refused_rather_than_coerced(tmp_path):
 
     assert frames[0]["type"] == "input_history"
     assert "integer limit and offset" in frames[0]["error"]
+
+
+# ── a session id is one path component, at both doors a message can use ────────
+#
+# The id is pasted onto `<cwd>/.emrg/sessions/` by eleven `_get_or_create_session`
+# call sites, by the resume reader, by the two memory readers and by
+# `delete_session`, which hands the resolved path to `shutil.rmtree`. So the check
+# lives once, in `_refuse_an_unsafe_session_id`: measured 2026-10-21, an id of
+# `../..` reached `rmtree` with the project tree.
+#
+# It has **two** callers because the daemon has two dispatchers. `_handle_client`
+# intercepts `{"type": "task"}` itself and never reaches `_process_message`, so a
+# check placed only in the latter left unguarded the one message type that creates
+# a session directory — measured on this branch before the fix: a `task` carrying
+# `../../../evil` created a directory one level above the project root, started its
+# turn, and sent the client nothing but `auth_ok`. A test that hands a `task` frame
+# to `_process_message` therefore certifies a door production does not use: that
+# function has no `task` branch at all and answers `unknown message type`. The two
+# tests below drive `_handle_client`, which is the door.
+
+
+def _project_with_a_neighbour(tmp_path):
+    (tmp_path / ".emrg" / "sessions" / "keep").mkdir(parents=True)
+    (tmp_path / "victim").mkdir()
+    (tmp_path / "victim" / "precious.txt").write_text("keep me", encoding="utf-8")
+    return tmp_path
+
+
+class _FakeSocket:
+    """A websocket stand-in the read loop can drive: `recv` yields frames, then ends."""
+
+    def __init__(self, frames: list[dict]) -> None:
+        self._frames = [json.dumps(f) for f in frames]
+        self.sent: list[dict] = []
+
+    async def recv(self) -> str:
+        if not self._frames:
+            from websockets.exceptions import ConnectionClosed
+            raise ConnectionClosed(None, None)
+        return self._frames.pop(0)
+
+    async def send(self, data) -> None:
+        self.sent.append(json.loads(data))
+
+    async def close(self) -> None:
+        pass
+
+
+def _drive_read_loop(monkeypatch, tmp_path, frames: list[dict]) -> list[dict]:
+    """One real `_handle_client` connection: auth, then `frames`, then a disconnect.
+
+    `_auth_token` is set by `EmrgServer.run()` when it binds a socket, and a unit
+    test never binds one, so it is pinned here. The two planted-fire markers are
+    pointed at `tmp_path` because a `task` frame really does start a tool loop, and
+    the loop stamps host state at round finalization (issue #1337).
+    """
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", tmp_path / "planted-fire")
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH",
+                        tmp_path / "planted-fire-round")
+    server = _make_server()
+    server._auth_token = "test-token"
+    socket = _FakeSocket([{"type": "auth", "token": "test-token"}, *frames])
+    asyncio.run(server._handle_client(socket))
+    return socket.sent
+
+
+def test_delete_session_refuses_an_id_that_is_not_one_component(tmp_path):
+    """A refused delete leaves the project alone and says so in a frame."""
+    project = _project_with_a_neighbour(tmp_path)
+    server = _make_server()
+
+    frames = _drive(server, {
+        "type": "delete_session", "session_id": "../..", "cwd": str(project),
+    })
+
+    assert len(frames) == 1
+    assert "invalid session id" in frames[0]["error"]
+    assert (project / "victim" / "precious.txt").read_text(encoding="utf-8") == "keep me"
+    assert (project / ".emrg" / "sessions" / "keep").is_dir()
+
+
+def test_delete_session_still_deletes_a_real_one(tmp_path):
+    """The other direction on the same seam: a plain id is untouched by the refusal."""
+    project = _project_with_a_neighbour(tmp_path)
+    server = _make_server()
+
+    frames = _drive(server, {
+        "type": "delete_session", "session_id": "keep", "cwd": str(project),
+    })
+
+    assert frames[0]["type"] == "session_deleted"
+    assert frames[0].get("error") is None
+    assert not (project / ".emrg" / "sessions" / "keep").exists()
+    assert (project / "victim" / "precious.txt").exists()
+
+
+def test_the_read_loop_refuses_a_task_carrying_an_unsafe_session_id(
+    tmp_path, monkeypatch
+):
+    """`_get_or_create_session` writes the directory, so the refusal precedes it.
+
+    Driven through `_handle_client`, because that is where a `task` is dispatched.
+    The id walks two levels up from the sessions directory, so without the refusal
+    the directory it creates lands **outside** the project — which is what the
+    assertion on `tmp_path` measures, not on `sessions/`.
+    """
+    project = tmp_path / "project"
+    (project / ".emrg" / "sessions" / "keep").mkdir(parents=True)
+
+    frames = _drive_read_loop(monkeypatch, tmp_path, [{
+        "type": "task", "id": "t1", "session_id": "../../../evil",
+        "cwd": str(project), "prompt": "hi",
+    }])
+
+    assert [f for f in frames if f.get("type") != "auth_ok"] == [
+        {"error": "invalid session id: '../../../evil' (a session id is one path component)"}
+    ]
+    assert not (tmp_path / "evil").exists()
+    assert sorted(p.name for p in (project / ".emrg" / "sessions").iterdir()) == ["keep"]
+
+
+def test_the_read_loop_still_accepts_a_task_carrying_a_plain_session_id(
+    tmp_path, monkeypatch
+):
+    """The other direction at the same door: a plain id creates its own session and starts.
+
+    The turn's LLM call cannot be reached in a unit test, so the assertion is the one
+    that discriminates: no `invalid session id` frame, and the session directory the
+    branch creates exists.
+    """
+    project = tmp_path / "project"
+    (project / ".emrg" / "sessions" / "keep").mkdir(parents=True)
+
+    frames = _drive_read_loop(monkeypatch, tmp_path, [{
+        "type": "task", "id": "t2", "session_id": "fresh",
+        "cwd": str(project), "prompt": "hi",
+    }])
+
+    assert not [f for f in frames if "invalid session id" in str(f.get("error", ""))]
+    assert (project / ".emrg" / "sessions" / "fresh").is_dir()
