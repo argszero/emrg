@@ -37,15 +37,26 @@ for, so the observable that separates "judged it necessary" from "did not engage
 itself. That is still a placement and wording guard: the share is re-measured by the instrument,
 over the window a later cycle names, never here.
 
+The bullet's subject changed on 2026-10-21 (issue #2437), because the count was the wrong subject: it
+left a reader free to meet the rule one call at a time, since its only test was whether a call "needed"
+an answer. The rule now asks for a **plan of the round, formed before the first call, and written out as
+the opening lines of the reply** — the act, not the attitude. Two guards carry that: `RULE_TERMS` holds
+each part of the ruling, and `RULE_ACTION_PHRASES` holds the two acts separately, one test case each, so
+deleting either one reddens a test that names it. Also measured here on the day of the change: **9.7%**
+of 137,592 rounds carry two or more calls, and 92.5% of the lone ones carry an `intent` naming no awaited
+answer — the same instrument, re-read, because a wording change is cheap to claim.
+
 What is asserted
 ----------------
 1. The rule is in `system.j2` **and in the render**, and once only: a block in the file that no render
    contains is not a rule any session runs under, and a second copy is two copies free to drift.
-2. It carries each part of the ruling — the unit (one round, several calls), the boundary (a call whose
-   arguments depend on another's answer waits for its own round), the reason (cost, not speed), and the
-   precedence of the no-background-process red line.
-3. The three misstatements are **gone**: no `parallel`, no `for speed`, no 并发. One statement, not two.
-4. **Reverse**: no wording that caps, budgets or quotas *rounds* may enter the shared prompt. The host
+2. It carries each part of the ruling — the act (plan the round first), the unit (one response, several
+   readings), the boundary (a call whose arguments depend on another's answer waits), **when the plan may
+   be revised** (between rounds, never between two calls of one round), and the reason (cost, not speed).
+3. Each of the two action phrases is asserted **on its own**, per reader, so a mutation that removes one
+   is caught by a case naming it rather than by a longer assertion that happens to still be true.
+4. The three misstatements are **gone**: no `parallel`, no `for speed`, no 并发. One statement, not two.
+5. **Reverse**: no wording that caps, budgets or quotas *rounds* may enter the shared prompt. The host
    rejected a round budget explicitly (rant 2026-10-15T12:35:03, 「c 没意义，肯定不行」 — it truncates long
    tasks), so a future edit must not smuggle one in beside the rule that saves rounds.
 
@@ -76,15 +87,29 @@ RULE_SECTION = "## How you work"
 
 #: The rule's identity: the bullet's lead phrase. Written as the phrase a rewrite would keep, so a second
 #: copy anywhere in the template is visible as a count of 2 rather than as longer prose.
-RULE_LEAD = "**Issue every call you can already specify, in one response.**"
+RULE_LEAD = "**Plan the round before the first call.**"
+
+#: The two actions the rule is made of, each a verbatim substring of the shipped wording and each asserted
+#: on its own so that dropping one reddens a test naming it. **Enumerating** is the act the rule asks for
+#: before any call; **writing the enumeration out** is the same act made observable, and it is the half a
+#: wording can lose while still reading like advice. Measured on the previous bullet — which asked for a
+#: count and carried neither phrase — the enumeration is what a reader never produced: 114,898 of 124,272
+#: lone rounds (92.5%) carried an `intent` naming no awaited answer, read by
+#: `scripts/check-batching-share.py` over 137,592 rounds of this installation's history.
+RULE_ACTION_PHRASES = (
+    "Plan the round before the first call",
+    "write that enumeration out as the opening lines of your reply",
+)
 
 #: One term per part of the ruling, each a verbatim substring of the shipped wording — so this list cannot
 #: drift away from the sentence it checks without this file saying so.
 RULE_TERMS = (
-    RULE_LEAD,                                                   # the unit: one response, several calls
-    "a call goes alone only when its arguments need an answer you have not read yet",  # the boundary
-    "names the specific answer it waits for",                    # what the lone call must still say
-    "Every round re-sends the conversation and emits fresh output",  # the reason: money
+    RULE_LEAD,                                                   # the act: plan first, then call
+    "Every reading you can already specify goes out in one response",  # the unit: one response, several
+    "a call stands alone only when its arguments need an answer you have not read yet",  # the boundary
+    "The plan is revised between rounds, when a reading changes what the round can still settle",
+    "never between two calls of the same round",                 # when the plan may be revised — and not
+    "One round re-sends the whole conversation and emits fresh output",  # the reason: money
 )
 
 #: The precedence clause's carrier: the section that owns the red lines, whose own paragraph says no
@@ -194,6 +219,29 @@ def test_the_shared_prompt_states_the_several_calls_rule(read) -> None:
     assert found == 1, (
         f"the rule must be stated once; found {found} copies — a second copy costs prompt and the two "
         "are then free to disagree"
+    )
+
+
+@pytest.mark.parametrize("phrase", RULE_ACTION_PHRASES, ids=["plan-the-round", "write-the-enumeration"])
+@pytest.mark.parametrize("read", [
+    pytest.param(lambda: SYSTEM_PROMPT.read_text(encoding="utf-8"), id="template"),
+    pytest.param(_render_system_prompt, id="render"),
+])
+def test_each_action_phrase_carries_its_own_case(read, phrase) -> None:
+    """One case per action phrase, per reader — so deleting one reddens the test that names it.
+
+    `test_the_shared_prompt_states_the_several_calls_rule` asserts the whole bullet at once, which is the
+    right shape for "is the rule stated" and the wrong one for "did this half survive": a rewrite that
+    dropped a single phrase would report the other terms as present and this file as passing. The two
+    phrases are what the rule asks a reader to *do* — enumerate what the round needs, and write that
+    enumeration where the host can see it — and each has to be able to fail on its own for a mutation arm
+    to mean anything.
+    """
+    block = _how_you_work_block(read())
+    assert block, f"system.j2 has no `{RULE_SECTION}` section for the rule to sit in"
+    assert phrase in block, (
+        f"the rule's action `{phrase}` is missing from `{RULE_SECTION}`: the bullet asks a reader to act, "
+        "and an act it no longer names is an act no session performs"
     )
 
 

@@ -37,7 +37,7 @@ Each skill is a file of instructions. When one bears on what the host asked, rea
 
 - **Every call carries an `intent`**: one plain sentence on why it is made and what it should reach. It is never executed, but the host reads it, so it must be true and specific.
 - **Read a file before you change it**, so the change matches what is there.
-- **Issue every call you can already specify, in one response.** Sending several is the normal case: a call goes alone only when its arguments need an answer you have not read yet, and then its `intent` names the specific answer it waits for. Every round re-sends the conversation and emits fresh output.
+- **Plan the round before the first call.** Enumerate what this round has to establish and the readings it needs, and write that enumeration out as the opening lines of your reply, before you call anything. Every reading you can already specify goes out in one response; a call stands alone only when its arguments need an answer you have not read yet. The plan is revised between rounds, when a reading changes what the round can still settle — never between two calls of the same round. One round re-sends the whole conversation and emits fresh output, so a lone call buys a single reading at the price of a round.
 
 ## Memory
 

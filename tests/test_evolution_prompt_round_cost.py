@@ -72,21 +72,28 @@ REQUIRED_TERMS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-#: The rule's unit, its criterion and its boundary, as shipped in **both** carriers. Editing either
+#: The rule's unit, its criterion and its reason, as shipped in **both** carriers. Editing either
 #: one alone is the defect this pair catches, so `test_both_carriers_state_the_same_unit_and_criterion`
 #: reads the live text of each rather than one file's expectations about the other.
 #:
 #: These are the longest phrases the two carriers genuinely share, and that is a measurement rather
 #: than a preference: R10 is a rulebook entry a cycle reads and `system.j2` is one bullet in every
-#: session's prefix, so the two state the same rule at different lengths — `issue every call you can
-#: already specify, in one response: sending several tool calls in one round … is the normal case`
-#: against `**Issue every call you can already specify, in one response.** Sending several is the
-#: normal case: …`. The phrases below are where they agree word for word (the rule's direction,
-#: the boundary that decides a lone call, and what that lone call must still say), and a drift in
-#: any of them still moves both — which is the property the comparison exists for.
-SHARED_UNIT = "every call you can already specify"
+#: session's prefix, so the two state the same rule at different lengths — R10's `issue every call you
+#: can already specify, in one response: sending several tool calls in one round … is the normal case`
+#: against the bullet's `Every reading you can already specify goes out in one response; a call stands
+#: alone only when its arguments need an answer you have not read yet`.
+#:
+#: The marker set moved on 2026-10-21 (issue #2437), when the bullet's subject changed from a count of
+#: calls to a plan of the round, and it moved because a marker that one side dropped cannot be a phrase
+#: two carriers share. What went is `names the specific answer it waits for`: the rewritten bullet does
+#: not restate it, so that clause now lives in R10 alone, and by that alone it is not a shared phrase —
+#: a comparison holding it would report every future rewrite as a drift. What came in is the reason
+#: (`emits fresh output`), which both carriers do still state word for word. The ruled-out alternative
+#: was to keep the old marker and edit R10 in the same PR: the host scoped this change to the bullet,
+#: and a rulebook entry rewritten to fit a one-line prompt change is the drift this test exists to stop.
+SHARED_UNIT = "you can already specify"
 SHARED_CRITERION = "its arguments need an answer you have not read yet"
-SHARED_BOUNDARY = "names the specific answer it waits for"
+SHARED_REASON = "emits fresh output"
 
 #: The unit this rule may no longer be stated in. The first version of R10 taught exactly
 #: these; the host retired the merge-several-calls-into-one reading explicitly at
@@ -185,7 +192,7 @@ def test_both_carriers_state_the_same_unit_and_criterion() -> None:
         "emrg/server/prompts/system.j2": SYSTEM_PROMPT.read_text(encoding="utf-8"),
     }
     for marker, label in ((SHARED_UNIT, "unit"), (SHARED_CRITERION, "criterion"),
-                          (SHARED_BOUNDARY, "boundary")):
+                          (SHARED_REASON, "reason")):
         missing = [name for name, text in carriers.items() if marker not in text]
         assert not missing, (
             f"the {label} `{marker}` is not in {missing}: R10 and system.j2 carry one rule, so "
