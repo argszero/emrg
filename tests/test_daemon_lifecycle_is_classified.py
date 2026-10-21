@@ -124,6 +124,19 @@ THE_ACT = [
     "parallel pkill -f emrg",
     "ssh localhost pkill -f emrg",
     "su root kill $(pgrep -f emrg)",
+    # a statement opener puts the signaller in the command position: a brace group,
+    # a negated command, and the compound forms whose body follows `then` / `do`.
+    # Each was allowed before the openers were named, and each really signals.
+    "{ pkill -f emrgd; }",
+    "{ pkill -f emrgd ; }",
+    "bash -c '{ pkill -f emrgd; }'",
+    "if true; then pkill -f emrgd; fi",
+    "while true; do pkill -f emrgd; done",
+    "until false; do killall emrgd; done",
+    "for x in 1; do pkill -f emrg; done",
+    "! pkill -f emrgd",
+    # the brace fuses to the word here, so the tokenizer never separates them
+    "{pkill -f emrgd;}",
     # a shell re-parsing the text, and a substitution naming the program
     "sh -c 'emrg server stop'",
     'bash -c "emrg server restart"',
@@ -166,6 +179,13 @@ NOT_THE_ACT = [
     "(grep -rn kill emrg/)",
     "echo $(grep -rn kill emrg/)",
     "find . -name kill -o -name emrg",
+    # an opener leads to the command that follows it, and that command may be a
+    # read — the opener set must not turn every mention after it into the act
+    "if true; then grep -rn kill emrg/; fi",
+    "while true; do grep kill emrg/; done",
+    "! grep -rn kill emrg/",
+    "{ grep -rn kill emrg/; }",
+    "for f in *; do grep -n kill \"$f\"; done",
     # a *quoted* mention is one argument, not a command line
     "echo 'emrg server stop'",
     # a signaller whose operand names somebody else — a stated limit, pinned
@@ -512,3 +532,32 @@ def test_full_access_is_exempt_on_the_live_path(boundary):
     for command in ("emrg server stop", "pkill -f emrg.server"):
         content, reached = _run(BashToolV2(), command, "danger-full-access")
         assert reached is True, f"{command!r} was read at full access: {content!r}"
+
+
+def test_a_statement_opener_puts_the_signaller_in_the_command_position():
+    """`{ …; }`, `! …`, `if …; then …` and `while …; do …` all run their body.
+
+    The command-position walk starts after the previous `;`, so after `then` or `do`
+    the first word it saw was `then` / `do` rather than the signaller, and the rule
+    answered "not the act". Every spelling below really signals the daemon, and each
+    was allowed before the openers were named — the same hole as the substitution
+    and `-exec` shapes, one position over.
+
+    The counterpart is that an opener leads to whatever command follows it, and that
+    command may be a read: `if true; then grep -rn kill emrg/; fi` stays allowed.
+    """
+    for cmd in (
+        "{ pkill -f emrgd; }",
+        "if true; then pkill -f emrgd; fi",
+        "while true; do pkill -f emrgd; done",
+        "! pkill -f emrgd",
+        "{pkill -f emrgd;}",
+    ):
+        assert _stops_or_restarts_the_daemon(cmd) is not None, f"{cmd!r} was allowed"
+    for cmd in (
+        "if true; then grep -rn kill emrg/; fi",
+        "while true; do grep kill emrg/; done",
+        "! grep -rn kill emrg/",
+        "{ grep -rn kill emrg/; }",
+    ):
+        assert _stops_or_restarts_the_daemon(cmd) is None, f"{cmd!r} was refused"

@@ -225,6 +225,18 @@ _WRAPPERS_TAKING_AN_OPERAND = frozenset({"ssh", "su"})
 #: leaves `$`, `(` and the backtick alone (so `kill $(pgrep -f emrg)` keeps its
 #: target), which is why the start has to be read here instead of as a border.
 _COMMAND_STARTERS = frozenset({"(", "`", "-exec", "-execdir"})
+#: Reserved words and operators that open a command position inside a statement:
+#: `{ cmd; }`, `! cmd`, and the compound forms `if …; then cmd`, `while …; do cmd`,
+#: `until …; do cmd`, `for x in …; do cmd`, `else cmd`. The walk below starts after
+#: the previous `;`, so after `then` or `do` it sees `then` / `do` as the first word
+#: and answers "not the act" — measured on `5b2a1411`/`0132a242`, every one of
+#: `{ pkill -f emrgd; }`, `if true; then pkill -f emrgd; fi`,
+#: `while true; do pkill -f emrgd; done` and `! pkill -f emrgd` was **allowed**,
+#: and each of them really signals the daemon. Named as a group rather than one at a
+#: time because these are several spellings of one position.
+_STATEMENT_OPENERS = frozenset({
+    "!", "{", "do", "elif", "else", "for", "if", "then", "until", "while",
+})
 #: `NAME=value` in front of a command — `env`-style handover, not a command word.
 _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
@@ -310,10 +322,11 @@ def _signaller_is_the_command(tokens: list[str], i: int) -> bool:
 
     A command line does not always begin at the statement's first token, though,
     and there the walk alone is too narrow: the command word also sits right
-    after a command substitution `$(` or a backtick, after a grouping `(`, and
-    after `-exec`/`-execdir`. A signaller in that position is the command word of
-    the line it opens, whatever precedes it (`echo $(pkill -f emrg)`,
-    `x=$(pkill -f emrg)`, `find . -exec pkill -f emrg`). Those tokens are
+    after a command substitution `$(` or a backtick, after a grouping `(`, after
+    `-exec`/`-execdir`, and after a statement opener (`{`, `!`, `then`, `do`,
+    `else`, …). A signaller in that position is the command word of the line it
+    opens, whatever precedes it (`echo $(pkill -f emrg)`, `x=$(pkill -f emrg)`,
+    `find . -exec pkill -f emrg`, `if true; then pkill -f emrg`). Those tokens are
     deliberately *not* command borders — `kill $(pgrep -f emrg)` must keep its
     target — so the position is read here instead of as a border.
 
@@ -328,7 +341,9 @@ def _signaller_is_the_command(tokens: list[str], i: int) -> bool:
     # A signaller right after a token that opens a command line is that line's
     # first word, whatever the statement around it looks like: `echo $(pkill -f
     # emrg)`, `x=$(…)`, ``echo `pkill` ``, `find . -exec pkill -f emrg \;`.
-    if i > 0 and tokens[i - 1] in _COMMAND_STARTERS:
+    if i > 0 and (
+        tokens[i - 1] in _COMMAND_STARTERS or tokens[i - 1] in _STATEMENT_OPENERS
+    ):
         return True
     takes_a_value = False
     while j < i:
@@ -470,6 +485,17 @@ def stops_or_restarts_the_daemon(cmd: str, _depth: int = 0) -> str | None:
     tokens = _tokenize_command(cmd)
     for i, tok in enumerate(tokens):
         base = _basename(tok).lower()
+        # `{pkill …` arrives as one token, so the signaller is not recognisable by
+        # the bare word: the brace fuses to it. Stripping it is a reading of the
+        # same position `{ pkill` occupies, and it is the one spelling the tokenizer
+        # does not separate — measured allowed on `5c9ed63b` as well, so it is a
+        # hole this rule inherits rather than one it opened.
+        opened_group = False
+        if base not in _PROCESS_SIGNALLER_WORDS and base not in _EMRG_PROGRAM_WORDS:
+            stripped = base.lstrip("{")
+            if stripped != base and stripped in _PROCESS_SIGNALLER_WORDS:
+                base = stripped
+                opened_group = True
         if base in _EMRG_PROGRAM_WORDS:
             entry = i
         elif tok == "-m" and tokens[i + 1 : i + 2] in (["emrg"], ["emrg.server"]):
@@ -478,7 +504,7 @@ def stops_or_restarts_the_daemon(cmd: str, _depth: int = 0) -> str | None:
             # rather than a curiosity.
             entry = i + 1
         elif base in _PROCESS_SIGNALLER_WORDS:
-            if not _signaller_is_the_command(tokens, i):
+            if not opened_group and not _signaller_is_the_command(tokens, i):
                 continue
             named = _operand_naming_emrg(tokens, i + 1)
             if named is None:
