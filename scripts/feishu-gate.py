@@ -116,8 +116,7 @@ class OutcomeUnknown(Refusal):
 
     A `send` that ends here proves nothing either way: the message may have left before the
     CLI went quiet. It is its own class because the caller's next move differs from the one a
-    plain `Refusal` allows — see "One approval, one message, spent before it is sent" in this
-    module's docstring.
+    plain `Refusal` allows — see "Spent before it is sent" in this module's docstring.
     """
 
 
