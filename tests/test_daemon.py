@@ -5622,3 +5622,63 @@ def test_an_out_of_domain_limit_is_refused_rather_than_coerced(tmp_path):
 
     assert frames[0]["type"] == "input_history"
     assert "integer limit and offset" in frames[0]["error"]
+
+
+# ── a session id is one path component, at the seam every message crosses ──────
+#
+# The id is pasted onto `<cwd>/.emrg/sessions/` by eleven `_get_or_create_session`
+# call sites, by the resume reader, by the two memory readers and by
+# `delete_session`, which hands the resolved path to `shutil.rmtree`. So the check
+# lives once, at the top of `_process_message`, and these tests drive that seam:
+# measured 2026-10-21, an id of `../..` reached `rmtree` with the project tree.
+
+
+def _project_with_a_neighbour(tmp_path):
+    (tmp_path / ".emrg" / "sessions" / "keep").mkdir(parents=True)
+    (tmp_path / "victim").mkdir()
+    (tmp_path / "victim" / "precious.txt").write_text("keep me", encoding="utf-8")
+    return tmp_path
+
+
+def test_delete_session_refuses_an_id_that_is_not_one_component(tmp_path):
+    """A refused delete leaves the project alone and says so in a frame."""
+    project = _project_with_a_neighbour(tmp_path)
+    server = _make_server()
+
+    frames = _drive(server, {
+        "type": "delete_session", "session_id": "../..", "cwd": str(project),
+    })
+
+    assert len(frames) == 1
+    assert "invalid session id" in frames[0]["error"]
+    assert (project / "victim" / "precious.txt").read_text(encoding="utf-8") == "keep me"
+    assert (project / ".emrg" / "sessions" / "keep").is_dir()
+
+
+def test_delete_session_still_deletes_a_real_one(tmp_path):
+    """The other direction on the same seam: a plain id is untouched by the refusal."""
+    project = _project_with_a_neighbour(tmp_path)
+    server = _make_server()
+
+    frames = _drive(server, {
+        "type": "delete_session", "session_id": "keep", "cwd": str(project),
+    })
+
+    assert frames[0]["type"] == "session_deleted"
+    assert frames[0].get("error") is None
+    assert not (project / ".emrg" / "sessions" / "keep").exists()
+    assert (project / "victim" / "precious.txt").exists()
+
+
+def test_a_task_carrying_an_unsafe_session_id_creates_no_directory(tmp_path):
+    """`_get_or_create_session` writes the directory, so the refusal precedes it."""
+    project = _project_with_a_neighbour(tmp_path)
+    server = _make_server()
+
+    frames = _drive(server, {
+        "type": "task", "session_id": "../..", "cwd": str(project), "prompt": "hi",
+    })
+
+    assert len(frames) == 1
+    assert "invalid session id" in frames[0]["error"]
+    assert sorted(p.name for p in (project / ".emrg" / "sessions").iterdir()) == ["keep"]

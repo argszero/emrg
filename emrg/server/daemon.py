@@ -93,7 +93,12 @@ from emrg.protocol import (
     ServerPong,
     TaskRequest,
 )
-from emrg.session import Session, last_n_messages, records_to_messages
+from emrg.session import (
+    Session,
+    is_safe_session_id,
+    last_n_messages,
+    records_to_messages,
+)
 
 
 # ── 会话级 sandbox 档位（rant 2026-09-30T09:30:16）─────────────────────
@@ -2788,6 +2793,27 @@ class EmrgServer:
     ) -> None:
         """Process a single message and send responses."""
         msg_type = msg.get("type", "")
+
+        # A session id is a client input that becomes a path component in half the
+        # handlers below, and `delete_session` hands the resolved path to
+        # `shutil.rmtree`. Checked here, once, where every message passes and before
+        # any handler builds a path: `_get_or_create_session` (eleven callers), the
+        # resume reader, the two memory readers and the delete path all take the id
+        # from this message. Measured 2026-10-21: `Session.delete("../..", cwd)` left
+        # the project tree empty, so the check cannot live only inside the delete
+        # handler. It sits in `_process_message` rather than in `_handle_client`'s read
+        # loop because this is the seam the tests drive directly.
+        session_id_field = msg.get("session_id")
+        if session_id_field and not is_safe_session_id(session_id_field):
+            logger.warning(
+                "refused a %r message carrying session id %r: a session id is one "
+                "path component inside <cwd>/.emrg/sessions", msg_type, session_id_field,
+            )
+            await self._send(ws, {
+                "error": f"invalid session id: {session_id_field!r} (a session id is "
+                         f"one path component)",
+            })
+            return
 
         if msg_type == "ping":
             elapsed = int(
