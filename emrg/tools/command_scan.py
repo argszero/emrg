@@ -210,9 +210,21 @@ _DAEMON_SUBCOMMAND_WORDS = frozenset({"server"})
 #: signaller they hand the argv to is still the command being run:
 #: `sudo -u root kill …`, `nice -n 5 pkill …`, `xargs kill …`.
 _WRAPPER_WORDS = frozenset({
-    "busybox", "caffeinate", "command", "doas", "env", "exec", "ionice", "nice",
-    "nohup", "stdbuf", "sudo", "time", "timeout", "xargs",
+    "busybox", "caffeinate", "command", "doas", "env", "eval", "exec", "ionice",
+    "nice", "nohup", "parallel", "ssh", "stdbuf", "su", "sudo", "time",
+    "timeout", "watch", "xargs",
 })
+#: Wrappers that also consume one bare operand before the command: `ssh <host>
+#: pkill …`. The first argument is a destination, not the command, so it is
+#: stepped over rather than ending the walk.
+_WRAPPERS_TAKING_AN_OPERAND = frozenset({"ssh", "su"})
+#: Tokens that open a command line of their own rather than prefixing one: a
+#: grouping `(`, a command substitution `$(` or a backtick, and `-exec`/
+#: `-execdir`, which exec the command that follows. A signaller right after one
+#: of these is that command line's first word — and the border test deliberately
+#: leaves `$`, `(` and the backtick alone (so `kill $(pgrep -f emrg)` keeps its
+#: target), which is why the start has to be read here instead of as a border.
+_COMMAND_STARTERS = frozenset({"(", "`", "-exec", "-execdir"})
 #: `NAME=value` in front of a command — `env`-style handover, not a command word.
 _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
@@ -290,10 +302,20 @@ def _signaller_is_the_command(tokens: list[str], i: int) -> bool:
       would have *opened* it; the wrapper set below is what closes it.
 
     So the walk starts at the statement's first token and steps over the words
-    that hand the argv on — wrappers (`sudo`, `nice`, `env`, `xargs`, `timeout`),
-    their flags, a flag's value (`sudo -u root kill`), a bare number (`timeout 5
-    kill`), and `NAME=value` assignments — then demands that the first remaining
-    word *be* the signaller.
+    that hand the argv on — wrappers (`sudo`, `nice`, `env`, `xargs`, `eval`,
+    `watch`, `ssh`, `timeout`), their flags, a flag's value (`sudo -u root
+    kill`), a bare number (`timeout 5 kill`), a wrapper's own destination (`ssh
+    <host> pkill`) and `NAME=value` assignments — then demands that the first
+    remaining word *be* the signaller.
+
+    A command line does not always begin at the statement's first token, though,
+    and there the walk alone is too narrow: the command word also sits right
+    after a command substitution `$(` or a backtick, after a grouping `(`, and
+    after `-exec`/`-execdir`. A signaller in that position is the command word of
+    the line it opens, whatever precedes it (`echo $(pkill -f emrg)`,
+    `x=$(pkill -f emrg)`, `find . -exec pkill -f emrg`). Those tokens are
+    deliberately *not* command borders — `kill $(pgrep -f emrg)` must keep its
+    target — so the position is read here instead of as a border.
 
     The border test is the tokenizer's own, so newlines separate statements here
     exactly as `;`, `&&` and `|` do: prose in a heredoc is a statement whose first
@@ -303,6 +325,11 @@ def _signaller_is_the_command(tokens: list[str], i: int) -> bool:
     while j >= 0 and not _is_a_command_border(tokens[j]):
         j -= 1
     j += 1
+    # A signaller right after a token that opens a command line is that line's
+    # first word, whatever the statement around it looks like: `echo $(pkill -f
+    # emrg)`, `x=$(…)`, ``echo `pkill` ``, `find . -exec pkill -f emrg \;`.
+    if i > 0 and tokens[i - 1] in _COMMAND_STARTERS:
+        return True
     takes_a_value = False
     while j < i:
         tok = tokens[j]
@@ -313,7 +340,9 @@ def _signaller_is_the_command(tokens: list[str], i: int) -> bool:
             takes_a_value = False
         elif takes_a_value:
             takes_a_value = False
-        elif base in _WRAPPER_WORDS or _ASSIGNMENT_RE.match(tok):
+        elif base in _WRAPPER_WORDS:
+            takes_a_value = base in _WRAPPERS_TAKING_AN_OPERAND
+        elif _ASSIGNMENT_RE.match(tok):
             takes_a_value = False
         else:
             return False

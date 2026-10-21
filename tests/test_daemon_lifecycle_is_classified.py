@@ -108,6 +108,22 @@ THE_ACT = [
     # signaller — a plain pipe into `kill -9` passes nothing and stays a guess
     "pgrep -f emrg | xargs kill",
     "ps aux | grep emrg | awk '{print $2}' | xargs kill",
+    "pgrep -f emrg | xargs -r kill",
+    # a command line the signaller opens rather than one it is prefixed by: a
+    # substitution, a grouping, a backtick, `find -exec`, and the programs whose
+    # bare argument is the command. All of these were refused before the
+    # command-position rule existed, and each really does signal the daemon.
+    "eval pkill -f emrg",
+    "echo $(pkill -f emrg)",
+    "x=$(pkill -f emrg)",
+    'echo `pkill -f emrg`',
+    "(pkill -f emrg)",
+    "find . -maxdepth 0 -exec pkill -f emrg \\;",
+    "find /tmp -name x -exec killall emrgd \\;",
+    "watch -n 1 pkill -f emrg",
+    "parallel pkill -f emrg",
+    "ssh localhost pkill -f emrg",
+    "su root kill $(pgrep -f emrg)",
     # a shell re-parsing the text, and a substitution naming the program
     "sh -c 'emrg server stop'",
     'bash -c "emrg server restart"',
@@ -140,6 +156,16 @@ NOT_THE_ACT = [
     "grep kill argszero/emrg notes.txt",
     # a pipeline that names the process but hands nothing to a signaller
     "ps aux | grep emrg | tee /tmp/procs.txt",
+    # the reads the wider wrapper set must not swallow: the wrapper runs the
+    # command after it, and that command is `grep`, not the signaller
+    "ssh host grep kill emrg/",
+    "watch grep kill emrg/",
+    "eval echo kill",
+    "parallel grep -rn kill emrg/",
+    "find . -exec grep -rn kill emrg/ \\;",
+    "(grep -rn kill emrg/)",
+    "echo $(grep -rn kill emrg/)",
+    "find . -name kill -o -name emrg",
     # a *quoted* mention is one argument, not a command line
     "echo 'emrg server stop'",
     # a signaller whose operand names somebody else — a stated limit, pinned
@@ -219,6 +245,39 @@ def test_xargs_appends_its_input_as_argv_so_the_target_is_read_upstream():
     hit = _stops_or_restarts_the_daemon("pgrep -f emrg | xargs kill")
     assert hit is not None and "emrg" in hit
     assert _stops_or_restarts_the_daemon("ps aux | grep emrg | kill -9") is None
+
+
+def test_a_signaller_that_opens_a_command_line_is_the_command_word():
+    """A substitution, a grouping, `-exec` and `eval` each start a command line.
+
+    Reading the statement's *first* word as the only candidate command word is
+    too narrow: the command word also sits after `$(`, a backtick and a grouping
+    `(`, after `-exec`/`-execdir`, and after the programs whose bare argument is
+    the command (`eval`, `watch`, `parallel`, `ssh`, `su`). Each of these really
+    signals the daemon, and each was refused before the command-position rule —
+    so missing them would be the rule *opening* a route rather than closing one.
+
+    The counterpart is that the same position must not swallow a read: the
+    wrapper runs the command after it, and when that command is `grep` the
+    mention stays a mention.
+    """
+    for cmd in (
+        "eval pkill -f emrg",
+        "echo $(pkill -f emrg)",
+        "x=$(pkill -f emrg)",
+        "find . -maxdepth 0 -exec pkill -f emrg \\;",
+        "watch -n 1 pkill -f emrg",
+        "ssh localhost pkill -f emrg",
+        "parallel pkill -f emrg",
+    ):
+        assert _stops_or_restarts_the_daemon(cmd) is not None, f"{cmd!r} was allowed"
+    for cmd in (
+        "ssh host grep kill emrg/",
+        "watch grep kill emrg/",
+        "find . -exec grep -rn kill emrg/ \\;",
+        "echo $(grep -rn kill emrg/)",
+    ):
+        assert _stops_or_restarts_the_daemon(cmd) is None, f"{cmd!r} was refused"
 
 
 def test_the_verb_must_follow_the_program():
