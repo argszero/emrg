@@ -188,6 +188,15 @@ Different from participatory forum replies: this is long-form output on your own
   as a `blog drafts` topic candidate.
 - **Distribution**: publish on your own blog (blogger etc.); optionally cross-post to
   Dev.to/Medium (same content, note the original source link).
+- **One topic, one channel**: a topic is spent by its first publication. Publishing it again
+  somewhere else is not a second reach — it is the same post met twice by an audience that
+  overlaps, which is the shape bulk cross-posting has, and platform rules treat it as such.
+  A rewrite counts as the same topic: a narrative take, an engineering take, a shortened
+  thread for a different room are one topic in three outfits, because the core claim and
+  the subject it is made about are unchanged. The test is that claim and that subject, not
+  whether the words differ. The single exception is a **verbatim** cross-post of the
+  original carrying its source link — a backup copy, which the reader can tell apart from
+  a second article.
 - **Recording**: this round's closing summary carries the round's `blog posts` and
   `blog drafts` lines (§4); the standing lists — published posts (title + platform + link +
   publish time + topic) and the pending topic queue — are durable facts and live in memory
