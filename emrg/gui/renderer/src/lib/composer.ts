@@ -180,35 +180,36 @@ export interface ImageCarrier {
 }
 
 /**
- * 从一次粘贴/拖拽事件里取图片文件 —— **两个面都取**：`files` 与 `items`。
+ * 从一次粘贴/拖拽事件里取图片文件：`files` 里有图就用 `files`；只有当 `files` 一个图都没有时，
+ * 才去读 `items[i].getAsFile()`。
  *
- * 为什么要两个面（rant 2026-09-30T09:35:04，宿主报障「GUI 输入框里 Cmd+V 现在没有任何
- * 效果」，实现在且从未走到过一次 IPC）：
+ * 为什么不「两个都读、按对象去重」（2026-10-21 在 EMRG.app 里跑探针应用实测）：同一次粘贴里，
+ * `files[0]` 和 `items[0].getAsFile()` 是**两个不同的 File 对象、内容相同**，而且每次调
+ * `getAsFile()` 都会新造一个对象 —— 按对象同一性去重挡不住它们，于是粘贴一张图会进来两张
+ * （日志里 7 次粘贴、7 次都是 `attach 2 file(s): image/png, image/png`，两次落盘还是同一个
+ * 文件），图片字节在请求体里也跟着翻倍。实测粘贴时 `files.length === 1`，所以「`files` 有值
+ * 就够用」这件事本身成立。
  *
- * - `DataTransfer.files` 是**拖拽**一路可靠的来源；
- * - 粘贴一路在 Chromium 里由 `items`（kind="file" → getAsFile()）承载，只读 `files`
- *   会得到空数组 —— 于是 `handlePaste` 里 `imgs.length === 0` 成立、处理器 `return
- *   false` 把事件交回浏览器，浏览器对没有文本的图片剪贴板什么也不做 ⇒ 宿主看到的就是
- *   「没有任何效果」，而且**一行日志都没有**（IPC 从未被调用）。
+ * ⚠️ 这里顺带推翻一条沿用很久的前提：2026-09-30「GUI 输入框里 Cmd+V 没有任何效果」的真因是
+ * 主进程用 Electron 不支持的 `blake2b512` 算摘要抛错（#2363 已修），**不是**「粘贴时 `files`
+ * 为空」。旧注释据此要求把 `items` 与 `files` 合并读，那是错的，也是双份的来源。
  *
- * 因此这里的取舍是：多读一个面是**纯增量**（`files` 里有的仍然会拿到），而少读一个面
- * 是静默失效。返回顺序 = `files` 在前、`items` 补齐其后，按对象同一性去重。
+ * `items` 仍然留作兜底：`files` 为空时它是唯一的取法。这个形状在本机没有被复现过，保留它是
+ * 为了不重新引入一次静默丢弃，代价是零 —— `files` 有值时这里根本不读它。
  *
- * ⚠️ 诚实边界：本机无法实跑真实粘贴（见 PR 的「诚实边界」），所以这不是「实测到的根因」，
- * 而是「两个面都收」——它对**任一面**为真的情况都成立，而调用方对空结果必须**出声**
- * （见 Composer 的可见拒绝），所以下一个宿主复现会把真正的层直接写进日志。
+ * 拖入两个同名同大小的不同文件仍然返回两个：这里不按内容去重，`files` 里有几个就是几个。
  */
 export function collectImageFiles(carrier: ImageCarrier | null | undefined): File[] {
   if (!carrier) return [];
+  const isImage = (f: File | null | undefined): f is File =>
+    !!f && typeof f.type === "string" && f.type.startsWith("image/");
+  const fromFiles = Array.from(carrier.files ?? []).filter(isImage);
+  if (fromFiles.length > 0) return fromFiles;
   const out: File[] = [];
-  const take = (f: File | null | undefined): void => {
-    if (f && typeof f.type === "string" && f.type.startsWith("image/") && !out.includes(f)) {
-      out.push(f);
-    }
-  };
-  for (const f of Array.from(carrier.files ?? [])) take(f);
   for (const it of Array.from(carrier.items ?? [])) {
-    if (it && it.kind === "file" && typeof it.getAsFile === "function") take(it.getAsFile());
+    if (!it || it.kind !== "file" || typeof it.getAsFile !== "function") continue;
+    const f = it.getAsFile();
+    if (isImage(f) && !out.includes(f)) out.push(f);
   }
   return out;
 }

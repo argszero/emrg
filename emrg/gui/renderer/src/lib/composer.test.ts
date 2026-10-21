@@ -266,7 +266,9 @@ describe("collectImageFiles — 粘贴/拖拽事件的两个面都取", () => {
     expect(collectImageFiles(carrier)).toEqual([png]);
   });
 
-  it("unions both faces without duplicating the same File object", () => {
+  it("reads `files` and adds nothing from `items` on top of it", () => {
+    // `items` is the fallback, not a second pile: when `files` carries an image, `items` is
+    // the same file seen from another face and must not contribute an extra entry.
     const carrier = {
       files: [png],
       items: [
@@ -274,7 +276,31 @@ describe("collectImageFiles — 粘贴/拖拽事件的两个面都取", () => {
         { kind: "file", type: "image/tiff", getAsFile: () => tiff },
       ],
     };
-    expect(collectImageFiles(carrier)).toEqual([png, tiff]);
+    expect(collectImageFiles(carrier)).toEqual([png]);
+  });
+
+  it("counts one pasted image once, though the two faces hand back different File objects", () => {
+    // The real paste shape, and the defect it caused: Chromium exposes the clipboard image
+    // through both faces as **two distinct `File` objects with the same content**, so
+    // identity de-duplication let both through and one paste became two attachments
+    // (`attach 2 file(s)` on every paste in the log). Same name, size and type, two objects.
+    const fromFiles = new File(["x"], "image.png", { type: "image/png" });
+    const fromItems = new File(["x"], "image.png", { type: "image/png" });
+    expect(fromFiles).not.toBe(fromItems);
+    const carrier = {
+      files: [fromFiles],
+      items: [{ kind: "file", type: "image/png", getAsFile: () => fromItems }],
+    };
+    const out = collectImageFiles(carrier);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toBe(fromFiles);
+  });
+
+  it("keeps a genuine multi-file drag, including two files with the same name and type", () => {
+    // Nothing here de-duplicates by content: `files` is what the user handed over, so two
+    // distinct files stay two.
+    const second = new File(["x"], "shot.png", { type: "image/png" });
+    expect(collectImageFiles({ files: [png, second] })).toEqual([png, second]);
   });
 
   it("ignores non-image carriers (string items, text kinds, nulls)", () => {
