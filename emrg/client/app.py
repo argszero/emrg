@@ -3415,7 +3415,9 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                         await conn.send_command("skills_update")
                         status.update(center="checking skill updates…")
                     else:
-                        skills = load_skills()
+                        # The session's directory, not this process's: the project
+                        # skills a session has are the ones under its own root.
+                        skills = load_skills(Path(cwd) if cwd else None)
                         if skills:
                             lines = ["**Loaded Skills:**", ""]
                             for s in skills:
