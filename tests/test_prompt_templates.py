@@ -1995,6 +1995,43 @@ def test_the_mention_ban_scanner_answers_both_ways() -> None:
         "- in someone else's space, carry value and no mention at all."
     ], "the shape that was vetoed must be caught, or this guard proves nothing"
 
+
+#: The bound the one-topic rule states, quoted from the template's own Distribution bullet.
+_ONE_TOPIC_RULE = "One topic, one channel"
+
+#: The mark that tells the permitted backup apart from the prohibited duplicate.
+_BACKUP_MARK = "verbatim"
+
+
+def test_the_one_topic_one_channel_rule_keeps_its_distinguishing_mark() -> None:
+    """A topic goes to one place, and a backup copy is the only second publication.
+
+    What this measures and what it does not: it pins that the bound is still **stated**, and
+    that the template still names the one thing that separates the case it permits from the
+    case it forbids. Whether a round obeyed it is a reading of that round's closing summary,
+    not something a text assertion can answer — so this guard has no verdict on behaviour,
+    and its absence would not have caught a duplicate post.
+
+    The rule is worth pinning because it is the kind that decays by paraphrase: the
+    Distribution bullet grants cross-posting, and an edit that widens that grant — "cross-post
+    the same content" → "cross-post", or dropping the source link — leaves the grant standing
+    while silently removing what made the exception an exception.
+    """
+    text = _PROMOTE_TEMPLATE.read_text(encoding="utf-8")
+
+    assert _ONE_TOPIC_RULE in text, (
+        "the one-topic-one-channel bound is gone from promote_prompt.md — with it goes the "
+        "only statement that a rewritten topic is not a second publication"
+    )
+    assert _BACKUP_MARK in text, (
+        "the rule no longer names a verbatim copy as what it permits, so its exception is "
+        "indistinguishable from the duplicate it forbids"
+    )
+    assert "original source link" in text, (
+        "the Distribution bullet stopped asking a cross-post to carry its source link — "
+        "that link is the reader's means of telling a backup from a second article"
+    )
+
     agreeing = (
         "**Mention density**: only a few (≤30%) mention it naturally.\n"
         "- in someone else's space, carry value first, with the mention only where it "
