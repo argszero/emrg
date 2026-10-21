@@ -180,35 +180,33 @@ export interface ImageCarrier {
 }
 
 /**
- * 从一次粘贴/拖拽事件里取图片文件 —— **两个面都取**：`files` 与 `items`。
+ * 从一次粘贴/拖拽事件里取图片文件 —— `files` 有图就用 `files`，`files` 一张都没有才退到 `items`。
  *
- * 为什么要两个面（rant 2026-09-30T09:35:04，宿主报障「GUI 输入框里 Cmd+V 现在没有任何
- * 效果」，实现在且从未走到过一次 IPC）：
+ * `items` 这一面为什么必须读（rant 2026-09-30T09:35:04，宿主报「GUI 输入框里 Cmd+V 现在
+ * 没有任何效果」）：粘贴一路在 Chromium 里由 `items`（kind="file" → getAsFile()）承载，
+ * 只读 `files` 会得到空数组 —— 于是 `handlePaste` 里 `imgs.length === 0` 成立、处理器
+ * `return false` 把事件交回浏览器，宿主看到的就是「没有任何效果」，而且**一行日志都没有**。
  *
- * - `DataTransfer.files` 是**拖拽**一路可靠的来源；
- * - 粘贴一路在 Chromium 里由 `items`（kind="file" → getAsFile()）承载，只读 `files`
- *   会得到空数组 —— 于是 `handlePaste` 里 `imgs.length === 0` 成立、处理器 `return
- *   false` 把事件交回浏览器，浏览器对没有文本的图片剪贴板什么也不做 ⇒ 宿主看到的就是
- *   「没有任何效果」，而且**一行日志都没有**（IPC 从未被调用）。
+ * `items` 为什么只能当兜底、不能与 `files` 合并（2026-10-21 宿主报「粘贴一次出现两个 img」
+ * 的根因）：同一个剪贴板文件在两个面上给出的是**两个不同的 `File` 对象**，内容相同而身份
+ * 不同，按对象同一性去重挡不住它们 —— 所以「两个面都收」在真实粘贴上稳定返回两张同内容的
+ * 图（本机留档 7 次粘贴、7 次都是 `attach 2 file(s)`，两次落盘路径相同，因为主进程按内容
+ * 哈希命名并同名去重）。`files` 里有内容时它就是这次事件的真相，`items` 只是同一批文件的
+ * 另一个视图；`files` 为空才是「这一路没有承载」的证据。
  *
- * 因此这里的取舍是：多读一个面是**纯增量**（`files` 里有的仍然会拿到），而少读一个面
- * 是静默失效。返回顺序 = `files` 在前、`items` 补齐其后，按对象同一性去重。
- *
- * ⚠️ 诚实边界：本机无法实跑真实粘贴（见 PR 的「诚实边界」），所以这不是「实测到的根因」，
- * 而是「两个面都收」——它对**任一面**为真的情况都成立，而调用方对空结果必须**出声**
- * （见 Composer 的可见拒绝），所以下一个宿主复现会把真正的层直接写进日志。
+ * 拖入两个同名同大小的不同文件仍返回两个 —— 那是用户真的给了两个，`files` 里有几个就是几个。
  */
 export function collectImageFiles(carrier: ImageCarrier | null | undefined): File[] {
   if (!carrier) return [];
+  const isImage = (f: File | null | undefined): f is File =>
+    !!f && typeof f.type === "string" && f.type.startsWith("image/");
+  const fromFiles = Array.from(carrier.files ?? []).filter(isImage);
+  if (fromFiles.length > 0) return fromFiles;
   const out: File[] = [];
-  const take = (f: File | null | undefined): void => {
-    if (f && typeof f.type === "string" && f.type.startsWith("image/") && !out.includes(f)) {
-      out.push(f);
-    }
-  };
-  for (const f of Array.from(carrier.files ?? [])) take(f);
   for (const it of Array.from(carrier.items ?? [])) {
-    if (it && it.kind === "file" && typeof it.getAsFile === "function") take(it.getAsFile());
+    if (!it || it.kind !== "file" || typeof it.getAsFile !== "function") continue;
+    const f = it.getAsFile();
+    if (isImage(f) && !out.includes(f)) out.push(f);
   }
   return out;
 }
