@@ -16,28 +16,82 @@ writes config_dir()/projects.yml, and whose reader/writer (`read_table`,
 (unpatched) config_dir → on a fresh runner this hits the real ~/.emrg/
 files.
 
-This autouse fixture makes any write to the REAL ~/.emrg/projects.yml
-or ~/.emrg/tasks.yml a hard test failure: the offending test is named
-immediately instead of the pollution being discovered later (precedent:
-#583 assertPortFileInTmp sandbox guard for the emrgd.token file).
+This autouse fixture makes any write to the REAL ~/.emrg/config.toml,
+~/.emrg/projects.yml or ~/.emrg/tasks.yml a hard test failure: the offending
+test is named immediately instead of the pollution being discovered later
+(precedent: #583 assertPortFileInTmp sandbox guard for the emrgd.token file).
 """
 from __future__ import annotations
 
 import logging
+import os
 import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
 _REAL_CONFIG_FILES = (
+    (Path.home() / ".emrg" / "config.toml").resolve(),
     (Path.home() / ".emrg" / "projects.yml").resolve(),
     (Path.home() / ".emrg" / "tasks.yml").resolve(),
 )
 
 
+def _is_real_config_target(path) -> bool:
+    """Is ``path`` one of the host's real config files?
+
+    The ``.emrg`` substring is a cheap pre-filter, not the rule. ``open`` is
+    called for every file the suite touches, so resolving each one would put a
+    ``stat`` on that path thousands of times per run; a path that cannot even
+    spell the directory is answered without one.
+
+    A pure predicate: it resolves the argument and opens nothing, which is what
+    lets a test name the host's own path without the test depending on a guard
+    that is working.
+    """
+    try:
+        text = os.fspath(path)
+    except TypeError:
+        return False
+    if isinstance(text, bytes):
+        return False
+    if ".emrg" not in text:
+        return False
+    return Path(text).resolve() in _REAL_CONFIG_FILES
+
+
+def _refuse_real_config(path, seam: str) -> None:
+    raise AssertionError(
+        f"test attempted to write a real ~/.emrg config file via {seam}; "
+        f"keep tests hermetic (target={path!r})"
+    )
+
+
 @pytest.fixture(autouse=True)
 def _guard_real_config_files(monkeypatch):
-    """Fail any test that writes the real ~/.emrg/projects.yml / tasks.yml."""
+    """Fail any test that writes a real ~/.emrg config file.
+
+    Three files and two seams, both widened together because widening one
+    without the other measures nothing.
+
+    **The third file is ``config.toml``.** It was the one file of the three this
+    fixture did not name, and it is the one whose corruption is on record: a
+    stray line appended to it made ``tomllib`` raise at line 48, and the daemon
+    exited during startup with the traceback landing in ``emrgd-crash.log``
+    rather than in any channel a startup-failure report reads.
+
+    **The second seam is the plain one.** ``atomic_write_yaml`` is how
+    ``projects.yml`` and ``tasks.yml`` are saved, and patching it was enough
+    while those were the only two files here. ``config.toml`` is not YAML: it is
+    written by ``ensure_config`` through ``cfg_path.write_text``, which that
+    patch never sees. So a guard naming only the YAML seam would leave
+    ``config.toml`` protected by nothing but ``_redirect_the_config_path`` — and
+    that redirect is precisely what a mutation arm exists to break, so it cannot
+    be the only thing between a test and the host's file.
+    """
+    import builtins
+    import io
+
     import emrg.server.daemon as daemon_mod
     import emrg.server.scheduler as sched_mod
 
@@ -45,15 +99,41 @@ def _guard_real_config_files(monkeypatch):
     assert orig is daemon_mod.atomic_write_yaml, "both modules must share atomic_write_yaml"
 
     def guarded(data, path, **kwargs):
-        if Path(path).resolve() in _REAL_CONFIG_FILES:
-            raise AssertionError(
-                "test attempted to write a real ~/.emrg config file; "
-                f"keep tests hermetic (target={path!r})"
-            )
+        if _is_real_config_target(path):
+            _refuse_real_config(path, "atomic_write_yaml")
         return orig(data, path, **kwargs)
 
     monkeypatch.setattr(sched_mod, "atomic_write_yaml", guarded)
     monkeypatch.setattr(daemon_mod, "atomic_write_yaml", guarded)
+
+    orig_open = builtins.open
+    orig_io_open = io.open
+
+    def guarded_open(file, mode="r", *args, **kwargs):
+        # An append is the shape the incident on record took, and it is the one
+        # shape a `Path` method cannot be asked about: `Path.write_text` only
+        # ever truncates, so a guard over the modes is the only thing that sees
+        # a line appended to a file that already exists.
+        if any(flag in mode for flag in "wax+"):
+            if _is_real_config_target(file):
+                _refuse_real_config(file, f"open(mode={mode!r})")
+        return orig_open(file, mode, *args, **kwargs)
+
+    def guarded_io_open(file, mode="r", *args, **kwargs):
+        if any(flag in mode for flag in "wax+"):
+            if _is_real_config_target(file):
+                _refuse_real_config(file, f"io.open(mode={mode!r})")
+        return orig_io_open(file, mode, *args, **kwargs)
+
+    # Two seams and no more. `Path.write_text` / `Path.write_bytes` are not
+    # patched separately because they reach `io.open` through `Path.open`, so a
+    # patch of their own would be a second wrapper over one write — and a guard
+    # that names a seam no write reaches is a claim, not a guard. What is left
+    # is one seam per call shape: the module-level `open`, and `io.open`, which
+    # is what `Path.open` calls. They are separate attributes, so each has to be
+    # patched; measured, dropping either one leaves the other's callers open.
+    monkeypatch.setattr(builtins, "open", guarded_open)
+    monkeypatch.setattr(io, "open", guarded_io_open)
 
 
 @pytest.fixture(autouse=True)
