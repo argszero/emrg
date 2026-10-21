@@ -1575,6 +1575,12 @@ class EmrgServer:
                             "error": "task requires session_id and cwd",
                         })
                         continue
+                    # This branch is the one door `_process_message` does not own, and it
+                    # is the door that creates the session directory: without this call a
+                    # `task` carrying an unsafe id reached `_get_or_create_session` and
+                    # wrote outside `<cwd>/.emrg/sessions` (measured on this branch).
+                    if await self._refuse_an_unsafe_session_id(ws, "task", session_id):
+                        continue
                     # Phase 2 session-level lock (protocol-contract §2.6.5):
                     # one active task per session — concurrent tasks queue.
                     # P1 (rant 21:55:37): construct req + allow_tools FIRST
@@ -2788,31 +2794,50 @@ class EmrgServer:
             "date_str": datetime.now().strftime("%y%m%d"),
         }
 
+    async def _refuse_an_unsafe_session_id(
+        self, ws, msg_type: str, session_id: object
+    ) -> bool:
+        """Refuse a client-supplied session id that is not one path component.
+
+        True means the id was refused and the client has been told, so the caller stops.
+
+        A session id arrives in a client message and lands on a path in half the handlers
+        below: `_get_or_create_session` (eleven callers) writes it, the resume reader and
+        the two memory readers open it, and `delete_session` hands the resolved path to
+        `shutil.rmtree`. Measured 2026-10-21: `Session.delete("../..", cwd)` walked
+        `cwd/.emrg/sessions/../..` and left the project tree empty.
+
+        **Two dispatchers, not one.** `_handle_client` intercepts `{"type": "task"}`
+        itself and never reaches `_process_message`, so a check placed only in the latter
+        left the one message type that *creates* a session directory unguarded — measured
+        on this branch before the fix: a `task` carrying `../../../evil` created a
+        directory one level above the project root and started its turn, telling the
+        client nothing. Both call sites ask this method, so the rule has one writer even
+        though it has two doors.
+        """
+        if not session_id or is_safe_session_id(session_id):
+            return False
+        logger.warning(
+            "refused a %r message carrying session id %r: a session id is one "
+            "path component inside <cwd>/.emrg/sessions", msg_type, session_id,
+        )
+        await self._send(ws, {
+            "error": f"invalid session id: {session_id!r} (a session id is "
+                     f"one path component)",
+        })
+        return True
+
     async def _process_message(
         self, msg: dict, ws
     ) -> None:
         """Process a single message and send responses."""
         msg_type = msg.get("type", "")
 
-        # A session id is a client input that becomes a path component in half the
-        # handlers below, and `delete_session` hands the resolved path to
-        # `shutil.rmtree`. Checked here, once, where every message passes and before
-        # any handler builds a path: `_get_or_create_session` (eleven callers), the
-        # resume reader, the two memory readers and the delete path all take the id
-        # from this message. Measured 2026-10-21: `Session.delete("../..", cwd)` left
-        # the project tree empty, so the check cannot live only inside the delete
-        # handler. It sits in `_process_message` rather than in `_handle_client`'s read
-        # loop because this is the seam the tests drive directly.
-        session_id_field = msg.get("session_id")
-        if session_id_field and not is_safe_session_id(session_id_field):
-            logger.warning(
-                "refused a %r message carrying session id %r: a session id is one "
-                "path component inside <cwd>/.emrg/sessions", msg_type, session_id_field,
-            )
-            await self._send(ws, {
-                "error": f"invalid session id: {session_id_field!r} (a session id is "
-                         f"one path component)",
-            })
+        # Every message type dispatched below takes its session id from this message and
+        # most of them paste it onto `<cwd>/.emrg/sessions/`. Checked here, before any
+        # handler builds a path; `{"type": "task"}` is checked in `_handle_client`,
+        # which never reaches this method.
+        if await self._refuse_an_unsafe_session_id(ws, msg_type, msg.get("session_id")):
             return
 
         if msg_type == "ping":
