@@ -26,8 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 GATE = REPO_ROOT / "scripts" / "feishu-gate.py"
 HOST = "ou_host_self"
 
-FAKE_CLI = '''#!/usr/bin/env python3
-"""A stand-in for the Feishu CLI: records argv, answers fixed JSON, touches no network."""
+FAKE_CLI = '''"""A stand-in for the Feishu CLI: records argv, answers fixed JSON, touches no network."""
 import json, os, sys
 from pathlib import Path
 
@@ -67,12 +66,74 @@ else:
 '''
 
 
+def a_program(tmp_path: Path, name: str, body: str, *, windows: bool | None = None) -> Path:
+    """Write `body` as a file the operating system will run when handed its path.
+
+    The gate takes **one** path and gives it to `subprocess`, so what the fixture owes it
+    is a program, not a text file. On POSIX that is a shebang script with the execute bit.
+    On Windows neither means anything to `CreateProcess`: the same fixture, run on the
+    `test-windows` leg, made eleven tests fail with `[WinError 193] %1 is not a valid
+    Win32 application` — the fake was never runnable there, so the gate's own refusal
+    ("the CLI could not be run") was what every assertion saw. So Windows gets a `.cmd`
+    entry point naming the interpreter, and `%*` forwards the caller's arguments to it as
+    written, which is what keeps the body-and-recipient assertions about the gate rather
+    than about a shell.
+
+    Which of the two a host gets is a fact about the host, not about the gate: the
+    property under test — one approval, one message, for the body the host was shown — is
+    the same on both.
+    """
+    if windows is None:
+        windows = os.name == "nt"
+    source = tmp_path / f"{name}.py"
+    source.write_text(body, encoding="utf-8")
+    if windows:
+        runner = tmp_path / f"{name}.cmd"
+        runner.write_text(
+            f'@echo off\r\n"{sys.executable}" "{source}" %*\r\n',
+            encoding="utf-8", newline="",
+        )
+        return runner
+    runner = tmp_path / name
+    runner.write_text(f"#!/usr/bin/env python3\n{body}", encoding="utf-8")
+    runner.chmod(0o755)
+    return runner
+
+
+def test_the_fake_cli_is_a_program_on_either_kind_of_host(tmp_path):
+    """Both arms from one host: the Windows arm is the one CI found missing.
+
+    The `test-windows` leg is where the defect showed, and a host that cannot run it
+    cannot run the fix either — so what is pinned here is the *shape* each arm produces,
+    which is exactly what `CreateProcess` and a POSIX `exec` were disagreeing about.
+    """
+    (tmp_path / "posix").mkdir()
+    (tmp_path / "win").mkdir()
+
+    posix = a_program(tmp_path / "posix", "lark-cli", "print('hi')\n", windows=False)
+    assert posix.read_text(encoding="utf-8").startswith("#!/usr/bin/env python3\n")
+    assert os.access(posix, os.X_OK), "POSIX runs a shebang script only while it is executable"
+    assert posix.name == "lark-cli", "the POSIX arm is named what a CLI is named on POSIX"
+
+    win = a_program(tmp_path / "win", "lark-cli", "print('hi')\n", windows=True)
+    text = win.read_text(encoding="utf-8", newline="")
+    assert win.suffix == ".cmd", "Windows runs only a name it has an extension for"
+    assert text.startswith("@echo off\r\n"), (
+        "without @echo off the shim prints its own command line, and the gate parses the "
+        "CLI's stdout as JSON"
+    )
+    assert "\r\n" in text, "cmd.exe wants CRLF; an LF-only .cmd is misparsed"
+    assert sys.executable in text, "the shim must name the interpreter the body needs"
+    assert text.rstrip().endswith("%*"), (
+        "the arguments must reach the body as the caller wrote them, or the body-and-"
+        "recipient assertions would be about a shell instead of about the gate"
+    )
+
+
 @pytest.fixture()
 def fake_lark(tmp_path):
     """A workspace, a fake CLI, and the two files it reads."""
-    cli = tmp_path / "lark-cli"
-    cli.write_text(FAKE_CLI, encoding="utf-8")
-    cli.chmod(0o755)
+    cli = a_program(tmp_path, "lark-cli", FAKE_CLI)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     env = {
