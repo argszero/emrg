@@ -699,6 +699,12 @@ def test_the_host_facing_half_of_the_summary_is_required():
     # A probability without its basis is what "don't talk to yourself" rejected, so
     # the basis is part of the requirement, not decoration.
     assert "with the basis it is estimated from" in host_half
+    # The question stayed, its answer's form changed: the round rules forbid writing
+    # that the goal is unlikely, so §5 asks for the reading and the gap in the
+    # competition's own metric rather than a bare probability. Pinned here so the
+    # pair cannot be split in silence — see
+    # `test_a_discouraging_reading_is_written_as_the_gap_not_as_a_verdict`.
+    assert "the current reading" in host_half and "the gap to the payout line" in host_half
     # And the reader it is written for — the host reads this, not only the next round.
     assert "not read the previous round's messages" in host_half
 
@@ -1036,3 +1042,46 @@ def test_phase_d_establishes_the_answer_on_a_sample_before_changing_the_class():
         "§Phase D must name the step most easily skipped, or a round that only observed reads "
         "as if it had improved something"
     )
+
+
+def test_a_discouraging_reading_is_written_as_the_gap_not_as_a_verdict(rendered):
+    """§5 asks how likely the goal is; the answer has one accepted form.
+
+    The question and the round rules used to point in opposite directions: §5 asked for a
+    probability, while the round rules forbid writing that the goal is unlikely and accept
+    only the current reading, the gap in the competition's own metric, the levers not yet
+    tried and the next attempt. A round reading both had to pick one silently, and a lean
+    estimate was the case where the two collide.
+
+    So the question is answered **in the metric**, and a discouraging answer is the gap
+    plus the untried levers — never a verdict that the goal cannot be reached. Asserted on
+    the render, because that is what a round receives: a `{# … #}` around the bullet leaves
+    the file intact and the round without the rule.
+    """
+    assert "answered in the competition's own metric" in rendered, (
+        "§5 must send the probability question back to the competition's own metric"
+    )
+    assert "never as a verdict that the goal cannot be reached" in rendered, (
+        "§5 must say what a discouraging reading is written as, or the round is left to "
+        "choose between this question and its own no-conclusion rule"
+    )
+    assert "the levers not yet tried" in rendered
+    assert "a probability for the goal" not in rendered, (
+        "asking for a bare probability is the instruction the round rules forbid answering — "
+        "the pair must not come back on one side only"
+    )
+
+
+def test_a_best_score_is_a_reading_and_a_round_brings_an_untried_attempt(rendered):
+    """Phase D must say what a recorded score is, and what iteration requires.
+
+    Without this, a round can record a best score, re-state it next round, and meet every
+    stated requirement — nothing distinguished a reading from a conclusion, and nothing
+    asked for an attempt the previous round had not tried.
+    """
+    assert "A recorded best score is a reading, not a conclusion" in rendered
+    assert "at least one attempt it had not tried before" in rendered, (
+        "Phase D must ask for an attempt the last round had not tried, or re-measuring "
+        "counts as iteration"
+    )
+    assert "has recorded a reading without iterating" in rendered
