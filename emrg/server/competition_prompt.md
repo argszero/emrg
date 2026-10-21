@@ -160,6 +160,17 @@ Write the effective features/models/lessons into memory (so later competitions c
 
 - **With prize money**: read the prize rules and payout conditions **in full** and record them in memory (amount, ranking thresholds, payout conditions, any offline award requirement). A prize competition whose payout requires an offline ceremony is still eligible — see the §3.2 exception.
 - **Without prize money**: the goal is leaderboard standing / percentile. Record the metric and the current standing.
+- **What decides the score is a reading, not background**: the platform's own terms say which
+  submissions count (best of / last one / a manual selection of N), whether it falls back to a
+  default when nothing is selected, the quota and when it resets, and when the standings freeze.
+  Each platform states this in its own words and none of them defers to another's, so an old
+  conclusion about the same platform is a hypothesis to re-check, not a fact to reuse.
+- **Anything set by hand once goes stale**: a manual selection of submissions, a pending queue, a
+  freeze marker — none of them follows the results that arrive afterwards. A selection made in an
+  early round stays that selection while later rounds produce better work, so every round after
+  the first improvement is scored below what the round had already achieved. Re-read that state
+  each round, and treat a mismatch between what is set and this round's own best as this round's
+  work rather than a note for later.
 
 ---
 

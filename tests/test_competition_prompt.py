@@ -295,6 +295,54 @@ def test_goal_line_covers_both_prize_and_standing():
     assert "leaderboard standing / percentile" in text
 
 
+def test_the_scoring_rule_is_read_each_round(rendered):
+    """What decides the score is a per-round reading, and hand-set state goes stale.
+
+    Both levels are asked, and they are different questions. The file read answers "does the
+    source that ships carry this?" — the render read answers "is this what a round is sent?".
+    A rule wrapped in `{# … #}` keeps every word in the file and renders as nothing, so a
+    file-level assertion alone would report a rule no round ever reads; measured on this very
+    template in issue #1904 for §0.0. The render is therefore the reading that matters here,
+    and the file assertion is kept because a rule deleted from the source must also fail.
+
+    Whitespace is collapsed before the search, because these phrases are longer than the
+    template's wrap column: pinning a line break would make the guard fail on a reflow that
+    changed no word, and a guard that reports formatting as a missing rule teaches the next
+    reader to edit the assertion rather than the text.
+
+    What this does not measure: whether a round obeyed it. That is a reading of the round's
+    closing summary, not something a text assertion can answer.
+    """
+    def flat(text: str) -> str:
+        return re.sub(r"\s+", " ", text)
+
+    source = flat(PROMPT.read_text(encoding="utf-8"))
+    prompt = flat(rendered)
+
+    for phrase, why in (
+        ("What decides the score is a reading",
+         "the rule that the metric's own definition is re-read each round, rather than reused "
+         "as background or carried across platforms"),
+        ("which submissions count",
+         "the first of the four things that decide a score — without it the rule states a "
+         "principle and leaves the round nothing to check"),
+        ("when the standings freeze",
+         "the fourth check; a rule that lists only where submissions land has read a quarter "
+         "of what decides the score"),
+        ("Anything set by hand once goes stale",
+         "the half that decays in silence: a selection or freeze marker made in an early round "
+         "does not follow the better work later rounds produce"),
+    ):
+        assert phrase in prompt, (
+            f"the rendered competition prompt must carry {why}; {phrase!r} is not in what a "
+            f"round is sent"
+        )
+        assert phrase in source, (
+            f"{phrase!r} renders but is not in the source — these two readings are supposed to "
+            f"agree, so one of them is being produced by something other than the template"
+        )
+
+
 def test_preparation_and_closing_summary_are_mandatory():
     text = PROMPT.read_text(encoding="utf-8")
     assert "0. Preparation (MUST run first every round)" in text
