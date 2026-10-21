@@ -213,11 +213,29 @@ _WRAPPER_WORDS = frozenset({
     "busybox", "caffeinate", "command", "doas", "env", "eval", "exec", "ionice",
     "nice", "nohup", "parallel", "ssh", "stdbuf", "su", "sudo", "time",
     "timeout", "watch", "xargs",
-})
+}) | _COMMAND_WRAPPERS
+#: The union above is the cure for a measured hole, not tidiness. This module
+#: holds two vocabularies that answer the same question — which word hands the
+#: argv on — and until they were joined they disagreed by six words, every one a
+#: route to the daemon: on `743931f4`, `setsid pkill -f emrg`, `builtin kill
+#: $(pgrep -f emrg)`, `chroot / pkill -f emrg`, `unshare -r pkill -f emrg`,
+#: `nsenter -t 1 pkill -f emrg` and `chrt 1 pkill -f emrg` were all **allowed**,
+#: while `_runs_as_a_command` (a few hundred lines below) already read those six
+#: prefixes as commands. `-exec`/`-execdir` ride along and change nothing: a token
+#: starting with `-` is read as a flag before the list is consulted.
+#:
+#: The union keeps *this* walk rather than replacing it with `_runs_as_a_command`,
+#: because the two skip different things and each skip is load-bearing: the operand
+#: skip below is what `ssh localhost pkill -f emrg` and `parallel pkill -f emrg`
+#: need (the other walk reads `localhost` as the command and answers "not the
+#: act"), and the flag-value skip is what `sudo -u root kill` needs. Joining the
+#: vocabularies without keeping the walk would trade six holes for two.
 #: Wrappers that also consume one bare operand before the command: `ssh <host>
 #: pkill …`. The first argument is a destination, not the command, so it is
-#: stepped over rather than ending the walk.
-_WRAPPERS_TAKING_AN_OPERAND = frozenset({"ssh", "su"})
+#: stepped over rather than ending the walk. `chroot` puts a bare *path* there —
+#: `chroot / pkill -f emrg` — which is neither a flag's value nor a number, so the
+#: walk needs it named to get past the argument.
+_WRAPPERS_TAKING_AN_OPERAND = frozenset({"ssh", "su", "chroot"})
 #: Tokens that open a command line of their own rather than prefixing one: a
 #: grouping `(`, a command substitution `$(` or a backtick, and `-exec`/
 #: `-execdir`, which exec the command that follows. A signaller right after one

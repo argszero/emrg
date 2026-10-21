@@ -137,6 +137,16 @@ THE_ACT = [
     "! pkill -f emrgd",
     # the brace fuses to the word here, so the tokenizer never separates them
     "{pkill -f emrgd;}",
+    # the six prefixes the two wrapper vocabularies disagreed about. Every one of
+    # them was *allowed* while the walk asked its own shorter list, and every one
+    # really puts the signaller in command position — `_runs_as_a_command` already
+    # read all six as commands, which is how the disagreement was found.
+    "setsid pkill -f emrg",
+    "builtin kill $(pgrep -f emrg)",
+    "chroot / pkill -f emrg",
+    "unshare -r pkill -f emrg",
+    "nsenter -t 1 pkill -f emrg",
+    "chrt 1 pkill -f emrg",
     # a shell re-parsing the text, and a substitution naming the program
     "sh -c 'emrg server stop'",
     'bash -c "emrg server restart"',
@@ -179,6 +189,14 @@ NOT_THE_ACT = [
     "(grep -rn kill emrg/)",
     "echo $(grep -rn kill emrg/)",
     "find . -name kill -o -name emrg",
+    # the six prefixes the wider list admitted lead to the command that follows
+    # them, and that command may still be a read: joining two vocabularies must
+    # add routes to the act, not turn every mention behind a prefix into it
+    "setsid grep -rn kill emrg/",
+    "builtin grep -rn kill emrg/",
+    "chroot / grep -rn kill emrg/",
+    "unshare grep kill emrg/",
+    "nsenter grep kill emrg/",
     # an opener leads to the command that follows it, and that command may be a
     # read — the opener set must not turn every mention after it into the act
     "if true; then grep -rn kill emrg/; fi",
