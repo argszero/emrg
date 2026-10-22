@@ -25,7 +25,7 @@ import subprocess
 import sys
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -169,7 +169,7 @@ from emrg.tools.glob_tool import GlobTool
 from emrg.tools.grep_tool import GrepTool
 from emrg.tools.submit_rant_tool import SubmitRantTool
 from emrg.tools.subagent_tool import SubagentTool
-from emrg.tools.boss_tool import BossTool
+from emrg.tools.boss_tool import BUSY_MARKER, REASK_WINDOW_S, BossTool
 from emrg.skills.loader import load_skills
 from emrg.skills.registry import ensure_catalog_file, load_catalog_skills, skill_is_managed
 from emrg.server.rants import append_rant, list_rants
@@ -8027,7 +8027,7 @@ class EmrgServer:
     BOSS_DIR = "sub-boss"
 
     async def _run_boss_tool(
-        self, *, parent_session_id: str, parent_cwd: str, focus: str = "",
+        self, *, parent_session_id: str, parent_cwd: str,
         timeout_s: int, intent: str = "", parent_tools: list[str] | None = None,
         parent_sandbox: str | None = None,
     ) -> dict:
@@ -8046,7 +8046,6 @@ class EmrgServer:
         child_task = asyncio.create_task(self._run_boss_child(
             parent_session_id=parent_session_id,
             parent_cwd=parent_cwd,
-            focus=focus,
             intent=intent,
             state=state,
             parent_tools=parent_tools,
@@ -8071,12 +8070,12 @@ class EmrgServer:
         return {"error": (
             f"boss: the owner did not answer within {timeout_s}s, so its turn was "
             "cancelled. Nothing from it was delivered. Owner session: "
-            f"{state['child']}. Raise `timeout_s`, or narrow `focus` to the one "
-            "thing you need judged."
+            f"{state['child']}. Raise `timeout_s` if the owner needs longer to read "
+            "this session's history."
         )}
 
     async def _run_boss_child(
-        self, *, parent_session_id: str, parent_cwd: str, focus: str,
+        self, *, parent_session_id: str, parent_cwd: str,
         intent: str, state: dict, parent_tools: list[str] | None = None,
         parent_sandbox: str | None = None,
     ) -> dict:
@@ -8109,19 +8108,39 @@ class EmrgServer:
         boss_cwd.mkdir(parents=True, exist_ok=True)
         parent_history = parent_session_dir / "history.jsonl"
 
-        prompt = _get_jinja_env().get_template("boss.j2").render(
-            parent_history=str(parent_history),
-            parent_session=parent_session_id,
-            # Read by the template's own `{% if focus %}`, so an empty string and a
-            # missing key agree: no particular question was asked.
-            focus=focus or "",
-        )
-
         # Load-or-create, never delete: the retained session keeps its history, its
         # memory and its own compaction between rounds. That is what makes the
         # several thousand characters of mission a cost paid once rather than
         # every round (issue #2467, requirement 3).
         child = self._get_or_create_session(child_id, boss_cwd)
+
+        # The quiet window (issue #2495). Direction does not change inside four
+        # hours, so a second call in that time would spend a whole owner turn to
+        # re-buy a judgement that cannot have moved. The clock is the owner
+        # session's own `meta.json`, so a restart neither resets nor forgets it,
+        # and it is read before anything is started: no turn, no prompt, no depth.
+        asked_at = time.time()
+        last_asked = child.boss_asked_at
+        if last_asked is not None and asked_at - last_asked < REASK_WINDOW_S:
+            free_at = last_asked + REASK_WINDOW_S
+            logger.info(
+                "[boss] busy: parent=%s child=%s remaining=%.0fs",
+                parent_session_id, child_id, free_at - asked_at,
+            )
+            return {"text": self._boss_busy_report(
+                child_id, last_asked, free_at, free_at - asked_at,
+            )}
+
+        # Stamped before the turn runs, never after it: a turn that dies mid-way
+        # must still leave the clock written, or the next call pays for the same
+        # judgement again with nothing to show for the first.
+        child.set_boss_asked_at(asked_at)
+
+        prompt = _get_jinja_env().get_template("boss.j2").render(
+            parent_history=str(parent_history),
+            parent_session=parent_session_id,
+        )
+
         child.set_depth(depth + 1)
         # The owner's tier is the parent's, never its own: authorization a caller
         # can choose for the thing it is authorizing is not a boundary.
@@ -8216,6 +8235,35 @@ class EmrgServer:
             f"- rounds: {rounds}\n"
             f"- elapsed: {elapsed:.1f}s\n\n"
             f"{answer}"
+        )
+
+    @staticmethod
+    def _boss_busy_report(
+        child_id: str, last_asked: float, free_at: float, remaining: float,
+    ) -> str:
+        """The answer a call inside the quiet window gets: a notice, and no stance.
+
+        An ordinary result rather than an error, because a busy owner is not a
+        failure of the round that asked — and its first line carries `BUSY_MARKER`
+        so that "the owner was left alone" is readable from the answer's shape.
+        The executor is told in as many words that no direction was decided, since
+        the tool otherwise promises every answer is a stance.
+        """
+        def _stamp(when: float) -> str:
+            return datetime.fromtimestamp(when, tz=timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+
+        return (
+            f"{BUSY_MARKER} — the owner was left alone; this is not a stance.\n"
+            f"- owner session: {child_id}\n"
+            f"- last asked: {_stamp(last_asked)}\n"
+            f"- free at: {_stamp(free_at)}\n"
+            f"- remaining: {int(remaining)}s\n\n"
+            "No question was put to the owner this round, so no direction was "
+            "decided: carry on with the plan you already have, or finish and "
+            "report. Ask again once the window has passed if the direction "
+            "genuinely has to change."
         )
 
     def _maybe_reflect_memory(

@@ -16,8 +16,11 @@ What is asserted here, and why each arm is a separate subject:
   authorization story: it lives in one whitelist and nowhere else, so a second
   mechanism inside the tool asking "who called me?" would be a copy of a fact the
   producer already holds;
-* **the arguments** — ``intent`` is required, ``focus`` is optional and is not a
-  brief, and every refusal names the parameter it refused;
+* **the arguments** — ``intent`` is required, the schema carries no ``focus`` at
+  all, and every refusal names the parameter it refused;
+* **the quiet window** — a second call inside four hours starts no owner turn and
+  says so in a shape a caller can detect; the clock is the session's own, so a
+  rebuilt session is still busy and a turn that died still leaves its stamp;
 * **where the mission comes from** — driven for real: the owner's first request
   does **not** contain the mission and its second one does, which can only happen
   if the owner read the parent's history itself. A test that asserted the prompt
@@ -36,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -51,7 +55,12 @@ from emrg.server.daemon import (
 )
 from emrg.protocol import TaskRequest
 from emrg.session import Session
-from emrg.tools.boss_tool import DEFAULT_TIMEOUT_S, BossTool
+from emrg.tools.boss_tool import (
+    BUSY_MARKER,
+    DEFAULT_TIMEOUT_S,
+    REASK_WINDOW_S,
+    BossTool,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PROMPTS = REPO_ROOT / "emrg" / "server" / "prompts"
@@ -154,16 +163,29 @@ def test_a_call_without_a_parent_session_is_refused():
     assert runner.calls == []
 
 
-def test_focus_is_optional_and_must_be_a_string():
+def test_the_schema_carries_no_focus_parameter():
+    """Issue #2495: choosing the question is choosing the direction.
+
+    Asserted on the schema rather than on behaviour, and the difference is the
+    guard: the tool ignores keys it does not know, so a test that passed `focus` in
+    and watched for no effect would stay green with the parameter restored.
+    """
+    properties = BossTool(_Runner()).definition().parameters["properties"]
+    assert "focus" not in properties, (
+        "the executor can still name what the owner should judge, which hands the "
+        "direction back to the session being directed"
+    )
+    assert set(properties) == {"intent", "timeout_s"}
+
+
+def test_the_runner_is_handed_no_focus():
+    """The other half: a removed parameter leaves the call as well as the schema."""
     runner = _Runner()
     asyncio.run(BossTool(runner).execute(_injected()))
-    assert runner.calls[0]["focus"] == "", (
-        "an absent focus must read as 'no particular question', not as a brief"
+    assert "focus" not in runner.calls[0], (
+        "the daemon is still handed a focus, so the parameter is only half gone"
     )
-
-    refused = asyncio.run(BossTool(_Runner()).execute(_injected(focus=["a", "b"])))
-    assert refused.error
-    assert "focus" in refused.content
+    assert "prompt" not in runner.calls[0]
 
 
 @pytest.mark.parametrize("bad", [True, "600", 0, -1, 1.5])
@@ -223,7 +245,7 @@ def test_the_boss_template_is_a_file_the_host_edits():
     original = source.read_text(encoding="utf-8")
     try:
         rendered = _get_jinja_env().get_template("boss.j2").render(
-            parent_history="/tmp/session/history.jsonl", focus="",
+            parent_history="/tmp/session/history.jsonl",
         )
         assert "/tmp/session/history.jsonl" in rendered, (
             "the template does not receive the path to the parent's history, so the "
@@ -233,7 +255,7 @@ def test_the_boss_template_is_a_file_the_host_edits():
         marker = "TEMPLATE-EDIT-IS-LIVE-4b7d"
         source.write_text(original + "\n" + marker + "\n", encoding="utf-8")
         again = _get_jinja_env().get_template("boss.j2").render(
-            parent_history="/tmp/session/history.jsonl", focus="",
+            parent_history="/tmp/session/history.jsonl",
         )
         assert marker in again, (
             "an edit to boss.j2 did not reach the next render — the wording is the "
@@ -289,7 +311,7 @@ def _boss_cwd(tmp_path, session_id: str = "task-1") -> Path:
 
 def _ask(server: EmrgServer, tmp_path, session_id: str = "task-1") -> dict:
     return asyncio.run(server._run_boss_child(
-        parent_session_id=session_id, parent_cwd=str(tmp_path), focus="",
+        parent_session_id=session_id, parent_cwd=str(tmp_path),
         intent="ask", state={"child": None}, parent_tools=["read"],
     ))
 
@@ -458,3 +480,121 @@ def test_an_owner_of_a_task_inherits_the_turns_tier(tmp_path, monkeypatch):
         "the owner of a confined task ran at a wider tier: an owner that may go "
         "where its executor may not is the escape this inheritance refuses"
     )
+
+
+# ── the quiet window (issue #2495) ────────────────────────────────────
+
+
+def test_the_quiet_window_is_four_hours():
+    """The number the description advertises and the daemon enforces is one number."""
+    assert REASK_WINDOW_S == 4 * 60 * 60, (
+        "the window moved: the tool's own description is rendered from this "
+        "constant, so a second number here would be a second answer"
+    )
+
+
+def test_a_second_call_inside_the_window_starts_no_owner_turn(tmp_path, monkeypatch):
+    server = _server(tmp_path, monkeypatch)
+    seen = _stub_the_loop(server)
+
+    first = _ask(server, tmp_path)
+    assert not first.get("error"), first
+    assert BUSY_MARKER not in first["text"], "the first call was answered as busy"
+    assert len(seen) == 1, "the first call must actually run the owner"
+
+    second = _ask(server, tmp_path)
+    assert len(seen) == 1, (
+        "a second owner turn started inside the window, which pays twice for a "
+        "judgement that cannot have changed"
+    )
+    assert second["text"].startswith(BUSY_MARKER), second["text"][:80]
+
+
+def test_the_busy_answer_is_a_result_and_says_no_stance_was_decided(
+    tmp_path, monkeypatch,
+):
+    """A busy owner is not a failure, and the answer must not read as direction."""
+    server = _server(tmp_path, monkeypatch)
+    _stub_the_loop(server)
+    _ask(server, tmp_path)
+
+    busy = _ask(server, tmp_path)
+    assert "error" not in busy, (
+        "a busy owner came back as an error, so a caller reads a normal wait as a "
+        "broken round"
+    )
+    assert busy["text"].startswith(BUSY_MARKER)
+    assert "remaining:" in busy["text"], "the answer does not say how long the wait is"
+    assert "no direction was decided" in busy["text"], (
+        "the answer does not say in as many words that this round has no stance, "
+        "and the tool otherwise promises every answer is one"
+    )
+
+
+def test_the_owner_is_asked_again_once_the_window_has_passed(tmp_path, monkeypatch):
+    """The window is a bound, not a permanent refusal at the other end."""
+    server = _server(tmp_path, monkeypatch)
+    seen = _stub_the_loop(server)
+    _ask(server, tmp_path)
+
+    owner = server._get_or_create_session("boss-task-1", _boss_cwd(tmp_path))
+    owner.set_boss_asked_at(time.time() - REASK_WINDOW_S - 1)
+
+    again = _ask(server, tmp_path)
+    assert len(seen) == 2, "the window refused a call that was outside it"
+    assert BUSY_MARKER not in again["text"]
+
+
+def test_the_window_survives_a_rebuilt_session(tmp_path, monkeypatch):
+    """A daemon restart must not reset the clock: the owner session lives on disk."""
+    first = _server(tmp_path, monkeypatch)
+    _stub_the_loop(first)
+    _ask(first, tmp_path)
+
+    reopened = _server(tmp_path, monkeypatch)
+    seen = _stub_the_loop(reopened)
+    out = _ask(reopened, tmp_path)
+
+    assert seen == [], "a rebuilt session forgot it had been asked, so it paid again"
+    assert out["text"].startswith(BUSY_MARKER)
+
+
+def test_a_turn_that_died_still_leaves_the_clock(tmp_path, monkeypatch):
+    """The stamp is written before the turn runs, never after it."""
+    server = _server(tmp_path, monkeypatch)
+
+    async def dead_loop(*args, **kwargs):
+        raise RuntimeError("the owner died mid-turn")
+
+    server._run_tool_loop_locked = dead_loop
+    with pytest.raises(RuntimeError):
+        _ask(server, tmp_path)
+
+    seen = _stub_the_loop(server)
+    out = _ask(server, tmp_path)
+    assert seen == [], (
+        "the clock was written only once the turn finished, so a turn that died "
+        "left no trace and the next call bought the same judgement again"
+    )
+    assert out["text"].startswith(BUSY_MARKER)
+
+
+def test_the_clock_is_written_by_its_own_setter(tmp_path):
+    """The value on disk is the setter's, not a neighbour's save carrying it along.
+
+    Without this arm, deleting the setter's `_save_meta()` survives every test
+    above: `set_depth` saves the same `meta.json` immediately afterwards and takes
+    the new key with it, so the call path looks correct while the writer is broken.
+    Asserted on the file, because the file is the thing the restart reads.
+    """
+    session = Session.create_with_id("boss-clock", tmp_path)
+    assert session.boss_asked_at is None, "a fresh session claims it was asked"
+
+    session.set_boss_asked_at(1761000000.0)
+
+    meta_path = tmp_path / ".emrg" / "sessions" / "boss-clock" / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert meta.get("boss_asked_at") == 1761000000.0, (
+        "the setter did not write the clock: on disk is where a restart reads it"
+    )
+    assert session.boss_asked_at == 1761000000.0
