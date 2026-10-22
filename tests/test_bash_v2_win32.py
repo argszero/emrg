@@ -26,12 +26,19 @@ import tempfile
 
 import pytest
 
-from emrg.sandbox.grants import RootGrant
+from emrg.sandbox import grants as grants_mod
+from emrg.sandbox.grants import GRANT_DIRECTORY, GRANT_REGISTRY, SOURCE_SESSION, RootGrant
 from emrg.sandbox.policy import SandboxPolicy
 from emrg.sandbox.providers import win32 as provider
 from emrg.sandbox.roots import canonical_path
-from emrg.sandbox.win32 import ffi
+from emrg.sandbox.win32 import abi, ffi
 from emrg.sandbox.win32.ffi import SIDAndAttributes
+from emrg.sandbox.win32.registry import (
+    RegistryKeyError,
+    key_exists,
+    read_current_key_dacl,
+    split_key,
+)
 from emrg.sandbox.win32.runner import (
     RUNNER_FAILURE_EXIT,
     RUNNER_SIGNATURE,
@@ -52,6 +59,7 @@ from emrg.sandbox.win32.sid import (
     assert_private_temp_disjoint,
     assert_temp_root_outside_workspace,
     contains_directory,
+    registry_write_sid,
     root_write_sid,
     temp_write_sid,
     workspace_write_sid,
@@ -62,6 +70,7 @@ from emrg.tools.shell_env import runner_import_env
 #: domain-separating ``-1``.
 WORKSPACE_SID_SHAPE = re.compile(r"^S-1-4-(\d+)-(\d+)$")
 TEMP_SID_SHAPE = re.compile(r"^S-1-4-(\d+)-(\d+)-1$")
+REGISTRY_SID_SHAPE = re.compile(r"^S-1-4-(\d+)-(\d+)-2$")
 
 #: The sub-authority ceiling the derivation reduces into (30-bit).
 SUB_AUTHORITY_CEILING = 2**30 - 1
@@ -2282,3 +2291,283 @@ def test_init_owns_every_sid_the_restricted_token_is_pointed_at(tmp_path, monkey
     assert len(api.kernel32.closed) == 2, "both the current and the restricted token are closed"
 
 
+
+
+# ── a registry key's capability identity (issue #2492 Stage 2) ────────────
+
+
+def test_the_registry_sid_is_its_own_domain_so_a_key_and_a_path_never_collide():
+    """A key and a path spelling the same string must not share one identity.
+
+    ``HKCU\\Software\\X`` is a perfectly legal file name, so one derivation for
+    both would let a key's ACE answer a path's grant — and this stack fails open
+    when the token carries a SID no ACE names, or an ACE stands for an object the
+    token never asked for. The third sub-authority is fixed at ``-2`` beside the
+    temp form's ``-1``, and the seed is domain-separated as well.
+    """
+    spelling = "HKCU\\Software\\LarkCli"
+    sid = registry_write_sid(spelling)
+
+    assert REGISTRY_SID_SHAPE.match(sid), sid
+    assert sid != workspace_write_sid(spelling)
+    assert sid != temp_write_sid(spelling)
+    assert registry_write_sid(spelling) == registry_write_sid(spelling.lower()), (
+        "the registry namespace is case-insensitive: two spellings of one key are one key, "
+        "so they must derive one identity"
+    )
+    assert registry_write_sid(spelling) != registry_write_sid(spelling + "\\keychain")
+
+
+def test_split_key_reads_both_roots_and_refuses_what_it_cannot_address():
+    """The half of the applier every platform can measure, on its own terms.
+
+    A bare hive is refused because it names every key the user owns — a widening
+    nobody asked for, and the registry counterpart of granting a volume instead of
+    a directory. An unknown root is refused because it names nothing this module
+    can open.
+    """
+    assert split_key("HKCU\\Software\\X") == (abi.HKEY_CURRENT_USER, "Software\\X")
+    assert split_key("hkey_current_user\\Software\\X") == (
+        abi.HKEY_CURRENT_USER,
+        "Software\\X",
+    )
+    assert split_key("HKLM\\SOFTWARE\\X") == (abi.HKEY_LOCAL_MACHINE, "SOFTWARE\\X")
+    assert split_key("HKEY_LOCAL_MACHINE\\SOFTWARE\\X")[0] == abi.HKEY_LOCAL_MACHINE
+    assert split_key("HKCU\\Software\\X\\") == (abi.HKEY_CURRENT_USER, "Software\\X"), (
+        "a trailing separator is a spelling, not a different key"
+    )
+
+    for refused in ("HKCU", "HKCU\\", "", "   ", "HKCR\\X", "Software\\X", "HKCU/X", None):
+        with pytest.raises(RegistryKeyError):
+            split_key(refused)
+
+
+def test_key_exists_answers_false_where_there_is_no_registry():
+    """The predicate that keeps the manifest total, measured on a host without one.
+
+    ``winreg`` does not exist off Windows, so the answer is ``False`` — which is
+    exactly what lets one derivation read every platform's manifest row on every
+    platform instead of inventing an environment to avoid reading it.
+    """
+    if sys.platform == "win32":
+        pytest.skip("on Windows the answer is this runner's own registry, not a constant")
+    assert key_exists("HKCU\\Software\\LarkCli") is False
+    assert key_exists("not-a-key-at-all") is False
+
+
+class _FakeRegistryAclApi:
+    """The three calls ``read_current_key_dacl`` makes, over a buffer it fills.
+
+    ``RegGetKeySecurity`` writes a descriptor into the buffer the caller supplies
+    and ``GetSecurityDescriptorDacl`` reports a DACL that points *into* it — the
+    shape the real API has, and the reason the pointer and the buffer have to
+    travel together. The bytes are arbitrary: what is measured through this fake
+    is ownership, never the descriptor's contents.
+    """
+
+    def __init__(self) -> None:
+        self.advapi32 = self
+        self.blob = b"REGKEY-DESCRIPTOR-BYTES"
+        self.filled: list[int] = []
+
+    @staticmethod
+    def _address(pointer) -> int:
+        if isinstance(pointer, int):
+            return pointer
+        return int(ctypes.cast(pointer, ctypes.c_void_p).value or 0)
+
+    def RegGetKeySecurity(self, handle, info, descriptor, size_ref):
+        if descriptor is None:
+            size_ref._obj.value = len(self.blob)
+            return abi.ERROR_INSUFFICIENT_BUFFER
+        address = self._address(descriptor)
+        ctypes.memmove(address, self.blob, len(self.blob))
+        self.filled.append(address)
+        return abi.ERROR_SUCCESS
+
+    def GetSecurityDescriptorDacl(self, descriptor, present_ref, dacl_ref, defaulted_ref):
+        present_ref._obj.value = 1
+        dacl_ref._obj.value = self._address(descriptor)
+        defaulted_ref._obj.value = 0
+        return 1
+
+
+def test_a_key_dacl_answer_owns_the_buffer_its_pointer_addresses():
+    """The ownership the merge depends on, measured where no registry exists.
+
+    ``RegGetKeySecurity`` fills a buffer the caller supplies and the DACL points
+    into it, so a pointer handed back on its own stays valid only until that
+    buffer is collected. Its next consumers walk the pointer as an ACL header and
+    copy every ACE it claims, so on a collected buffer they read an allocator's
+    bookkeeping as ``AclSize``/``AceCount`` and can write past the new ACL — the
+    heap is corrupted, and something unrelated dies later with no assertion
+    firing. So the answer carries the buffer, and what is asserted here is that
+    the pointer addresses the buffer it carries, and that the buffer kept is the
+    one the API filled.
+    """
+    api = _FakeRegistryAclApi()
+    dacl = read_current_key_dacl(api, "HKCU\\Software\\X", 0x4B1)
+
+    assert dacl is not None, "the fake reports a present DACL"
+    assert api.filled, "the reader must pass its own buffer to the API, not a scratch one"
+    start = ctypes.addressof(dacl.buffer)
+    assert start <= dacl.pointer < start + len(dacl.buffer), (
+        "the DACL pointer must address the buffer the answer keeps alive"
+    )
+    assert bytes(dacl.buffer)[: len(api.blob)] == api.blob, (
+        "the buffer kept must be the one the API filled, not a copy of it"
+    )
+
+
+@needs_windows
+def test_a_key_grant_is_applied_checkable_and_reversible_on_a_real_key():
+    """The boundary itself, on a throwaway key under ``HKCU``.
+
+    Three properties, and the middle one is what a careless rewrite breaks:
+
+    * the key's DACL gains the capability ACE (:func:`has_exact_grant` answers for
+      the *registry* mask, not the file one);
+    * the **host's own access survives the merge** — a DACL rebuilt from the
+      capability SID alone would lock the user out of their own key, which is why
+      this asserts the ambient open still works rather than only that the ACE is
+      there;
+    * a revoke takes ours away and leaves theirs.
+
+    The key is created for this test and deleted at the end, so nothing it writes
+    outlives it.
+    """
+    import uuid
+    import winreg
+
+    from emrg.sandbox.win32.acl import has_exact_grant
+    from emrg.sandbox.win32.grants import AclWriteGrant
+    from emrg.sandbox.win32.registry import (
+        close_key,
+        grant_key_write,
+        open_key,
+        read_current_key_dacl,
+        revoke_key_write,
+    )
+
+    name = f"EMRGTest-{uuid.uuid4().hex}"
+    subkey = f"Software\\{name}"
+    key = f"HKCU\\{subkey}"
+    winreg.CreateKey(winreg.HKEY_CURRENT_USER, subkey).Close()
+    api = ffi.win32()
+    grant = AclWriteGrant.create(registry_write_sid(key))
+    try:
+        def current_acl():
+            """Read the key's DACL through the production reader, keeping its buffer.
+
+            The answer is returned whole rather than reduced to its pointer: the
+            buffer it carries is what makes that pointer addressable, and this test
+            reads through it after the handle is closed.
+            """
+            handle = open_key(api, key)
+            try:
+                return read_current_key_dacl(api, key, handle)
+            finally:
+                close_key(api, handle, key)
+
+        before = current_acl()
+        assert before is not None, "a key created here carries a DACL"
+        assert not has_exact_grant(api, before.pointer, grant.sid_ptr, mask=abi.REGISTRY_GRANT_MASK), (
+            "the capability ACE must not be there before the grant — otherwise nothing below measures it"
+        )
+
+        grant_key_write(api, key, grant.sid_ptr)
+        after = current_acl()
+        assert has_exact_grant(api, after.pointer, grant.sid_ptr, mask=abi.REGISTRY_GRANT_MASK), (
+            "the key's DACL must carry the capability ACE after the grant"
+        )
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, subkey, 0, winreg.KEY_READ | winreg.KEY_WRITE
+        ):
+            pass  # the host's own access survived: the merge added an ACE
+
+        revoke_key_write(api, key, grant.sid_ptr)
+        revoked = current_acl()
+        assert not has_exact_grant(
+            api, revoked.pointer, grant.sid_ptr, mask=abi.REGISTRY_GRANT_MASK
+        )
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, subkey, 0, winreg.KEY_READ | winreg.KEY_WRITE
+        ):
+            pass  # and the revoke took only the capability ACE
+    finally:
+        grant.dispose()
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, subkey)
+
+
+@pytest.fixture
+def enforces_registry(monkeypatch):
+    """Pin this host's enforcement table to claim the registry kind.
+
+    The provider under test is the Windows dialect, and the leg this runs on is
+    not necessarily Windows — so the **precondition** is pinned rather than the
+    subject faked: what is measured is the provider's rendering, not this
+    platform's capability. ``named_grants`` reads the table at call time, so a
+    patch of the module's own table is what it sees. On the Windows leg the entry
+    is already there and the fixture changes nothing.
+    """
+    family = grants_mod.platform_family()
+    table = dict(grants_mod.ENFORCED_KINDS)
+    if GRANT_REGISTRY not in table[family]:
+        table[family] = (*table[family], GRANT_REGISTRY)
+    monkeypatch.setattr(grants_mod, "ENFORCED_KINDS", table)
+
+
+def test_a_registry_grant_reaches_the_runner_as_its_own_flag(tmp_path, enforces_registry):
+    """The wiring, measured on every platform: a key becomes ``--extra-key``.
+
+    Two halves of one property. The policy renders a key grant as its **own** flag
+    — never as ``--extra-root``, which the path applier would apply to a
+    filesystem object nobody named — and the runner's parser reads it back into
+    the list its SIDs are derived from. Either half alone proves nothing: a flag
+    nobody parses confines nothing, and a parser nobody feeds is dead code.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    key = "HKCU\\Software\\LarkCli"
+    policy = SandboxPolicy(
+        mode="workspace-write",
+        workspace_root=str(workspace),
+        extra_grants=(RootGrant(kind=GRANT_REGISTRY, target=key, source=SOURCE_SESSION),),
+    )
+
+    argv = provider.runner_argv(policy)
+
+    assert argv[argv.index("--extra-key") + 1] == key
+    assert "--extra-root" not in argv, "a key must never be rendered as a path grant"
+
+    parsed = parse_args([
+        "--workspace", str(workspace),
+        "--temp", str(tmp_path),
+        "--mode", "workspace-write",
+        "--extra-key", key,
+        "--", "cmd",
+    ])
+    assert parsed.extra_keys == [key]
+    assert parsed.extra_roots == []
+
+
+def test_a_key_grant_and_a_path_grant_travel_on_separate_flags(tmp_path, enforces_registry):
+    """One policy, both kinds: neither may be dropped, and neither may swap flags."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    root = tmp_path / "root"
+    root.mkdir()
+    key = "HKCU\\Software\\LarkCli"
+    policy = SandboxPolicy(
+        mode="workspace-write",
+        workspace_root=str(workspace),
+        extra_grants=(
+            RootGrant(kind=GRANT_DIRECTORY, target=str(root), source=SOURCE_SESSION),
+            RootGrant(kind=GRANT_REGISTRY, target=key, source=SOURCE_SESSION),
+        ),
+    )
+
+    argv = provider.runner_argv(policy)
+
+    assert argv[argv.index("--extra-root") + 1] == canonical_path(str(root))
+    assert argv[argv.index("--extra-key") + 1] == key

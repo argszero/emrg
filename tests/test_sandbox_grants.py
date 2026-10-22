@@ -28,6 +28,7 @@ Two readings this file is written around:
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -60,6 +61,7 @@ from emrg.sandbox.roots import (
     stored_grants,
     writable_roots,
 )
+from emrg.sandbox.win32.registry import RegistryKeyError, split_key
 from emrg.session import Session
 
 #: The shipped manifest, captured at import — before the autouse fixture can pin
@@ -145,6 +147,23 @@ def test_the_path_projection_has_no_key_to_a_registry_grant(tmp_path):
     only paths. Handing a key spelling to one of them would grant something else
     entirely — the identity bug requirement 1 of issue #2492 names.
 
+    **Two meanings used to share this one assertion, and the second is not this
+    test's.** Whether a *key can be enforced* on the platform at hand is
+    ``test_a_registry_grant_is_either_enforced_here_or_refused_by_name``'s
+    question, answered from ``enforced_kinds()``; whether a *path reader* may
+    ever be handed a key is this test's, and the answer is **none anywhere**.
+    Reading the first through ``pytest.raises(GrantKindNotEnforced)`` around the
+    projection meant the claim held only while no platform enforced a key: the
+    day one did, the raise stopped and the projection's own guarantee went
+    unmeasured — measured as a red `test-windows` leg on PR #2498, where the
+    raise simply no longer happens.
+
+    So the claim is stated as what the projection does with the key — it is
+    absent, and the paths are exactly the ones the same policy yields without it
+    — and the baseline is asserted non-empty, because a projection that answered
+    ``[]`` for every policy would satisfy "no key" while telling the truth about
+    nothing.
+
     The workspace root is the fixture's own directory, not a literal ``/tmp``: the
     policy refuses a root that is not absolute *in the execution world*, and ``/tmp``
     is not one on a Windows host — where this test then failed on the setup rather
@@ -157,12 +176,19 @@ def test_the_path_projection_has_no_key_to_a_registry_grant(tmp_path):
         workspace_root=str(tmp_path),
         extra_grants=(grant,),
     )
+    without_key = resolve_policy(mode="workspace-write", workspace_root=str(tmp_path))
 
     assert canonical_target(grant) == "HKCU\\Software\\LarkCli", (
         "realpath over a key spelling would rewrite the key into a path"
     )
-    with pytest.raises(GrantKindNotEnforced):
-        writable_roots(policy)
+    paths = writable_roots(policy)
+    assert paths, "the projection has no subject if it answers no path at all"
+    assert "HKCU\\Software\\LarkCli" not in paths, (
+        "a key spelling reached a reader that can only write paths"
+    )
+    assert paths == writable_roots(without_key), (
+        "the key grant changed the paths, so it is not merely absent from them"
+    )
 
 
 # ── §2 the manifest supplies grants nobody typed ───────────────────────────
@@ -291,30 +317,82 @@ def test_the_manifest_grants_nothing_at_read_only(pin_default_manifest, tmp_path
 # ── §5 a kind no platform enforces is refused by name ─────────────────────
 
 
-def test_no_platform_enforces_a_registry_key_yet():
-    """The staging boundary, pinned: the kind exists, the enforcement does not.
+def test_one_platform_enforces_a_registry_key_and_the_other_three_refuse_it():
+    """The staging boundary has moved, and it is now asymmetric on purpose.
 
-    ``emrg/sandbox/win32/`` applies DACLs to paths. A key needs its own
-    enforcement, and it is Stage 2 of issue #2492 — so this asserts the *absence*
-    on every platform rather than trusting a comment, and the Stage-2 change is
-    the one that edits this test on purpose.
+    A registry key's DACL is read and rewritten through ``RegGetKeySecurity`` /
+    ``RegSetKeySecurity``, which exist on Windows and nowhere else. So the kind is
+    enforceable on exactly one family, and the other three must keep saying so
+    rather than dropping the grant — a platform that cannot enforce a kind and
+    silently accepts it is the lying boundary this module refuses everywhere else.
     """
-    for family in ("darwin", "linux", "win32", "other"):
+    assert GRANT_REGISTRY in enforced_kinds("win32")
+    for family in ("darwin", "linux", "other"):
         assert GRANT_REGISTRY not in enforced_kinds(family), family
 
 
-def test_a_registry_grant_is_refused_by_name_and_not_dropped(tmp_path):
+def test_the_windows_registry_rows_name_keys_the_applier_can_address():
+    """The shipped table's registry rows, held to the parser that has to act on them.
+
+    A row naming a spelling ``split_key`` refuses would be a default grant that can
+    never be applied — the lying manifest this module refuses elsewhere, one layer
+    down. Comparing the two halves is what keeps the table and the applier in step;
+    nothing here opens a key, so it measures on every platform.
+    """
+    rows = _SHIPPED_MANIFEST["win32"]
+    keys = [row for row in rows if row[0] == GRANT_REGISTRY]
+    assert len(keys) >= 2, (
+        f"the Windows manifest ships {len(keys)} registry row(s) — the parent and the key "
+        "are both load-bearing, so fewer than two means nothing was measured"
+    )
+    for kind, spelling in keys:
+        _root, subkey = split_key(spelling)
+        assert subkey, spelling
+        assert kind in _SHIPPED_ENFORCED["win32"], (kind, spelling)
+    # The other direction, and it is what makes this a guard rather than a tally:
+    # re-typing a key row as a path drops it out of `keys`, so every assertion
+    # above would pass over the row that changed. A path row must therefore *not*
+    # carry a key's spelling.
+    for kind, spelling in rows:
+        if kind == GRANT_REGISTRY:
+            continue
+        with pytest.raises(RegistryKeyError):
+            split_key(spelling)
+
+
+def test_a_registry_row_this_host_does_not_have_is_absent_not_an_error():
+    """The manifest's totality covers a key, not only a directory.
+
+    ``lark-cli`` may never have run here, and on a host with no registry it cannot
+    have — so the row is *absent* from the derivation, never a failure, and the
+    directory rows beside it are unaffected.
+    """
+    if sys.platform == "win32":
+        pytest.skip("on Windows the answer depends on this runner's own registry")
+    kinds = [grant.kind for grant in default_grants("win32")]
+    assert GRANT_REGISTRY not in kinds, kinds
+
+
+def test_a_registry_grant_is_either_enforced_here_or_refused_by_name(tmp_path):
     """Requirement 5: neither silently ignored nor reported as granted.
 
     Dropping it would let the run claim a boundary it does not have; passing the
-    key to a path consumer would grant something else. So the derivation raises,
-    and the sentence names the kind and the platform's set.
+    key to a path consumer would grant something else. So the derivation either
+    hands the grant on — on the one platform that can enforce a key — or raises,
+    and the sentence names the kind, the target and what this platform can do.
+    The test asks ``enforced_kinds()`` rather than ``sys.platform``, so one body
+    measures both answers without asserting which platform it runs on.
     """
+    grant = RootGrant(kind=GRANT_REGISTRY, target="HKCU\\Software\\X")
     policy = resolve_policy(
         mode="workspace-write",
         workspace_root=str(tmp_path),
-        extra_grants=(RootGrant(kind=GRANT_REGISTRY, target="HKCU\\Software\\X"),),
+        extra_grants=(grant,),
     )
+
+    if GRANT_REGISTRY in enforced_kinds():
+        assert named_grants(policy) == [grant], "an enforceable key grant must survive typed"
+        return
 
     with pytest.raises(GrantKindNotEnforced) as refused:
         named_grants(policy)
@@ -330,7 +408,17 @@ def test_every_dialect_refuses_a_registry_grant_rather_than_losing_it(tmp_path):
     The fence answers in text (its callers render a sentence to the model) while
     the profile builders let the exception out, so a confined command fails
     closed instead of running under a profile that quietly omitted a grant.
+
+    Scoped to the platforms that do not enforce the kind: on Windows a registry
+    grant *is* enforceable, and Seatbelt and bubblewrap are not the dialects a run
+    there reaches — the chain picks a provider by platform — so the refusal they
+    own has nothing to answer.
     """
+    if GRANT_REGISTRY in enforced_kinds():
+        pytest.skip(
+            "this platform enforces a registry key; the Seatbelt and bubblewrap "
+            "builders are not the dialects a run here reaches"
+        )
     policy = resolve_policy(
         mode="workspace-write",
         workspace_root=str(tmp_path),

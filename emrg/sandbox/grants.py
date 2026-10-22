@@ -69,15 +69,18 @@ GRANT_SOURCES: tuple[str, ...] = (SOURCE_SESSION, SOURCE_DEFAULT)
 
 #: The kinds **this platform's dialects implement**, per platform family.
 #:
-#: ``registry`` is deliberately in none of them: the kind is modelled and
-#: :func:`enforcement_refusal` names the reason, but the code that applies a DACL
-#: to a key does not exist yet (issue #2492 Stage 2). A set rather than a comment
-#: because two callers read it — the refusal sentence, and the guard that keeps
-#: :data:`DEFAULT_MANIFEST` from claiming a kind its platform cannot honour.
+#: ``registry`` is enforced on ``win32`` alone: a key's DACL is read and rewritten
+#: through ``RegGetKeySecurity`` / ``RegSetKeySecurity``
+#: (:mod:`emrg.sandbox.win32.registry`).  The other three families name no
+#: registry API at all, so for them the kind stays modelled and unenforced, and
+#: :func:`enforcement_refusal` says so by name (issue #2492 Stage 2).  A set
+#: rather than a comment because two callers read it — the refusal sentence, and
+#: the guard that keeps :data:`DEFAULT_MANIFEST` from claiming a kind its
+#: platform cannot honour.
 ENFORCED_KINDS: dict[str, tuple[str, ...]] = {
     "darwin": (GRANT_DIRECTORY, GRANT_FILE),
     "linux": (GRANT_DIRECTORY, GRANT_FILE),
-    "win32": (GRANT_DIRECTORY, GRANT_FILE),
+    "win32": (GRANT_DIRECTORY, GRANT_FILE, GRANT_REGISTRY),
     "other": (GRANT_DIRECTORY, GRANT_FILE),
 }
 
@@ -90,13 +93,12 @@ ENFORCED_KINDS: dict[str, tuple[str, ...]] = {
 #: Two properties this table owes, both asserted by tests rather than trusted:
 #:
 #: * **a row's kind is one its platform can enforce** — :data:`ENFORCED_KINDS` is
-#:   the reader, so the Windows registry keys the rant also names are absent
-#:   here until Stage 2 can enforce them. A manifest promising a grant the run
-#:   does not have would be the lying boundary this module refuses elsewhere;
-#: * **the table is data, not a code path** — an entry whose directory does not
-#:   exist on this host is simply absent from the derivation
-#:   (:func:`default_grants`), so a deployment that has never run ``lark-cli``
-#:   is not an error and not a grant.
+#:   the reader, so a row is only written for a kind that platform's dialect
+#:   implements. That is what the Windows registry rows below are held to, and
+#:   why no ``darwin``/``linux`` row names one;
+#: * **the table is data, not a code path** — an entry whose object does not exist
+#:   on this host is simply absent from the derivation (:func:`default_grants`), so
+#:   a deployment that has never run ``lark-cli`` is not an error and not a grant.
 #:
 #: ``%APPDATA%`` is expanded with :func:`os.path.expandvars`, which understands
 #: the ``%NAME%`` form on Windows only; on POSIX the two darwin/linux rows carry
@@ -113,6 +115,16 @@ DEFAULT_MANIFEST: dict[str, tuple[tuple[str, str], ...]] = {
     "win32": (
         (GRANT_DIRECTORY, "~/.lark-cli"),
         (GRANT_DIRECTORY, "%APPDATA%/Microsoft/Protect"),
+        # Two rows for one tool, and both are load-bearing: the **parent** is what
+        # lets the confined child create ``keychain`` in the first place (the
+        # capability ACE is inheritable), while the **key** itself is what reaches
+        # a ``keychain`` that already exists — inheritance applies when a key is
+        # created, and ``RegSetKeySecurity`` on the parent does not walk the keys
+        # already beneath it. A deployment where ``keychain`` is absent loses only
+        # the second row (:func:`default_grants` is total over a key this host does
+        # not have) and still gets the first.
+        (GRANT_REGISTRY, "HKCU\\Software\\LarkCli"),
+        (GRANT_REGISTRY, "HKCU\\Software\\LarkCli\\keychain"),
     ),
 }
 
@@ -292,10 +304,18 @@ def default_grants(platform: str | None = None) -> list[RootGrant]:
     out: list[RootGrant] = []
     for kind, spelling in DEFAULT_MANIFEST.get(family, ()):
         target = os.path.expandvars(os.path.expanduser(spelling))
-        try:
-            exists = os.path.isdir(target) if kind == GRANT_DIRECTORY else os.path.exists(target)
-        except OSError:  # pragma: no cover - both calls swallow their own errors
-            exists = False
+        if kind == GRANT_REGISTRY:
+            # Imported here rather than at module scope: the registry predicate is
+            # Windows-only machinery, and this derivation runs on every platform
+            # for every family. Off Windows it answers False without touching it.
+            from emrg.sandbox.win32.registry import key_exists  # noqa: PLC0415
+
+            exists = key_exists(target)
+        else:
+            try:
+                exists = os.path.isdir(target) if kind == GRANT_DIRECTORY else os.path.exists(target)
+            except OSError:  # pragma: no cover - both calls swallow their own errors
+                exists = False
         if not exists:
             continue
         out.append(RootGrant(kind=kind, target=target, source=SOURCE_DEFAULT))

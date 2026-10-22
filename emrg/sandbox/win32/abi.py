@@ -96,6 +96,51 @@ INHERITED_ACE = 0x10
 #: Maximum SID allocation size in bytes.
 SECURITY_MAX_SID_SIZE = 68
 
+# --- registry keys (issue #2492 Stage 2) -----------------------------------
+
+#: Predefined ``HKEY_CURRENT_USER`` handle.
+HKEY_CURRENT_USER = 0x80000001
+#: Predefined ``HKEY_LOCAL_MACHINE`` handle.
+HKEY_LOCAL_MACHINE = 0x80000002
+#: Standard right: read an object's DACL.
+READ_CONTROL = 0x00020000
+#: Standard right: replace an object's DACL.
+WRITE_DAC = 0x00040000
+#: Key access needed to read a key's DACL and rewrite it — and nothing else.
+#:
+#: ``RegOpenKeyExW`` wants the rights to be asked for up front, so the applier
+#: asks for exactly the two the edit needs: with these, a key whose DACL the
+#: caller may not rewrite fails at the open, before any merge is attempted.
+KEY_SECURITY_ACCESS = READ_CONTROL | WRITE_DAC
+#: Key right: read a key's values.
+KEY_QUERY_VALUE = 0x0001
+#: Key right: write a key's values.
+KEY_SET_VALUE = 0x0002
+#: Key right: create a subkey.
+KEY_CREATE_SUB_KEY = 0x0004
+#: Key right: enumerate a key's subkeys.
+KEY_ENUMERATE_SUB_KEYS = 0x0008
+#: Key right: receive change notifications for a key.
+KEY_NOTIFY = 0x0010
+#: Capability-SID access mask granting read, value writes and subkey creation.
+#:
+#: The registry's counterpart of :data:`GRANT_MASK`, and it excludes the standard
+#: rights for the same reason: ``WRITE_DAC`` and ``WRITE_OWNER`` would let a
+#: confined child rewrite the key's DACL or take its ownership and walk out of the
+#: allowlist it was handed. ``READ_CONTROL`` is excluded with them — the mask
+#: grants what a tool does to a key's *contents*, never what it does to the key's
+#: own security descriptor.
+REGISTRY_GRANT_MASK = (
+    KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_CREATE_SUB_KEY | KEY_ENUMERATE_SUB_KEYS | KEY_NOTIFY
+)
+#: ``SECURITY_DESCRIPTOR_REVISION``: the only revision ``InitializeSecurityDescriptor`` accepts.
+SECURITY_DESCRIPTOR_REVISION = 1
+#: The bytes an absolute ``SECURITY_DESCRIPTOR`` occupies.
+#:
+#: Named by the SDK for exactly this use — the buffer an absolute descriptor is
+#: built in before ``MakeSelfRelativeSD`` measures the form the API wants.
+SECURITY_DESCRIPTOR_MIN_LENGTH = 20
+
 # --- process creation (Win32 process owner, win32-process/src/abi.ts) -------
 
 #: STARTUPINFO.dwFlags: the std handles in the struct are meaningful.

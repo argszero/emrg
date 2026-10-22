@@ -52,7 +52,7 @@ import os
 
 from emrg.sandbox.grants import GrantKindNotEnforced
 from emrg.sandbox.policy import DANGER_FULL_ACCESS, SandboxPolicy
-from emrg.sandbox.roots import canonical_path, writable_roots
+from emrg.sandbox.roots import canonical_path, named_grants, writable_roots
 from emrg.tools.file_policy import protected_paths
 
 
@@ -91,7 +91,13 @@ def file_refusal(file_path: str, policy: SandboxPolicy) -> str | None:
         # ``emrg/tools/file_policy.py`` because the legacy scanner reads it too.
         return f"{policy.mode} sandbox: blocked write to protected daemon file {file_path!r}"
     try:
-        roots = writable_roots(policy)
+        # The enforcement question is asked here rather than left to
+        # ``writable_roots``, which projects paths and so has no answer for a
+        # kind that contributes none. Asking it through the projection made it
+        # refuse an *enforceability* problem, and the two became inseparable the
+        # moment Windows began enforcing a key (PR #2498): the raise stopped, and
+        # with it both the refusal and the projection's own guarantee.
+        named_grants(policy)
     except GrantKindNotEnforced as refused:
         # A grant this platform cannot enforce is refused rather than dropped
         # (issue #2492, requirement 5). The fence answers in text because its
@@ -99,6 +105,7 @@ def file_refusal(file_path: str, policy: SandboxPolicy) -> str | None:
         # same exception propagate instead, so a confined command fails closed
         # rather than running with a boundary nobody applied.
         return f"{policy.mode} sandbox: {refused.reason}"
+    roots = writable_roots(policy)
     if any(_is_within_root(target, root) for root in roots):
         return None
     granted = (

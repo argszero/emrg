@@ -14,7 +14,7 @@ the same contract)::
     python -m emrg.sandbox.win32.runner --workspace <dir> --temp <dir>
         --mode <read-only|workspace-write>
         [--write-sid <S-1-4-…> --temp-write-sid <S-1-4-…>]
-        [--extra-root <path>]… -- <argv...>
+        [--extra-root <path>]… [--extra-key <key>]… -- <argv...>
 
 ``--extra-root`` carries the host-named writable roots of the policy (rant
 ``2026-10-09T09:43:39`` §7).  It is repeatable, may name a directory or a single
@@ -22,6 +22,14 @@ file, and never carries a SID: the runner derives each root's capability SID fro
 the path itself, so the ACE the seam materialized and the restricting list this
 token is built with cannot name two different paths.  Under ``read-only`` the
 flag is refused outright — that tier grants no root at all.
+
+``--extra-key`` is the same contract for a **registry key** (issue #2492 Stage
+2): repeatable, never carrying a SID, and each key's capability SID derived here
+from the spelling this process was handed, by the one derivation the seam's ACE
+also names.  It is a flag of its own rather than a spelling of ``--extra-root``
+because a key's DACL is edited through a different API on a different object
+type, and a path consumer handed a key spelling would grant something else
+entirely.  ``read-only`` refuses it for the same reason it refuses a root.
 
 ``--write-sid`` + ``--temp-write-sid`` are the seam's grant contract: the
 **caller** has already materialized distinct workspace and private-temp ACEs and
@@ -59,9 +67,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from emrg.sandbox.win32.ffi import Win32Bindings, set_environment_variable, win32
+from emrg.sandbox.win32.registry import key_exists
 from emrg.sandbox.win32.sandbox import AclSandbox
 from emrg.sandbox.win32.sid import (
     assert_temp_root_outside_workspace,
+    registry_write_sid,
     root_write_sid,
     temp_write_sid,
     workspace_write_sid,
@@ -137,6 +147,7 @@ class ParsedArgs:
     write_sid: str | None
     temp_write_sid: str | None
     extra_roots: list[str]
+    extra_keys: list[str]
     command: str
     args: list[str]
 
@@ -159,6 +170,7 @@ def parse_args(raw: list[str]) -> ParsedArgs:
     write_sid: str | None = None
     temp_write_sid_value: str | None = None
     extra_roots: list[str] = []
+    extra_keys: list[str] = []
     index = 0
     while index < len(raw):
         token = raw[index]
@@ -182,6 +194,8 @@ def parse_args(raw: list[str]) -> ParsedArgs:
             temp_write_sid_value = value
         elif token == "--extra-root":
             extra_roots.append(value)
+        elif token == "--extra-key":
+            extra_keys.append(value)
         else:
             fail(f"unknown argument: {token}")
     if workspace is None:
@@ -200,6 +214,7 @@ def parse_args(raw: list[str]) -> ParsedArgs:
         write_sid=write_sid,
         temp_write_sid=temp_write_sid_value,
         extra_roots=extra_roots,
+        extra_keys=extra_keys,
         command=argv[0],
         args=list(argv[1:]),
     )
@@ -301,6 +316,9 @@ def _build_sandbox(parsed: ParsedArgs) -> tuple[AclSandbox, str | None]:
         # too rather than only the seam's: an argv carrying an extra root under
         # read-only is a caller that believes it granted something.
         fail("read-only does not accept --extra-root")
+    if parsed.mode == "read-only" and parsed.extra_keys:
+        # The same belief, one object kind over.
+        fail("read-only does not accept --extra-key")
     if parsed.mode == "workspace-write" and (parsed.write_sid is None) != (parsed.temp_write_sid is None):
         fail("workspace-write requires --write-sid and --temp-write-sid together")
     assert_temp_root_outside_workspace(parsed.workspace, parsed.temp)
@@ -315,6 +333,17 @@ def _build_sandbox(parsed: ParsedArgs) -> tuple[AclSandbox, str | None]:
         if not os.path.exists(root):
             fail(f"--extra-root does not exist: {root}")
         extra_grants.append((root, root_write_sid(root)))
+
+    # The same construction one object kind over: each key's SID is derived here
+    # from the spelling this process was handed, by the one derivation the seam's
+    # ACE also names.  A key is required to exist for the same reason a root is —
+    # there is no DACL to merge into on a key that is not there, and inventing one
+    # would mean creating a key as a side effect of confining a command.
+    extra_key_grants: list[tuple[str, str]] = []
+    for key in parsed.extra_keys:
+        if not key_exists(key):
+            fail(f"--extra-key does not exist: {key}")
+        extra_key_grants.append((key, registry_write_sid(key)))
 
     write_sid: str | None = None
     private_temp: str | None = None
@@ -340,6 +369,7 @@ def _build_sandbox(parsed: ParsedArgs) -> tuple[AclSandbox, str | None]:
         write_sid=write_sid,
         temp_write_sid=private_temp_sid,
         extra_grants=extra_grants,
+        extra_key_grants=extra_key_grants,
         manage_dacls=not seam_managed,
     )
     return sandbox, owned_temp

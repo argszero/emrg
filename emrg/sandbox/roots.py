@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 import tempfile
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Callable, NamedTuple
 
 from emrg.sandbox.grants import (
     GRANT_DIRECTORY,
@@ -192,18 +192,57 @@ def granted_grants(policy: SandboxPolicy) -> list[RootGrant]:
     """
     if policy.mode != "workspace-write":
         return []
-    return _dedupe([*_mode_grants(policy), *named_grants(policy)])
+    return _composed(policy, named_grants)
+
+
+def _composed(
+    policy: SandboxPolicy, named: Callable[[SandboxPolicy], list[RootGrant]]
+) -> list[RootGrant]:
+    """One composition of a policy's grants: the mode's sources, then the named ones.
+
+    The two named-list policies differ in exactly one respect — whether the
+    enforcement table is consulted (:func:`named_grants` asks it,
+    :func:`stored_grants` does not) — and both reach this same composition, so
+    the readers of either cannot disagree about which grants exist: "the shell
+    can write where ``write`` cannot" needs one derivation, not one call site.
+
+    ``read-only`` (and ``danger-full-access``, which never asks) grant nothing:
+    the early return is what makes requirement 4 of issue #2492 true by
+    construction rather than by a check — a default manifest cannot widen a tier
+    that grants none, because this function never consults one for that tier.
+
+    :param policy: the file-effect policy to derive the grant list from.
+    :param named: which named-list policy to append — the enforcement-checked
+        one, or the display one the path projection reads.
+    :returns: the canonical, deduplicated grants; empty for every mode but
+        ``workspace-write``.
+    """
+    if policy.mode != "workspace-write":
+        return []
+    return _dedupe([*_mode_grants(policy), *named(policy)])
 
 
 def writable_roots(policy: SandboxPolicy) -> list[str]:
-    """The **paths** among :func:`granted_grants` — the projection path-readers use.
+    """The **paths** a policy grants — the projection path-readers use.
 
-    A derived view, not a second allow-list: it is built from
-    :func:`granted_grants` and can therefore never disagree with it. It exists
+    A derived view, not a second allow-list: it is built by the same
+    :func:`_composed` composition :func:`granted_grants` reads, and applies one
+    filter to it, so it can never disagree with that derivation. It exists
     because several readers need nothing but paths — the fence's containment
     test, the confined cache relocation, and the providers' own spellings — and
     because a registry grant has no path to contribute, so a path-only reader
     must not be handed one.
+
+    **It does not ask the enforcement table**, and that is the point of the
+    split. Whether this platform can enforce a registry key is a question about
+    enforcement; a key contributes no path either way. Asking it here is what
+    once made this projection's own guarantee unmeasurable: while no platform
+    enforced a key the projection refused before it could be asked, and the day
+    one did — Windows, PR #2498 — the refusal vanished and so did the "no key
+    among the paths" claim, leaving a green reading about nothing. The loud
+    answer to a grant this platform cannot enforce is :func:`named_grants`'s,
+    and every reader that *acts* on grants reads that one: the profile builders
+    directly, and the fence by asking for the refusal itself.
 
     ``read-only`` still answers ``[]``, which is the property the host's rule
     rests on: at a tier that grants nothing, nothing is writable however the
@@ -212,7 +251,11 @@ def writable_roots(policy: SandboxPolicy) -> list[str]:
     :param policy: the file-effect policy to derive the allow-list from.
     :returns: the canonical writable paths.
     """
-    return [grant.target for grant in granted_grants(policy) if grant.kind != GRANT_REGISTRY]
+    return [
+        grant.target
+        for grant in _composed(policy, stored_grants)
+        if grant.kind != GRANT_REGISTRY
+    ]
 
 
 #: The shared POSIX temp root — one spelling, named once, read through

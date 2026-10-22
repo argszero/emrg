@@ -278,12 +278,14 @@ def merge_and_apply(
         throw_last_error(api, "LocalFree", f"{label}({path}) new ACL")
 
 
-def has_exact_grant(api: Win32Bindings, old_acl: int, sid_ptr: int) -> bool:
+def has_exact_grant(
+    api: Win32Bindings, old_acl: int, sid_ptr: int, mask: int = abi.GRANT_MASK
+) -> bool:
     """Whether the DACL already carries the exact write grant this module adds.
 
     Every field is read through bounded offset reads (Allow ACE, ``OI|CI``
-    inheritance, :data:`~emrg.sandbox.win32.abi.GRANT_MASK`, the capability
-    SID) — no pointer arithmetic, no ``memcpy``.  The ACE's SID is **inline**
+    inheritance, the access mask, the capability SID) — no pointer arithmetic,
+    no ``memcpy``.  The ACE's SID is **inline**
     (embedded after the 4-byte mask), so there is no pointer to follow: it is
     read byte-wise against the ACE's own size.  A malformed header reads as "no
     exact grant", which sends the caller down the merge path — the path that
@@ -292,6 +294,10 @@ def has_exact_grant(api: Win32Bindings, old_acl: int, sid_ptr: int) -> bool:
     :param api: the binding table.
     :param old_acl: the current explicit DACL pointer.
     :param sid_ptr: the capability SID to match.
+    :param mask: the access mask the grant's ACE carries — the file rights by
+        default, and :data:`~emrg.sandbox.win32.abi.REGISTRY_GRANT_MASK` for a
+        registry key.  A second checker was the alternative and would have been
+        this one with one name changed.
     :returns: whether the exact grant ACE is already present.
     """
     header = ACLStructure.from_address(old_acl)
@@ -307,11 +313,11 @@ def has_exact_grant(api: Win32Bindings, old_acl: int, sid_ptr: int) -> bool:
         ace_size = int(ctypes.c_uint16.from_address(old_acl + offset + 2).value)
         if ace_size < 8 or offset + ace_size > acl_size:
             return False  # implausible: fall back to the merge path
-        mask = int(ctypes.c_uint32.from_address(old_acl + offset + 4).value)
+        ace_mask = int(ctypes.c_uint32.from_address(old_acl + offset + 4).value)
         exact = (
             ace_type == abi.ACCESS_ALLOWED_ACE_TYPE
             and ace_flags == abi.SUB_CONTAINERS_AND_OBJECTS_INHERIT
-            and mask == abi.GRANT_MASK
+            and ace_mask == mask
         )
         if exact:
             inline = _inline_sid_bytes(old_acl + offset + 8, ace_size - 8)
