@@ -13,7 +13,7 @@ const { pathToFileURL } = require("url");
 const { spawn } = require("child_process");
 const crypto = require("crypto");
 const { parse: parseToml, stringify: stringifyToml } = require("smol-toml");
-const { generateSessionId, isSessionId } = require("./daemon_client");
+const { generateSessionId, isSessionId, pickSessionCwd } = require("./daemon_client");
 const { ConnManager } = require("./conn-manager");
 const { guiStatePath, sanitizeOpenSessions, saveGuiState, DEFAULT_CAP } = require("./gui-state");
 const { externalNavPolicy } = require("./nav-policy");
@@ -80,6 +80,34 @@ function main() {
     } catch { /* index 缺失/损坏 → 未知（null） */ }
     return null;
   }
+
+  // 会话的真实项目目录：先问 daemon，问不到才退回上面那套本地推断（issue #2484）。
+  //
+  // 此前 GUI 只读本地 `sessions_index.json`，读不到就由调用方 `|| DEFAULT_CWD` 兜到
+  // homedir —— daemon 的 `_handle_resume_session` 早把这条写进注释：cwd 落错的客户端
+  // 会在 `~/.emrg/sessions/<sid>/` 误建 0 消息幽灵会话，真会话反而打不开。而 daemon
+  // 本来就持有这个事实（全局会话索引），并且有专门的 `resolve_session_cwd` 命令：
+  // `index` 带回项目路径，`unknown` 只把请求值当候选回显（不冒充事实）。TUI 每次打开
+  // 都先问（app.py 的 /resume 与会话选择器两处），GUI 此前一处都没有。
+  //
+  // 返回 null 表示「daemon 也说不准」，候选值由调用方决定 —— 这里绝不兜 homedir。
+  async function askSessionCwd(sessionId, candidateCwd) {
+    const conn = connManager?.daemonConn();
+    if (!conn || !conn.connected) return null;
+    try {
+      const frame = await conn.sendCommandAndWait(
+        "resolve_session_cwd",
+        { session_id: sessionId, cwd: candidateCwd || DEFAULT_CWD },
+        3000,
+      );
+      return pickSessionCwd(frame, null);
+    } catch (e) {
+      // 超时或错误帧：与 daemon 的 unknown 同义 —— 客户端保留自己的候选
+      logger.warn(`[gui] resolve_session_cwd failed sid=${sessionId}: ${e.message}`);
+      return null;
+    }
+  }
+
   // P2.3（rant 12:20:35）：HTML 预览 WebContentsView——懒创建、单实例复用、右对齐 bounds 同步。
   // renderer 崩溃 reload 后由 renderer 侧拉取（emrg:getPreviewState）恢复（main 是真相源）。
   let previewView = null;       // WebContentsView 实例（首次打开 HTML tab 才创建）
@@ -382,9 +410,16 @@ vision = false
       }
       // P2：每会话独立连接——首条消息前自动打开（新会话不 resume，daemon 隐式订阅）
       // P5 slice 2：cwd 取该会话所属项目（跨项目会话用其项目路径，非全局 projectDir）
-      const sessionCwd = resolveSessionCwd(sessionId) || DEFAULT_CWD;
+      // issue #2484：候选 cwd 先交给 daemon 判定 —— 它说 index 就以它为准（那是事实），
+      // 说 unknown 或问不到才用调用方给的 projectPath，最后才退回本地索引推断。
+      let sessionCwd = resolveSessionCwd(sessionId) || DEFAULT_CWD;
       let conn = connManager?.get(sessionId);
       if (!conn || !conn.connected) {
+        // issue #2484：这次打开带 resume:false，daemon 的幽灵会话校验
+        // （_handle_resume_session：meta 缺失/0 消息时按全局索引核对 cwd）没有机会跑，
+        // 随后的 sendTask 就把这里的 cwd 交给了 daemon 的取/建路径。所以打开前先问准。
+        const asked = await askSessionCwd(sessionId, DEFAULT_CWD);
+        if (asked) sessionCwd = asked;
         conn = await openSession(sessionId, sessionCwd, { resume: false });
       }
       markSessionActive(sessionId); // P4：发送 = 会话活动 → lastActive + 持久化
@@ -562,8 +597,13 @@ vision = false
       // Rant 2026-08-25T17:38:56 根因 2：fallback 链去掉 DEFAULT_CWD——未知会话
       // 交 daemon not_found 处理（下方已有 fallback 到最近会话），绝不隐式回退
       // homedir 误建幽灵会话。
-      const targetPath = projectPath || resolveSessionCwd(sessionId);
-      logger.info(`[gui:switch] openSession start sid=${sessionId} targetPath=${targetPath}`);
+      // issue #2484：先问 daemon「这个会话在哪个项目」，再退回本地推断。
+      // 顺序即优先级：daemon 的 index 答案是事实，projectPath 是调用方的候选，
+      // 本地索引读不到才轮到它 —— 三者都没有就交 null 给 daemon 回 not_found，
+      // 绝不隐式回退 homedir（那正是幽灵会话的来源）。
+      const asked = await askSessionCwd(sessionId, projectPath || DEFAULT_CWD);
+      const targetPath = asked || projectPath || resolveSessionCwd(sessionId);
+      logger.info(`[gui:switch] openSession start sid=${sessionId} targetPath=${targetPath} asked=${asked}`);
       try {
         await openSession(sessionId, targetPath); // 打开（新）会话连接 + resume_session 自动订阅
         logger.info(`[gui:switch] openSession OK sid=${sessionId} targetPath=${targetPath}`);
