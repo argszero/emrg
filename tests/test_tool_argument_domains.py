@@ -41,6 +41,7 @@ import pytest
 from emrg.server import scheduler
 from emrg.tools import (
     bash_tool_v2,
+    boss_tool,
     edit_tool,
     glob_tool,
     grep_tool,
@@ -209,6 +210,7 @@ DOMAINS = [
     (bash_tool_v2.BashToolV2(), "timeout", ("positive",)),
     (pwsh_tool_v2.PwshToolV2(), "timeout", ("positive",)),
     (subagent_tool.SubagentTool(lambda **kwargs: None), "timeout_s", ("at least 1",)),
+    (boss_tool.BossTool(lambda **kwargs: None), "timeout_s", ("at least 1",)),
 ]
 
 
@@ -408,6 +410,7 @@ TOOL_SET = [
     # The runner is never called: this sweep reads `definition()` only, and the tool
     # is here so its declared parameters are asked about like every other tool's.
     subagent_tool.SubagentTool(lambda **kwargs: None),
+    boss_tool.BossTool(lambda **kwargs: None),
 ]
 
 
