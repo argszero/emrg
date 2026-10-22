@@ -26,7 +26,7 @@ from websockets.exceptions import ConnectionClosed
 from emrg.protocol import TaskResponse, ToolEnd, ToolStart, new_task_id
 from emrg.sandbox.escalation import APPROVAL_TIMEOUT_SECONDS
 from emrg.sandbox.policy import SANDBOX_MODES
-from emrg.session import generate_session_id
+from emrg.session import generate_session_id, session_dir
 # The credential rule is a stdlib-only leaf (`emrg/server/redaction.py`), deliberately
 # importable from outside the daemon: this is the client's own log surface, and a window
 # applied there before the rule sees the text is the defect that module exists to prevent.
@@ -2719,7 +2719,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
             # After paste, check clipboard for images
             has_image, label = _detect_clipboard_image()
             if has_image:
-                images_dir = Path(cwd) / ".emrg" / "sessions" / session_id / "images"
+                images_dir = session_dir(cwd, session_id) / "images"
                 images_dir.mkdir(parents=True, exist_ok=True)
                 counter = len(_pending_images) + 1
                 tmp_path = images_dir / f"_clipboard_tmp_{counter}.png"
@@ -3440,7 +3440,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                         if _is_image_token(inp.text, pos):
                             has_image, label = _detect_clipboard_image()
                             if has_image:
-                                images_dir = Path(cwd) / ".emrg" / "sessions" / session_id / "images"
+                                images_dir = session_dir(cwd, session_id) / "images"
                                 images_dir.mkdir(parents=True, exist_ok=True)
                                 counter = len(_pending_images) + 1
                                 tmp_path = images_dir / f"_clipboard_tmp_{counter}.png"

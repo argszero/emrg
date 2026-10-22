@@ -340,13 +340,30 @@ def is_safe_session_id(session_id: object) -> bool:
     return True
 
 
+def session_dir(cwd: Path, session_id: str) -> Path:
+    """The directory a session's state lives in, for a workspace and an id.
+
+    This is the one producer of ``<cwd>/.emrg/sessions/<session_id>``. The rule has
+    more than one reader: ``Session`` fills the directory it computes here, and the
+    daemon derives a *parent's* directory from it to place a child's cwd inside —
+    ``sub-agent/sub<N>`` for a delegation, ``sub-agent/sub-boss`` for an owner. A
+    caller that has an id and a cwd but no handle asks this, so a layout change is an
+    edit in one place rather than a search for every copy of the expression.
+
+    The id is not validated here — ``is_safe_session_id`` decides that, and its caller
+    decides whether an unsafe id is refused or merely not a directory (see its
+    docstring for what an unchecked id did).
+    """
+    return Path(cwd) / ".emrg" / "sessions" / session_id
+
+
 class Session:
     """Manages a single conversation session on disk."""
 
     def __init__(self, session_id: str, cwd: Path) -> None:
         self.session_id = session_id
         self.cwd = cwd
-        self._dir = cwd / ".emrg" / "sessions" / session_id
+        self._dir = session_dir(cwd, session_id)
         self._dir.mkdir(parents=True, exist_ok=True)
 
         # Initialize memory subdirectory
@@ -1063,9 +1080,9 @@ class Session:
             )
             return False
 
-        session_dir = cwd / ".emrg" / "sessions" / session_id
-        if session_dir.exists():
-            shutil.rmtree(session_dir)
+        target = session_dir(cwd, session_id)
+        if target.exists():
+            shutil.rmtree(target)
             logger.info("session deleted: %s", session_id)
             # Global index (rant 2026-08-13T16:42:22): drop the deleted session.
             remove_session_index(session_id)
