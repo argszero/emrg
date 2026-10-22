@@ -321,20 +321,24 @@ def test_list_tasks_reports_the_effective_interval_and_the_next_edge(sched):
     assert isinstance(boundary, int) and 0 < boundary <= 86400
 
 
-def test_a_live_handler_reports_the_same_three_keys():
+def test_a_live_handler_reports_the_same_three_keys(monkeypatch):
+    # The clock is frozen inside the band: `status()` reads `now()` itself, and a test
+    # that compared it with a second `now()` would describe the instant the suite ran at.
+    monkeypatch.setattr(mod, "datetime", _frozen_at(datetime(2026, 10, 19, 10, 0)))
     handler = _handler_with(_record())
     status = handler.status()
     assert status["interval"] == 10800
     assert status["schedule"] == _record()["schedule"]
-    assert status["effective_interval"] == effective_interval(_record())
+    assert status["effective_interval"] == 900, "the window answers, not the record"
     assert status["next_window_boundary_in_seconds"] is not None
 
 
-def test_the_heartbeat_and_the_backoff_take_the_frequency_in_force():
+def test_the_heartbeat_and_the_backoff_take_the_frequency_in_force(monkeypatch):
     """⑧: neither layer re-derives the rule, and neither bypasses the other."""
+    monkeypatch.setattr(mod, "datetime", _frozen_at(datetime(2026, 10, 19, 10, 0)))
     handler = _handler_with(_record())
     in_force = handler._effective_interval()
-    assert in_force in (900, 10800), "one of the two answers the record can give"
+    assert in_force == 900, "inside the band the frequency in force is the window's"
     assert handler._heartbeat_interval() == max(in_force, min(in_force * 8, 8 * 3600))
     handler._connect_failures = 0
     assert handler._connect_backoff() == float(in_force)
@@ -369,15 +373,40 @@ async def _first_wait(handler: TaskHandler) -> float:
             task.cancel()
 
 
-def _loop_wait(tmp_path, monkeypatch, boundary):
+def _frozen_at(instant: datetime):
+    """A `datetime` whose `now()` answers `instant`, so a run does not read the clock.
+
+    A test of the wait reads whatever frequency `now()` selects. Left to the real clock
+    a window is open or shut depending on the hour the suite happens to run at — which
+    is how this file first reddened: measured on CI at 10:54 **UTC** on a Thursday the
+    `mon-fri 09:00-18:00` band was open, so a record that still carried it waited its
+    window's 900s, while the same suite was green locally at 18:54 +08:00 where the band
+    was shut. The instant is stated here instead.
+    """
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant
+    return _Frozen
+
+
+def _plain_record(interval: int = 3600) -> dict:
+    """A record with **no** `schedule` key at all — absent, not a stored null."""
+    record = _record(interval=interval)
+    del record["schedule"]
+    return record
+
+
+def _loop_wait(tmp_path, monkeypatch, boundary, record=None, freeze_at=None):
     """The wait one real `run()` arms, over a real tasks.yml, with `boundary` injected."""
     original = mod.config_dir
     monkeypatch.setattr(mod, "config_dir", lambda: tmp_path)
     monkeypatch.setattr(mod, "seconds_to_next_boundary", lambda record, now=None: boundary)
+    if freeze_at is not None:
+        monkeypatch.setattr(mod, "datetime", _frozen_at(freeze_at))
     try:
         tasks_yml = tmp_path / "tasks.yml"
-        # An hour, so the two loop tests differ only in the boundary they inject.
-        tasks_yml.write_text(yaml.safe_dump([_record(interval=3600)]))
+        tasks_yml.write_text(yaml.safe_dump([record if record is not None else _plain_record()]))
         handler = TaskHandler(name="windowed", identity=InstanceIdentity())
         handler._tasks_file = tasks_yml
         return asyncio.run(_first_wait(handler))
@@ -392,6 +421,22 @@ def test_run_cuts_the_wait_to_the_next_boundary(tmp_path, monkeypatch):
 
 
 def test_run_without_a_boundary_waits_the_whole_interval(tmp_path, monkeypatch):
-    """The same loop and the same tasks.yml, no schedule: today's wait, unchanged."""
+    """The same loop over a record with **no** `schedule`: today's wait, unchanged."""
     wait = _loop_wait(tmp_path, monkeypatch, boundary=None)
     assert 3500 < wait <= 3600, f"a task with no windows waits its interval: {wait}"
+
+
+def test_run_waits_at_the_window_the_record_states(tmp_path, monkeypatch):
+    """The dual of the test above: the record's window is read, not merely carried.
+
+    Same helper, same `interval: 3600`, same injected `boundary=None` — only the record
+    differs (it keeps the `mon-fri 09:00-18:00 / 900` band) and the clock is frozen
+    inside that band. The wait must therefore be the window's frequency. Make
+    `_effective_interval` answer the declared interval again and this reads ~3600.
+    """
+    inside = datetime(2026, 10, 19, 10, 0)  # a Monday, inside the band
+    wait = _loop_wait(
+        tmp_path, monkeypatch, boundary=None,
+        record=_record(interval=3600), freeze_at=inside,
+    )
+    assert 800 < wait <= 900, f"inside the window the wait is the window's interval: {wait}"
