@@ -92,6 +92,30 @@ def temp_write_sid(temp_dir: str) -> str:
     return f"S-1-4-{first}-{second}-1"
 
 
+def registry_write_sid(key: str) -> str:
+    """Derive one registry key's capability SID (``S-1-4-x-y-2``).
+
+    Domain-separated from the path identities by a fixed third sub-authority, the
+    way :func:`temp_write_sid` is: a registry key and a file path can spell the
+    same string, and one derivation would then hand one object the other's
+    identity.  Two sub-authorities now mean "a filesystem path", ``-1`` a private
+    temp directory, ``-2`` a registry key.
+
+    The spelling is lowercased because the registry namespace is
+    case-insensitive: ``HKCU\\Software\\LarkCli`` and ``HKCU\\software\\larkcli``
+    are one key, so they must derive one SID.  Unlike a path there is no
+    ``realpath`` to converge the spellings — the canonicalization *is* this
+    lowercasing, and both halves of the grant (the ACE the seam applies and the
+    SID the runner puts in the token) call this one function, so they cannot
+    disagree about which key was granted.
+
+    :param key: the key's full spelling, e.g. ``HKCU\\Software\\LarkCli``.
+    :returns: the SDDL string form.
+    """
+    first, second = _derive(b"registry\0" + key.lower().encode("utf-8"))
+    return f"S-1-4-{first}-{second}-2"
+
+
 def contains_directory(root: str, candidate: str) -> bool:
     """Whether ``root`` is the same canonical directory as ``candidate`` or contains it.
 

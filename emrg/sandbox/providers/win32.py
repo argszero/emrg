@@ -44,6 +44,7 @@ import tempfile
 from dataclasses import dataclass
 
 from emrg.sandbox.contract import Runner, RunnerFailureRule
+from emrg.sandbox.grants import GRANT_REGISTRY
 from emrg.sandbox.policy import SandboxPolicy
 from emrg.sandbox.roots import canonical_path, named_grants
 from emrg.sandbox.win32.ffi import Win32Bindings, win32
@@ -387,10 +388,12 @@ def runner_argv(policy: SandboxPolicy) -> list[str]:
             "--temp", tempfile.gettempdir(),
             "--mode", policy.mode,
         ]
-    extra_roots = _extra_root_spellings(policy)
+    path_spellings, key_spellings = _extra_grant_spellings(policy)
     extra_flags: list[str] = []
-    for root in extra_roots:
+    for root in path_spellings:
         extra_flags += ["--extra-root", root]
+    for key in key_spellings:
+        extra_flags += ["--extra-key", key]
     if policy.session_id is None:
         return [
             *runner_invocation(),
@@ -399,7 +402,7 @@ def runner_argv(policy: SandboxPolicy) -> list[str]:
             "--mode", policy.mode,
             *extra_flags,
         ]
-    capability = STORE.materialize(policy.session_id, workspace, extra_roots=extra_roots)
+    capability = STORE.materialize(policy.session_id, workspace, extra_roots=path_spellings)
     return [
         *runner_invocation(),
         "--workspace", workspace,
@@ -411,8 +414,8 @@ def runner_argv(policy: SandboxPolicy) -> list[str]:
     ]
 
 
-def _extra_root_spellings(policy: SandboxPolicy) -> tuple[str, ...]:
-    """The enforceable extra grants' paths — the manifest's and the session's.
+def _extra_grant_spellings(policy: SandboxPolicy) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The enforceable extra grants' spellings, split by object kind.
 
     Read from the shared derivation (:func:`~emrg.sandbox.roots.named_grants`)
     rather than off ``policy.extra_grants``, because a grant the host never typed
@@ -420,16 +423,42 @@ def _extra_root_spellings(policy: SandboxPolicy) -> tuple[str, ...]:
     manifest is for (issue #2492). Canonicalization and de-duplication happen in
     that derivation, once, for every dialect.
 
-    A **registry** grant never reaches this function: no platform enforces that
-    kind yet, and the derivation raises
-    :class:`~emrg.sandbox.grants.GrantKindNotEnforced` rather than handing a key
-    spelling to a path consumer. On Windows that is the loop Stage 2 closes — the
-    key needs a DACL of its own, not an ``--extra-root`` flag.
+    The split is the whole point of the pair: a path grant becomes an
+    ``--extra-root`` and a key grant becomes an ``--extra-key``, because this
+    backend applies a DACL to a *path* with ``SetNamedSecurityInfoW`` and to a
+    *key* with ``RegSetKeySecurity``. Handing a key spelling to the path half
+    would grant a filesystem object nobody named.
 
     :param policy: the resolved per-call policy.
-    :returns: the canonical spellings.
+    :returns: the path spellings and the key spellings.
     """
-    return tuple(grant.target for grant in named_grants(policy))
+    named = named_grants(policy)
+    return (
+        tuple(grant.target for grant in named if grant.kind != GRANT_REGISTRY),
+        tuple(grant.target for grant in named if grant.kind == GRANT_REGISTRY),
+    )
+
+
+def _extra_root_spellings(policy: SandboxPolicy) -> tuple[str, ...]:
+    """The enforceable extra grants' paths — the manifest's and the session's.
+
+    :param policy: the resolved per-call policy.
+    :returns: the canonical path spellings.
+    """
+    return _extra_grant_spellings(policy)[0]
+
+
+def _extra_key_spellings(policy: SandboxPolicy) -> tuple[str, ...]:
+    """The enforceable extra grants' registry keys — the manifest's and the session's.
+
+    One producer for the key half too, for the reason the path half has one: the
+    ACE the seam applies and the SID the runner puts in the token are derived from
+    this same list, so a key cannot end up granted on one side only.
+
+    :param policy: the resolved per-call policy.
+    :returns: the canonical key spellings.
+    """
+    return _extra_grant_spellings(policy)[1]
 
 
 def release_session(session_id: str) -> None:

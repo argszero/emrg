@@ -34,6 +34,7 @@ from emrg.sandbox.win32.ffi import (
     throw_last_error,
     win32,
 )
+from emrg.sandbox.win32.registry import grant_key_write, split_key
 from emrg.sandbox.win32.sid import assert_private_temp_disjoint
 from emrg.sandbox.win32.spawn import RestrictedChild, spawn_restricted
 from emrg.sandbox.win32.token import (
@@ -107,6 +108,16 @@ class AclSandbox:
         as well as a directory: Windows ACLs are per-object, and the single-file
         case is the one half of item 7 the Windows leg has not yet measured
         (the seam's ``GrantStore`` word is the standing-ACE cache for both).
+    :param extra_key_grants: the host-named extra writable **registry keys**, each
+        paired with the capability SID derived from its own spelling (issue #2492
+        Stage 2). Same one-SID-per-object rule as an extra root, and the same
+        standing lifetime, for the same reason: the SID is a pure function of the
+        spelling, so the ACE is a cache and the *policy* is what grants the key per
+        call — a call that stops passing ``--extra-key`` builds a token without that
+        SID and the write is refused again, with no DACL teardown on a hot path.
+        A key carries no existence precondition here: the caller
+        (``runner.py``) has already required it, and a key is not something this
+        class may create.
     :param manage_dacls: whether this instance owns its DACL grants.  ``False``
         means the caller (the seam's grant store) already materialized them, so
         ``init``/``dispose`` neither grant nor revoke.
@@ -121,6 +132,7 @@ class AclSandbox:
         write_sid: str | None = None,
         temp_write_sid: str | None = None,
         extra_grants: "list[tuple[str, str]] | tuple[tuple[str, str], ...]" = (),
+        extra_key_grants: "list[tuple[str, str]] | tuple[tuple[str, str], ...]" = (),
         manage_dacls: bool = True,
     ) -> None:
         self.mode = mode
@@ -148,13 +160,27 @@ class AclSandbox:
             resolved_extras.append((absolute, sid))
         self.extra_grants = resolved_extras
 
+        # A key is validated by its spelling, not by the disk: there is no
+        # ``os.path.exists`` for it, and creating one here would be a confinement
+        # mechanism writing the host's registry.  ``split_key`` refuses a bare hive
+        # and an unknown root, which is the half of the check this class owns; the
+        # key's presence is the runner's (``--extra-key does not exist``).
+        resolved_keys: list[tuple[str, str]] = []
+        for key, sid in extra_key_grants:
+            split_key(key)
+            resolved_keys.append((key, sid))
+        self.extra_key_grants = resolved_keys
+
         if mode == "workspace-write" and write_sid is None:
             raise ValueError(
                 "AclSandbox workspace-write requires a write SID — derive it from the workspace "
                 "via workspace_write_sid()"
             )
         if mode == "read-only" and (
-            write_sid is not None or temp_write_sid is not None or resolved_extras
+            write_sid is not None
+            or temp_write_sid is not None
+            or resolved_extras
+            or resolved_keys
         ):
             raise ValueError("AclSandbox read-only does not accept write SIDs")
         if write_sid is not None and temp_write_sid == write_sid:
@@ -169,6 +195,17 @@ class AclSandbox:
                 raise ValueError(
                     f"AclSandbox extra root SID must be distinct from every other write SID: "
                     f"{sid} ({path})"
+                )
+            named.add(sid)
+        # A key's SID is derived in its own domain, so a collision with a path
+        # should be impossible — which is exactly why it is checked: an identity
+        # that "cannot" collide and silently does would widen one grant into
+        # another, and the check is one comparison.
+        for key, sid in resolved_keys:
+            if sid in named:
+                raise ValueError(
+                    f"AclSandbox extra key SID must be distinct from every other write SID: "
+                    f"{sid} ({key})"
                 )
             named.add(sid)
         if temp_dir is None and temp_write_sid is not None:
@@ -199,6 +236,9 @@ class AclSandbox:
         #: token points at them for the child's whole life — so they are freed on
         #: the same two exits and by the same helper.
         self._extra_sid_ptrs: list[tuple[str, int]] = []
+        #: The host-named keys' parsed SIDs, each beside the key it was derived
+        #: from.  The same kind of OS allocation on the same two exits.
+        self._extra_key_sid_ptrs: list[tuple[str, int]] = []
 
     @property
     def temp_dir(self) -> str | None:
@@ -234,6 +274,8 @@ class AclSandbox:
             )
             for path, sid in self.extra_grants:
                 self._extra_sid_ptrs.append((path, _parse_sid(bindings, sid)))
+            for key, sid in self.extra_key_grants:
+                self._extra_key_sid_ptrs.append((key, _parse_sid(bindings, sid)))
             if self._temp_dir is not None:
                 if not os.path.isdir(self._temp_dir):
                     raise ValueError(
@@ -260,6 +302,13 @@ class AclSandbox:
                 # propagation on a hot path and buy nothing.
                 for path, sid_ptr in self._extra_sid_ptrs:
                     grant_write(bindings, path, sid_ptr)
+                # A key's ACE is applied through a different API on a different
+                # object type (``RegSetKeySecurity``) and is standing on the same
+                # terms as the roots': the SID is a pure function of the spelling,
+                # so the ACE is a cache and the policy withdraws the grant by not
+                # passing the key on the next call.
+                for key, sid_ptr in self._extra_key_sid_ptrs:
+                    grant_key_write(bindings, key, sid_ptr)
                 if self._temp_dir is not None and self._temp_write_sid_ptr is not None:
                     # Recorded before the grant: grant_write can throw after a
                     # successful apply, and the fail-closed path must still
@@ -277,6 +326,7 @@ class AclSandbox:
                     self._write_sid_ptr,
                     self._temp_write_sid_ptr,
                     *(sid_ptr for _, sid_ptr in self._extra_sid_ptrs),
+                    *(sid_ptr for _, sid_ptr in self._extra_key_sid_ptrs),
                 )
                 if sid is not None
             ]
@@ -388,9 +438,12 @@ class AclSandbox:
         _free_sid_best_effort(api, self._temp_write_sid_ptr, "temp write SID", failures)
         for path, sid_ptr in self._extra_sid_ptrs:
             _free_sid_best_effort(api, sid_ptr, f"extra root write SID ({path})", failures)
+        for key, sid_ptr in self._extra_key_sid_ptrs:
+            _free_sid_best_effort(api, sid_ptr, f"extra key write SID ({key})", failures)
         self._write_sid_ptr = None
         self._temp_write_sid_ptr = None
         self._extra_sid_ptrs = []
+        self._extra_key_sid_ptrs = []
         if self._token is not None:
             try:
                 if int(api.kernel32.CloseHandle(ctypes.c_void_p(self._token))) == 0:

@@ -353,6 +353,49 @@ class Win32Bindings:
             c.POINTER(c.c_void_p), c.POINTER(c.c_void_p),
         ]
 
+        # -- a registry key's DACL (issue #2492 Stage 2) ---------------------
+        #
+        # ``LSTATUS`` is a 32-bit signed ``LONG``, not a ``DWORD``: a negative
+        # status declared unsigned would read as a huge success code and the
+        # caller's ``!= ERROR_SUCCESS`` check would still fire, but the code it
+        # printed would be a number the system's message table has no text for.
+
+        a32.RegOpenKeyExW.restype = wintypes.LONG
+        a32.RegOpenKeyExW.argtypes = [
+            c.c_void_p, wintypes.LPCWSTR, wintypes.DWORD, c.c_int,
+            c.POINTER(c.c_void_p),
+        ]
+
+        a32.RegCloseKey.restype = wintypes.LONG
+        a32.RegCloseKey.argtypes = [c.c_void_p]
+
+        a32.RegGetKeySecurity.restype = wintypes.LONG
+        a32.RegGetKeySecurity.argtypes = [
+            c.c_void_p, wintypes.DWORD, c.c_void_p, c.POINTER(wintypes.DWORD),
+        ]
+
+        a32.RegSetKeySecurity.restype = wintypes.LONG
+        a32.RegSetKeySecurity.argtypes = [c.c_void_p, wintypes.DWORD, c.c_void_p]
+
+        a32.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+        a32.GetSecurityDescriptorDacl.argtypes = [
+            c.c_void_p, c.POINTER(wintypes.BOOL), c.POINTER(c.c_void_p),
+            c.POINTER(wintypes.BOOL),
+        ]
+
+        a32.InitializeSecurityDescriptor.restype = wintypes.BOOL
+        a32.InitializeSecurityDescriptor.argtypes = [c.c_void_p, wintypes.DWORD]
+
+        a32.SetSecurityDescriptorDacl.restype = wintypes.BOOL
+        a32.SetSecurityDescriptorDacl.argtypes = [
+            c.c_void_p, wintypes.BOOL, c.c_void_p, wintypes.BOOL,
+        ]
+
+        a32.MakeSelfRelativeSD.restype = wintypes.BOOL
+        a32.MakeSelfRelativeSD.argtypes = [
+            c.c_void_p, c.c_void_p, c.POINTER(wintypes.DWORD),
+        ]
+
     # -- the primitive helpers every call site shares ------------------------
 
     def get_last_error(self) -> int:
