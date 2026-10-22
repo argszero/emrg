@@ -1023,10 +1023,21 @@ def _paged_json(args: list[str]) -> list[dict]:
     `.[]` just as often as it is given it, and a list of lists would then reach the
     caller as rows that are not issue rows.
 
-    A payload that parses to neither is not "no rows": it raises, and `main` reports
-    it unmeasurable rather than as an empty queue.
+    A payload that parses to neither is not "no rows": a blank answer raises here, and a
+    line that is not JSON raises out of `json.loads`, so `main` reports both unmeasurable
+    rather than as an empty queue. Measured 2026-10-23 (issue #2500): the fallback below
+    used to return `[]` for a blank answer, so a run that read no subject at all printed
+    the `OK:` sentence — the paragraph above was true of the intent and false of the
+    code, and the code is what runs. What stays legitimate is a **real** `[]`: an issue
+    with no comments and a timeline with no events both answer that way, and neither is
+    unmeasurable.
     """
     out = _gh([*args, "--paginate"])
+    if not out.strip():
+        raise RuntimeError(
+            f"gh printed nothing for {' '.join(args)}: an empty answer is not an empty "
+            f"queue"
+        )
     try:
         payload: object = json.loads(out)
     except json.JSONDecodeError:
@@ -1071,6 +1082,31 @@ def load_queue(repo: str, state: str = "open", since: str | None = None) -> Queu
         else:
             queue.issues.append(row)
     return queue
+
+
+def open_queue_total(repo: str) -> int:
+    """How many open subjects `repo` reports, from an endpoint other than the queue.
+
+    The second reading a zero-row queue needs (issue #2500). The queue query and this
+    count are two independent answers to "how many open subjects are there", so a queue
+    that reads nothing while the repository reports a non-zero count is a reading that
+    contradicts itself — unmeasurable, never an empty queue.
+
+    `open_issues_count` is the number of open **issues and** open PRs, which is exactly
+    the subject set `load_queue` returns, so the two numbers are comparable rather than
+    merely both numbers.
+
+    `--jq` rather than parsing the payload, for `issue_state`'s reason: the caller gets
+    one number and no shape. A count that is not a number — including the blank answer
+    the queue reading just refused to accept — is unmeasurable, never zero.
+    """
+    out = _gh(["api", f"repos/{repo}", "--jq", ".open_issues_count"]).strip()
+    try:
+        return int(out)
+    except ValueError:
+        raise RuntimeError(
+            f"the repository's own open count is not a number: {out!r}"
+        ) from None
 
 
 def issue_state(repo: str, number: int) -> str:
@@ -1625,6 +1661,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"cannot determine the issue/PR links: {exc}", file=sys.stderr)
         return 2
 
+    if not queue.issues and not queue.prs:
+        # A zero-subject queue is a reading, not a verdict (issue #2500): the queue
+        # answered nothing, so ask a second endpoint before concluding there is nothing
+        # open. Reached only when the queue is empty, so a normal run pays no extra call,
+        # and a genuinely empty repository comes back with the same zero from the other
+        # endpoint — which is what separates "nothing to link" from "nothing was read".
+        try:
+            reported = open_queue_total(args.repo)
+        except RuntimeError as exc:
+            print(f"cannot determine the issue/PR links: {exc}", file=sys.stderr)
+            return 2
+        if reported:
+            print(
+                f"cannot determine the issue/PR links: the queue read no subject, but "
+                f"{args.repo} reports {reported} open issue(s)/PR(s) - an unread queue "
+                f"is not an empty one",
+                file=sys.stderr,
+            )
+            return 2
+
     rows = judge_issues(queue.issues, refs_by_issue, stated_by_pr) + judge_prs(
         queue.prs, queue.issue_numbers, stated_by_pr
     )
@@ -1679,7 +1735,18 @@ def main(argv: list[str] | None = None) -> int:
         ordered = sorted(rows, key=lambda r: (r.kind != "issue", r.number))
         for row in ordered:
             print(render(row))
-        if not bad:
+        if not rows:
+            # Nothing to judge is not "everything is linked". The `OK:` sentence makes
+            # three claims about open subjects, and with none open it would make them
+            # about nothing — the defect issue #2500 names. Both endpoints agreeing on
+            # zero is a real measurement, so this exits 0, but the sentence says what was
+            # measured: no link was read, so none was found complete.
+            print(
+                "\nno subject to judge: the queue is empty and the repository's own "
+                "count agrees (0 open), so this run read no link at all - it did not "
+                "find them all linked"
+            )
+        elif not bad:
             clauses = [
                 "every open issue has exactly one open PR declaring it",
                 "each declaration is named back in the issue",
