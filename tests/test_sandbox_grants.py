@@ -147,6 +147,23 @@ def test_the_path_projection_has_no_key_to_a_registry_grant(tmp_path):
     only paths. Handing a key spelling to one of them would grant something else
     entirely — the identity bug requirement 1 of issue #2492 names.
 
+    **Two meanings used to share this one assertion, and the second is not this
+    test's.** Whether a *key can be enforced* on the platform at hand is
+    ``test_a_registry_grant_is_either_enforced_here_or_refused_by_name``'s
+    question, answered from ``enforced_kinds()``; whether a *path reader* may
+    ever be handed a key is this test's, and the answer is **none anywhere**.
+    Reading the first through ``pytest.raises(GrantKindNotEnforced)`` around the
+    projection meant the claim held only while no platform enforced a key: the
+    day one did, the raise stopped and the projection's own guarantee went
+    unmeasured — measured as a red `test-windows` leg on PR #2498, where the
+    raise simply no longer happens.
+
+    So the claim is stated as what the projection does with the key — it is
+    absent, and the paths are exactly the ones the same policy yields without it
+    — and the baseline is asserted non-empty, because a projection that answered
+    ``[]`` for every policy would satisfy "no key" while telling the truth about
+    nothing.
+
     The workspace root is the fixture's own directory, not a literal ``/tmp``: the
     policy refuses a root that is not absolute *in the execution world*, and ``/tmp``
     is not one on a Windows host — where this test then failed on the setup rather
@@ -159,12 +176,19 @@ def test_the_path_projection_has_no_key_to_a_registry_grant(tmp_path):
         workspace_root=str(tmp_path),
         extra_grants=(grant,),
     )
+    without_key = resolve_policy(mode="workspace-write", workspace_root=str(tmp_path))
 
     assert canonical_target(grant) == "HKCU\\Software\\LarkCli", (
         "realpath over a key spelling would rewrite the key into a path"
     )
-    with pytest.raises(GrantKindNotEnforced):
-        writable_roots(policy)
+    paths = writable_roots(policy)
+    assert paths, "the projection has no subject if it answers no path at all"
+    assert "HKCU\\Software\\LarkCli" not in paths, (
+        "a key spelling reached a reader that can only write paths"
+    )
+    assert paths == writable_roots(without_key), (
+        "the key grant changed the paths, so it is not merely absent from them"
+    )
 
 
 # ── §2 the manifest supplies grants nobody typed ───────────────────────────
