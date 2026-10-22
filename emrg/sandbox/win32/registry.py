@@ -79,6 +79,43 @@ class KeyDaclRefused(RuntimeError):
     """A key's DACL is not one this module will edit."""
 
 
+class KeyDacl:
+    """A key's current DACL pointer and the buffer that owns it.
+
+    ``RegGetKeySecurity`` writes the descriptor into a buffer the caller supplies,
+    and the DACL is a pointer *into* that buffer — so the two travel together or
+    the pointer is meaningless. It is meaningless in a way that does not raise:
+    the pointer's next consumers are :func:`~emrg.sandbox.win32.acl.has_exact_grant`,
+    which walks it as an ACL header, and ``SetEntriesInAclW``, which copies every
+    ACE it is told is there. On a collected buffer those read an allocator's
+    bookkeeping as ``AclSize``/``AceCount``, so the walk runs off the end of a
+    freed block and the copy can overrun the new ACL: the heap is corrupted and
+    some later call is the one that dies.
+
+    This is :class:`~emrg.sandbox.win32.acl.CurrentDacl` in the registry's idiom,
+    and the two files carry one each because nothing else keeps a descriptor
+    alive: the answer holds the buffer, so a caller that holds the answer holds
+    the memory its pointer addresses.
+    """
+
+    __slots__ = ("_buffer", "pointer")
+
+    def __init__(self, pointer: int, buffer: ctypes.Array) -> None:
+        self._buffer = buffer
+        self.pointer = pointer
+
+    @property
+    def buffer(self) -> ctypes.Array:
+        """The descriptor buffer :attr:`pointer` addresses.
+
+        Exposed so a test can assert the pointer lies inside it, and for nothing
+        else: the buffer is owned here and is not the caller's to free or resize.
+
+        :returns: the buffer this answer keeps alive.
+        """
+        return self._buffer
+
+
 def split_key(key: str) -> tuple[int, str]:
     """Split a key's full spelling into its predefined root and its subkey path.
 
@@ -208,18 +245,20 @@ def _close_key_best_effort(api: Win32Bindings, handle: int) -> None:
         pass
 
 
-def read_current_key_dacl(api: Win32Bindings, key: str, handle: int) -> int | None:
-    """Read the key's current explicit DACL pointer.
+def read_current_key_dacl(api: Win32Bindings, key: str, handle: int) -> KeyDacl | None:
+    """Read the key's current explicit DACL, with the buffer that owns it.
 
     The descriptor is read into a buffer this module owns, so nothing here is
-    freed with ``LocalFree``: the DACL pointer refers *into* that buffer, which
-    stays alive until the caller finishes the merge — and the buffer needs no
-    keeping once the merged ACL has been applied.
+    freed with ``LocalFree``: the DACL pointer refers *into* that buffer, and the
+    two are therefore handed back together — as a :class:`KeyDacl`, never as a
+    bare pointer, because a pointer alone outlives nothing and its consumers
+    would read freed memory instead of raising.
 
     :param api: the binding table.
     :param key: the key's full spelling, for error messages.
     :param handle: the open key handle.
-    :returns: the DACL pointer, or ``None`` when the key carries no DACL.
+    :returns: the DACL pointer with the buffer that owns it, or ``None`` when the
+        key carries no DACL.
     :raises Win32Error: when a call failed.
     :raises KeyDaclRefused: when the key carries a NULL DACL, which grants
         everyone full control; replacing it would narrow access the host has
@@ -260,7 +299,9 @@ def read_current_key_dacl(api: Win32Bindings, key: str, handle: int) -> int | No
             "writing one here would narrow access this module did not grant and cannot restore"
         )
     dacl = decode_ptr(dacl_slot)
-    return None if is_null_ptr(dacl) else int(dacl)
+    if is_null_ptr(dacl):
+        return None
+    return KeyDacl(int(dacl), buffer)
 
 
 def merge_entry(api: Win32Bindings, entry, old_acl: int | None, label: str) -> int:
@@ -374,7 +415,11 @@ def grant_key_write(api: Win32Bindings, key: str, sid_ptr: int) -> None:
     with with_path_lock(api, key):
         handle = open_key(api, key)
         try:
-            old_acl = read_current_key_dacl(api, key, handle)
+            # ``dacl`` is bound, not just read: its buffer owns the pointer that
+            # ``has_exact_grant`` walks and ``merge_entry`` copies ACEs out of,
+            # so letting it go out of scope here would free the memory under both.
+            dacl = read_current_key_dacl(api, key, handle)
+            old_acl = dacl.pointer if dacl is not None else None
             if old_acl is not None and has_exact_grant(
                 api, old_acl, sid_ptr, mask=abi.REGISTRY_GRANT_MASK
             ):
@@ -409,12 +454,12 @@ def revoke_key_write(api: Win32Bindings, key: str, sid_ptr: int) -> bool:
     with with_path_lock(api, key):
         handle = open_key(api, key)
         try:
-            old_acl = read_current_key_dacl(api, key, handle)
-            if old_acl is None:
+            dacl = read_current_key_dacl(api, key, handle)
+            if dacl is None:
                 close_key(api, handle, key)
                 return False
             entry = build_explicit_access(sid_ptr, abi.REVOKE_ACCESS, 0)
-            new_acl = merge_entry(api, entry, old_acl, f"revokeKeyWrite({key})")
+            new_acl = merge_entry(api, entry, dacl.pointer, f"revokeKeyWrite({key})")
         except BaseException:
             _close_key_best_effort(api, handle)
             raise

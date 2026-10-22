@@ -33,7 +33,12 @@ from emrg.sandbox.providers import win32 as provider
 from emrg.sandbox.roots import canonical_path
 from emrg.sandbox.win32 import abi, ffi
 from emrg.sandbox.win32.ffi import SIDAndAttributes
-from emrg.sandbox.win32.registry import RegistryKeyError, key_exists, split_key
+from emrg.sandbox.win32.registry import (
+    RegistryKeyError,
+    key_exists,
+    read_current_key_dacl,
+    split_key,
+)
 from emrg.sandbox.win32.runner import (
     RUNNER_FAILURE_EXIT,
     RUNNER_SIGNATURE,
@@ -2350,6 +2355,70 @@ def test_key_exists_answers_false_where_there_is_no_registry():
     assert key_exists("not-a-key-at-all") is False
 
 
+class _FakeRegistryAclApi:
+    """The three calls ``read_current_key_dacl`` makes, over a buffer it fills.
+
+    ``RegGetKeySecurity`` writes a descriptor into the buffer the caller supplies
+    and ``GetSecurityDescriptorDacl`` reports a DACL that points *into* it — the
+    shape the real API has, and the reason the pointer and the buffer have to
+    travel together. The bytes are arbitrary: what is measured through this fake
+    is ownership, never the descriptor's contents.
+    """
+
+    def __init__(self) -> None:
+        self.advapi32 = self
+        self.blob = b"REGKEY-DESCRIPTOR-BYTES"
+        self.filled: list[int] = []
+
+    @staticmethod
+    def _address(pointer) -> int:
+        if isinstance(pointer, int):
+            return pointer
+        return int(ctypes.cast(pointer, ctypes.c_void_p).value or 0)
+
+    def RegGetKeySecurity(self, handle, info, descriptor, size_ref):
+        if descriptor is None:
+            size_ref._obj.value = len(self.blob)
+            return abi.ERROR_INSUFFICIENT_BUFFER
+        address = self._address(descriptor)
+        ctypes.memmove(address, self.blob, len(self.blob))
+        self.filled.append(address)
+        return abi.ERROR_SUCCESS
+
+    def GetSecurityDescriptorDacl(self, descriptor, present_ref, dacl_ref, defaulted_ref):
+        present_ref._obj.value = 1
+        dacl_ref._obj.value = self._address(descriptor)
+        defaulted_ref._obj.value = 0
+        return 1
+
+
+def test_a_key_dacl_answer_owns_the_buffer_its_pointer_addresses():
+    """The ownership the merge depends on, measured where no registry exists.
+
+    ``RegGetKeySecurity`` fills a buffer the caller supplies and the DACL points
+    into it, so a pointer handed back on its own stays valid only until that
+    buffer is collected. Its next consumers walk the pointer as an ACL header and
+    copy every ACE it claims, so on a collected buffer they read an allocator's
+    bookkeeping as ``AclSize``/``AceCount`` and can write past the new ACL — the
+    heap is corrupted, and something unrelated dies later with no assertion
+    firing. So the answer carries the buffer, and what is asserted here is that
+    the pointer addresses the buffer it carries, and that the buffer kept is the
+    one the API filled.
+    """
+    api = _FakeRegistryAclApi()
+    dacl = read_current_key_dacl(api, "HKCU\\Software\\X", 0x4B1)
+
+    assert dacl is not None, "the fake reports a present DACL"
+    assert api.filled, "the reader must pass its own buffer to the API, not a scratch one"
+    start = ctypes.addressof(dacl.buffer)
+    assert start <= dacl.pointer < start + len(dacl.buffer), (
+        "the DACL pointer must address the buffer the answer keeps alive"
+    )
+    assert bytes(dacl.buffer)[: len(api.blob)] == api.blob, (
+        "the buffer kept must be the one the API filled, not a copy of it"
+    )
+
+
 @needs_windows
 def test_a_key_grant_is_applied_checkable_and_reversible_on_a_real_key():
     """The boundary itself, on a throwaway key under ``HKCU``.
@@ -2388,20 +2457,27 @@ def test_a_key_grant_is_applied_checkable_and_reversible_on_a_real_key():
     grant = AclWriteGrant.create(registry_write_sid(key))
     try:
         def current_acl():
-            """Read the key's DACL through the production reader."""
+            """Read the key's DACL through the production reader, keeping its buffer.
+
+            The answer is returned whole rather than reduced to its pointer: the
+            buffer it carries is what makes that pointer addressable, and this test
+            reads through it after the handle is closed.
+            """
             handle = open_key(api, key)
             try:
                 return read_current_key_dacl(api, key, handle)
             finally:
                 close_key(api, handle, key)
 
-        assert current_acl() is not None, "a key created here carries a DACL"
-        assert not has_exact_grant(api, current_acl(), grant.sid_ptr, mask=abi.REGISTRY_GRANT_MASK), (
+        before = current_acl()
+        assert before is not None, "a key created here carries a DACL"
+        assert not has_exact_grant(api, before.pointer, grant.sid_ptr, mask=abi.REGISTRY_GRANT_MASK), (
             "the capability ACE must not be there before the grant — otherwise nothing below measures it"
         )
 
         grant_key_write(api, key, grant.sid_ptr)
-        assert has_exact_grant(api, current_acl(), grant.sid_ptr, mask=abi.REGISTRY_GRANT_MASK), (
+        after = current_acl()
+        assert has_exact_grant(api, after.pointer, grant.sid_ptr, mask=abi.REGISTRY_GRANT_MASK), (
             "the key's DACL must carry the capability ACE after the grant"
         )
         with winreg.OpenKey(
@@ -2410,7 +2486,10 @@ def test_a_key_grant_is_applied_checkable_and_reversible_on_a_real_key():
             pass  # the host's own access survived: the merge added an ACE
 
         revoke_key_write(api, key, grant.sid_ptr)
-        assert not has_exact_grant(api, current_acl(), grant.sid_ptr, mask=abi.REGISTRY_GRANT_MASK)
+        revoked = current_acl()
+        assert not has_exact_grant(
+            api, revoked.pointer, grant.sid_ptr, mask=abi.REGISTRY_GRANT_MASK
+        )
         with winreg.OpenKey(
             winreg.HKEY_CURRENT_USER, subkey, 0, winreg.KEY_READ | winreg.KEY_WRITE
         ):
