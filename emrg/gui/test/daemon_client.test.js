@@ -66,7 +66,7 @@ Module._load = function (request, parent, isMain) {
   if (request === "ws") return MockWs;
   return origLoad.apply(this, arguments);
 };
-const { DaemonClient, generateSessionId, isSessionId, TOKEN_FILE, EMRGD_PORT, EMRGD_START_ERR } = require("../daemon_client.js");
+const { DaemonClient, generateSessionId, isSessionId, pickSessionCwd, TOKEN_FILE, EMRGD_PORT, EMRGD_START_ERR } = require("../daemon_client.js");
 let tmpHome = null;
 let origHome = null;
 let origUserProfile = null;
@@ -2135,4 +2135,59 @@ test("#1283 startDaemon：标记在 spawn 之前取，失败信息只含本次�
     childProcess.spawn = origSpawn;
     require.cache[cacheKey] = originalModule;
   }
+});
+
+// ── issue #2484：先问 daemon「这个会话在哪个项目」 ──
+//
+// GUI 此前只读本地 sessions_index.json，读不到就用 `|| os.homedir()` 兜底，
+// 而 daemon 的幽灵会话校验只挂在 resume_session 上 —— 发送路径的预打开带
+// resume:false，于是 cwd 直接进了 daemon 的取/建路径。这两条测试钉住 GUI 侧
+// 问得出去、答得回来，以及「答得不准时不冒充事实」。
+
+test("resolve_session_cwd 一问一答（issue #2484：GUI 侧此前无此命令）", async () => {
+  const client = new DaemonClient();
+  await connectClient(client);
+  const p = client.sendCommandAndWait(
+    "resolve_session_cwd",
+    { session_id: "feishu-inbox", cwd: "/Users/argszero" },
+    2000,
+  );
+  await new Promise((r) => setTimeout(r, 10));
+  const sent = JSON.parse(currentMockWs.sent.at(-1));
+  assert.strictEqual(sent.type, "resolve_session_cwd", "命令名即帧 type");
+  assert.strictEqual(sent.session_id, "feishu-inbox");
+  assert.strictEqual(sent.cwd, "/Users/argszero", "客户端自己的 cwd 只作候选发出");
+  currentMockWs.emit("message", Buffer.from(JSON.stringify({
+    type: "session_cwd_result",
+    session_id: "feishu-inbox",
+    cwd: "/Users/argszero/.emrg",
+    source: "index",
+  })));
+  const res = await p;
+  assert.strictEqual(res.type, "session_cwd_result", "映射表认得出响应帧（缺映射会超时）");
+  assert.strictEqual(pickSessionCwd(res, null), "/Users/argszero/.emrg", "index 答案即事实");
+});
+
+test("pickSessionCwd：只有 index 答案是事实，其余一律退回调用方候选（issue #2484）", () => {
+  const fallback = "/proj/caller";
+  // index + 非空 cwd → daemon 说了算（跨项目会话的唯一正解）
+  assert.strictEqual(pickSessionCwd({ source: "index", cwd: "/proj/real" }, fallback), "/proj/real");
+  // unknown → daemon 无法保证；回显的 requested_cwd 只是候选，绝不采信
+  assert.strictEqual(
+    pickSessionCwd({ source: "unknown", cwd: null, requested_cwd: "/proj/caller" }, fallback),
+    fallback,
+  );
+  // 声称 index 却是空/非字符串 → 不冒充事实
+  assert.strictEqual(pickSessionCwd({ source: "index", cwd: "" }, fallback), fallback);
+  assert.strictEqual(pickSessionCwd({ source: "index", cwd: "   " }, fallback), fallback);
+  assert.strictEqual(pickSessionCwd({ source: "index", cwd: null }, fallback), fallback);
+  assert.strictEqual(pickSessionCwd({ source: "index", cwd: 42 }, fallback), fallback);
+  // 缺 source、不可读的帧 → 候选
+  assert.strictEqual(pickSessionCwd({ cwd: "/proj/x" }, fallback), fallback);
+  assert.strictEqual(pickSessionCwd(null, fallback), fallback);
+  assert.strictEqual(pickSessionCwd(undefined, fallback), fallback);
+  assert.strictEqual(pickSessionCwd("session_cwd_result", fallback), fallback);
+  // 默认候选是 null —— 兜底由调用方决定，这里绝不自己变出 homedir
+  assert.strictEqual(pickSessionCwd({ source: "unknown", cwd: null }), null);
+  assert.strictEqual(pickSessionCwd({ source: "index", cwd: "/proj/real" }), "/proj/real");
 });

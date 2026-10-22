@@ -133,6 +133,9 @@ const RESPONSE_TYPES = {
   list_rants: "rants_list",
   list_memories: "memories_list",
   resume_session: "resume_result",
+  // issue #2484：`resolve_session_cwd` 由 daemon 以 `session_cwd_result` 回答
+  // （daemon.py `_process_message`）。缺这一行，GUI 连"会话到底在哪个项目"都问不出去。
+  resolve_session_cwd: "session_cwd_result",
   delete_session: "session_deleted",
   set_model: "model_set",
   clear_session: "clear_result", // 修正：daemon 命令名是 clear_session（原 clear 匹配不上）
@@ -156,6 +159,26 @@ const RESPONSE_TYPES = {
   task_template_update: "template_result",
   task_template_delete: "template_result",
 };
+
+/** The cwd a `session_cwd_result` frame names, or the caller's own candidate.
+ *
+ * The daemon answers where a session lives so that a client does not have to
+ * guess (issue #2484). Two answers are deliberately not the same value: `index`
+ * carries the project the global session index holds, and `unknown` carries
+ * `null` — the daemon cannot vouch for that session's project, so the requested
+ * cwd comes back only as a candidate and must not be relabelled as a fact.
+ *
+ * So everything except a non-empty `index` cwd answers the caller's fallback,
+ * a frame this cannot read included: a client that treats a guess as a fact is
+ * the defect the command exists to remove.
+ */
+function pickSessionCwd(frame, fallbackCwd = null) {
+  if (!frame || typeof frame !== "object") return fallbackCwd;
+  if (frame.source !== "index") return fallbackCwd;
+  const cwd = frame.cwd;
+  if (typeof cwd !== "string" || !cwd.trim()) return fallbackCwd;
+  return cwd;
+}
 
 class DaemonClient {
   constructor({ logger = console, authTimeoutMs = AUTH_TIMEOUT_MS, isPackaged = false, deltaBatchMs = 0 } = {}) {
@@ -1297,4 +1320,4 @@ function generateSessionId(seed) {
   return sid;
 }
 
-module.exports = { DaemonClient, generateSessionId, isSessionId, TOKEN_FILE, MAX_PAYLOAD, EMRGD_PORT, EMRGD_START_ERR };
+module.exports = { DaemonClient, generateSessionId, isSessionId, pickSessionCwd, TOKEN_FILE, MAX_PAYLOAD, EMRGD_PORT, EMRGD_START_ERR };

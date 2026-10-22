@@ -31,7 +31,13 @@ const path = require("node:path");
 const GUI_ROOT = path.join(__dirname, "..");
 
 function read(rel) {
-  return fs.readFileSync(path.join(GUI_ROOT, rel), "utf8");
+  // Normalise the line ending here, once, so every assertion in this file reads
+  // text whose newlines are "\n" whatever the checkout did. A sentinel written as
+  // "\n  }\n" is a property of the file's content, not of the platform, but a CRLF
+  // checkout makes indexOf answer -1 and the slice collapse to "" — measured
+  // 2026-10-22: the same assertion passed on Linux and macOS and failed on Windows
+  // with `actual: ''`. The assertions themselves are unchanged.
+  return fs.readFileSync(path.join(GUI_ROOT, rel), "utf8").replace(/\r\n/g, "\n");
 }
 
 test("boot chain: main.js emrg:init handler must call ensureConnected()", () => {
@@ -228,4 +234,62 @@ test("device flow: the emrg:githubConnectWeb handler forwards the frame's user",
       "an install that is connected already."
   );
   assert.strictEqual(already.code, null, "a short-circuit carries no device code");
+});
+
+// ── issue #2484：GUI 打开会话前，必须先问 daemon「它在哪个项目」 ──
+//
+// main.js 这一层没有运行时测试（renderer 测试全 mock window.emrg，integration 测试
+// 直接打 daemon_client），所以用与本文件同款的静态钉子。被钉住的是一条因果链：
+// 本地 sessions_index.json 读不到 → 调用方 `|| os.homedir()` → 带 resume:false 的
+// 预打开绕过 daemon 的幽灵会话校验（_handle_resume_session 只在 resume 时核对 cwd）
+// → daemon 照单创建 `~/.emrg/sessions/<sid>/`，真会话（另一个项目下的同名 id）再也打不开。
+
+function handlerRegion(src, name) {
+  const start = src.indexOf(`ipcMain.handle("${name}"`);
+  assert.ok(start >= 0, `${name} handler 必须存在于 main.js`);
+  const next = src.indexOf("ipcMain.handle(", start + 10);
+  return src.slice(start, next === -1 ? undefined : next);
+}
+
+test("issue #2484: emrg:switchSession asks the daemon before it opens a session", () => {
+  const region = handlerRegion(read("main.js"), "emrg:switchSession");
+  assert.match(
+    region,
+    /await askSessionCwd\(/,
+    "switchSession must ask the daemon where the session lives: its own index lookup " +
+      "answers null for a session it cannot place, and the caller then opens at the home directory.",
+  );
+  assert.match(
+    region,
+    /asked \|\| projectPath \|\| resolveSessionCwd\(sessionId\)/,
+    "precedence must be daemon answer > the caller's project > the local index guess, so a " +
+      "session from another project opens where it really lives rather than where we guessed.",
+  );
+});
+
+test("issue #2484: the send path's pre-open asks the daemon first, and does so before opening", () => {
+  const region = handlerRegion(read("main.js"), "emrg:sendMessage");
+  const openAt = region.indexOf("openSession(sessionId, sessionCwd, { resume: false })");
+  assert.ok(openAt > 0, "send path still pre-opens with resume:false (the window this guards)");
+  const beforeOpen = region.slice(0, openAt);
+  assert.match(
+    beforeOpen,
+    /await askSessionCwd\(/,
+    "the ask must happen BEFORE the resume:false open: that open skips the daemon's ghost " +
+      "check, so the cwd it carries is the cwd the session gets created at.",
+  );
+});
+
+test("issue #2484: askSessionCwd asks, judges, and never falls back to the home directory", () => {
+  const src = read("main.js");
+  const start = src.indexOf("async function askSessionCwd(");
+  assert.ok(start > 0, "askSessionCwd must exist");
+  const body = src.slice(start, src.indexOf("\n  }\n", start) + 4);
+  assert.match(body, /sendCommandAndWait\(\s*"resolve_session_cwd"/, "it must send the daemon's own command");
+  assert.match(body, /pickSessionCwd\(frame, null\)/, "an answer that is not `index` must not become a fact");
+  assert.match(body, /return null;/, "an unanswerable question returns null for the caller to decide");
+  assert.ok(
+    !/DEFAULT_CWD/.test(body.split("candidateCwd || DEFAULT_CWD")[1] || ""),
+    "DEFAULT_CWD may be the candidate it sends, never the value it returns",
+  );
 });
