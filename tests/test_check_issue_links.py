@@ -142,12 +142,14 @@ def _merged(number: int, *, body: str = "", merged_at: str = "2026-09-25T00:00:0
 class FakeGh:
     """`_gh` replaced by a routing table; every call recorded.
 
-    Three payloads are served, all as the JSON *text* `gh` would print, because the tool
-    parses its own output: the open queue (one `/issues` call), a per-subject timeline,
-    and a per-issue comment list. An unexpected query is an assertion failure rather than
-    an empty answer, so a typo in a path cannot read as "no links" — and a comments call
-    for an issue that is not in the queue is such a typo, since no claiming issue can be
-    outside it.
+    Four payloads are served, all as the JSON *text* `gh` would print, because the tool
+    parses its own output: the open queue (one `/issues` call), a per-subject timeline, a
+    per-issue comment list, and — only when a test passes `open_issues_count` — the
+    repository's own count, which is the second reading a zero-row queue is cross-checked
+    against (issue #2500). An unexpected query is an assertion failure rather than an
+    empty answer, so a typo in a path cannot read as "no links", and a `repos/<repo>`
+    query with no `open_issues_count` behind it is exactly such an unexpected query —
+    which is what pins "the cross-check is spent only on an empty queue".
 
     The shape served is the one measured on this machine (2026-09-26): with no `--jq`,
     `gh api --paginate` prints **one merged array on one line**. The other measured
@@ -160,20 +162,29 @@ class FakeGh:
         prs: list[dict],
         timelines: dict[int, list[dict]],
         comments: dict[int, list[dict]] | None = None,
+        open_issues_count: str | int | None = None,
     ):
         self.issues = issues
         self.prs = prs
         self.timelines = timelines
         self.comments = comments or {}
+        self.open_issues_count = open_issues_count
         self.calls: list[list[str]] = []
 
     def __call__(self, args: list[str]) -> str:
         self.calls.append(list(args))
         assert args, "gh was called with no arguments"
         assert args[0] == "api", f"unexpected gh call: {args}"
-        assert args[-1] == "--paginate", args
         target = next((a for a in args if a.startswith("repos/")), None)
         assert target, args
+        if target == f"repos/{REPO}":
+            assert self.open_issues_count is not None, (
+                "the repository's own count was read with "
+                f"{len(self.issues) + len(self.prs)} subject(s) in the queue: {args}"
+            )
+            assert args[-1] == ".open_issues_count", args
+            return str(self.open_issues_count)
+        assert args[-1] == "--paginate", args
         if "/issues?" in target:
             return json.dumps([*self.issues, *self.prs])
         if "/comments?" in target:
@@ -1375,6 +1386,139 @@ def test_an_unparseable_timeline_is_unmeasurable(mod, monkeypatch, capsys) -> No
 
     assert rc == 2
     assert "OK" not in captured.out
+
+
+def test_a_blank_queue_answer_is_unmeasurable_not_an_empty_queue(
+    mod, monkeypatch, capsys
+) -> None:
+    """A successful `gh` call that printed nothing is not a repository with nothing open.
+
+    Issue #2500: the payload fallback read a blank answer as `[]`, so a run that had read
+    no subject went on to print the `OK:` sentence — the strongest claim the tool makes,
+    made about nothing. The reading must now be exit 2 with no verdict.
+
+    The fake answers the queue call and **refuses every other**, which is the second half
+    of the defect: a blank queue does not get to ask the repository what it thinks either,
+    because the cross-check presumes a queue that parsed. Two branches, not one.
+    """
+
+    def blank(args: list[str]) -> str:
+        assert "/issues?" in args[1], (
+            f"a queue that answered nothing is not a question for another endpoint: {args}"
+        )
+        return ""
+
+    monkeypatch.setattr(mod, "_gh", blank)
+
+    rc = mod.main([])
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "printed nothing" in captured.err
+    assert "OK" not in captured.out
+
+
+def test_a_blank_timeline_answer_is_unmeasurable_too(mod, monkeypatch, capsys) -> None:
+    """The blank-payload branch lives in `_paged_json`, so the timeline is covered as well.
+
+    A timeline that answered nothing would otherwise read as "no reference" — the same
+    confident wrong verdict (`unlinked`) the unparseable-timeline test above refuses, one
+    layer earlier in the read: there the lines were not JSON, here there were no lines.
+    """
+    fake = FakeGh([_issue(10, "the problem")], [_pr(20, "the fix", body="Closes #10.")], {})
+    real = fake
+
+    def routed(args: list[str]) -> str:
+        target = next(a for a in args if a.startswith("repos/"))
+        if "/issues?" in target:
+            return real(args)
+        return ""
+
+    monkeypatch.setattr(mod, "_gh", routed)
+
+    rc = mod.main([])
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "printed nothing" in captured.err
+    assert "OK" not in captured.out
+
+
+def test_an_empty_queue_is_cross_checked_against_the_repositorys_own_count(
+    mod, monkeypatch, capsys
+) -> None:
+    """A queue that read nothing is contradicted by a repository reporting subjects.
+
+    The count comes from a different endpoint (`repos/<repo>`'s `open_issues_count`), so
+    the two readings cannot be one answer looked at twice — which is what makes a zero
+    queue a measurement instead of a silence. Both numbers appear in the reason, because
+    the reader has to see which two disagree.
+    """
+    fake = FakeGh([], [], {}, open_issues_count=3)
+    _install(mod, monkeypatch, fake)
+
+    rc = mod.main([])
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "read no subject" in captured.err
+    assert "3 open" in captured.err
+    assert "OK" not in captured.out
+
+
+def test_a_genuinely_empty_repository_says_it_measured_nothing(
+    mod, monkeypatch, capsys
+) -> None:
+    """Both readings agreeing on zero is a measurement — and still not an `OK`.
+
+    Exit 0, because nothing is wrong with an empty repository; but the sentence must not
+    claim that links were checked, because no subject was read. `OK:` is the token a
+    caller greps for, so its absence is the assertion.
+    """
+    fake = FakeGh([], [], {}, open_issues_count=0)
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 0, out
+    assert "OK" not in out
+    assert "no subject to judge" in out
+    assert "did not find them all linked" in out
+
+
+def test_a_count_that_is_not_a_number_is_unmeasurable(mod, monkeypatch, capsys) -> None:
+    """The cross-check refuses to read a non-number as zero.
+
+    The count endpoint going quiet is exactly the silence the queue reading just refused,
+    so it cannot become the reassurance here — issue #2500's own argument, one endpoint
+    over. The reading is unmeasurable, and no verdict is printed.
+    """
+    fake = FakeGh([], [], {}, open_issues_count="not a number")
+    _install(mod, monkeypatch, fake)
+
+    rc = mod.main([])
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "is not a number" in captured.err
+    assert "OK" not in captured.out
+
+
+def test_a_queue_with_subjects_pays_no_cross_check_call(mod, monkeypatch, capsys) -> None:
+    """The second reading is spent only when the first one read nothing.
+
+    `FakeGh` refuses the repository query unless a test asked for it, so this is the
+    control arm for the cross-check: a linked pair runs as before, with no extra call and
+    no change to the verdict.
+    """
+    fake = _linked_pair()
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 0, out
+    assert "OK:" in out
+    assert not [c for c in fake.calls if c[1] == f"repos/{REPO}"], fake.calls
 
 
 # --------------------------------------------------------------------------- #
