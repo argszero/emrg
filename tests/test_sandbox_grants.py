@@ -50,7 +50,7 @@ from emrg.sandbox.grants import (
     manifest_targets,
 )
 from emrg.sandbox.policy import grants_from_arguments, resolve_policy
-from emrg.sandbox.providers.darwin import seatbelt_profile_args
+from emrg.sandbox.providers.darwin import sbpl_string, seatbelt_profile_args
 from emrg.sandbox.providers.linux import bwrap_profile_args
 from emrg.sandbox.roots import (
     canonical_path,
@@ -99,8 +99,17 @@ def test_a_recorded_kind_wins_over_the_disk(tmp_path):
 
     profile = " ".join(seatbelt_profile_args(policy))
 
-    assert f'(literal "{canonical_path(str(became_a_directory))}")' in profile
-    assert f'(subpath "{canonical_path(str(became_a_directory))}")' not in profile, (
+    # The expected clause is spelled by the provider's own ``sbpl_string``, never by
+    # quoting the path here. The profile escapes every backslash, so a clause written
+    # from the raw path is found on a host whose paths have none and is *false* on a
+    # Windows host with the grant visibly present — which is what ``test-windows``
+    # reported for this file (`2 failed, 5179 passed, 499 skipped`). Both directions
+    # take the same spelling, so the negative one is a measurement there too rather
+    # than a string that could never match.
+    clause = sbpl_string(canonical_path(str(became_a_directory)))
+
+    assert f"(literal {clause})" in profile
+    assert f"(subpath {clause})" not in profile, (
         "the recorded kind was overridden by the disk — the widening this change removes"
     )
 
@@ -129,17 +138,23 @@ def test_one_path_named_as_two_kinds_is_two_grants(tmp_path):
     assert kinds == [GRANT_DIRECTORY, GRANT_FILE], kinds
 
 
-def test_the_path_projection_has_no_key_to_a_registry_grant():
+def test_the_path_projection_has_no_key_to_a_registry_grant(tmp_path):
     """A registry key is not a path, so the path projection contributes none.
 
     ``writable_roots`` is a view of ``granted_grants`` for the readers that need
     only paths. Handing a key spelling to one of them would grant something else
     entirely — the identity bug requirement 1 of issue #2492 names.
+
+    The workspace root is the fixture's own directory, not a literal ``/tmp``: the
+    policy refuses a root that is not absolute *in the execution world*, and ``/tmp``
+    is not one on a Windows host — where this test then failed on the setup rather
+    than on the claim it makes. The claim is about a kind that is not a path, so the
+    root it is made under must not itself be a platform statement.
     """
     grant = RootGrant(kind=GRANT_REGISTRY, target="HKCU\\Software\\LarkCli")
     policy = resolve_policy(
         mode="workspace-write",
-        workspace_root="/tmp",
+        workspace_root=str(tmp_path),
         extra_grants=(grant,),
     )
 
