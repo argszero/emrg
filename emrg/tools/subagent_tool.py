@@ -170,6 +170,15 @@ class SubagentTool(ToolExecutor):
         # value that is not a list is treated as "no statement", which the
         # daemon reads as its default set — the same meaning the message field
         # has, so the two cannot disagree about silence.
+        # The tier this turn is running under, injected by the daemon. A value that
+        # is not a non-empty string is "no statement": silence means the turn itself
+        # declared no tier, which the daemon reads as unconfined.
+        raw_parent_sandbox = arguments.get("_parent_sandbox")
+        parent_sandbox = (
+            raw_parent_sandbox
+            if isinstance(raw_parent_sandbox, str) and raw_parent_sandbox else None
+        )
+
         raw_parent_tools = arguments.get("_parent_tools")
         parent_tools = (
             [str(name) for name in raw_parent_tools]
@@ -183,6 +192,7 @@ class SubagentTool(ToolExecutor):
             timeout_s=int(timeout_s),
             intent=str(arguments.get("intent") or ""),
             parent_tools=parent_tools,
+            parent_sandbox=parent_sandbox,
         )
         if outcome.get("error"):
             return ToolResult(name="subagent", content=outcome["error"], error=True)

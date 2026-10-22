@@ -43,6 +43,7 @@ import pytest
 from emrg.config import LlmConfig
 from emrg.server import daemon as daemon_mod
 from emrg.server.daemon import EmrgServer
+from emrg.protocol import TaskRequest
 from emrg.session import Session
 from emrg.tools.subagent_tool import DEFAULT_TIMEOUT_S, SubagentTool
 
@@ -524,3 +525,45 @@ def test_the_tool_passes_the_default_timeout_through():
     assert seen["timeout_s"] == DEFAULT_TIMEOUT_S
     assert seen["parent_session_id"] == "p"
     assert seen["intent"] == "because"
+
+
+def test_a_task_delegation_inherits_the_turns_tier(tmp_path, monkeypatch):
+    """A scheduled task's tier reaches its child, and it is the *turn's* tier.
+
+    A task's tier is resolved from `tasks.yml` into the request and never written
+    onto the session object, so a child that read the session inherited nothing and
+    ran unconfined while the task body itself was confined — the escalation this
+    test exists to refuse. Driven through `_inject_tool_arguments` and then the
+    tool, never by handing the tier straight to the runner: the injection is the
+    half that was missing, and a test below it would have stayed green.
+    """
+    server = _server(tmp_path, monkeypatch)
+    _stub_reply(server, "child answer")
+    parent = Session.create_with_id("parent-task-turn", tmp_path)
+    assert parent.sandbox is None, (
+        "this test models a scheduled task, whose tier lives on the request; a "
+        "parent that carries one is the client shape the other test covers"
+    )
+    req = TaskRequest(
+        id="tier-turn", session_id=parent.session_id, cwd=str(tmp_path),
+        prompt="a task's tick", sandbox="read-only",
+    )
+
+    args = {"prompt": "do the job", "timeout_s": 10}
+    EmrgServer._inject_tool_arguments("subagent", args, parent, req, None)
+
+    assert args.get("_parent_sandbox") == "read-only", (
+        "the turn's tier never reached the call, so the child cannot inherit it: "
+        f"{args}"
+    )
+    result = _run(SubagentTool(server._run_subagent_tool).execute(args))
+    assert not result.error, result.content
+
+    child = Session.load(
+        _report_field(result.content, "session"),
+        Path(_report_field(result.content, "cwd")),
+    )
+    assert child.sandbox == "read-only", (
+        "a child of a confined task ran at a wider tier; a delegation is the same "
+        "authorisation one level down, never a way around it"
+    )
