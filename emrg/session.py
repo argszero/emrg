@@ -621,17 +621,26 @@ class Session:
         """
         return self._boss_asked_at
 
-    def set_boss_asked_at(self, when: float) -> None:
+    def set_boss_asked_at(self, when: float | None) -> None:
         """Persist the instant this session was last asked, into ``meta.json``.
 
         The only writer of the key, and it is called *before* the owner's turn
         runs rather than after it: a stamp written on completion leaves a turn that
         died looking like one that never happened, and the next call would then pay
         for the same judgement a second time.
+
+        ``None`` clears it, and the key leaves ``meta.json`` with it — the state a
+        session that was never asked is in. That is how a call which delivered
+        nothing gives the window back (issue #2499): the clock exists to make a
+        direction that *was* given stand, and a call that was cancelled gave none.
         """
-        self._boss_asked_at = float(when)
+        self._boss_asked_at = None if when is None else float(when)
         self._save_meta()
-        logger.info("session owner clock set: %s -> %.0f", self.session_id, self._boss_asked_at)
+        logger.info(
+            "session owner clock set: %s -> %s",
+            self.session_id,
+            "never" if self._boss_asked_at is None else f"{self._boss_asked_at:.0f}",
+        )
 
     # ── Sandbox tier ──────────────────────────────────────────
 

@@ -598,3 +598,117 @@ def test_the_clock_is_written_by_its_own_setter(tmp_path):
         "the setter did not write the clock: on disk is where a restart reads it"
     )
     assert session.boss_asked_at == 1761000000.0
+
+
+# ── a call that delivered nothing does not consume the window (issue #2499) ──
+#
+# The clock is stamped before the turn runs, so a turn that *died* keeps it — that
+# guarantee is what `test_a_turn_that_died_still_leaves_the_clock` pins. The two
+# branches below are the other case: the turn was taken away before it could
+# answer, and a stamp left standing refuses the very retry the timeout error asks
+# for. "Delivered nothing" and "died mid-way" are different outcomes, so they are
+# told apart rather than the stamp moved wholesale to after the turn.
+
+
+def _ask_with_timeout(
+    server: EmrgServer, tmp_path, timeout_s: int = 30, session_id: str = "task-1",
+) -> dict:
+    """One whole `boss` call, bound included — the layer the timeout lives in."""
+    return asyncio.run(server._run_boss_tool(
+        parent_session_id=session_id, parent_cwd=str(tmp_path),
+        timeout_s=timeout_s, intent="ask", parent_tools=["read"],
+    ))
+
+
+def test_a_call_that_timed_out_does_not_consume_the_window(tmp_path, monkeypatch):
+    """Issue #2499: the retry a timeout error asks for must start a turn.
+
+    Nothing was decided by a call that was cancelled, so there is no stance for
+    the window to protect — and the busy notice that a standing stamp would
+    produce tells the round to carry on as if one had been given.
+    """
+    server = _server(tmp_path, monkeypatch)
+
+    async def never_answers(req, ws, session, cancel_event, **kwargs):
+        await asyncio.sleep(3600)
+
+    server._run_tool_loop_locked = never_answers
+
+    timed_out = _ask_with_timeout(server, tmp_path, timeout_s=1)
+    assert timed_out.get("error"), (
+        f"a call that never answered came back as a result: {timed_out}"
+    )
+    assert "did not answer within" in timed_out["error"]
+
+    seen = _stub_the_loop(server)
+    retry = _ask_with_timeout(server, tmp_path)
+
+    assert len(seen) == 1, (
+        "the retry after a timeout started no owner turn: the cancelled call "
+        "consumed the four-hour window, so `Raise timeout_s` — the only remedy the "
+        "error offers — cannot be carried out"
+    )
+    assert BUSY_MARKER not in retry.get("text", ""), (
+        "the retry was answered with the busy notice instead of a stance"
+    )
+
+
+def test_a_call_cancelled_with_its_round_does_not_consume_the_window(
+    tmp_path, monkeypatch,
+):
+    """The round that asked was cancelled: same outcome, nothing delivered."""
+    server = _server(tmp_path, monkeypatch)
+    started = asyncio.Event()
+
+    async def never_answers(req, ws, session, cancel_event, **kwargs):
+        started.set()
+        await asyncio.sleep(3600)
+
+    server._run_tool_loop_locked = never_answers
+
+    async def scenario():
+        task = asyncio.create_task(server._run_boss_tool(
+            parent_session_id="task-1", parent_cwd=str(tmp_path),
+            timeout_s=600, intent="ask", parent_tools=["read"],
+        ))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+    owner = server._get_or_create_session("boss-task-1", _boss_cwd(tmp_path))
+    assert owner.boss_asked_at is None, (
+        "a call whose round was cancelled wrote the clock, so the same session's "
+        "next round is refused for four hours by a call that delivered nothing"
+    )
+    meta_path = _boss_cwd(tmp_path).parent.parent / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert "boss_asked_at" not in meta, (
+        "the clock is still on disk, and on disk is what a restart reads"
+    )
+
+
+def test_a_call_that_answered_still_consumes_the_window(tmp_path, monkeypatch):
+    """The control: the window's own feature must survive the fix.
+
+    Without this arm the timeout fix could be made by stamping only on delivery,
+    or by deleting the stamp — both of which would delete issue #2495's feature
+    and leave every test above green.
+    """
+    server = _server(tmp_path, monkeypatch)
+    _stub_the_loop(server)
+
+    answered = _ask_with_timeout(server, tmp_path)
+    assert not answered.get("error"), answered
+    assert "The owner answered" in answered["text"], answered["text"][:120]
+
+    seen = _stub_the_loop(server)
+    second = _ask_with_timeout(server, tmp_path)
+
+    assert seen == [], (
+        "an owner that answered did not consume the window, so the second call "
+        "paid for the same judgement again"
+    )
+    assert second["text"].startswith(BUSY_MARKER), second["text"][:80]
