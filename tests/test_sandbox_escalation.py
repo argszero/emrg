@@ -38,6 +38,7 @@ from emrg.server import daemon as daemon_mod
 from emrg.server.daemon import EmrgServer
 from emrg.server.tool_types import ToolDefinition, ToolResult
 from emrg.session import Session
+from emrg.tools.shell_dialects import shell_tool_name
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────
@@ -620,13 +621,20 @@ def test_a_cancel_while_the_ending_is_told_does_not_say_two_endings(tmp_path):
 
 def _drive_shell_call(
     tmp_path, monkeypatch, *, args: dict, answer=object(), sandbox="read-only",
-    tool_name="bash",
+    tool_name=None,
 ):
     """Run one tool loop whose single tool call carries `args`.
 
     Returns `(tool, frames, ws)`: the stub tool the loop executed (or not),
     everything it broadcast, and the subscriber that received it.
+
+    `tool_name` defaults to the dialect **this platform mounts**, not to the word
+    `"bash"`: the turn's set is the default set, which names that dialect, so a
+    stand-in registered as the other one is refused before any of this file's
+    subject is reached — on a Windows runner the loop answers `Unknown tool: bash`
+    and every assertion here reads a call that never happened.
     """
+    tool_name = tool_name or shell_tool_name()
     monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH",
                         tmp_path / "planted-fire-heartbeat")
     monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH",
@@ -802,8 +810,9 @@ def test_the_widening_belongs_to_one_call_and_not_to_the_next(tmp_path, monkeypa
     server = _server()
     session = Session.create_with_id("esc-once", tmp_path)
     ws = _subscribe(server, session)
-    stub = _StubTool("bash")
-    server.tools._tools["bash"] = stub
+    shell = shell_tool_name()
+    stub = _StubTool(shell)
+    server.tools._tools[shell] = stub
 
     rounds = [
         [{"command": "npm install", "sandbox_permissions": "danger-full-access",
@@ -823,7 +832,8 @@ def test_the_widening_belongs_to_one_call_and_not_to_the_next(tmp_path, monkeypa
                 "usage": {"prompt_tokens": 10, "completion_tokens": 1},
                 "tool_calls": [{
                     "index": 0, "id": f"call_{n}", "type": "function",
-                    "function": {"name": "bash", "arguments": json.dumps(rounds[n][0])},
+                    "function": {"name": shell,
+                                 "arguments": json.dumps(rounds[n][0])},
                 }],
             }
         else:

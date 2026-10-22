@@ -1878,6 +1878,16 @@ def test_a_scheduled_task_message_declares_its_prompt_is_not_host_input(tmp_path
         "the scheduled task message no longer says its prompt is not host input — the "
         "daemon will file one task prompt per cycle into the session's recall list"
     )
+    # Issue #2465: the producer states which tool set this round may use. The
+    # daemon cannot tell a scheduled round from a typed one by the session's name,
+    # so the round that knows has to say it — and a producer that stops saying it
+    # silently widens every scheduled round to the default set.
+    from emrg.server.daemon import scheduled_task_tool_names
+
+    assert msg.get("tools") == scheduled_task_tool_names(), (
+        "the scheduled task message no longer names its tool set, so the round runs "
+        "with the default one"
+    )
     # And the field is not there at the cost of the message: these are what the daemon
     # needs to run the turn at all.
     for key in ("session_id", "cwd", "prompt", "timestamp"):
