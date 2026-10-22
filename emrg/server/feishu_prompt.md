@@ -36,8 +36,14 @@ in the usual install locations before calling it blocked.
   yourself; there is no state file to keep and none to trust.
 - Rants whose `project` is `{{ task.project }}` are the host's instructions for this round
   and outrank the plan; those that do not match are counted, not acted on.
-- A CLI that cannot run, or an account whose authorisation has expired, is a `blocked`
-  item reported to the host. A round that reads nothing must say so.
+- A CLI that cannot run is a `blocked` item reported to the host, and so is an account that
+  really cannot authenticate — but `missing identity` is a symptom, not a cause. The CLI
+  resolves its identity from directories under `$HOME`, so a token that is valid under one
+  `HOME` reads missing under another. Run `auth status` in the same environment the send
+  will use, and report the cause you read rather than the word the call printed. Never
+  start a fresh authorisation on one `missing` answer: it changes the host's account state,
+  and the wrong `HOME` reproduces the symptom whatever the token says.
+- A round that reads nothing must say so.
 
 ### 2. Judge
 
