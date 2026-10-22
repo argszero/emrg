@@ -98,6 +98,7 @@ from emrg.session import (
     is_safe_session_id,
     last_n_messages,
     records_to_messages,
+    session_dir,
 )
 
 
@@ -7710,8 +7711,7 @@ class EmrgServer:
         # project root, and it is why nothing here fights `is_safe_session_id`,
         # which constrains the id alone.
         slot_cwd = (
-            Path(parent_cwd) / ".emrg" / "sessions" / parent_session_id
-            / "sub-agent" / f"sub{slot}"
+            session_dir(parent_cwd, parent_session_id) / "sub-agent" / f"sub{slot}"
         )
 
         try:
@@ -7894,9 +7894,7 @@ class EmrgServer:
         # fixed `boss` would make two tasks' owners indistinguishable there.
         child_id = f"boss-{parent_session_id}"
         state["child"] = child_id
-        parent_session_dir = (
-            Path(parent_cwd) / ".emrg" / "sessions" / parent_session_id
-        )
+        parent_session_dir = session_dir(parent_cwd, parent_session_id)
         # The cwd is two levels below the parent's session directory, which is how
         # the owner derives the history it must read: `<parent>/sub-agent/sub-boss`.
         boss_cwd = parent_session_dir / "sub-agent" / self.BOSS_DIR

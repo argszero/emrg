@@ -14,7 +14,35 @@ from emrg.session import (
     _validate_tool_messages,
     generate_session_id,
     last_n_messages,
+    session_dir,
 )
+
+
+def test_session_dir_names_the_directory_a_session_actually_fills(tmp_path):
+    """The class and the rule cannot disagree about where a session lives.
+
+    The subject has to be non-empty for this to mean anything: two spellings of the
+    same string compare equal however wrong the rule is, so the assertion is about a
+    directory `Session` really made, on disk, and then about the rule naming that same
+    directory.
+    """
+    sid = "s_260101_0000_abcd"
+    session = Session.create_with_id(sid, tmp_path)
+
+    assert session.dir_path.is_dir(), (
+        "the subject is empty — nothing was created, so an equality check below "
+        "would pass without saying anything"
+    )
+    assert session.dir_path == session_dir(tmp_path, sid)
+    assert session.dir_path.resolve() == session_dir(tmp_path, sid).resolve()
+    assert session.dir_path.parent == tmp_path / ".emrg" / "sessions"
+
+
+def test_session_dir_keeps_the_workspace_it_was_given(tmp_path):
+    """A relative workspace stays relative, so the caller's cwd still decides."""
+    assert str(session_dir("project", "s_260101_0000_abcd")) == str(
+        Path("project") / ".emrg" / "sessions" / "s_260101_0000_abcd"
+    )
 
 
 class TestValidateToolMessages:
