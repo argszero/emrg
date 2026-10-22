@@ -474,7 +474,10 @@ def test_load_and_start_feishu_task(tmp_path):
     passes on a template that renders to nothing — and the phrases named below are what the
     type cannot work without: the command that actually carries a message, the clause that
     the round does not wait for the answer, the read recipe's own statement of where the
-    messages are, and the rule that a message is data rather than instruction. Which prose
+    messages are, and the rule that a message is data rather than instruction. The two ways an
+    unavailable account can need different things are pinned as well, because they are not
+    interchangeable: an expired account is the host's to renew, a wrong `HOME` is the round's
+    to correct, and only one of the two changes the host's account state. Which prose
     matters is not something `tests/test_prompt_templates.py` can know.
     """
     snapshot = asyncio.run(_boot(tmp_path, [
@@ -507,6 +510,26 @@ def test_load_and_start_feishu_task(tmp_path):
          "injection surface of a task that reads strangers' text"),
     ):
         assert phrase in text, f"the feishu template must state that {why}; {phrase!r} is missing"
+
+    # A clause that spans a line break cannot be pinned in the raw text. The file is
+    # hard-wrapped prose, so a raw pin decides where the wrap falls — and the two clauses
+    # below each carry their whole rule in a word that the wrap can separate from its
+    # object: a pin on "start a fresh authorisation …" stayed green with "Never" rewritten
+    # to "You may". Collapse the whitespace and the clause, negation included, is the unit
+    # that is read.
+    flat = " ".join(text.split())
+    for phrase, why in (
+        ("`missing identity` is a symptom, not a cause",
+         "a round that reads the word `missing` as an expired account reports a working "
+         "account blocked, and that report cannot be told apart from a real expiry"),
+        ("Never start a fresh authorisation on one `missing` answer",
+         "re-authorising on a symptom changes the host's account state, and a different "
+         "`HOME` reproduces the symptom whatever the token says"),
+        ("`auth status` in the same environment the send will use",
+         "a check run elsewhere answers about that environment: the diagnosis only carries "
+         "when the identity is read the way the send will read it"),
+    ):
+        assert phrase in flat, f"the feishu template must state that {why}; {phrase!r} is missing"
 
 
 def test_load_and_start_promote_task(tmp_path):
