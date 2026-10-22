@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 
 from emrg.config import LlmConfig
 from emrg.protocol import TaskRequest
@@ -49,7 +50,15 @@ from emrg.session import Session
 from emrg.tools.shell_dialects import SHELL_TOOL_NAMES, shell_tool_name
 
 
-def _registry(platform_name: str = "darwin"):
+def _registry(platform_name: str | None = None):
+    """The real registry, for a named platform or (by default) for this host.
+
+    The platform defaults to the host rather than to a literal. A helper spelling
+    `"darwin"` mounts `bash` on a Windows runner while `default_tool_names()`
+    answers `pwsh`, so the shell is intersected away and every assertion about the
+    set ends up describing a platform the runner is not — which is how the first
+    version of this file read green on one leg and red on the other.
+    """
     return build_tool_registry(None, None, platform_name=platform_name)
 
 
@@ -120,15 +129,28 @@ def test_a_list_of_nothing_but_unknown_names_yields_no_tools():
     assert effective_tool_names(_registry(), ["no-such-tool", "nor-this"]) == []
 
 
-def test_the_default_set_names_the_shell_this_platform_registers():
-    # The whitelist is written once and runs everywhere, so the shell entry must
-    # come from the platform rather than from the word "bash": on Windows the
-    # registered tool is `pwsh`, and a list spelling the other dialect would be
-    # intersected away — the session would lose its shell without a word.
-    registry = _registry()
-    shells = {name for name in registry.names if name in SHELL_TOOL_NAMES}
-    assert len(shells) == 1, f"exactly one dialect is mounted, got {shells}"
-    assert shells <= set(effective_tool_names(registry, None))
+def test_the_default_set_names_the_shell_the_registry_mounts():
+    # The whitelist is written once and runs everywhere, so its shell entry must
+    # come from the platform rather than from the word "bash" — asked here in both
+    # dialects on whichever host runs this, plus the host's own. A reading taken
+    # only where the two dialects agree (every POSIX box) cannot see the failure at
+    # all, and one taken only on the Windows leg cannot be checked before pushing.
+    for platform_name in ("darwin", "win32", None):
+        subject = platform_name or sys.platform
+        registry = _registry(platform_name)
+        shells = {name for name in registry.names if name in SHELL_TOOL_NAMES}
+        assert shells == {shell_tool_name(platform_name)}, (
+            f"{subject}: the registry mounted {shells}, not this platform's dialect"
+        )
+        assert shells <= set(default_tool_names(platform_name)), (
+            f"{subject}: the default set {default_tool_names(platform_name)} does not "
+            f"name {shells}, the only shell this registry carries"
+        )
+        assert shells <= set(effective_tool_names(registry, None, platform_name)), (
+            f"{subject}: the intersection "
+            f"{effective_tool_names(registry, None, platform_name)} dropped the shell, "
+            "so the session loses it without a word"
+        )
 
 
 def test_the_two_whitelists_name_tools_that_exist():

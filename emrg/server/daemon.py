@@ -189,26 +189,33 @@ _ROOT_CONSUMING_TOOLS = SHELL_TOOL_NAMES | {"write", "edit"}
 #: The shell entry is the platform's dialect rather than the word ``"bash"``: on
 #: Windows the registered tool is ``pwsh``, so a list spelled ``"bash"`` would be
 #: intersected away and the session would lose its shell silently.
-def default_tool_names() -> list[str]:
+#:
+#: The platform is a parameter for the same reason it is one in
+#: ``shell_tool_name``: the coupling that matters is that this set and the
+#: registry it is intersected with were built for **one** platform, and a fact the
+#: Windows CI leg alone can reach is a fact no host can check. Stating the platform
+#: makes the pair askable about either dialect on any host.
+def default_tool_names(platform_name: str | None = None) -> list[str]:
     """The tool names a host conversation may use (issue #2465)."""
     return [
-        shell_tool_name(), "read", "write", "edit", "glob", "grep",
+        shell_tool_name(platform_name), "read", "write", "edit", "glob", "grep",
         "submit_rant", "subagent",
     ]
 
 
-def scheduled_task_tool_names() -> list[str]:
+def scheduled_task_tool_names(platform_name: str | None = None) -> list[str]:
     """The tool names a scheduled task's round may use (issue #2465).
 
     Today the same set a conversation gets. The split exists so that a tool
     meant only for scheduled work (a review/owner role) can be added **here
     alone** — no second mechanism inside the tool asking "who called me?".
     """
-    return default_tool_names()
+    return default_tool_names(platform_name)
 
 
 def effective_tool_names(
     registry: ToolRegistry, requested: list[str] | None,
+    platform_name: str | None = None,
 ) -> list[str]:
     """``(requested or the default set) ∩ registered``, in the caller's order.
 
@@ -218,8 +225,15 @@ def effective_tool_names(
     whole turn over it would make one stale name cost the round. Duplicates
     collapse to their first occurrence, so the set cannot be handed the same tool
     twice.
+
+    ``platform_name`` is the platform ``registry`` was built for; it reaches
+    ``default_tool_names`` so that this intersection can be asked the question the
+    Windows runner asks, on any host.
     """
-    names = default_tool_names() if requested is None else list(requested)
+    names = (
+        default_tool_names(platform_name) if requested is None
+        else list(requested)
+    )
     seen: set[str] = set()
     out: list[str] = []
     for name in names:
