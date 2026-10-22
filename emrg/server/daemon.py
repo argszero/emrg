@@ -639,6 +639,50 @@ def build_shell_tool(
     return BashToolV2()
 
 
+def build_tool_registry(
+    sandbox_config: Optional[SandboxConfig] = None,
+    run_subagent_cb=None,
+    platform_name: str | None = None,
+) -> ToolRegistry:
+    """The daemon's tool set, built in one place so that its size is a reading.
+
+    The registry is the one fact about this agent that a document cannot restate
+    by hand and stay true: `README.md` names the tools, and a name added here is a
+    name that document stops being right about the moment it is added. Something
+    therefore has to compare the two, and a comparison that lives in a test needs a
+    producer it can call **without a daemon** — a copy of this block in the test
+    would be a second list to keep in step, which is the defect
+    `emrg/tools/shell_dialects.py` exists to name. So the block is here, the daemon
+    calls it, and `tests/test_readme_matches_code.py` reads the same function.
+
+    :param sandbox_config: the ``[sandbox]`` section, passed through to
+        :func:`build_shell_tool`; a missing one means the defaults.
+    :param run_subagent_cb: the caller's own runner. The tool has no path to the
+        session machinery of its own, so everything that owns state stays with the
+        daemon that supplies it.
+    :param platform_name: the platform to decide the shell dialect for; defaults to
+        the host's, which is what the daemon wants and what a test overrides.
+    :returns: the populated registry.
+    """
+    tools = ToolRegistry()
+    # Which shell this platform mounts — and, on POSIX, which of the two
+    # executors answers to the name `bash`.  The gate is composition data
+    # rather than a runtime branch (design §14.2 layer 6): Windows has no
+    # `bash` tool row at all, so "bash is not found" is not representable
+    # there.  See `build_shell_tool` for the three cases.
+    tools.register(build_shell_tool(sandbox_config, platform_name))
+    tools.register(ReadTool())
+    tools.register(WriteTool())
+    tools.register(EditTool())
+    tools.register(GlobTool())
+    tools.register(GrepTool())
+    tools.register(SubmitRantTool())
+    # The runner is the daemon's own method, so the tool has no path to the
+    # session machinery of its own: everything that owns state stays there.
+    tools.register(SubagentTool(run_subagent_cb))
+    return tools
+
+
 class EmrgServer:
     """EMRG daemon — listens on Unix socket, processes tasks with tool calling."""
 
@@ -798,22 +842,7 @@ class EmrgServer:
         self._pending_web_auth_proc: Optional[asyncio.subprocess.Process] = None
 
         # Build tool registry
-        self.tools = ToolRegistry()
-        # Which shell this platform mounts — and, on POSIX, which of the two
-        # executors answers to the name `bash`.  The gate is composition data
-        # rather than a runtime branch (design §14.2 layer 6): Windows has no
-        # `bash` tool row at all, so "bash is not found" is not representable
-        # there.  See `build_shell_tool` for the three cases.
-        self.tools.register(build_shell_tool(self._sandbox_config))
-        self.tools.register(ReadTool())
-        self.tools.register(WriteTool())
-        self.tools.register(EditTool())
-        self.tools.register(GlobTool())
-        self.tools.register(GrepTool())
-        self.tools.register(SubmitRantTool())
-        # The runner is the daemon's own method, so the tool has no path to the
-        # session machinery of its own: everything that owns state stays here.
-        self.tools.register(SubagentTool(self._run_subagent_tool))
+        self.tools = build_tool_registry(self._sandbox_config, self._run_subagent_tool)
         logger.info("tools registered: %s", self.tools.names)
 
         # Skills are **not** held here. A snapshot taken at startup cannot see a skill

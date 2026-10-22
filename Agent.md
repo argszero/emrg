@@ -34,7 +34,7 @@ The execution model, in this repo's own terms (`emrg/server/daemon.py`):
 
 - **Tool loop** — the whole process triggered by one user message: LLM requests and tool calls repeat until a round produces no new tool calls (`_run_tool_loop`).
 - **Round** — one iteration inside a tool loop: one LLM request + zero or more tool calls + their execution (`round_num`, bounded by `max_tool_rounds`).
-- **Evolution cycle** — one full self-evolution run (Prepare → Review → Discover → Improve → Submit → Record). Never call it a "round".
+- **Evolution cycle** — one full self-evolution run (Preparation → Look → Think → Act → Record). Never call it a "round".
 
 ## Capabilities
 
