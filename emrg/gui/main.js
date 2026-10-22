@@ -942,6 +942,14 @@ vision = false
       return frame.tasks || [];
     });
 
+    ipcMain.handle("emrg:taskLimits", async () => {
+      // 间隔下限的唯一来源是 daemon 的 MIN_INTERVAL（issue #2490）：渲染层问这里，
+      // 不再自己写一份。拿不到就走 undefined，让 daemon 的权威校验说话。
+      const frame = await requireConn().sendCommandAndWait("list_tasks", {}, 5000);
+      const v = frame.min_interval;
+      return typeof v === "number" && Number.isFinite(v) ? { minInterval: v } : {};
+    });
+
     // renderer → main 日志桥（rant 2026-08-24：打开会话链路排障）。级别白名单，
     // 消息截断到 2000 字符防刷屏。写同一 emrg-gui.log，时间线可与 main 日志对齐。
     ipcMain.handle("emrg:log", async (_e, { level, msg } = {}) => {
@@ -960,14 +968,19 @@ vision = false
 
     // ── Task/template CRUD IPC (rant 2026-08-12T18:23:15 P3) ──────────
     ipcMain.handle("emrg:taskCreate", async (_e, payload) => {
-      const { name, type, project, interval, enabled, repo, description, sandbox } = payload || {};
+      const { name, type, project, interval, enabled, repo, description, sandbox, schedule } = payload || {};
       if (typeof name !== "string" || !name.trim()) throw new Error("invalid task name");
       if (typeof type !== "string" || !type.trim()) throw new Error("invalid task type");
       if (typeof project !== "string" || !project.trim()) throw new Error("invalid project");
-      const frame = await requireConn().sendCommandAndWait("task_create", {
+      // `schedule` 必须原样转发：这张固定字段表此前把它丢掉，于是 GUI 永远只能建
+      // 单一频次的任务，daemon 收了也白收（issue #2490）。只有 payload 真的带了这个
+      // 键才发，缺席＝不声明，与 task_update 的「缺省不动该字段」一致。
+      const fields = {
         name: name.trim(), task_type: type.trim(), project: project.trim(),
         interval, enabled, repo, description, sandbox,
-      }, 8000);
+      };
+      if ("schedule" in (payload || {})) fields.schedule = schedule;
+      const frame = await requireConn().sendCommandAndWait("task_create", fields, 8000);
       if (!frame.ok && frame.error) throw new Error(frame.error);
       return frame;
     });

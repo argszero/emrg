@@ -166,7 +166,12 @@ from emrg.tools.boss_tool import BossTool
 from emrg.skills.loader import load_skills
 from emrg.skills.registry import ensure_catalog_file, load_catalog_skills, skill_is_managed
 from emrg.server.rants import append_rant, list_rants
-from emrg.server.scheduler import TaskScheduler, read_task_run_records, task_run_files
+from emrg.server.scheduler import (
+    MIN_INTERVAL,
+    TaskScheduler,
+    read_task_run_records,
+    task_run_files,
+)
 from emrg.server import logcontext
 
 logger = logging.getLogger(__name__)
@@ -3059,6 +3064,11 @@ class EmrgServer:
             await self._send(ws, {
                 "type": "tasks_list",
                 "tasks": tasks,
+                # The floor the daemon itself refuses below, reported rather than
+                # restated: the renderer used to carry its own copy of this number in
+                # two comparisons and two sentences, which drifts silently the moment
+                # the daemon's changes (issue #2490). One producer, one value.
+                "min_interval": MIN_INTERVAL,
             })
 
         elif msg_type == "trigger_task":

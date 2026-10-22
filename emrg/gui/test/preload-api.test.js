@@ -61,6 +61,7 @@ const EXPECTED_INVOKE_METHODS = [
   "registerProject",
   "removeProject",
   "listTasks",
+  "taskLimits",
   "triggerTask",
   "taskCreate",
   "taskUpdate",
@@ -124,8 +125,8 @@ function parseApiBlock(block) {
 
 const api = parseApiBlock(extractApiBlock());
 
-test("window.emrg exposes the full contract (58 invoke + onEvent)", () => {
-  // 58 invoke 方法全部存在（防误删/改名）
+test("window.emrg exposes the full contract (59 invoke + onEvent)", () => {
+  // 59 invoke 方法全部存在（防误删/改名）
   for (const name of EXPECTED_INVOKE_METHODS) {
     assert.ok(api.invoke.has(name), `缺少 invoke 方法 ${name}`);
   }

@@ -55,6 +55,8 @@ const api = {
   registerProject: (payload) => ipcRenderer.invoke("emrg:registerProject", payload),
   removeProject: (payload) => ipcRenderer.invoke("emrg:removeProject", payload),
   listTasks: () => ipcRenderer.invoke("emrg:listTasks"),
+  // 间隔下限由 daemon 上报（issue #2490）——渲染层不留第二份数字
+  taskLimits: () => ipcRenderer.invoke("emrg:taskLimits"),
   triggerTask: (payload) => ipcRenderer.invoke("emrg:triggerTask", payload),
   // Task/template CRUD (rant 2026-08-12T18:23:15 P3)
   taskCreate: (payload) => ipcRenderer.invoke("emrg:taskCreate", payload),

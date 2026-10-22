@@ -69,6 +69,11 @@ interface WorkspaceBridge {
   triggerTask(p: { name: string }): Promise<unknown>;
   taskCreate(p: TaskFormPayload): Promise<unknown>;
   taskUpdate(p: TaskFormPayload): Promise<unknown>;
+  /**
+   * 间隔下限（issue #2490）：daemon 的 `MIN_INTERVAL`，由 `tasks_list` 帧上报。
+   * 渲染层不保留第二份数字 —— 拿不到就没有预检，由 daemon 权威校验。
+   */
+  taskLimits?(): Promise<{ minInterval?: number }>;
   taskDelete(p: { name: string }): Promise<unknown>;
   taskTemplateList(): Promise<{ name: string }[]>;
   sendRant(p: { message: string; project?: string }): Promise<{ ok?: boolean; count?: number }>;
@@ -128,6 +133,8 @@ export function Shell() {
   const [dialogState, dispatch] = useReducer(dialogReducer, initialDialogState);
   // Batch 5 slice 8：任务表单 + Rant 对话框（vanilla openTaskForm/openRantForm 语义）
   const [taskForm, setTaskForm] = useState<{ task: TaskRec | null } | null>(null);
+  /** 间隔下限：daemon 上报的值（undefined = 还没问到，表单就不预检） */
+  const [minInterval, setMinInterval] = useState<number | undefined>(undefined);
   const [rantOpen, setRantOpen] = useState(false);
   const [taskTypes, setTaskTypes] = useState<string[]>([]);
   // 升级横幅（rant 2026-08-27T21:54:51：React 迁移丢 upgrade 事件）：dismissed 记录
@@ -372,6 +379,15 @@ export function Shell() {
       setTaskTypes((prev) => (prev.length ? prev : ["evolution"]));
     }
     if (!isEdit) await loadProjects(); // 新建需要项目下拉
+    // 下限先问 daemon（issue #2490）：问不到保持 undefined，表单不预检
+    if (b?.taskLimits) {
+      try {
+        const limits = await b.taskLimits();
+        if (typeof limits?.minInterval === "number") setMinInterval(limits.minInterval);
+      } catch {
+        /* 拿不到就交给 daemon 权威校验 */
+      }
+    }
     setTaskForm({ task: isEdit ? task : null });
   }
 
@@ -878,6 +894,7 @@ export function Shell() {
           request={taskForm}
           types={taskTypes}
           projects={projects}
+          minInterval={minInterval}
           onSubmit={(payload) => void saveTask(payload)}
           onDismiss={() => setTaskForm(null)}
         />
