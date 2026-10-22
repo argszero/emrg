@@ -47,7 +47,7 @@ EMRG 是一个关于*自主进化*的实验：一个能帮你写代码的 AI 智
 |---|---|
 | **Electron GUI（主入口）** | 安装即用：首次启动引导配置 API Key；全部 `/` 指令可用；结果面板、Ask/Auto 模式、自进化可见化。GUI 配好即 TUI 可用 |
 | **全功能 TUI + 守护进程** | 流式 Markdown、`/` 自动补全、会话管理、快捷键——跑在常驻的 `emrgd` 守护进程上，随时重连 |
-| **定时任务** | 内置 + 自定义任务类型（提示词模板存 `~/.emrg/task-templates/`）、GUI 设置页增删改 + 热加载、`/trigger` 随时手动触发 |
+| **定时任务** | 内置任务类型（`evolution`、`paper`、`open-source`、`promote`、`journal`、`competition`、`ios-app`、`feishu`）加自定义类型（提示词模板存 `~/.emrg/task-templates/`）、GUI 设置页增删改 + 热加载、`/trigger` 随时手动触发 |
 | **100% 开源** | MIT 协议——没有围墙，没有厂商锁定。默认英文，提供中文版 |
 
 ---
@@ -64,8 +64,8 @@ EMRG 不只是一个工具——它是一个**会听吐槽、会自我改进**�
   - 跨项目学习
           |
           v
-演化循环（每 30 分钟）
-（准备 -> 回顾 -> 发现 -> 改进 -> 提交 -> 记录）
+演化循环（默认每 10 分钟）
+（Preparation -> Look -> Think -> Act -> Record）
           |
           v
   1. pytest + import 检查
@@ -148,12 +148,14 @@ TUI 内：`Esc` 中断流式输出，`Ctrl+C` / `exit` 退出（配置与 GUI �
 | `/memory` | 浏览项目和会话记忆 |
 | `/rename [标题]` | 给当前会话起个好记的名字 |
 | `/model [name]` | 切换 LLM 模型——不带参数进入交互式选择器 |
+| `/sandbox [mode]` | 设置本会话的沙箱档位——不带参数弹出选择器；`add`/`remove`/`list` 管理额外可写根 |
 | `/rant <反馈> [@<project>]` | 吐槽、建议、夸奖——演化系统会听 |
 | `/help` | 查看所有键盘快捷键和命令帮助 |
 | `/image` | 从剪贴板插入图片到输入框 |
 | `/delete [id]` | 删除会话——不带参数进入交互式选择器 |
 | `/rewind` | 回退对话到历史某个节点 |
 | `/trigger` | 触发演化任务——交互式选择器（任务管理在 GUI 设置 → 定时任务） |
+| `/task-session` | 打开某个定时任务自己的会话——交互式选择器 |
 | `/skills` | 列出已加载技能；`/skills available\|install\|update` |
 | `/version` | 显示 EMRG 版本和实例信息 |
 | `Esc` | 中断正在运行的响应 |
@@ -166,13 +168,13 @@ TUI 内：`Esc` 中断流式输出，`Ctrl+C` / `exit` 退出（配置与 GUI �
 |  | Claude Code | Codex | DeepSeek Harness | **EMRG** | **Grok Bot** |
 |---|---|---|---|---|---|
 | AI 驱动编程 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 工具调用 (bash, read, write, edit, glob, grep) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 工具调用 (`bash`/`pwsh`、`read`、`write`、`edit`、`glob`、`grep`、`submit_rant`、`subagent`) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | 会话记忆与上下文 | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `/` 命令自动补全 | ✅ | ✅ | ✅ | ✅ | ~ *@ mention 建议 + 命令面板* |
 | ESC 中断 | ✅ | ✅ | — | ✅ | ✅ |
 | 插件化架构 | ❌ | ❌ | ✅ *一切皆插件* | ❌ | ✅ |
 | 沙箱执行 | ❌ | ❌ | ✅ | ✅ *read-only / workspace-write / danger-full-access* | ~ *protectedBoxPaths + /workspace* |
-| 子代理 | ❌ | ❌ | ✅ | ❌ | ✅ *assistants/automations 生态* |
+| 子代理 | ❌ | ❌ | ✅ | ✅ *子会话委派* | ✅ *assistants/automations 生态* |
 | Web UI | ❌ | ❌ | ✅ *浏览器* | ✅ *Electron* | ✅ *Electron* |
 | **递归自我改进（RSI）** | ❌ | ❌ | ❌ | ✅ *全自动——代码、提示词、工具链* | ❌ |
 | **个人智能体** *你的机器、你的 key、你的数据* | ~ *本地 CLI，模型为托管服务，走你的账号* | ~ *本地 CLI，模型为托管服务* | ~ *本地 harness，模型为托管服务* | ✅ *本地智能体，用你的 key，状态在你磁盘上* | ~ *本地应用，托管服务* |
