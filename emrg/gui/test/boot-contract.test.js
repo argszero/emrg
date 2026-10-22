@@ -31,7 +31,13 @@ const path = require("node:path");
 const GUI_ROOT = path.join(__dirname, "..");
 
 function read(rel) {
-  return fs.readFileSync(path.join(GUI_ROOT, rel), "utf8");
+  // Normalise the line ending here, once, so every assertion in this file reads
+  // text whose newlines are "\n" whatever the checkout did. A sentinel written as
+  // "\n  }\n" is a property of the file's content, not of the platform, but a CRLF
+  // checkout makes indexOf answer -1 and the slice collapse to "" — measured
+  // 2026-10-22: the same assertion passed on Linux and macOS and failed on Windows
+  // with `actual: ''`. The assertions themselves are unchanged.
+  return fs.readFileSync(path.join(GUI_ROOT, rel), "utf8").replace(/\r\n/g, "\n");
 }
 
 test("boot chain: main.js emrg:init handler must call ensureConnected()", () => {
