@@ -71,14 +71,11 @@ tells a Committer to use) was counted by the only authority on whether a vote co
 
 So the clause is asked here too, of every vote: **the window belongs to the voting
 cycle**, and the head counts as that cycle's own if it was pushed at or after the
-window's start. Per vote rather than per PR, because each vote names its own cycle —
-which is also why `--cycles-log` exists: the answer is read from the cycle records on
-disk, and a verdict about a vote must not silently depend on which records happen to
-sit on the reading host.
+window's start. Per vote rather than per PR, because each vote names its own cycle.
 
-Asked of *every* vote, though, it read a corpus the voting cycle never wrote. The
+Asked of *every* vote, though, it judged a vote by a window it had no business reading. The
 clause is a self-review guard — "every cycle on a host is the same instance running
-again" — so it belongs to the instance whose records are being read, and this repo is
+again" — so it belongs to the instance whose cycle the vote names, and this repo is
 reviewed by more than one: measured 2026-10-05 on #1851, the only open PR, two ✅
 LGTMs from **`pm25coder`** (whose cycle says its host is Windows; this counter's
 records are macOS) were voided as "cast inside the window this vote's cycle treats as
@@ -206,7 +203,6 @@ Usage
     uv run --no-sync python3 scripts/check-vote-count.py <PR> --json
     uv run --no-sync python3 scripts/check-vote-count.py <PR> --min-votes 2
     uv run --no-sync python3 scripts/check-vote-count.py <PR> --mergeability-wait 60
-    uv run --no-sync python3 scripts/check-vote-count.py <PR> --cycles-log DIR
 
 `--mergeability-wait` is for the transient `UNKNOWN`: GitHub computes
 mergeability lazily, so a head pushed a moment ago reports "not answered yet",
@@ -683,7 +679,6 @@ def own_head_window(
     push_time: str,
     push_time_exact: bool,
     pusher: str = "",
-    cycles_log: str | None = None,
 ) -> tuple[bool, str]:
     """Is the head inside the window this vote's own cycle treats as its own?
 
@@ -704,12 +699,14 @@ def own_head_window(
       An unknown one - an empty string, or no login that can be read - keeps the clause,
       so this can only ever un-void a push that is provably someone else's, never credit
       a self-review.
-    * **The window.** The span is this cycle's own run: from its own start to the start
-      of the cycle that follows it. It is read through `review-queue.own_window`, the
+    * **The window.** The span is this cycle's own run, from its own start onward. It is
+      read through `review-queue.own_window`, the
       *only* producer of it, so the counter reaches the same boundary the queue does
       (issue #2218). Only a push inside the run is this cycle's own work: one below the
-      start was pushed by somebody else before this cycle began, and one at or after the
-      far end belongs to the cycle that followed (issue #2334). The host ruled the wider
+      start was pushed by somebody else before this cycle began. The span is open above,
+      because the cycle records that once closed it are gone — a head a later cycle pushes
+      while this one runs is read as this one's own, which delays that vote and never
+      credits one wrongly (issue #2334). The host ruled the wider
       near bound away on 2026-10-16T22:18:15 - a head the *previous* cycle pushed is not
       this cycle's own work either.
     * **An unresolvable window is not passed.** A cycle id that names no instant
@@ -729,7 +726,7 @@ def own_head_window(
     if not cycle:  # a caller error, not a reading: only a resolved cycle is asked about
         raise ValueError("own_head_window needs the vote's cycle id")
     queue = review_queue()
-    window = queue.own_window(cycle, cycles_log=cycles_log)
+    window = queue.own_window(cycle)
     if not window.applied:
         return True, (
             "the head's own window cannot be decided from this vote's cycle "
@@ -769,7 +766,6 @@ def own_head_window(
             f"counts - the head was pushed by {pusher}, which is not a login this "
             "instance pushes under, so the own-head clause is not asked of it"
         )
-    far = f", until {window.window_end_text()}" if window.end is not None else ""
     # What this reason may say is bounded by what it is a reason *about*: this counter
     # reads reviews that were posted, so a sentence saying `cast-vote.py` refused to post
     # "this vote" names an action no tool took, on the vote the row reports (measured
@@ -779,7 +775,7 @@ def own_head_window(
     # *state* clauses above stay, because both tools share the state.
     return True, (
         f"cast inside the run this vote's cycle treats as its own - the head was "
-        f"pushed {push_time}, at or after {window.window_start_text()}{far} "
+        f"pushed {push_time}, at or after {window.window_start_text()} "
         f"({window.source}); a cycle does not vote on a head it pushed, so this vote "
         "counts for nobody (issue #1408)."
     )
@@ -1866,7 +1862,6 @@ def check_pr(
     needed: int,
     *,
     mergeability_wait: float = 0.0,
-    cycles_log: str | None = None,
 ) -> Verdict:
     view = _view_with_computed_mergeability(number, mergeability_wait)
     head = str(view["headRefOid"])
@@ -2021,7 +2016,6 @@ def check_pr(
                     push_time=push_time,
                     push_time_exact=exact,
                     pusher=pusher,
-                    cycles_log=cycles_log,
                 )
             inside, why = windows[cycle]
             # …and only for a vote cast by the instance the window belongs to. The
@@ -2094,24 +2088,15 @@ def check_pr(
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     # `--cycle` is `cast-vote.py`'s flag — the id a vote is *cast* under — and this
-    # tool's own corpus flag is `--cycles-log`. With argparse's default prefix
-    # matching the two spellings were one argument, so `--cycle cyc20261015-014345`
-    # was read as `--cycles-log cyc20261015-014345`: a directory that does not
-    # exist. The corpus then could not be read, the abstention window narrowed to
-    # the vote cycle's own start, and a vote the real corpus **voids** was reported
-    # as counted - measured 2026-10-15 (`cyc20261015-014345`) on PR #2271, same
-    # head, exit 0 both ways: `2/3` with the flag against `1/3` without it (issue
-    # #2274). Refused by name rather than left to argparse, because the flag is a
-    # real one in the sibling tool and the reader needs to be told which one this
-    # tool takes.
+    # tool takes no such flag: it names the cycle in each review body and reads nothing
+    # else about it. Refused by name rather than left to argparse, because the flag is a
+    # real one in the sibling tool and the reader needs to be told which one takes it.
     for arg in argv:
         if arg == "--cycle" or arg.startswith("--cycle="):
             print(
                 "error: `--cycle` is `cast-vote.py`'s flag (the cycle id a vote is "
-                "cast under); this tool's cycle-record corpus flag is `--cycles-log "
-                "DIR`. Refusing rather than reading a cycle id as a directory path: "
-                "a corpus that cannot be read narrows the abstention window, which "
-                "counts a vote the real corpus voids (issue #2274).",
+                "cast under). This tool reads no cycle corpus, so it takes no such "
+                "flag either; give it a PR number and it counts the votes on that PR.",
                 file=sys.stderr,
             )
             return 2
@@ -2121,8 +2106,8 @@ def main(argv: list[str] | None = None) -> int:
         # The default is rendered by argparse from `default=` below, so the help
         # line cannot go stale the way a hand-written "(default 3)" did.
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        # No prefix matching: `--cycles` is not `--cycles-log` and, more to the
-        # point, `--cycle` is not either (issue #2274).
+        # No prefix matching: a flag is never abbreviated here, so an unknown spelling
+        # is refused by name rather than bound to a longer one it resembles.
         allow_abbrev=False,
     )
     parser.add_argument("prs", nargs="+", type=int, help="pull request number(s)")
@@ -2133,13 +2118,6 @@ def main(argv: list[str] | None = None) -> int:
         help="votes required",
     )
     parser.add_argument("--json", action="store_true", help="emit JSON instead of prose")
-    parser.add_argument(
-        "--cycles-log",
-        default=None,
-        help="directory (or os.pathsep-joined directories) of cycle records the "
-             "abstention window is read from (default: $EMRG_CYCLES_LOG, else both the "
-             "project's and the corpus's .emrg/memory)",
-    )
     parser.add_argument(
         "--mergeability-wait",
         type=float,
@@ -2155,7 +2133,6 @@ def main(argv: list[str] | None = None) -> int:
                 n,
                 args.min_votes,
                 mergeability_wait=args.mergeability_wait,
-                cycles_log=args.cycles_log,
             )
             for n in args.prs
         ]

@@ -62,14 +62,6 @@ ID_REVIEW = "emrg: a flag with an attached value is the same flag (#1256)"
 #: In UTC (`cycle_start` converts): `CYCLE` starts at 18:01:49Z and this one at 17:59:06Z.
 PREV_CYCLE = "cyc20260916-015906"
 
-#: A record corpus with **nothing** in it. The window's far bound is the cycle that
-#: follows this one, read from `--cycles-log`; left to the default this host's own records
-#: would give these 2026-09-16 ids a successor, closing the span at a machine-dependent
-#: instant. A path that does not exist answers "no cycle record after this cycle", which
-#: leaves the span open above — the state the posting cycle itself is in. Callers that
-#: exercise the corpus pass their own `--cycles-log`.
-NO_RECORDS = REPO_ROOT / "tests" / "_no_such_cycles_log"
-
 #: Where every head in this file was pushed unless the test moves it: **before both ends
 #: of the window**, so the clause lets the vote through and the tests that measure
 #: attribution and counting keep measuring exactly that. A test about the clause sits its
@@ -283,17 +275,9 @@ def body_file(tmp_path):
 
 
 def _run(mod, monkeypatch, counter: FakeCounter, gh: FakeGh, argv: list[str]):
-    """`main` with the counter, `gh` and the window's far bound all pinned.
-
-    `--cycles-log` is supplied unless the caller pins the corpus itself. The tool's
-    default is the cycle records beside the checkout, so a test that let the default
-    decide would be measuring this host's memory directory rather than the clause — and
-    would answer differently on CI, where those records do not exist.
-    """
+    """`main` with the counter and `gh` pinned."""
     monkeypatch.setattr(mod, "votes_counter", lambda: counter)
     monkeypatch.setattr(mod, "_gh", gh)
-    if "--cycles-log" not in argv:
-        argv = [*argv, "--cycles-log", str(NO_RECORDS)]
     return mod.main(argv)
 
 

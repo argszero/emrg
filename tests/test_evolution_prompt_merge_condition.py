@@ -105,22 +105,6 @@ def counter():
     return _load_counter()
 
 
-@pytest.fixture(autouse=True)
-def _pinned_cycle_records(counter, tmp_path, monkeypatch):
-    """Read the abstention window from an empty directory, never from this host.
-
-    `check-vote-count.py` reads that window out of cycle records on disk, defaulting to
-    the corpus of whichever machine runs the suite. The control below is about the
-    *head push*, so its votes must not also be judged against the cycles this host
-    happens to have recorded: an empty directory narrows the window to the voting
-    cycle's own start, which the fixture above places an hour after the push.
-    """
-    monkeypatch.delenv("EMRG_CYCLES_LOG", raising=False)
-    empty = tmp_path / "no-cycle-records"
-    empty.mkdir()
-    monkeypatch.setattr(counter.review_queue(), "DEFAULT_CYCLES_LOGS", (empty,))
-
-
 @pytest.fixture(scope="module")
 def rendered(tmp_path_factory) -> str:
     """The real template, rendered through the real builder with the real context."""
