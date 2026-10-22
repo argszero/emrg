@@ -48,15 +48,79 @@ def test_session_dir_keeps_the_workspace_it_was_given(tmp_path):
     )
 
 
-def _slash_chain(node: ast.AST) -> list[ast.AST]:
-    """`a / b / c` flattened to `[a, b, c]`, outermost division first."""
-    parts: list[ast.AST] = []
-    while isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-        parts.append(node.right)
-        node = node.left
-    parts.append(node)
-    parts.reverse()
+#: A path component that is not a literal: a workspace handle, an id, a formatted
+#: value. It is what separates a leaf from the directory sessions live *in*.
+_ANY: None = None
+
+#: The constructors whose positional arguments are path components.
+_PATH_CTORS = {"Path", "PurePath", "PosixPath", "WindowsPath"}
+
+
+def _called_path_components(node: ast.Call) -> list[str | None] | None:
+    """Components of `Path(a, b)`, `<x>.joinpath(a, b)` and `os.path.join(a, b)`."""
+    func = node.func
+    base: list[str | None] = []
+    if isinstance(func, ast.Name) and func.id in _PATH_CTORS:
+        pass
+    elif isinstance(func, ast.Attribute):
+        if func.attr in _PATH_CTORS:
+            pass
+        elif func.attr == "joinpath":
+            receiver = _path_components(func.value)
+            if receiver is None:
+                return None
+            base = receiver
+        elif (
+            func.attr == "join"
+            and isinstance(func.value, ast.Attribute)
+            and func.value.attr == "path"
+        ):
+            pass  # os.path.join
+        else:
+            return [_ANY]
+    else:
+        return [_ANY]
+    parts = list(base)
+    for arg in node.args:
+        if isinstance(arg, ast.Starred):
+            parts.append(_ANY)
+            continue
+        components = _path_components(arg)
+        if components is None:
+            return None
+        parts.extend(components)
     return parts
+
+
+def _path_components(node: ast.AST) -> list[str | None] | None:
+    """The ordered path components `node` names, or `None` when it names no path.
+
+    A component is either a literal segment or `_ANY`. The subject is the *sequence*,
+    not the spelling: `a / b / c`, `Path(a, b, c)`, `a.joinpath(b, c)`,
+    `os.path.join(a, b, c)` and an f-string with literal segments all name the same
+    ordered list. A matcher that walks one joining operator therefore matches one
+    family of authors and reports the rest as absent, which reads as a clean tree.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [part for part in node.value.split("/") if part]
+    if isinstance(node, ast.JoinedStr):
+        out: list[str | None] = []
+        for value in node.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                out.extend(part for part in value.value.split("/") if part)
+            else:
+                out.append(_ANY)
+        return out
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        left = _path_components(node.left)
+        right = _path_components(node.right)
+        return None if left is None or right is None else left + right
+    if isinstance(node, ast.Call):
+        return _called_path_components(node)
+    # Any other expression still *occupies a position*: `cwd` is a workspace handle
+    # this scan cannot resolve, and reading it as "no component" would shift every
+    # segment after it and silence the whole match.
+    return [_ANY]
 
 
 def _spells_a_session_directory(tree: ast.AST) -> list[int]:
@@ -65,25 +129,27 @@ def _spells_a_session_directory(tree: ast.AST) -> list[int]:
     Read from the syntax tree rather than the text, because the subject is *who
     builds the path*, not how it is spelled: a scan for one spelling passes a
     second author who writes `sessions / sid`, and a scan of the text counts the
-    producer's own docstring as a second producer. The operand after `"sessions"`
-    is what makes it a leaf — `cwd / ".emrg" / "sessions"` without one names the
-    directory sessions live *in*, which several callers may legitimately ask for.
+    producer's own docstring as a second producer. The match is on the component
+    sequence `.emrg`, `sessions`, then anything, so it is indifferent to the
+    operator, the constructor and the grouping that produced it. The component
+    after `sessions` is what makes it a leaf — `cwd / ".emrg" / "sessions"`
+    without one names the directory sessions live *in*, which several callers may
+    legitimately ask for.
+
+    A line is reported once: several nested expressions on one line are one site.
     """
-    found: list[int] = []
+    found: set[int] = set()
     for node in ast.walk(tree):
-        if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Div):
+        if not isinstance(node, (ast.BinOp, ast.Call, ast.JoinedStr)):
             continue
-        parts = _slash_chain(node)
+        parts = _path_components(node)
+        if parts is None:
+            continue
         for i in range(len(parts) - 2):
-            head, tail = parts[i], parts[i + 1]
-            if (
-                isinstance(head, ast.Constant) and head.value == ".emrg"
-                and isinstance(tail, ast.Constant) and tail.value == "sessions"
-                and not isinstance(parts[i + 2], ast.Constant)
-            ):
-                found.append(node.lineno)
+            if parts[i] == ".emrg" and parts[i + 1] == "sessions":
+                found.add(node.lineno)
                 break
-    return found
+    return sorted(found)
 
 
 def test_the_directory_a_session_lives_in_has_one_producer():
@@ -116,6 +182,53 @@ def test_the_directory_a_session_lives_in_has_one_producer():
     assert len(producer) == 1, (
         f"expected exactly one producer in session.py, found {producer}"
     )
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        'cwd / ".emrg" / "sessions" / sid',
+        'Path(cwd) / ".emrg" / "sessions" / sid / "images"',
+        'Path(cwd, ".emrg", "sessions", sid)',
+        'cwd.joinpath(".emrg", "sessions", sid)',
+        'os.path.join(cwd, ".emrg", "sessions", sid)',
+        'cwd / f".emrg/sessions/{sid}"',
+        '(cwd / ".emrg") / ("sessions" / sid)',
+    ],
+)
+def test_every_spelling_of_a_session_directory_is_one_copy(expression):
+    """Each way of naming the four components is the same copy, and is found.
+
+    The last two are the ones a matcher on the division operator alone cannot see,
+    and neither is a different author's taste: an f-string hides `.emrg/sessions`
+    inside a single segment, and parenthesising the right-hand pair of the very same
+    `/` chain puts `"sessions" / sid` where a literal is expected. A guard that
+    covers one joining syntax covers one family of authors and reports the rest as a
+    clean tree.
+    """
+    assert _spells_a_session_directory(ast.parse(expression)) == [1]
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        'cwd / ".emrg" / "sessions"',
+        'Path(cwd, ".emrg", "sessions")',
+        'os.path.join(cwd, ".emrg", "sessions")',
+        'cwd / ".emrg" / "history.jsonl"',
+        'cwd / ".emrg" / "sessions.json"',
+        'a_call_that_is_not_a_path(".emrg", "sessions", sid)',
+        "sid",
+    ],
+)
+def test_the_sessions_root_is_not_a_session_directory(expression):
+    """The directory sessions live *in* is a different value, and stays uncontested.
+
+    Several callers may legitimately ask for the root, so a matcher that flagged it
+    would report a clean tree as dirty — the same failure as missing a copy, in the
+    other direction, and the one that teaches a reader to ignore the guard.
+    """
+    assert _spells_a_session_directory(ast.parse(expression)) == []
 
 
 def _javascript_without_comments(source: str) -> str:
