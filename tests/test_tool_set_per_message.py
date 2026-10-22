@@ -540,7 +540,20 @@ def test_the_scheduler_states_the_scheduled_task_set(tmp_path, monkeypatch):
     # Kept as a pointer to the assertion's home: `_run_cycle_bounded` needs a
     # websocket, a handler and a template, and test_scheduler.py already builds
     # all three for the neighbouring field (`input_history`).
-    assert scheduled_task_tool_names() == default_tool_names(), (
-        "today the two sets are equal; when they stop being equal, the assertion in "
-        "test_scheduler.py is what has to change with them"
+    #
+    # The two sets were equal until #2467 gave scheduled rounds a tool a
+    # conversation must not have. What is asserted here is the **shape** of that
+    # difference rather than its contents: an equality against a literal would
+    # restate the implementation and go green on any change that kept the restatement
+    # in step, while the property below is the one that matters — the difference is
+    # exactly the owner role, and no tool is lost from either side.
+    scheduled = set(scheduled_task_tool_names())
+    default = set(default_tool_names())
+    assert scheduled - default == {"boss"}, (
+        "the two sets differ by the owner role and nothing else (#2467); any other "
+        f"difference is a tool that silently appeared on one side: {scheduled - default}"
+    )
+    assert not default - scheduled, (
+        "a tool offered to a conversation must stay available to a scheduled round; "
+        f"these were dropped: {default - scheduled}"
     )

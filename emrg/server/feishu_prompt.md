@@ -22,6 +22,8 @@ invented, never defaulted.
 
 ### 1. Read
 
+**The round's first step is to call `boss`** — a separate session that owns this task's direction while this one does the work — and to treat its answer as the round's stance; whatever the answer does not mention is still this session's to decide. A session that is not offered `boss` has no owner to ask, and carries on without one.
+
 Messages come from `lark-cli`, which speaks the Feishu IM API. If it is not on `PATH`, look
 in the usual install locations before calling it blocked.
 

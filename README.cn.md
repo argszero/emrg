@@ -168,7 +168,7 @@ TUI 内：`Esc` 中断流式输出，`Ctrl+C` / `exit` 退出（配置与 GUI �
 |  | Claude Code | Codex | DeepSeek Harness | **EMRG** | **Grok Bot** |
 |---|---|---|---|---|---|
 | AI 驱动编程 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 工具调用 (`bash`/`pwsh`、`read`、`write`、`edit`、`glob`、`grep`、`submit_rant`、`subagent`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 工具调用 (`bash`/`pwsh`、`read`、`write`、`edit`、`glob`、`grep`、`submit_rant`、`subagent`、`boss`) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | 会话记忆与上下文 | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `/` 命令自动补全 | ✅ | ✅ | ✅ | ✅ | ~ *@ mention 建议 + 命令面板* |
 | ESC 中断 | ✅ | ✅ | — | ✅ | ✅ |

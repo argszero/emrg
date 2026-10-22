@@ -161,6 +161,7 @@ from emrg.tools.glob_tool import GlobTool
 from emrg.tools.grep_tool import GrepTool
 from emrg.tools.submit_rant_tool import SubmitRantTool
 from emrg.tools.subagent_tool import SubagentTool
+from emrg.tools.boss_tool import BossTool
 from emrg.skills.loader import load_skills
 from emrg.skills.registry import ensure_catalog_file, load_catalog_skills, skill_is_managed
 from emrg.server.rants import append_rant, list_rants
@@ -204,13 +205,18 @@ def default_tool_names(platform_name: str | None = None) -> list[str]:
 
 
 def scheduled_task_tool_names(platform_name: str | None = None) -> list[str]:
-    """The tool names a scheduled task's round may use (issue #2465).
+    """The tool names a scheduled task's round may use (issue #2465, #2467).
 
-    Today the same set a conversation gets. The split exists so that a tool
-    meant only for scheduled work (a review/owner role) can be added **here
-    alone** — no second mechanism inside the tool asking "who called me?".
+    A host conversation's set, plus ``boss`` — the owner role, which is the first
+    tool the split was built for and the reason it exists: adding it here alone is
+    what keeps it out of a conversation, with no second mechanism inside the tool
+    asking "who called me?".
+
+    ``boss`` goes last so the shared prefix of the two lists is the whole of
+    ``default_tool_names``: a reader comparing them sees one append, not a
+    reshuffle.
     """
-    return default_tool_names(platform_name)
+    return default_tool_names(platform_name) + ["boss"]
 
 
 def effective_tool_names(
@@ -708,6 +714,7 @@ def build_shell_tool(
 def build_tool_registry(
     sandbox_config: Optional[SandboxConfig] = None,
     run_subagent_cb=None,
+    run_boss_cb=None,
     platform_name: str | None = None,
 ) -> ToolRegistry:
     """The daemon's tool set, built in one place so that its size is a reading.
@@ -746,6 +753,10 @@ def build_tool_registry(
     # The runner is the daemon's own method, so the tool has no path to the
     # session machinery of its own: everything that owns state stays there.
     tools.register(SubagentTool(run_subagent_cb))
+    # Registered like any other tool and offered to scheduled tasks alone: which
+    # sessions may call it is `scheduled_task_tool_names()`'s fact, not this one's
+    # (issue #2467).
+    tools.register(BossTool(run_boss_cb))
     return tools
 
 
@@ -908,7 +919,9 @@ class EmrgServer:
         self._pending_web_auth_proc: Optional[asyncio.subprocess.Process] = None
 
         # Build tool registry
-        self.tools = build_tool_registry(self._sandbox_config, self._run_subagent_tool)
+        self.tools = build_tool_registry(
+            self._sandbox_config, self._run_subagent_tool, self._run_boss_tool,
+        )
         logger.info("tools registered: %s", self.tools.names)
 
         # Skills are **not** held here. A snapshot taken at startup cannot see a skill
@@ -4340,13 +4353,13 @@ class EmrgServer:
             # safe form is the unconditional one: whatever the session holds,
             # including nothing, is what the call runs with.
             args["writable_roots"] = session.sandbox_roots
-        if tc_name == "subagent":
+        if tc_name in ("subagent", "boss"):
             # The parent's identity and cwd are facts the model must not choose
-            # (issue #2451): the slot is derived from both, so a caller that named
-            # its own would name a wrong one. Injected unconditionally, so a value
-            # the model put in the call is replaced rather than honoured — the same
-            # rule the writable roots follow, and for the same reason: the parent of
-            # a delegation cannot be the delegated.
+            # (issue #2451, #2467): the slot is derived from both, so a caller that
+            # named its own would name a wrong one. Injected unconditionally, so a
+            # value the model put in the call is replaced rather than honoured — the
+            # same rule the writable roots follow, and for the same reason: the
+            # parent of a delegation cannot be the delegated.
             args["_parent_session_id"] = session.session_id
             args["_parent_cwd"] = str(session.cwd)
             # The child inherits **this turn's** set (issue #2465). A delegation
@@ -7796,6 +7809,202 @@ class EmrgServer:
             f"- rounds: {rounds}\n"
             f"- elapsed: {elapsed:.1f}s\n\n"
             "Its final answer, and nothing else it said along the way:\n\n"
+            f"{answer}"
+        )
+
+    # ── The owner role (issue #2467) ───────────────────────────────────────
+
+    #: The fixed directory a task's owner session lives in, under the parent's
+    #: ``sub-agent/``. One owner per parent, so it is a name and not a slot: the
+    #: nine ``subagent`` slots are least-recently-closed and emptied on use, which
+    #: is right for a job that ends when it answers and wrong for a role that is
+    #: held across rounds.
+    BOSS_DIR = "sub-boss"
+
+    async def _run_boss_tool(
+        self, *, parent_session_id: str, parent_cwd: str, focus: str = "",
+        timeout_s: int, intent: str = "", parent_tools: list[str] | None = None,
+    ) -> dict:
+        """Run the owner session for one `boss` call. Answers text or an error.
+
+        The bound covers everything, as `subagent`'s does, and is read the same
+        way — by *whether the child finished*, not by catching a timeout: the tool
+        loop absorbs the cancellation it receives and returns normally, so a
+        cancelled owner would look like a finished one that said nothing.
+
+        There is no slot to release: the directory is fixed and retained, so a
+        timed-out call leaves nothing occupied and the next call resumes the same
+        session.
+        """
+        state: dict = {"child": None}
+        child_task = asyncio.create_task(self._run_boss_child(
+            parent_session_id=parent_session_id,
+            parent_cwd=parent_cwd,
+            focus=focus,
+            intent=intent,
+            state=state,
+            parent_tools=parent_tools,
+        ))
+        try:
+            done, _ = await asyncio.wait({child_task}, timeout=timeout_s)
+        except asyncio.CancelledError:
+            # The executor's own round was cancelled. The owner is not left running
+            # behind it.
+            child_task.cancel()
+            await asyncio.gather(child_task, return_exceptions=True)
+            raise
+        if done:
+            return child_task.result()
+        child_task.cancel()
+        await asyncio.gather(child_task, return_exceptions=True)
+        logger.warning(
+            "[boss] timed out after %ss: parent=%s child=%s",
+            timeout_s, parent_session_id, state["child"],
+        )
+        return {"error": (
+            f"boss: the owner did not answer within {timeout_s}s, so its turn was "
+            "cancelled. Nothing from it was delivered. Owner session: "
+            f"{state['child']}. Raise `timeout_s`, or narrow `focus` to the one "
+            "thing you need judged."
+        )}
+
+    async def _run_boss_child(
+        self, *, parent_session_id: str, parent_cwd: str, focus: str,
+        intent: str, state: dict, parent_tools: list[str] | None = None,
+    ) -> dict:
+        """The body of one owner call: open the retained session, run it, report."""
+        started = time.monotonic()
+        parent = self._get_or_create_session(parent_session_id, Path(parent_cwd))
+
+        depth = parent.depth
+        if depth >= self.SUBAGENT_MAX_DEPTH:
+            logger.info(
+                "[boss] refused: delegation depth %d reached (parent=%s)",
+                depth, parent_session_id,
+            )
+            return {"error": (
+                f"boss: refused — this session is already {depth} delegations deep "
+                f"and the limit is {self.SUBAGENT_MAX_DEPTH}. Nothing was started. "
+                "An owner is asked for by the session that does the work, not by "
+                "one it has already delegated to."
+            )}
+
+        # The id carries the parent's for the same reason a slot's does: the busy,
+        # cancel and turn tables are keyed by id across the whole daemon, so a
+        # fixed `boss` would make two tasks' owners indistinguishable there.
+        child_id = f"boss-{parent_session_id}"
+        state["child"] = child_id
+        parent_session_dir = (
+            Path(parent_cwd) / ".emrg" / "sessions" / parent_session_id
+        )
+        # The cwd is two levels below the parent's session directory, which is how
+        # the owner derives the history it must read: `<parent>/sub-agent/sub-boss`.
+        boss_cwd = parent_session_dir / "sub-agent" / self.BOSS_DIR
+        boss_cwd.mkdir(parents=True, exist_ok=True)
+        parent_history = parent_session_dir / "history.jsonl"
+
+        prompt = _get_jinja_env().get_template("boss.j2").render(
+            parent_history=str(parent_history),
+            parent_session=parent_session_id,
+            # Read by the template's own `{% if focus %}`, so an empty string and a
+            # missing key agree: no particular question was asked.
+            focus=focus or "",
+        )
+
+        # Load-or-create, never delete: the retained session keeps its history, its
+        # memory and its own compaction between rounds. That is what makes the
+        # several thousand characters of mission a cost paid once rather than
+        # every round (issue #2467, requirement 3).
+        child = self._get_or_create_session(child_id, boss_cwd)
+        child.set_depth(depth + 1)
+        # The owner's tier is the parent's, never its own: authorization a caller
+        # can choose for the thing it is authorizing is not a boundary.
+        if parent.sandbox:
+            child.set_sandbox(parent.sandbox)
+        if parent.sandbox_roots:
+            try:
+                child.set_sandbox_roots(parent.sandbox_roots)
+            except (ValueError, OSError):
+                logger.warning("[boss] could not inherit the parent's writable roots")
+
+        req = TaskRequest(
+            id=f"boss-{int(started * 1000)}",
+            session_id=child_id,
+            cwd=str(boss_cwd),
+            prompt=prompt,
+            timestamp="",
+            sandbox=parent.sandbox,
+            # The owner inherits the executor's tool set the way any child does
+            # (#2465). It includes `boss` itself; the depth limit above is what
+            # bounds an owner that asks for an owner.
+            tools=parent_tools,
+        )
+        assistants_before = sum(
+            1 for r in child._read_history() if r.get("role") == "assistant"
+        )
+        logger.info(
+            "[boss] start: parent=%s child=%s depth=%d intent=%s",
+            parent_session_id, child_id, depth + 1,
+            redact_string(intent) if intent else "-",
+        )
+
+        self._session_busy[child_id] = True
+        cancel_event = asyncio.Event()
+        self._session_cancel[child_id] = cancel_event
+        try:
+            await self._run_tool_loop_locked(req, None, child, cancel_event)
+        finally:
+            # "Closed" is the whole teardown, the memory write included — the same
+            # ordering the slot runners need, and here it is also what makes the
+            # next round read a settled history.
+            await self._await_memory_reflection(child_id)
+            self._session_busy[child_id] = False
+            self._session_cancel.pop(child_id, None)
+
+        records = child._read_history()
+        rounds = max(0, sum(
+            1 for r in records if r.get("role") == "assistant"
+        ) - assistants_before)
+        answer = ""
+        for record in reversed(records):
+            if record.get("role") != "assistant":
+                continue
+            content = record.get("content")
+            if isinstance(content, str) and content.strip():
+                answer = content
+                break
+        elapsed = time.monotonic() - started
+        logger.info(
+            "[boss] done: child=%s rounds=%d elapsed=%.1fs", child_id, rounds, elapsed,
+        )
+        return {"text": self._boss_report(child_id, boss_cwd, answer, rounds, elapsed)}
+
+    @staticmethod
+    def _boss_report(
+        child_id: str, boss_cwd: Path, answer: str, rounds: int, elapsed: float,
+    ) -> str:
+        """What the executor's round receives: the stance, and where it came from.
+
+        The cap is `_SUBAGENT_ANSWER_CHARS`, shared rather than duplicated: the two
+        subjects are one question — how much of a child session's answer reaches the
+        parent's round — and a second constant would be a second number to keep in
+        step with it.
+        """
+        if not answer:
+            answer = "(the owner produced no answer)"
+        elif len(answer) > _SUBAGENT_ANSWER_CHARS:
+            answer = (
+                answer[:_SUBAGENT_ANSWER_CHARS]
+                + f"\n\n… (truncated — the answer ran to {len(answer)} characters, "
+                f"the first {_SUBAGENT_ANSWER_CHARS} are shown)"
+            )
+        return (
+            "The owner answered. Treat this as this round's stance; anything it "
+            "does not mention is still yours to decide.\n"
+            f"- session: {child_id}\n"
+            f"- cwd: {boss_cwd}\n"
+            f"- rounds: {rounds}\n"
+            f"- elapsed: {elapsed:.1f}s\n\n"
             f"{answer}"
         )
 

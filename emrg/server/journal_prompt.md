@@ -40,6 +40,8 @@ do. The host unblocks it by adding `author_id` to this task's `config` in tasks.
 
 **Do not skip. Execute even if "everything looks fine".**
 
+**The round's first step is to call `boss`** — a separate session that owns this task's direction while this one does the work — and to treat its answer as the round's stance; whatever the answer does not mention is still this session's to decide. A session that is not offered `boss` has no owner to ask, and carries on without one.
+
 #### 0.1 Environment verification
 
 ```bash
