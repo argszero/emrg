@@ -3,6 +3,7 @@
 import ast
 import json
 import os
+import re
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -114,6 +115,74 @@ def test_the_directory_a_session_lives_in_has_one_producer():
     )
     assert len(producer) == 1, (
         f"expected exactly one producer in session.py, found {producer}"
+    )
+
+
+def _javascript_without_comments(source: str) -> str:
+    """`source` with every comment blanked to spaces, newlines and strings kept.
+
+    Line numbers survive, so a failure names the line a reader will find. Two
+    cheaper spellings are wrong here and both were considered: a regex that strips
+    `//` to end of line also eats the `//` inside a URL or a string, and dropping
+    comment lines outright shifts every number below them. A scan that silently
+    removed a line of code would report a lower count as clean.
+    """
+    out: list[str] = []
+    i, n = 0, len(source)
+    while i < n:
+        ch = source[i]
+        if ch == "/" and i + 1 < n and source[i + 1] == "/":
+            j = source.find("\n", i)
+            j = n if j < 0 else j
+            out.append(" " * (j - i))
+            i = j
+        elif ch == "/" and i + 1 < n and source[i + 1] == "*":
+            j = source.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            out.append("".join(c if c == "\n" else " " for c in source[i:j]))
+            i = j
+        elif ch in "\"'`":
+            quote, j = ch, i + 1
+            while j < n and source[j] != quote:
+                j += 2 if source[j] == "\\" else 1
+            out.append(source[i:j + 1])
+            i = j + 1
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def test_the_electron_client_builds_the_same_path_in_one_place():
+    """The rule's other language: the GUI main process is its own single producer.
+
+    `main.js` writes a pasted image into `<project>/.emrg/sessions/<id>/images` so
+    the daemon can find it, and it cannot call the Python producer — the two
+    processes share a filesystem, not a runtime. So delegation is not available on
+    this half; what is available is that the copy stays **one** copy, and that is
+    what this pins. Measured when written: exactly one code site, in `main.js`.
+    The path is also spelled in comments in `preload.js` and `main.js`, which is
+    why the comments are blanked rather than counted.
+    """
+    gui = Path(__file__).resolve().parents[1] / "emrg" / "gui"
+    sites: list[str] = []
+    for path in sorted(gui.rglob("*.js")):
+        if any(part in {"node_modules", "dist"} for part in path.relative_to(gui).parts):
+            continue
+        if path.name.endswith(".test.js"):
+            continue
+        code = _javascript_without_comments(
+            path.read_text(encoding="utf-8", errors="replace")
+        )
+        for match in re.finditer(r"""["']\.emrg["']\s*,\s*["']sessions["']""", code):
+            line = code[: match.start()].count("\n") + 1
+            sites.append(f"{path.relative_to(gui).as_posix()}:{line}")
+
+    assert len(sites) == 1, (
+        "expected exactly one place in the Electron client to build "
+        f"<project>/.emrg/sessions/<id>, found {sites} — the Python package gets "
+        "this from one producer; this half of the rule has to stay one copy, "
+        "because nothing compares them at runtime"
     )
 
 
