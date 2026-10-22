@@ -187,6 +187,59 @@ def test_the_client_turn_path_resolves_the_tier_before_the_loop_starts():
     assert "resolve_client_tier" not in inject_source
 
 
+def test_the_injection_documents_every_argument_it_writes():
+    """The docstring is the only map of what this method overrides.
+
+    A reader asking what the daemon puts into a tool call it did not write has
+    one instrument — the enumeration in this method's docstring — and nothing
+    else reads it. It said "three rules" while the body wrote nine keys in five
+    classes, and the two it left out were exactly the safety injections: the
+    host's writable roots, and the parent a delegation is born from. A reader
+    who trusted the list concluded that both came from the model, which is the
+    opposite of what the code does — so the prose did not merely lag the code,
+    it misdescribed the boundary the code exists to hold.
+
+    Prose drifts while every behavioural test stays green, so the drift is
+    measured here instead of remembered. The key set is derived from the source,
+    so a key the method starts writing is visible without anyone maintaining a
+    list of keys; ``pinned`` then turns that into a decision rather than an
+    accident, and fails in the other direction too — a key dropped from the code
+    whose bullet outlives it leaves the prose documenting something that is not
+    written.
+
+    Both directions are the guard, and neither is a behavioural claim: the
+    injection's own behaviour is pinned by the tests that drive it
+    (``test_shell_tool_mount.py``, ``test_boss_tool.py``,
+    ``test_subagent_tool.py``). This one pins the map.
+    """
+    source = inspect.getsource(EmrgServer._inject_tool_arguments)
+    written = set(re.findall(r'args\["(\w+)"\]\s*=', source))
+
+    pinned = {
+        "workdir",  # the session cwd: pinned for the shell tools, a default for glob
+        "path",  # grep's spelling of the same fact
+        "sandbox",  # the task's tier
+        "workspace",  # the write boundary that rides with the tier
+        "writable_roots",  # the host's roots, injected unconditionally
+        "_parent_session_id",  # a delegation's parent — four facts the model
+        "_parent_cwd",  # must not choose, all injected unconditionally
+        "_parent_tools",
+        "_parent_sandbox",
+    }
+    assert written == pinned, (
+        f"the injection writes {sorted(written)}, the guard expects "
+        f"{sorted(pinned)} — decide which is right, then update both the code's "
+        f"docstring and this pin"
+    )
+
+    doc = EmrgServer._inject_tool_arguments.__doc__ or ""
+    undocumented = sorted(k for k in written if f"``{k}``" not in doc)
+    assert not undocumented, (
+        f"the injection writes {undocumented} and its docstring never names "
+        f"them — the list a reader audits the sandbox surface from is incomplete"
+    )
+
+
 # ── the daemon's one write path and its broadcast ─────────────────────────
 
 

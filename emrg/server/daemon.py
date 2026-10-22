@@ -4258,9 +4258,15 @@ class EmrgServer:
     ) -> None:
         """Inject the parts of a tool call the model must not choose.
 
-        Three rules. The first two are one fact — the session's cwd is where a
-        filesystem tool works — split by what the value decides for that tool: a
-        boundary (pinned) or a preference (a default). The third is the tier.
+        Five classes, in the order the body writes them. The first two are one
+        fact — the session's cwd is where a filesystem tool works — split by what
+        the value decides for that tool: a boundary (pinned) or a preference (a
+        default). The third is the tier. The last two are the ones a caller would
+        get wrong left to itself: the root list, and the parent a delegation is
+        born from. Every key this method writes is named below
+        (``tests/test_session_sandbox.py`` pins the enumeration to the code), and
+        that is the point of the list — it is the only map a reader has for asking
+        what the daemon overrides in a call it did not write.
 
         * **the session's cwd is where a filesystem tool works — for the tools
           that run a command.** Injected unconditionally into the shell tools,
@@ -4298,9 +4304,35 @@ class EmrgServer:
           test_shell_tool_mount.py`` now pins by driving this method and then the
           tool rather than asserting the argument dict alone.
         * **the sandbox tier is the task's, not the agent's** (rant
-          2026-08-20T15:46:50). ``write``/``edit`` also receive it, together with
-          the workspace boundary, so that under read-only they cannot clobber the
-          host's uncommitted tree (community issue #979).
+          2026-08-20T15:46:50). ``write``/``edit`` also receive it, under the key
+          ``sandbox``, together with the workspace boundary, so that under
+          read-only they cannot clobber the host's uncommitted tree (community
+          issue #979).
+        * **the host names the writable roots, and only the host.** The tools
+          that write under a root — the shell tools, ``write`` and ``edit``, the
+          same set the tier reaches — receive ``writable_roots`` from the
+          session's ``sandbox_roots``, injected **unconditionally** (rant
+          2026-10-09T09:43:39 §4). The difference from the tier above is
+          deliberate on both sides: the tier's injection is guarded by
+          ``req.sandbox`` because a call carrying no tier belongs to a host
+          session whose unconfined default is silence, and silence cannot widen
+          anything. A list of roots has no such neutral value, and an honoured
+          model-supplied list would be a sandbox whose boundary the sandboxed
+          decided — so whatever the session holds, including nothing, is what the
+          call runs with.
+        * **the parent of a delegation is a fact, not a field.** ``subagent`` and
+          ``boss`` receive ``_parent_session_id``, ``_parent_cwd``,
+          ``_parent_tools`` and ``_parent_sandbox``, all of them unconditional
+          (issues #2451, #2465, #2467), for one reason in four parts: the child's
+          slot is derived from the parent's id and cwd, so a caller naming its own
+          would name a wrong one; the child inherits **this turn's** tool set, so
+          a round that may not use a tool cannot hand it to a session it spawns;
+          and it inherits **this turn's** tier — ``req.sandbox``, the same value
+          injected above — so a task's child is as confined as the task. Reading
+          that tier from the session object instead was a hole: a scheduled task's
+          tier is resolved from ``tasks.yml`` into the request and never written
+          onto the session, so every child such a task spawned ran unconfined at
+          ``policy.DEFAULT_MODE`` while the task body itself was confined.
 
         ``workspace`` is a new key for the shell tools and the old executor
         ignores it (it reads ``command``/``timeout``/``workdir``/``sandbox``
