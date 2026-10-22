@@ -293,3 +293,48 @@ test("issue #2484: askSessionCwd asks, judges, and never falls back to the home 
     "DEFAULT_CWD may be the candidate it sends, never the value it returns",
   );
 });
+
+test("issue #2490: emrg:taskCreate forwards `schedule`, and only when the payload carries it", () => {
+  // `schedule` is a top-level field of a task record. This handler built its
+  // `task_create` payload from a fixed destructured list, so the key was dropped on
+  // the floor and the GUI could only ever create a one-frequency task — the daemon
+  // accepted the field the whole time. No runtime test covers the main process, which
+  // is why this guard reads the source: it asserts the payload is built from a value
+  // it forwards, not from a list that omits the field.
+  const src = read("main.js");
+  const start = src.indexOf('ipcMain.handle("emrg:taskCreate"');
+  assert.ok(start > 0, "main.js must contain an emrg:taskCreate handler");
+  const body = src.slice(start, src.indexOf('\n    });\n', start) + 8);
+  assert.match(
+    body,
+    /schedule/,
+    "emrg:taskCreate must name `schedule` — dropping it means the GUI can never create " +
+      "a task with time-of-day windows (issue #2490)."
+  );
+  assert.match(
+    body,
+    /"schedule" in \(payload \|\| \{\}\)/,
+    "the key must be forwarded only when the payload carries it: an absent key means " +
+      "'do not touch the field', which is what keeps a pre-existing task's windows."
+  );
+  assert.match(
+    body,
+    /sendCommandAndWait\("task_create",\s*fields/,
+    "the forwarded value has to reach the daemon command, not sit in a local object."
+  );
+});
+
+test("issue #2490: emrg:taskLimits reports the daemon's own minimum, never a literal", () => {
+  // The renderer's interval floor is the daemon's MIN_INTERVAL. The only honest way to
+  // give it to the GUI is to report it, so this handler must read the field out of the
+  // daemon's frame — a number written here would be the second copy the issue removes.
+  const src = read("main.js");
+  const start = src.indexOf('ipcMain.handle("emrg:taskLimits"');
+  assert.ok(start > 0, "main.js must contain an emrg:taskLimits handler");
+  const body = src.slice(start, src.indexOf('\n    });\n', start) + 8);
+  assert.match(body, /frame\.min_interval/, "the floor is read from the daemon's frame");
+  assert.ok(
+    !/\b60\b/.test(body),
+    "no literal floor may live in this handler — that is the copy issue #2490 removes"
+  );
+});

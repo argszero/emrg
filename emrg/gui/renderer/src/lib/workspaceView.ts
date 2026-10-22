@@ -23,6 +23,17 @@ export interface ProjectRec {
   latest_session_at?: string | null;
 }
 
+/**
+ * 一个调度窗口（issue #2490）：daemon 的 `schedule` 字段逐字原样。
+ * 全部本地时间；`days` 可省略＝每天；`from`/`to` 为 `HH:MM`（允许 24:00）。
+ */
+export interface ScheduleWindow {
+  days?: string;
+  from: string;
+  to: string;
+  interval: number;
+}
+
 export interface TaskRec {
   name?: string;
   type?: string;
@@ -34,6 +45,8 @@ export interface TaskRec {
   last_run_at?: string | null;
   saturation?: { heartbeat_active?: boolean; heartbeat_interval?: number } | null;
   config?: { project?: string; repo?: string; sandbox?: string } | null;
+  /** 分时段频次窗口；缺省＝全天单一 `interval`（`list_tasks()` 逐字回报） */
+  schedule?: ScheduleWindow[] | null;
   /** 任务面板「打开会话」所需字段（daemon TaskHandler.status() 返回，vanilla #924 迁移时丢失） */
   session_id?: string;
   project?: string;

@@ -39,6 +39,9 @@ function mockEmrg() {
   const taskUpdate = vi.fn().mockResolvedValue({ ok: true });
   const taskDelete = vi.fn().mockResolvedValue({ ok: true });
   const taskTemplateList = vi.fn().mockResolvedValue([{ name: "journal" }]);
+  // issue #2490：间隔下限由 daemon 上报 —— 这里刻意给 120（不是渲染层曾写死的 60），
+  // 于是「表单拿到的就是上报值」这件事在接线层可断言。
+  const taskLimits = vi.fn().mockResolvedValue({ minInterval: 120 });
   const sendRant = vi.fn().mockResolvedValue({ ok: true, count: 11 });
   const restartDaemon = vi.fn().mockResolvedValue({ ok: true });
   const setModel = vi.fn().mockResolvedValue({ ok: true });
@@ -62,6 +65,7 @@ function mockEmrg() {
     taskUpdate,
     taskDelete,
     taskTemplateList,
+    taskLimits,
     sendRant,
     restartDaemon,
     setModel,
@@ -84,6 +88,7 @@ function mockEmrg() {
     taskUpdate,
     taskDelete,
     taskTemplateList,
+    taskLimits,
     sendRant,
     restartDaemon,
     setModel,
@@ -768,6 +773,30 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     expect(payload.interval).toBe(1800);
     await waitFor(() => expect(m.listTasks).toHaveBeenCalledTimes(2)); // 初始 + 保存后刷新
     expect(screen.queryByTestId("task-form-dialog")).not.toBeInTheDocument();
+  });
+
+  it("表单的间隔下限来自 daemon 上报（taskLimits），不是渲染层写死的数", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("nav-tasks"));
+    await waitFor(() => expect(screen.getByTestId("task-row")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("＋ Add task"));
+    await waitFor(() => expect(screen.getByTestId("task-form-dialog")).toBeInTheDocument());
+    // 接线本身：表单打开时问过 daemon 的下限
+    await waitFor(() => expect(m.taskLimits).toHaveBeenCalled());
+
+    fireEvent.change(screen.getByTestId("task-form-name"), { target: { value: "t3" } });
+    // 上报值是 120：写成 60（渲染层曾经写死的那个数）必须被拒，且错误文案带 120
+    fireEvent.change(screen.getByTestId("task-form-interval"), { target: { value: "60" } });
+    fireEvent.click(screen.getByTestId("task-form-save"));
+    expect(screen.getByTestId("task-form-error")).toHaveTextContent("120");
+    expect(m.taskCreate).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByTestId("task-form-interval"), { target: { value: "120" } });
+    fireEvent.click(screen.getByTestId("task-form-save"));
+    await waitFor(() => expect(m.taskCreate).toHaveBeenCalledTimes(1));
+    expect(m.taskCreate.mock.calls[0][0].interval).toBe(120);
   });
 
   it("任务行「Edit」→ 表单预填 + name 只读 → 保存 → taskUpdate（不改名）", async () => {

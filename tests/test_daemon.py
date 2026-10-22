@@ -5762,3 +5762,45 @@ def test_the_read_loop_still_accepts_a_task_carrying_a_plain_session_id(
 
     assert not [f for f in frames if "invalid session id" in str(f.get("error", ""))]
     assert (project / ".emrg" / "sessions" / "fresh").is_dir()
+
+
+# ── the task list frame is the renderer's one source for the floor ───────────
+
+
+def test_the_tasks_list_frame_carries_the_minimum_interval(tmp_path, monkeypatch):
+    """Issue #2490: the GUI reads its `interval` floor from this frame.
+
+    The renderer used to carry its own copy of the number — a comparison, an input
+    `min` and two sentences — so raising `MIN_INTERVAL` in Python left the GUI
+    refusing a value the daemon accepts (or the reverse). The frame reports the
+    daemon's own constant instead, and this asserts the value is that constant
+    rather than a second literal that happens to agree with it today.
+    """
+    from emrg.server.scheduler import MIN_INTERVAL
+
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    windows = [{"days": "mon-fri", "from": "09:00", "to": "18:00", "interval": 900}]
+    sched = TaskScheduler(InstanceIdentity())
+    sched._tasks_file = tmp_path / "tasks.yml"
+    sched._tasks_file.write_text(yaml.safe_dump([
+        {"name": "windowed", "type": "evolution", "config": {"project": "emrg"},
+         "interval": 10800, "enabled": True, "schedule": windows},
+        {"name": "plain", "type": "evolution", "config": {"project": "emrg"},
+         "interval": 1800, "enabled": True},
+    ]))
+
+    server = _make_server()
+    server._scheduler = sched
+    # `_FakeWs` decodes what the daemon writes; `_FakeWriter` keeps raw frames.
+    writer = _FakeWs()
+    asyncio.run(server._process_message({"type": "list_tasks"}, writer))
+
+    frames = [f for f in writer.sent if f.get("type") == "tasks_list"]
+    assert len(frames) == 1, writer.sent
+    frame = frames[0]
+    assert frame["min_interval"] == MIN_INTERVAL, (
+        "the frame reports the daemon's own floor, not a copy of it"
+    )
+    rows = {t["name"]: t for t in frame["tasks"]}
+    assert rows["windowed"]["schedule"] == windows, "the form prefills from this"
+    assert rows["plain"]["schedule"] is None, "absent stays absent, not []"
