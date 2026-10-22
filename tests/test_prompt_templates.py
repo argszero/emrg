@@ -2183,3 +2183,66 @@ def test_the_inbound_pin_answers_both_ways():
             f"removing {phrase!r} did not make exactly that phrase read as missing, so this "
             "pin would not notice its own rule being deleted"
         )
+
+
+# ── the ios-app template's app layout ───────────────────────────────────────────────────────
+#
+# The layout is not decoration: §3's inception step and §4's attribution rule both assume it.
+# An app that is submitted, attributed and possibly handed over has to be a repository of its
+# own, and §0.6 used to open with `<project root>/apps/<slug>/` — a child of a shared
+# container, which is not a repository root and is exactly the one-shared-project-for-several-
+# apps shape the placement forbids. These pin the layout the section must state, and refuse the
+# container by name.
+
+_IOS_TEMPLATE = PROMPTS_DIR / "ios_app_prompt.md"
+_IOS_LAYOUT_HEADING = "#### 0.6 Workspace hygiene"
+_IOS_LAYOUT_ENDS_AT = "#### 0.7 Build inside the workspace, foreground"
+
+IOS_LAYOUT_PHRASES = (
+    "its own repository",
+    "One app, one repository",
+    "Only this app's directory is yours",
+)
+
+
+def _ios_layout_section(text: str) -> str:
+    return _bounded_section(text, _IOS_LAYOUT_HEADING, _IOS_LAYOUT_ENDS_AT)
+
+
+def test_the_ios_app_template_places_each_app_in_a_repository_of_its_own():
+    """§0.6 must place an app where it can be the root of its own repository."""
+    body = _ios_layout_section(_IOS_TEMPLATE.read_text(encoding="utf-8"))
+    missing = _missing_phrases(body, IOS_LAYOUT_PHRASES)
+    assert not missing, (
+        "the ios-app template's workspace section no longer states the app's layout: "
+        f"{missing}. Without it the template places every app inside one shared container, and "
+        "an app that is not a repository of its own has no history to attribute (§4) or to "
+        "archive, while a second app joining the container mixes the two."
+    )
+    assert "apps/<slug>" not in body, (
+        "the section names an `apps/` container again: a container's child is not a repository "
+        "root, so the app is not its own repository"
+    )
+
+
+def test_the_ios_layout_pin_answers_both_ways():
+    """The control for both halves: the phrase pin, and the container refusal.
+
+    Without it, a section emptied of the rule and a reader pointed at the wrong region would
+    read the same as a section that still carries it.
+    """
+    text = _IOS_TEMPLATE.read_text(encoding="utf-8")
+    for phrase in IOS_LAYOUT_PHRASES:
+        stripped = text.replace(phrase, "")
+        assert stripped != text, f"{phrase!r} is pinned but absent, so this arm measured nothing"
+        assert _missing_phrases(_ios_layout_section(stripped), IOS_LAYOUT_PHRASES) == [phrase], (
+            f"removing {phrase!r} did not make exactly that phrase read as missing, so this pin "
+            "would not notice its own rule being deleted"
+        )
+    container = "<project root>/apps/<slug>/"
+    seeded = text.replace("`<project root>/<repo>/`", f"`{container}`", 1)
+    assert seeded != text, "the layout line this test names is not a line the template carries"
+    assert container in _ios_layout_section(seeded), (
+        "the container refusal did not see a container written into the section it reads, so it "
+        "would pass on any section at all"
+    )
