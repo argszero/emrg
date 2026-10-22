@@ -2678,6 +2678,12 @@ class TaskHandler:
             # silent ending (see `_end_heartbeat`).
             return self._NOT_STARTED
 
+        # Issue #2465: this round's tool set is the **scheduled-task** one.
+        # Imported here rather than at module scope because `emrg.server.daemon`
+        # imports this module; the whitelists live there, beside the registration
+        # they describe, so there is one place that says what a tool set is.
+        from emrg.server.daemon import scheduled_task_tool_names
+
         task_msg = json.dumps(
             {
                 "type": "task",
@@ -2704,6 +2710,11 @@ class TaskHandler:
                 # forces, not what dirt does. `EMRG_TASK_DIRTY_OVERRIDE` (audited
                 # receipt) skips that convergence rather than a downgrade.
                 "sandbox": await self._effective_sandbox(),
+                # Issue #2465: which tools this round may use. Named by the
+                # producer because only the producer knows this is a scheduled
+                # round rather than something the host typed — a fact the daemon
+                # would otherwise have to guess from the session's name.
+                "tools": scheduled_task_tool_names(),
             },
             ensure_ascii=False,
         )

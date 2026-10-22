@@ -42,8 +42,9 @@ from emrg.server.tool_types import ToolDefinition, ToolResult
 from emrg.tools.base import ToolExecutor
 
 #: The runner the daemon supplies: ``await runner(parent_session_id=…,
-#: parent_cwd=…, prompt=…, timeout_s=…, intent=…)`` answering either
-#: ``{"text": …}`` or ``{"error": …}``.
+#: parent_cwd=…, prompt=…, timeout_s=…, intent=…, parent_tools=…)`` answering
+#: either ``{"text": …}`` or ``{"error": …}``. ``parent_tools`` is the parent
+#: turn's effective tool set (issue #2465), which the child inherits.
 Runner = Callable[..., Awaitable[dict]]
 
 #: A default that is generous enough for a real job and short enough that a
@@ -165,12 +166,23 @@ class SubagentTool(ToolExecutor):
                 error=True,
             )
 
+        # The parent turn's tool set, injected by the daemon (issue #2465). A
+        # value that is not a list is treated as "no statement", which the
+        # daemon reads as its default set — the same meaning the message field
+        # has, so the two cannot disagree about silence.
+        raw_parent_tools = arguments.get("_parent_tools")
+        parent_tools = (
+            [str(name) for name in raw_parent_tools]
+            if isinstance(raw_parent_tools, list) else None
+        )
+
         outcome = await self._runner(
             parent_session_id=str(parent_session_id),
             parent_cwd=str(parent_cwd),
             prompt=prompt,
             timeout_s=int(timeout_s),
             intent=str(arguments.get("intent") or ""),
+            parent_tools=parent_tools,
         )
         if outcome.get("error"):
             return ToolResult(name="subagent", content=outcome["error"], error=True)

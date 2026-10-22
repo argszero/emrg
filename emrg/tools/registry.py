@@ -27,16 +27,25 @@ class ToolRegistry:
         """Look up a tool by name. Returns None if not found."""
         return self._tools.get(name)
 
-    def to_openai_tools(self) -> list[dict]:
-        """Serialize all registered tools to OpenAI function-calling format.
+    def to_openai_tools(self, names: list[str] | None = None) -> list[dict]:
+        """Serialize registered tools to OpenAI function-calling format.
+
+        :param names: the only tool names to serialize, in registry order.
+            ``None`` (the default) serializes the whole registry, which is what
+            a caller that is not narrowing a turn's set wants. A name this
+            registry does not hold is simply not there — the list narrows, it
+            does not create (issue #2465).
 
         Returns a list of dicts suitable for the `tools` field
         of a chat completions API request:
             [{"type": "function", "function": {"name": ..., "description": ..., "parameters": ...}}]
         """
+        allowed = None if names is None else set(names)
         result: list[dict] = []
         for tool in self._tools.values():
             d = tool.definition()
+            if allowed is not None and d.name not in allowed:
+                continue
             result.append({
                 "type": "function",
                 "function": {

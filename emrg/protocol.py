@@ -45,6 +45,13 @@ class TaskRequest:
     # danger-full-access, current behavior). Set by task config, never by
     # the agent itself.
     sandbox: Optional[str] = None
+    # The tools this turn may use, by name (issue #2465). `None` means "the
+    # daemon's default set"; a list is a whitelist, intersected with the tools
+    # actually registered, so a name that is not registered is dropped rather
+    # than refused. An **empty** list is meaningful — it asks for no tools at
+    # all — which is why both the sender and the reader test `is not None`
+    # rather than the truthiness `sandbox` above is tested for.
+    tools: Optional[list[str]] = None
 
     def to_dict(self) -> dict:
         d = {
@@ -59,6 +66,8 @@ class TaskRequest:
             d["images"] = self.images
         if self.sandbox:
             d["sandbox"] = self.sandbox
+        if self.tools is not None:
+            d["tools"] = self.tools
         return d
 
 

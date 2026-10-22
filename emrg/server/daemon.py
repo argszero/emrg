@@ -178,6 +178,58 @@ logger = logging.getLogger(__name__)
 #: roots — and two hand-written unions would be two chances to drift apart.
 _ROOT_CONSUMING_TOOLS = SHELL_TOOL_NAMES | {"write", "edit"}
 
+#: The tools a **host conversation** is offered, by name (issue #2465).
+#:
+#: This is a whitelist, and naming a tool is the only way to offer it: a tool
+#: registered in ``build_tool_registry`` but named in neither this list nor
+#: ``scheduled_task_tool_names()`` is invisible to every session. That is the
+#: point — some tools are meaningful for one kind of turn and not another — but
+#: it makes adding a tool a two-part act, and the second part is here.
+#:
+#: The shell entry is the platform's dialect rather than the word ``"bash"``: on
+#: Windows the registered tool is ``pwsh``, so a list spelled ``"bash"`` would be
+#: intersected away and the session would lose its shell silently.
+def default_tool_names() -> list[str]:
+    """The tool names a host conversation may use (issue #2465)."""
+    return [
+        shell_tool_name(), "read", "write", "edit", "glob", "grep",
+        "submit_rant", "subagent",
+    ]
+
+
+def scheduled_task_tool_names() -> list[str]:
+    """The tool names a scheduled task's round may use (issue #2465).
+
+    Today the same set a conversation gets. The split exists so that a tool
+    meant only for scheduled work (a review/owner role) can be added **here
+    alone** — no second mechanism inside the tool asking "who called me?".
+    """
+    return default_tool_names()
+
+
+def effective_tool_names(
+    registry: ToolRegistry, requested: list[str] | None,
+) -> list[str]:
+    """``(requested or the default set) ∩ registered``, in the caller's order.
+
+    Intersection, not validation (issue #2465): a name that is not registered is
+    dropped in silence rather than refused, because a message naming a tool this
+    build does not carry is a message from a different build, and failing the
+    whole turn over it would make one stale name cost the round. Duplicates
+    collapse to their first occurrence, so the set cannot be handed the same tool
+    twice.
+    """
+    names = default_tool_names() if requested is None else list(requested)
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in names:
+        if name in seen:
+            continue
+        seen.add(name)
+        if registry.get(name) is not None:
+            out.append(name)
+    return out
+
 #: How much of a child session's final answer a `subagent` call returns, in
 #: characters (issue #2451). The answer is the one thing the parent gets back, so it
 #: needs a ceiling — a child that dumps a whole file would spend the parent's context
@@ -1649,6 +1701,11 @@ class EmrgServer:
                             timestamp=data.get("timestamp", ""),
                             images=data.get("images"),
                             sandbox=data.get("sandbox"),
+                            # Issue #2465: which tools this turn may use, as the
+                            # producer stated it. Absent (`None`) means the
+                            # default set — which is what every client that does
+                            # not care sends, and what a host conversation gets.
+                            tools=data.get("tools"),
                         )
                     except Exception as e:
                         await self._send(ws, {"error": f"invalid task: {e}"})
@@ -4167,7 +4224,10 @@ class EmrgServer:
                     })
 
     @staticmethod
-    def _inject_tool_arguments(tc_name: str, args: dict, session, req: TaskRequest) -> None:
+    def _inject_tool_arguments(
+        tc_name: str, args: dict, session, req: TaskRequest,
+        tool_names: list[str] | None = None,
+    ) -> None:
         """Inject the parts of a tool call the model must not choose.
 
         Three rules. The first two are one fact — the session's cwd is where a
@@ -4275,6 +4335,13 @@ class EmrgServer:
             # a delegation cannot be the delegated.
             args["_parent_session_id"] = session.session_id
             args["_parent_cwd"] = str(session.cwd)
+            # The child inherits **this turn's** set (issue #2465). A delegation
+            # is the same authorisation seen one level down, so a round that may
+            # not use a tool cannot hand it to a session it spawns — otherwise
+            # `subagent` would be a way around the set rather than a use of it.
+            args["_parent_tools"] = (
+                list(tool_names) if tool_names is not None else None
+            )
 
     async def _apply_escalation(
         self, tc_name: str, args: dict, session, req: TaskRequest,
@@ -4416,7 +4483,15 @@ class EmrgServer:
         # The message was just built and persisted above; the same one goes in,
         # so the stored bytes are the sent bytes (issue #2311).
         self._inject_context_message(session, messages, context_message)
-        tools_base = self.tools.to_openai_tools() if allow_tools else []
+        # Issue #2465: the tools this turn may actually use. Computed once and
+        # read by all three enforcement points — the table the model is offered,
+        # the lookup that runs a named tool, and the memory-reflection loop —
+        # because a filter at only one of them is a gate in name only.
+        turn_tool_names = effective_tool_names(self.tools, req.tools)
+        turn_tool_set = set(turn_tool_names)
+        tools_base = (
+            self.tools.to_openai_tools(turn_tool_names) if allow_tools else []
+        )
         # P1 (rant 21:55:37): injection rounds do NOT consume the round budget;
         # force_ask latches "an Ask message was injected outside the round-top
         # injection (stop / Case 3 / loop-end)" so the next round uses an empty
@@ -4472,7 +4547,9 @@ class EmrgServer:
                 })
 
                 # Fire-and-forget: reflect on whether to save memories
-                self._maybe_reflect_memory(session, req.prompt, full_content)
+                self._maybe_reflect_memory(
+                    session, req.prompt, full_content, turn_tool_names,
+                )
                 return
 
             tools_openai = tools_base
@@ -4906,7 +4983,9 @@ class EmrgServer:
                 })
 
                 # Fire-and-forget: reflect on whether to save memories
-                self._maybe_reflect_memory(session, req.prompt, full_content)
+                self._maybe_reflect_memory(
+                    session, req.prompt, full_content, turn_tool_names,
+                )
                 # Issue #1114: a round GENUINELY completed here (final text
                 # answer, no more tool calls) — stamp the completed-round file
                 # so the staleness alarm can answer "how long since a
@@ -5002,13 +5081,20 @@ class EmrgServer:
                     })
 
                     # The pieces of a call the model must not choose (D1).
-                    self._inject_tool_arguments(tc_name, args, session, req)
+                    self._inject_tool_arguments(
+                        tc_name, args, session, req, turn_tool_names,
+                    )
 
                     # Execute
                     refusal = await self._apply_escalation(
                         tc_name, args, session, req,
                     )
-                    tool = self.tools.get(tc_name)
+                    # Issue #2465: a name outside this turn's set is answered
+                    # exactly as a name that was never registered — the refusal
+                    # below, not a second vocabulary for saying no.
+                    tool = (
+                        self.tools.get(tc_name) if tc_name in turn_tool_set else None
+                    )
                     if refusal is not None:
                         # A refused escalation is the call's outcome, and the
                         # command does not run at all: a hop that was not granted
@@ -5123,7 +5209,9 @@ class EmrgServer:
             })
 
             # Fire-and-forget: reflect on whether to save memories
-            self._maybe_reflect_memory(session, req.prompt, full_content)
+            self._maybe_reflect_memory(
+                session, req.prompt, full_content, turn_tool_names,
+            )
             # Issue #1114: max-tokens/other-stop with the final answer
             # persisted + broadcast = a genuinely completed round — stamp the
             # completed-round file (see Case 1; NOT done on the cancellation /
@@ -7490,7 +7578,7 @@ class EmrgServer:
 
     async def _run_subagent_tool(
         self, *, parent_session_id: str, parent_cwd: str, prompt: str,
-        timeout_s: int, intent: str = "",
+        timeout_s: int, intent: str = "", parent_tools: list[str] | None = None,
     ) -> dict:
         """Run one child session for one `subagent` call. Answers text or an error.
 
@@ -7514,6 +7602,7 @@ class EmrgServer:
             prompt=prompt,
             intent=intent,
             state=state,
+            parent_tools=parent_tools,
         ))
         try:
             done, _ = await asyncio.wait({child_task}, timeout=timeout_s)
@@ -7544,7 +7633,7 @@ class EmrgServer:
 
     async def _run_subagent_child(
         self, *, parent_session_id: str, parent_cwd: str, prompt: str,
-        intent: str, state: dict,
+        intent: str, state: dict, parent_tools: list[str] | None = None,
     ) -> dict:
         """The body of one delegation: pick a slot, run the child, report its answer."""
         started = time.monotonic()
@@ -7616,6 +7705,10 @@ class EmrgServer:
                 prompt=prompt,
                 timestamp="",
                 sandbox=parent.sandbox,
+                # Issue #2465: the child's tool set is the parent's — inherited
+                # the same way its tier is, because authorisation a caller can
+                # choose for the thing it is authorising is not a boundary.
+                tools=parent_tools,
             )
             assistants_before = sum(
                 1 for r in child._read_history() if r.get("role") == "assistant"
@@ -7685,7 +7778,8 @@ class EmrgServer:
         )
 
     def _maybe_reflect_memory(
-        self, session: Session, user_prompt: str, assistant_content: str
+        self, session: Session, user_prompt: str, assistant_content: str,
+        tool_names: list[str] | None = None,
     ) -> None:
         """Fire-and-forget: ask LLM to reflect on the exchange and save memories.
 
@@ -7818,8 +7912,15 @@ class EmrgServer:
                     "directory to keep the index in sync."
                 )
 
-                # Run a mini tool loop: LLM can create/update memory files via tools
-                tools = self.tools.to_openai_tools()
+                # Run a mini tool loop: LLM can create/update memory files via tools.
+                # Issue #2465: this loop builds its **own** table, so a filter in
+                # `_run_tool_loop` alone would leave this copy offering every
+                # registered tool — the third enforcement point, not a duplicate.
+                tools = self.tools.to_openai_tools(tool_names)
+                reflect_tool_set = (
+                    set(tool_names) if tool_names is not None
+                    else set(self.tools.names)
+                )
                 messages: list[dict] = [{"role": "user", "content": prompt}]
                 max_rounds = 4
 
@@ -7880,7 +7981,10 @@ class EmrgServer:
                         except json.JSONDecodeError:
                             args = {}
 
-                        tool = self.tools.get(tc_name)
+                        tool = (
+                            self.tools.get(tc_name)
+                            if tc_name in reflect_tool_set else None
+                        )
                         if tool:
                             try:
                                 result = await tool.execute(args)
