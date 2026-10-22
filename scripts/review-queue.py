@@ -123,12 +123,13 @@ cycle pushed is no longer read as this cycle's own work.
 
 *Who pushed a head* is not a fact GitHub records, so the clause has to be read off
 the clock, and a cycle id **is** its start time in the host's local zone
-(`cyc20260917-221117` began at 22:11:17 local). The near bound therefore needs no
-corpus at all: it is this cycle's own id. The far one does — **the cycle that follows
-it**, read from the cycle records in the directories the memory system writes them to
-(`--cycles-log`, default `DEFAULT_CYCLES_LOGS` — the checkout's project memory root,
-plus one memory directory per session under it). A head pushed inside `[this cycle's
-start, the next cycle's start)` is reported `abstain` instead of `vote` or `merge`.
+(`cyc20260917-221117` began at 22:11:17 local). So the window needs no corpus at all:
+it is this cycle's own id, and a head pushed inside `[this cycle's start, now)` is
+reported `abstain` instead of `vote` or `merge`. The span stays open above, which is the
+state every posting cycle is in — nothing has taken the run over yet — and the direction
+it errs in is a delay: a head a *later* cycle pushes while this one runs reads as this
+one's own work, so this cycle abstains on it and that vote waits for a later cycle
+(issue #2334). It is never credited wrongly.
 
 A cycle id that names no instant leaves the window unapplied, and the queue prints
 what it could not determine rather than passing it. An unresolved window is never
@@ -152,7 +153,6 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
-import os
 import re
 import subprocess
 import sys
@@ -223,81 +223,6 @@ RUNNER = "uv run --no-sync python3"
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 
-def session_memory_roots(checkout: Path) -> tuple[Path, ...]:
-    """The memory directories of the sessions run inside `checkout`, in a stable order.
-
-    A cycle record is an ordinary memory entry, so it lands where the memory
-    instructions put one of its kind: the checkout's project memory root or the
-    memory directory of the session that wrote it. This is the second of those
-    levels, and it is **globbed off the filesystem rather than constructed** — a
-    memory store mkdirs the directory it is handed, and a reading with a side effect
-    is how a search comes to create the corpus it searches. `check-memory-index.py`
-    globs `*/memory/MEMORY.md` beside the project index for the same reason.
-
-    Empty when the tree carries no session memory, which is every fresh clone:
-    `.emrg` is gitignored, so on a runner the default is the project root alone.
-    """
-    sessions = checkout / ".emrg" / "sessions"
-    return tuple(sorted(path for path in sessions.glob("*/memory") if path.is_dir()))
-
-
-#: Where the evolution task writes its cycle records — one `cycle-<date>-<time>.md`
-#: per cycle, the cycle's id without its `cyc` prefix in the filename, which is why
-#: the id is rebuilt rather than read off.
-#:
-#: **Two roots, because a tree's memory is not one directory.** `SCRIPTS_DIR` is
-#: `<source_dir>/scripts`, so `SCRIPTS_DIR.parent` is the checkout. A record is a
-#: memory entry like any other, and the memory instructions name two levels for it —
-#: the checkout's project root (`.emrg/memory/`, the cross-session scope) and the
-#: session that wrote it (`.emrg/sessions/*/memory/`, the session scope) — so which
-#: level a record lands at is the writer's scope choice, not a path the instructions
-#: fix. So both are live, and this search has to
-#: read both: the project root holds the older records, and the session directories
-#: hold the ones written since a cycle put its record under the session it belongs to.
-#:
-#: **The direction of the error is why this is worth a paragraph.** The newest record
-#: decides the far bound — the cycle that follows this one — so a root that has stopped
-#: growing *freezes* that bound at the last cycle that wrote there, and a frozen far
-#: bound is an *open* one: the span then has no upper end, so a head pushed by a cycle
-#: that followed is reported `abstain` when it is that later cycle's own work. Nothing is
-#: printed as a fault — the tool names a window, names the cycle it resolved and exits
-#: 0 — so only the row's cycle is wrong. Measured 2026-10-12: the project root's newest
-#: record was a day older than the newest record the session directories held, and the
-#: bound was resolved from the stale one.
-#:
-#: This is the shape this tool carried while the prompt's record path moved once
-#: before (D9, PR #1555) and the corpus was split over two roots — it searched both
-#: and took the newest across the union then, for the same reason.
-#:
-#: A guard ties this set to the writers
-#: (`tests/test_review_queue.py::test_the_records_land_where_the_queue_reads_them`):
-#: it measures the project root the loader derives and a session root this search
-#: visits, so reader and writers cannot drift apart silently again — read
-#: against the writer, not the rendered template, which no longer names a record's
-#: path (the test's docstring carries that history).
-#:
-#: Overridable by `--cycles-log` / `EMRG_CYCLES_LOG` (one directory, or several joined by
-#: `os.pathsep`); a directory that is not there is reported as unreadable, never guessed at.
-DEFAULT_CYCLES_LOGS: tuple[Path, ...] = (
-    SCRIPTS_DIR.parent / ".emrg" / "memory",          # the checkout's project memory root
-    *session_memory_roots(SCRIPTS_DIR.parent),        # plus one per session that wrote
-)
-
-
-def resolve_cycle_logs(override: str | None = None) -> tuple[Path, ...]:
-    """The cycle-record directories to search: the override, else the default.
-
-    `--cycles-log` / `EMRG_CYCLES_LOG` accept one directory or several joined by
-    `os.pathsep`, so a caller can name a corpus of its own without the default
-    changing meaning — and the default is itself several directories, because the
-    writers do not all use one root.
-    """
-    raw = override or os.environ.get("EMRG_CYCLES_LOG")
-    if raw:
-        return tuple(Path(part) for part in raw.split(os.pathsep) if part)
-    return DEFAULT_CYCLES_LOGS
-
-
 # ── the abstention window ────────────────────────────────────────────────────
 #
 # "May this cycle vote here?" has two halves. The counter owns the first — how many
@@ -305,9 +230,6 @@ def resolve_cycle_logs(override: str | None = None) -> tuple[Path, ...]:
 # is read off the clock, because GitHub does not attribute a push to a cycle.
 
 _CYCLE_ID = re.compile(r"cyc(\d{8})-(\d{6})")
-#: A cycle record's *filename* is `cycle-<date>-<time>.md` — the same instant as the
-#: id without its `cyc` prefix, so the id has to be rebuilt rather than read off.
-_CYCLE_RECORD = re.compile(r"cycle-(\d{8}-\d{6})\.md")
 
 
 def cycle_start(cycle: str) -> datetime | None:
@@ -339,81 +261,13 @@ def instant(text: str) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def _cycle_record_ids(cycles_logs) -> tuple[dict[str, Path], list[str]]:
-    """Every cycle id the record corpus holds, and the roots that were **not listed**.
-
-    The scan `following_cycle` reads for the window's far bound: the earliest id above this
-    cycle's. Resolved from a second reading of the roots, the same head would read one way in
-    the queue and another at the poster, which is the divergence this family has already paid
-    for once (issue #2218).
-
-    A root that cannot be listed is *named* rather than passed over: an answer drawn from
-    the readable half is still an answer, but a reader has to know which half it came from.
-    """
-    found: dict[str, Path] = {}
-    unreadable: list[str] = []
-    for log in tuple(Path(entry) for entry in (cycles_logs or ())):
-        try:
-            names = [entry.name for entry in log.iterdir()]
-        except OSError as exc:
-            unreadable.append(f"{log} ({exc.strerror or exc})")
-            continue
-        for name in names:
-            match = _CYCLE_RECORD.fullmatch(name)
-            if match:
-                found.setdefault("cyc" + match.group(1), log)
-    return found, unreadable
-
-
-def following_cycle(cycle: str, cycles_logs) -> tuple[str, str, str]:
-    """`(the cycle that follows `cycle`, where it was found, why the corpus fell short)`.
-
-    The **earliest** cycle record whose id sorts after this cycle's; ids are fixed width,
-    so string order is time order. This is the window's far bound, and the clause needs it
-    because a cycle's run ends where the next cycle begins: a head pushed at or after that
-    instant was pushed by that later cycle, so it is not this one's own work however the
-    clock reads (issue #2334).
-
-    `("", reason, ...)` when there is none — the *ordinary* state here rather than an
-    accident: the newest cycle is the one posting a vote and nothing follows it yet, so its
-    span stays open at the far end. The third element is the roots that were **not listed**,
-    and its direction is the safe one: a corpus nobody could
-    read has not said there is no later cycle either, so the bound stays open, which leaves
-    the window **wide** — a delay, never a vote credited.
-    """
-    found, unreadable = _cycle_record_ids(cycles_logs)
-    named = ", ".join(str(log) for log in (cycles_logs or ()))
-    shortfall = "; ".join(unreadable)
-    later = sorted(entry for entry in found if entry > cycle)
-    if later:
-        where = str(found[later[0]])
-        if unreadable:
-            where += f" ({shortfall} could not be read)"
-    elif unreadable and not found:
-        # Nothing at all could be listed, so "no cycle record after X" is a claim the
-        # corpus never supported: the reason is the read failure. The two are different
-        # facts and only one of them is a gap in the record corpus.
-        where = f"{shortfall} could not be read"
-    else:
-        where = (
-            f"no cycle record after {cycle} in {named}"
-            if named
-            else "no cycle-record directory was named"
-        )
-        if unreadable:
-            where += f" ({shortfall} could not be read)"
-    return (later[0], where, shortfall) if later else ("", where, shortfall)
-
-
 @dataclass
 class Window:
     """The span of cycles whose heads this cycle must neither vote on nor merge.
 
-    `start` is this cycle's own run start — a cycle id **is** its start instant — and
-    `end` is the instant the **next** cycle began, or `None` while this cycle is the
-    newest. The span is `[start, end)`: a head pushed before `start` belongs to somebody
-    else, so the vote counts, and one pushed from `end` onward belongs to the cycle that
-    followed (issue #2334).
+    `start` is this cycle's own run start — a cycle id **is** its start instant — and the
+    span is `[start, ∞)`: a head pushed before `start` belongs to somebody else, so the
+    vote counts, and everything since is this cycle's own work.
 
     No `start` means the clause could not be applied at all — the caller's cycle id names
     no instant — and `unresolved` names that, so a window that was not applied says so
@@ -423,12 +277,6 @@ class Window:
     start: datetime | None = None
     source: str = ""
     unresolved: str = ""
-    #: The far bound of the span: the instant the **next** cycle started, or `None` while
-    #: this cycle is the newest — its run has not ended, which is the state every cycle is
-    #: in when it posts a vote. A head pushed at or after this instant was pushed by that
-    #: later cycle, so it is not this cycle's own work however the clock reads (issue
-    #: #2334).
-    end: datetime | None = None
 
     @property
     def applied(self) -> bool:
@@ -437,19 +285,17 @@ class Window:
     def covers(self, pushed: datetime) -> bool:
         """Is this push inside the run of the cycle whose head-window this is?
 
-        The clause is about a head **this** cycle pushed, and a cycle's run ends where the
-        next cycle begins: the span is `[start, end)`, with `end` open while this cycle is
-        the newest — nothing after it exists to take the run over, so every push since its
-        start is its own. A push *before* `start` was pushed by somebody else, and that is
+        The clause is about a head **this** cycle pushed, so the span is `[start, ∞)`:
+        every push since this cycle's start is its own. A push *before* `start` was pushed
+        by somebody else, and that is
         the reading the host ruled for on 2026-10-16T22:18:15: "I think the requirement
         'nor one pushed by the cycle immediately before it' should not exist. That the
         cycle that pushed it cannot vote is already enough" (translated from the Chinese
         original). So the window is this cycle's own run, not the previous cycle's too.
 
-        The far bound is needed because without one the span reaches *forward* without
-        limit, and a head pushed by a later cycle was reported as this one's own work
-        (issue #2334: `cyc20261016-181619` was voided on a head `cyc20261016-183420`
-        pushed).
+        The span is open above: the cycle records that once closed it are gone, so a head
+        a later cycle pushes while this one runs reads as this one's own work and this
+        cycle abstains on it — a delay, never a vote credited (issue #2334).
 
         One predicate, asked by all three carriers — the queue that prints the verdict,
         the counter that voids a posted vote, the poster that refuses to spend one — so
@@ -457,28 +303,18 @@ class Window:
         """
         if self.start is None:
             return False
-        return pushed >= self.start and (self.end is None or pushed < self.end)
+        return pushed >= self.start
 
     def window_start_text(self) -> str:
         """The window's start as one readable instant (empty when unapplied)."""
         return self.start.isoformat(timespec="seconds") if self.start else ""
 
-    def window_end_text(self) -> str:
-        """The window's far bound as one readable instant (empty when it has none).
 
-        Empty in two states a reader must not confuse: a cycle whose span is still open
-        because nothing followed it — the state every posting cycle is in — and a window
-        that could not be applied at all. Both leave the span open above, which is the
-        safe reading, so neither invents an instant.
-        """
-        return self.end.isoformat(timespec="seconds") if self.end else ""
+def abstain_window(cycle: str) -> Window:
+    """The window one cycle's own run defines: `[its start, now)`.
 
-
-def abstain_window(cycle: str, following: str = "") -> Window:
-    """The window one cycle's own run defines: `[its start, the next cycle's start)`.
-
-    A cycle id **is** its start instant, so the near bound needs no corpus: the clause is
-    about a head *this* cycle pushed, and everything before its own start was pushed by
+    A cycle id **is** its start instant, so the window needs no corpus at all: the clause
+    is about a head *this* cycle pushed, and everything before its own start was pushed by
     somebody else. The host ruled the older, wider reading away on 2026-10-16T22:18:15
     ("I think the requirement 'nor one pushed by the cycle immediately before it' should
     not exist. That the cycle that pushed it cannot vote is already enough" — translated
@@ -486,53 +322,41 @@ def abstain_window(cycle: str, following: str = "") -> Window:
     start onward, which is "any head pushed while this cycle ran", not "the head this cycle
     pushed".
 
-    `following` is the cycle *after* this one, and it closes the span at the far end: a
-    head pushed from the next cycle's start onward was pushed by that cycle, not by this
-    one, so the clause has nothing to say about it (issue #2334). It is `""` for the
-    newest cycle — the state every posting cycle is in — and the span is then open above,
-    which is right: nothing has taken the run over yet.
+    The span is open above. It once ended where the next cycle's record began, and the
+    cycle records are gone: a head a later cycle pushes while this one runs is read as this
+    one's own work, so this cycle abstains on it and that vote waits for a later cycle
+    (issue #2334). A delay, never a vote credited.
 
     A cycle id that names no instant is the one input this reading must not invent, so
     the window is left **unresolved** — no `start` at all, the state both tools already
     treat as "this vote cannot be counted" and "this vote must not be posted".
     """
     own = cycle_start(cycle)
-    end = cycle_start(following)
     if own is None:
         return Window(
             start=None,
             source="",
             unresolved=f"{cycle!r} is not a cycle id",
-            end=end,
         )
     return Window(
         start=own,
-        end=end,
         source=f"this cycle's own run (started {own.isoformat(timespec='seconds')})",
     )
 
 
-def own_window(cycle: str, cycles_log: str | None = None) -> Window:
+def own_window(cycle: str) -> Window:
     """The own-window — the single producer for a rule three tools act on.
 
-    The near bound is this cycle's own start (`abstain_window`); the far one is the cycle
-    that follows it, resolved from the record corpus because a later cycle's existence is
-    a fact only the records hold. The two compose **here and nowhere else**, because a
-    window is a rule and not an implementation detail: `review-queue.py` prints the
-    verdict from it, `cast-vote.py` refuses to *post* on it, and `check-vote-count.py`
-    voids a posted vote on it. Resolved from different corpora in different carriers, the
-    same head reads `vote` in the queue and is refused at the poster — a vote lost to an
-    arithmetic difference between two carriers rather than to the clause (issue #2218).
+    The window is this cycle's own start (`abstain_window`), and it composes **here and
+    nowhere else**, because a window is a rule and not an implementation detail:
+    `review-queue.py` prints the verdict from it, `cast-vote.py` refuses to *post* on it,
+    and `check-vote-count.py` voids a posted vote on it. Resolved in different carriers,
+    the same head read `vote` in the queue and was refused at the poster — a vote lost to
+    an arithmetic difference between two carriers rather than to the clause (issue #2218).
 
-    :param cycles_log: the cycle-record corpus, `os.pathsep`-joined for several, or
-        `None` for the default roots.
     :returns: the window to use.
     """
-    roots = resolve_cycle_logs(cycles_log)
-    # The far bound is read for every caller: it is a fact of the corpus, and a window
-    # whose far end nobody looked for would report a later cycle's head as this one's own.
-    following, _where, _shortfall = following_cycle(cycle, roots)
-    return abstain_window(cycle, following=following)
+    return abstain_window(cycle)
 
 
 def _sibling(name: str, module_name: str):
@@ -972,8 +796,7 @@ def _note(*parts: str) -> str:
 
 def read_pr(pr: int, repo: str = REPO, cycle: str | None = None,
             needed: int = 3, mergeability_wait: float = 0.0,
-            window: Window | None = None,
-            cycles_log: str | None = None) -> Reading:
+            window: Window | None = None) -> Reading:
     """Assemble one PR's row from the counter and the freshness tool.
 
     Each half degrades on its own — an unreadable ancestry does not discard a
@@ -984,16 +807,13 @@ def read_pr(pr: int, repo: str = REPO, cycle: str | None = None,
     The vote half is first because everything else is a decision about its number,
     and because a failure there means no row is worth printing. `mergeability_wait`
     is passed through to the counter, which is the tool that owns the refusal: this
-    one neither softens it nor invents a verdict if the budget runs out. `cycles_log`
-    goes through for the same reason the flag exists: the counter reads the abstention
-    window's far bound out of it, so a corpus named here and not there would have this
-    row's window read from one collection of cycles and its *count* judged against another.
+    one neither softens it nor invents a verdict if the budget runs out.
     """
     out = Reading(pr=pr, head="", needed=needed)
 
     try:
         verdict = vote_counter().check_pr(
-            pr, needed, mergeability_wait=mergeability_wait, cycles_log=cycles_log
+            pr, needed, mergeability_wait=mergeability_wait
         )
     except Exception as exc:  # noqa: BLE001 - the point is to report, not to crash
         out.unread = _note(f"vote count unreadable: {type(exc).__name__}: {exc}")
@@ -1657,10 +1477,8 @@ def main(argv: list[str] | None = None) -> int:
         prog="review-queue.py",
         description="For every open PR: its counted votes, and the next action for a cycle.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        # No prefix matching, so `--cycle` (which is `cast-vote.py`'s flag, not this
-        # tool's) cannot be bound to `--cycles-log` and read a cycle id as a
-        # directory path - the misparse that made an unreadable corpus narrow the
-        # abstention window into a *counted* vote (measured 2026-10-15, issue #2274).
+        # No prefix matching: a flag is never abbreviated here, so an unknown spelling
+        # is refused by name rather than bound to a longer one it resembles.
         allow_abbrev=False,
     )
     parser.add_argument(
@@ -1675,14 +1493,6 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="this cycle's id (cycYYYYMMDD-HHMMSS); given, the queue also answers "
              "whether this cycle may still vote at each head",
-    )
-    parser.add_argument(
-        "--cycles-log",
-        default=None,
-        help="directory of `cycle-<id>.md` records, read for the cycle that follows "
-             "this one - the window's far bound (default: $EMRG_CYCLES_LOG, else the "
-             f"{os.pathsep}-joined directories the memory system writes records to: "
-             f"{os.pathsep.join(str(d) for d in DEFAULT_CYCLES_LOGS)})",
     )
     parser.add_argument(
         "--min-votes",
@@ -1721,11 +1531,10 @@ def main(argv: list[str] | None = None) -> int:
 
     window: Window | None = None
     if args.cycle:
-        # The window composes in exactly one place: `own_window` owns both bounds - this
-        # cycle's own start and the start of the cycle that follows it - because the two
+        # The window composes in exactly one place: `own_window` owns it, because the two
         # sibling tools that act on the same window (`cast-vote.py` at the poster and
         # `check-vote-count.py` at the counter) read it from there too (issue #2218).
-        window = own_window(args.cycle, args.cycles_log)
+        window = own_window(args.cycle)
 
     try:
         queue = args.prs if args.prs else open_prs(args.repo)
@@ -1737,8 +1546,7 @@ def main(argv: list[str] | None = None) -> int:
 
     readings = rows(
         [
-            read_pr(pr, args.repo, args.cycle, needed, args.mergeability_wait, window,
-                    args.cycles_log)
+            read_pr(pr, args.repo, args.cycle, needed, args.mergeability_wait, window)
             for pr in queue
         ],
         args.cycle,

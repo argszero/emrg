@@ -115,8 +115,8 @@ The abstention clause, asked where the vote is spent
 ----------------------------------------------------
 The merge rules say what a vote *is*; until 2026-09-18 nothing said **who may cast
 one** (issue #1408). The clause is *a cycle does not vote on a head it pushed*, read
-against the cycle's own run — from its own start to the start of the cycle that
-follows it. The host struck the wider reading out on 2026-10-16T22:18:15, so a head
+against the cycle's own run — from its own start onward. The host struck the wider
+reading out on 2026-10-16T22:18:15, so a head
 the cycle *before* this one pushed belongs to whoever made it and is votable.
 `review-queue.py` owns that reading, and
 `uv run --no-sync python3 scripts/review-queue.py --cycle <id>` reports such a head as an
@@ -131,10 +131,10 @@ window, and the sibling reported `abstain` for it minutes later.
 
 So the clause is applied here too, from the same reading, and refuses to post. The
 window is this cycle's own run: it starts at this cycle's own id — a cycle id *is* its
-start instant, so the near bound needs no corpus — and ends where the cycle that follows
-begins, read from the newest cycle record in `--cycles-log` (default
-`$EMRG_CYCLES_LOG`, else the directory the evolution template names: the project memory
-root inside this checkout). A push below the start belongs to whoever made it before
+start instant, so the window needs no corpus at all — and it is open above, so a head a
+later cycle pushes while this one runs reads as this one's own and the vote waits for a
+later cycle (issue #2334: a delay, never a vote credited). A push below the start
+belongs to whoever made it before
 this cycle ran, so the vote counts; the host ruled the older, wider reading away on
 2026-10-16T22:18:15. A head whose push time fell back to the commit date is **refused
 rather than judged**: a lower bound cannot decide a window, so nothing is posted and
@@ -215,7 +215,6 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
-import os
 import re
 import subprocess
 import sys
@@ -518,7 +517,6 @@ def tree_claim_refusal(body: str, pr: int, repo: str) -> tuple[str | None, str]:
 def own_head_window(
     cycle: str,
     verdict: object,
-    cycles_log: str | None = None,
 ) -> tuple[str, str]:
     """The abstention clause, applied at the moment the vote would be spent.
 
@@ -536,8 +534,8 @@ def own_head_window(
     reported `abstain` for that same head minutes later, from the same window this
     refuses on.
 
-    **The window is this cycle's own run** — from its own start to the start of the
-    cycle that follows it — and only a push inside it is refused. The host ruled the
+    **The window is this cycle's own run** — from its own start onward, open above — and
+    only a push inside it is refused. The host ruled the
     wider reading away on 2026-10-16T22:18:15 ("I think the requirement 'nor one pushed
     by the cycle immediately before it' should not exist. That the cycle that pushed it
     cannot vote is already enough" — translated from the Chinese original): a head the
@@ -574,7 +572,7 @@ def own_head_window(
     # One producer for the window, shared with the queue that prints the verdict and the
     # counter that voids a posted vote (`review-queue.own_window`), so the same head
     # cannot read `vote` in one and be refused by another (issue #2218).
-    window = queue.own_window(cycle, cycles_log)
+    window = queue.own_window(cycle)
 
     if not window.applied:
         return (
@@ -605,18 +603,16 @@ def own_head_window(
             f"({push_time!r}) is not an instant. Nothing was posted"
         ), ""
 
-    # The clause's span has **two** ends, and both of them can put a push outside it: a
-    # push below `start` belongs to whoever made it before this cycle began, and one at
-    # or after `end` belongs to the cycle that followed (issue #2334). Only a push inside
-    # the run is this cycle's own work, so this is the comparison that decides — and it is
-    # the same predicate the queue prints and the counter voids on.
+    # The clause's span has one bound that can put a push outside it: a push below `start`
+    # belongs to whoever made it before this cycle began. Only a push inside the run is
+    # this cycle's own work, so this is the comparison that decides — and it is the same
+    # predicate the queue prints and the counter voids on.
     if not window.covers(pushed):
         return "", ""
 
-    far = f", until {window.window_end_text()}" if window.end is not None else ""
     return (
         f"the head {head[:8]} was pushed {push_time}, inside the run this cycle treats "
-        f"as its own, which starts {window.window_start_text()}{far} "
+        f"as its own, which starts {window.window_start_text()} "
         f"({window.source}) - a cycle does not vote on a head it pushed. "
         "Nothing was posted. The next vote here has to come from a later cycle "
         "(the same head is an `abstain` row in "
@@ -869,10 +865,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="cast-vote.py",
         description="Post a review vote and confirm the vote counter counted it.",
-        # No prefix matching: this parser holds both `--cycle` (the id the vote is cast
-        # under) and `--cycles-log` (the corpus), so a prefix is one typo away from
-        # binding the wrong one, and the counter's own parser was measured reading
-        # `--cycle` as `--cycles-log` (2026-10-15, issue #2274).
+        # No prefix matching: a flag is never abbreviated here, so an unknown spelling is
+        # refused by name rather than bound to a longer one it resembles.
         allow_abbrev=False,
     )
     parser.add_argument("pr", type=int, help="pull request number")
@@ -885,14 +879,6 @@ def main(argv: list[str] | None = None) -> int:
         "--cycle",
         default=None,
         help="the cycle id the vote is cast under; must be the one in the body",
-    )
-    parser.add_argument(
-        "--cycles-log",
-        default=None,
-        help="directory (or several, joined by `os.pathsep`) holding the "
-        "`cycle-<date>-<time>.md` records, read for the cycle that follows this one "
-        "- the window's far bound (default: $EMRG_CYCLES_LOG, else the project "
-        "memory root inside this checkout)",
     )
     parser.add_argument("--repo", default=REPO, help="owner/name the PR lives in")
     parser.add_argument(
@@ -984,7 +970,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"note: {note}", file=sys.stderr)
 
     refusal, window_note = own_head_window(
-        cycle, verdict, cycles_log=args.cycles_log
+        cycle, verdict
     )
     if window_note:
         # Ahead of the refusal, because the note describes the *reading* rather than the

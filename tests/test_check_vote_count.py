@@ -108,30 +108,17 @@ def _identity_reads_no_remote(mod, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _pinned_cycle_records(mod, tmp_path, monkeypatch):
-    """Point the abstention window at an empty directory, for every test in this file.
+def _fixtures_timeline_premise(mod):
+    """The premise every voting cycle in this file is written against.
 
-    The window is read from cycle records *on disk*, and the default is the host's own
-    corpus (`<repo>/.emrg/memory` and the one beside it). Left alone, whether a vote
-    counts would depend on which cycles this machine happens to have recorded and on
-    the reading host's time zone — a verdict that is green here and red anywhere else,
-    which is the defect class this whole family of guards exists to catch. An empty
-    directory narrows the window to the *voting cycle's own start*: a fact of the
-    fixture, not of the host. A test that needs a *later* cycle's record — the window's
-    far bound — writes it into a directory it names (`--cycles-log`). The environment
-    override is cleared for the same reason — it would otherwise reach the reading too.
+    The fixture timeline's own premise: every voting cycle in this file starts *after*
+    the head push, which is what the clause asks of a vote that counts. A cycle id is
+    local time and `T0` is UTC, so that premise is a claim about the **runner's**
+    offset rather than about the data, and a host far enough from UTC makes the same
+    two literals describe the opposite order - every vote below would then be void for
+    a reason that is about the machine. Checked here so such a host fails with this
+    sentence instead of re-reading every count in the file.
     """
-    monkeypatch.delenv("EMRG_CYCLES_LOG", raising=False)
-    empty = tmp_path / "no-cycle-records"
-    empty.mkdir()
-    monkeypatch.setattr(mod.review_queue(), "DEFAULT_CYCLES_LOGS", (empty,))
-    # The fixture timeline's own premise: every voting cycle in this file starts *after*
-    # the head push, which is what the clause asks of a vote that counts. A cycle id is
-    # local time and `T0` is UTC, so that premise is a claim about the **runner's**
-    # offset rather than about the data, and a host far enough from UTC makes the same
-    # two literals describe the opposite order - every vote below would then be void for
-    # a reason that is about the machine. Checked here so such a host fails with this
-    # sentence instead of re-reading every count in the file.
     start = mod.review_queue().cycle_start("cyc20260911-090000")
     pushed = mod.review_queue().instant(T0)
     assert start is not None and pushed is not None and start > pushed, (
@@ -139,7 +126,6 @@ def _pinned_cycle_records(mod, tmp_path, monkeypatch):
         f"host ({LOCAL}) cyc20260911-090000 starts at {start.isoformat() if start else None}, "
         f"which is not after the push {T0}"
     )
-    return empty
 
 
 class FakeGh:
@@ -2134,45 +2120,6 @@ def test_a_vote_cast_inside_the_voting_cycles_own_window_does_not_count(
     assert "cast inside the run this vote's cycle treats as its own" not in out, out
 
 
-def test_a_vote_on_a_head_pushed_by_a_later_cycle_counts(mod, monkeypatch, capsys, tmp_path):
-    """Issue #2334: the span's far bound, and the release PR it unblocked.
-
-    Measured 2026-10-16 on #2326: the head `54d9f18a` was pushed by `cyc20261016-183420`
-    (18:34:20), while the ✅ under it was cast by `cyc20261016-181619` — a cycle that began
-    at 18:16:19 and pushed nothing. With a start and no end the span ran forward to the
-    reading instant, the push fell inside it, and a vote by a cycle that had done no such
-    work was voided: the release PR waited a cycle at 2/3.
-
-    The window ends where the *next* cycle begins, so that push belongs to the cycle that
-    made it. The two arms differ in the corpus alone — the push instant is the same one —
-    so an instrument that voided everything, or nothing, fails one of them.
-    """
-    pushed = _push(2026, 9, 11, 9, 0)  # 09:00, pushed by the cycle that followed this one
-    vote_at = _push(2026, 9, 11, 10, 0)
-
-    records = tmp_path / "records"
-    records.mkdir()
-    (records / "cycle-20260911-083000.md").write_text("x", encoding="utf-8")
-    later = FakeGh([_approve("cyc20260911-080000", vote_at)], push_time=pushed)
-    rc = _run(mod, monkeypatch, later,
-              ["1", "--min-votes", "1", "--cycles-log", str(records)])
-    out = capsys.readouterr().out
-    assert rc == 0, out
-    assert "READY 1/1" in out, out
-    assert "cast inside the run this vote's cycle treats as its own" not in out, out
-
-    # the control: the same vote, the same push, and a corpus that holds no later cycle —
-    # so the span has no far bound to stop it, which is the reading #2334 corrects
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    no_later = FakeGh([_approve("cyc20260911-080000", vote_at)], push_time=pushed)
-    rc = _run(mod, monkeypatch, no_later,
-              ["1", "--min-votes", "1", "--cycles-log", str(empty)])
-    out = capsys.readouterr().out
-    assert rc == 1, out
-    assert "VOID cyc20260911-080000 - cast inside the run this vote's cycle treats as its own" in out, out
-
-
 def test_a_vote_on_a_head_another_instance_pushed_inside_the_window_counts(
     mod, monkeypatch, capsys
 ):
@@ -2308,100 +2255,7 @@ def test_the_login_set_is_the_token_and_the_remotes(mod, monkeypatch):
     assert mod.own_login("pm25coder") is True
 
 
-def test_the_corpus_flag_is_not_reachable_by_the_siblings_spelling(mod, monkeypatch, capsys):
-    """Issue #2274: `--cycle <id>` must not be read as `--cycles-log <id>`.
-
-    `--cycle` is `cast-vote.py`'s flag — the id a vote is cast under — and this tool's
-    corpus flag is `--cycles-log`. With argparse's default prefix matching the two
-    spellings were one argument, so a cycle id became a directory path. Measured
-    2026-10-15 (`cyc20261015-014345`) on #2271, same head, exit 0 either way: `--cycle
-    cyc20261015-014345` printed `2/3` with the vote by `cyc20261015-005138` marked
-    `OK - counts`, where the readable corpus prints `1/3` and `VOID - cast inside the
-    window this vote's cycle treats as its own`. The unreadable corpus narrowed the
-    window, and the narrow reading is the *permissive* one.
-
-    Both directions are pinned: the trap is refused by name, and a longer option is
-    not reachable by a prefix at all. The second half below would run a real `gh` were
-    the prefix accepted again, so the seam is stubbed and the failure reads as what it
-    is rather than as a request this file's docstring promises not to make.
-    """
-    def _ran_a_command(*args, **kwargs):
-        raise AssertionError("the abbreviation was bound and a command ran")
-
-    monkeypatch.setattr(mod, "_gh_json", _ran_a_command)
-    monkeypatch.setattr(mod, "_gh_json_paginated", _ran_a_command)
-
-    assert mod.main(["2271", "--cycle", "cyc20261015-014345"]) == 2
-    err = capsys.readouterr().err
-    assert "--cycles-log" in err, f"the refusal must name this tool's flag: {err!r}"
-    assert "--cycle" in err, err
-
-    # The property rather than the one spelling: `--cycles` is a prefix of
-    # `--cycles-log` and, with matching on, was bound to it in silence.
-    caught: SystemExit | None = None
-    try:
-        mod.main(["2271", "--cycles", "somewhere"])
-    except SystemExit as exc:
-        caught = exc
-    if caught is None:
-        pytest.fail("the prefix was accepted: `--cycles` was bound to `--cycles-log`")
-    assert caught.code == 2
-
-
-def _load_sibling(name: str):
-    """Load a sibling script by path, the way this family's tests do."""
-    spec = importlib.util.spec_from_file_location(
-        f"abbrev_{name.replace('-', '_')}", REPO_ROOT / "scripts" / f"{name}.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-@pytest.mark.parametrize(
-    "name, argv",
-    [
-        # The arguments each sibling needs to get *past* its own parser, so that a
-        # bound prefix shows up as a command run rather than as a different refusal.
-        ("cast-vote", ["1", "--body-file", "-", "--cycles", "somewhere"]),
-        ("review-queue", ["--cycles", "somewhere"]),
-    ],
-)
-def test_no_family_parser_binds_a_long_option_by_prefix(name, argv, monkeypatch):
-    """The same flag family carries `--cycles-log`, so the same trap lives there.
-
-    Issue #2274's acceptance names all three carriers. `--cycles` is an unambiguous
-    prefix of `--cycles-log` on every one of them, so with argparse's default it was
-    silently accepted — the state that let a cycle id be read as a corpus directory.
-    `subprocess.run` is stubbed so that a regression is reported as a command that
-    ran, and never as a request this file's docstring promises not to make.
-    """
-    module = _load_sibling(name)
-
-    def _ran_a_command(*args, **kwargs):
-        raise AssertionError(f"{name}: the abbreviation was bound and a command ran")
-
-    monkeypatch.setattr(module.subprocess, "run", _ran_a_command)
-    caught: SystemExit | None = None
-    try:
-        module.main(argv)
-    except SystemExit as exc:
-        caught = exc
-    if caught is None:
-        pytest.fail("the prefix was accepted: `--cycles` was bound to `--cycles-log`")
-    assert caught.code == 2
-
-
-
-
-
-
-
-
-
-
-def test_the_void_reason_does_not_claim_another_tools_refusal(mod, tmp_path):
+def test_the_void_reason_does_not_claim_another_tools_refusal(mod):
     """One rule, two carriers, each saying it about its own subject.
 
     The counter's subject is a review that **was** posted — that is the only thing it
@@ -2416,17 +2270,10 @@ def test_the_void_reason_does_not_claim_another_tools_refusal(mod, tmp_path):
     the counter states the rule and its own verdict, and the poster still refuses the same
     `(cycle, head)` pair.
     """
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    # The record of the cycle that *follows* the voting one, so the span has a far end
-    # and the push below falls inside it: the clause's own text is what this arm is about,
-    # and a push outside the window would leave it unvoiced.
-    (corpus / "cycle-20260911-110000.md").write_text("x", encoding="utf-8")
-    log = str(corpus)
     inside = _push(2026, 9, 11, 10, 30)  # inside the voting cycle's own run
 
     counted, why = mod.own_head_window(
-        "cyc20260911-100000", push_time=inside, push_time_exact=True, cycles_log=log
+        "cyc20260911-100000", push_time=inside, push_time_exact=True
     )
     assert counted is True, why
     assert "cast inside the run this vote's cycle treats as its own" in why, why  # the clause is still named
@@ -2436,7 +2283,7 @@ def test_the_void_reason_does_not_claim_another_tools_refusal(mod, tmp_path):
     # The other carrier is unchanged: moving the sentence must not move the refusal.
     cast_vote = _cast_vote()
     refused, note = cast_vote.own_head_window(
-        "cyc20260911-100000", _Head(inside), cycles_log=log
+        "cyc20260911-100000", _Head(inside)
     )
     assert refused, note
 
@@ -2604,23 +2451,15 @@ def test_the_pusher_is_the_actor_of_the_run_whose_time_was_read(mod, monkeypatch
     assert mod._earliest_run(HEAD) == ("2026-09-11T01:00:00Z", SELF_LOGIN)
 
 
-def test_the_counter_voids_exactly_the_votes_cast_vote_refuses_to_post(mod, monkeypatch, tmp_path):
+def test_the_counter_voids_exactly_the_votes_cast_vote_refuses_to_post(mod, monkeypatch):
     """The two halves of one clause, asserted against each other rather than assumed.
 
     Sharing the machinery is not the claim; sharing the *verdict* is. If a later change
     reaches one tool and not the other, the hole re-opens on whichever side was left
     behind - a vote nobody may post, or a vote counted that its own poster refused. So
-    the same (cycle, head) pairs are put to both, and **both** ends of the window are
-    covered: at this cycle's own start, inside its run, at the following cycle's start,
-    one second before it began, and two cycles back.
+    the same (cycle, head) pairs are put to both: at this cycle's own start, inside its
+    run, one second before it began, and two cycles back.
     """
-    corpus = tmp_path / "cycles"
-    corpus.mkdir()
-    # The record of the cycle that follows the voting one: it is what closes the span at
-    # the far end, so the "at or after the far end" arm below is a reading rather than an
-    # open window's accident.
-    (corpus / "cycle-20260911-110000.md").write_text("# a cycle record\n", encoding="utf-8")
-    log = str(corpus)
     counter, cast_vote = mod, _cast_vote()
     # The identity half is asked through `gh api user`, and neither end is driven through
     # a fake here - both are called directly - so it is pinned instead of stubbed. Two
@@ -2635,20 +2474,19 @@ def test_the_counter_voids_exactly_the_votes_cast_vote_refuses_to_post(mod, monk
         # (push instant, inside the window of `cyc20260911-100000`?)
         (_push(2026, 9, 11, 10, 0), True),    # exactly this cycle's own start
         (_push(2026, 9, 11, 10, 30), True),   # inside this cycle's own run
-        (_push(2026, 9, 11, 11, 0), False),   # at the following cycle's start — its work
+        (_push(2026, 9, 11, 11, 0), True),    # still this cycle's: the span is open above
         (_push(2026, 9, 11, 9, 59), False),   # one second before this cycle began
         (_push(2026, 9, 11, 7, 30), False),   # two cycles back, another actor's work
     )
     for pushed, inside in cases:
         refused, _ = cast_vote.own_head_window(
-            "cyc20260911-100000", _Head(pushed), cycles_log=log
+            "cyc20260911-100000", _Head(pushed)
         )
         counted, why = counter.own_head_window(
             "cyc20260911-100000",
             push_time=pushed,
             push_time_exact=True,
-            cycles_log=log,
-        )
+                    )
         assert bool(refused) is inside, (pushed, refused)
         assert counted is inside, (pushed, why)
 
@@ -2661,15 +2499,14 @@ def test_the_counter_voids_exactly_the_votes_cast_vote_refuses_to_post(mod, monk
         if not inside:
             continue
         refused, _ = cast_vote.own_head_window(
-            "cyc20260911-100000", _Head(pushed, pusher=OTHER_LOGIN), cycles_log=log
+            "cyc20260911-100000", _Head(pushed, pusher=OTHER_LOGIN)
         )
         counted, why = counter.own_head_window(
             "cyc20260911-100000",
             push_time=pushed,
             push_time_exact=True,
             pusher=OTHER_LOGIN,
-            cycles_log=log,
-        )
+                    )
         assert not refused, (pushed, refused)
         assert not counted, (pushed, why)
 
@@ -2677,15 +2514,14 @@ def test_the_counter_voids_exactly_the_votes_cast_vote_refuses_to_post(mod, monk
     # an exemption nobody measured is the direction that credits a self-review.
     for pushed, inside in cases:
         refused, _ = cast_vote.own_head_window(
-            "cyc20260911-100000", _Head(pushed, pusher=""), cycles_log=log
+            "cyc20260911-100000", _Head(pushed, pusher="")
         )
         counted, why = counter.own_head_window(
             "cyc20260911-100000",
             push_time=pushed,
             push_time_exact=True,
             pusher="",
-            cycles_log=log,
-        )
+                    )
         assert bool(refused) is inside, (pushed, refused)
         assert counted is inside, (pushed, why)
 
@@ -2695,14 +2531,13 @@ def test_the_counter_voids_exactly_the_votes_cast_vote_refuses_to_post(mod, monk
     # missing run - the reading that refuses to merge either way (see
     # `test_a_head_with_no_ci_run_leaves_the_clause_unapplied`).
     inexact = _Head(_push(2026, 9, 11, 10, 30), exact=False)
-    refused, _ = cast_vote.own_head_window("cyc20260911-100000", inexact, cycles_log=log)
+    refused, _ = cast_vote.own_head_window("cyc20260911-100000", inexact)
     assert refused, "the poster refuses a window it cannot decide"
     counted, why = counter.own_head_window(
         "cyc20260911-100000",
         push_time=inexact.push_time,
         push_time_exact=False,
-        cycles_log=log,
-    )
+            )
     assert not counted and why == ""
 
 
