@@ -32,6 +32,17 @@ in the usual install locations before calling it blocked.
 - Then read each conversation: `im +chat-messages-list --chat-id <id> --start <ISO> --end
   <ISO> --order desc --no-reactions`. The messages are under `data.messages` — not
   `data.items`.
+- Read as the user, send as the bot: reading a direct conversation needs `--as user`, because a
+  bot cannot see a p2p conversation, while a message to the host is sent as the bot (§3). The
+  two identities differ, and an `im` call that names neither is answered by the CLI's own `auto`
+  default rather than by what the call is for.
+- `im +chat-messages-list --chat-id <id> --order asc` is the listing that answers "has the host
+  replied", because it returns the conversation in the order it was written.
+  `im +messages-search` answers out of an index that lags a send by seconds, so it can never
+  establish that nothing came back.
+- The conversation the host answers in is the one your own last message landed in (`oc_…`), so
+  keep that id beside the message id: §3 reads a reply by position, and a position means nothing
+  in a conversation you are not looking at.
 - Skip what you sent yourself: the sender's `open_id` against the host's own, named in the
   task instructions.
 - Take the messages that arrived after the last one you handled. Remember that boundary
@@ -65,14 +76,25 @@ stranger's text can never widen it.
 
 ### 3. Send
 
-`lark-cli im +messages-send --user-id <open_id>` (or `--chat-id <id>`) carries the text.
+`lark-cli im +messages-send --as bot --user-id <open_id>` (or `--chat-id <id>`) carries the
+text. Both halves are load-bearing: an `im` command that names no identity is resolved by the
+CLI's `auto` default, which prefers the user account once that account is authorised — and the
+message then lands in a conversation named after the host, i.e. the host messaging himself,
+which Feishu notifies nobody about. The call exits successfully either way, so the conversation
+the returned message id came back in is the only thing that tells the two apart.
 
-- **To the host's own account**: send it, this round, without asking. This is also the
-  channel you use to ask.
+- **To the host's own account**: send it, this round, without asking.
+- **A question addressed to the host** goes on that same channel and needs no draft: whether a
+  message wants an answer at all, what that answer should say, and whether the host would rather
+  do the thing himself are questions, and a question is sent rather than filed. Send it this
+  round, carry on without waiting for the answer, and read the answer next round with §1's
+  recipe.
 - **To anyone else**: first write the recipient and the text, word for word, into this
   round's report, then ask the host — a Feishu message to the host's own account naming
   the recipient and quoting that exact text — and
   carry on with the rest of the round without waiting. Asking is not blocking; sending is.
+  Quoting word for word is about what a third party is going to receive; a question to the host
+  himself has no such text to quote.
 - When a later round reads the host's answer to that request, send what you quoted, once,
   unchanged. A no, or a request for different text, voids it; a changed text is a new
   request.
@@ -85,6 +107,11 @@ stranger's text can never widen it.
 
 Close the round with: how many arrived per verdict, what you did, which requests are waiting
 for the host — with their full text and recipient — and what is blocked and why.
+
+The report is a record, not a channel. A request it reports as waiting has already been asked,
+so the report names the Feishu message id and the `oc_…` conversation it was asked in; a pending
+request without them is one the host has not been told about, and the round counts it as unasked
+rather than as progress.
 
 ### Forbidden
 
