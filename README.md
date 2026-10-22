@@ -47,7 +47,7 @@ EMRG is an experiment in *autonomous self-improvement*: an AI agent that helps y
 |---|---|
 | **Electron GUI (main entry)** | Install & go: first-run wizard, all slash commands, results panel, Ask/Auto modes, visible self-evolution. GUI configured = TUI ready |
 | **Full-featured TUI + daemon** | Streaming markdown, `/` autocomplete, sessions, shortcuts — on a persistent `emrgd` daemon you can reconnect to anytime |
-| **Scheduled tasks** | Built-in + custom task types with prompt templates (`~/.emrg/task-templates/`), CRUD + hot reload from the GUI settings, `/trigger` any task on demand |
+| **Scheduled tasks** | Built-in task types (`evolution`, `paper`, `open-source`, `promote`, `journal`, `competition`, `ios-app`, `feishu`) plus custom ones with prompt templates in `~/.emrg/task-templates/`, CRUD + hot reload from the GUI settings, `/trigger` any task on demand |
 | **100% open source** | MIT — no walled garden, no vendor lock-in. English default, Chinese version available |
 
 ---
@@ -64,8 +64,8 @@ Inputs:
   - Cross-project learning
           |
           v
-Evolution Cycle (every 30 min)
-(Prepare -> Review -> Discover -> Improve -> Commit -> Record)
+Evolution Cycle (every 10 min by default)
+(Preparation -> Look -> Think -> Act -> Record)
           |
           v
   1. pytest + import check
@@ -150,12 +150,14 @@ In the TUI: `Esc` interrupts streaming, `Ctrl+C` / `exit` quits (config is share
 | `/memory` | Browse project & session memories |
 | `/rename [title]` | Give your session a memorable name |
 | `/model [name]` | Switch LLM model — no args for interactive picker |
+| `/sandbox [mode]` | Set this session's sandbox tier — no args for a picker; `add`/`remove`/`list` manage extra writable roots |
 | `/rant <feedback> [@<project>]` | Complain, suggest, praise — evolution listens |
 | `/help` | Show keyboard shortcuts and command help |
 | `/image` | Insert clipboard image into the input field |
 | `/delete [id]` | Delete a session — no args for interactive picker |
 | `/rewind` | Rewind conversation to a history point |
 | `/trigger` | Trigger an evolution task — interactive picker (manage tasks in GUI Settings → Scheduled tasks) |
+| `/task-session` | Open a scheduled task's own session — interactive picker |
 | `/skills` | List loaded skills; `/skills available\|install\|update` |
 | `/version` | Show EMRG version and instance info |
 | `Esc` | Interrupt a running response mid-stream |
@@ -168,13 +170,13 @@ In the TUI: `Esc` interrupts streaming, `Ctrl+C` / `exit` quits (config is share
 |  | Claude Code | Codex | DeepSeek Harness | **EMRG** | **Grok Bot** |
 |---|---|---|---|---|---|
 | AI-powered coding | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Tool-calling (bash, read, write, edit, glob, grep) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Tool-calling (`bash`/`pwsh`, `read`, `write`, `edit`, `glob`, `grep`, `submit_rant`, `subagent`) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Session memory & context | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `/` command autocomplete | ✅ | ✅ | ✅ | ✅ | ~ *@ mention + command palette* |
 | ESC interrupt | ✅ | ✅ | — | ✅ | ✅ |
 | Plugin architecture | ❌ | ❌ | ✅ *everything is a plugin* | ❌ | ✅ |
 | Sandboxed execution | ❌ | ❌ | ✅ | ✅ *read-only / workspace-write / danger-full-access* | ~ *protectedBoxPaths + /workspace* |
-| Subagents | ❌ | ❌ | ✅ | ❌ | ✅ *assistants/automations* |
+| Subagents | ❌ | ❌ | ✅ | ✅ *delegated child sessions* | ✅ *assistants/automations* |
 | Web UI | ❌ | ❌ | ✅ *browser* | ✅ *Electron* | ✅ *Electron* |
 | **Recursive self-improvement (RSI)** | ❌ | ❌ | ❌ | ✅ *autonomous — code, prompts, toolchain* | ❌ |
 | **Personal agent** *your machine, your key, your data* | ~ *local CLI, hosted model, your account* | ~ *local CLI, hosted model* | ~ *local harness, hosted model* | ✅ *local agent, your key, its state on your disk* | ~ *local app, hosted service* |
