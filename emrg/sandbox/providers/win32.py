@@ -45,7 +45,7 @@ from dataclasses import dataclass
 
 from emrg.sandbox.contract import Runner, RunnerFailureRule
 from emrg.sandbox.policy import SandboxPolicy
-from emrg.sandbox.roots import canonical_path
+from emrg.sandbox.roots import canonical_path, named_grants
 from emrg.sandbox.win32.ffi import Win32Bindings, win32
 from emrg.sandbox.win32.grants import AclWriteGrant
 from emrg.sandbox.win32.sid import (
@@ -412,19 +412,24 @@ def runner_argv(policy: SandboxPolicy) -> list[str]:
 
 
 def _extra_root_spellings(policy: SandboxPolicy) -> tuple[str, ...]:
-    """The policy's host-named roots, canonical, de-duplicated, order preserved.
+    """The enforceable extra grants' paths — the manifest's and the session's.
+
+    Read from the shared derivation (:func:`~emrg.sandbox.roots.named_grants`)
+    rather than off ``policy.extra_grants``, because a grant the host never typed
+    is still one this run must be able to write under: that is what the default
+    manifest is for (issue #2492). Canonicalization and de-duplication happen in
+    that derivation, once, for every dialect.
+
+    A **registry** grant never reaches this function: no platform enforces that
+    kind yet, and the derivation raises
+    :class:`~emrg.sandbox.grants.GrantKindNotEnforced` rather than handing a key
+    spelling to a path consumer. On Windows that is the loop Stage 2 closes — the
+    key needs a DACL of its own, not an ``--extra-root`` flag.
 
     :param policy: the resolved per-call policy.
     :returns: the canonical spellings.
     """
-    out: list[str] = []
-    seen: set[str] = set()
-    for spelling in policy.extra_roots:
-        canonical = canonical_path(spelling)
-        if canonical not in seen:
-            seen.add(canonical)
-            out.append(canonical)
-    return tuple(out)
+    return tuple(grant.target for grant in named_grants(policy))
 
 
 def release_session(session_id: str) -> None:

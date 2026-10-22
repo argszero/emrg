@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import os
 
+from emrg.sandbox.grants import GrantKindNotEnforced
 from emrg.sandbox.policy import DANGER_FULL_ACCESS, SandboxPolicy
 from emrg.sandbox.roots import canonical_path, writable_roots
 from emrg.tools.file_policy import protected_paths
@@ -89,7 +90,15 @@ def file_refusal(file_path: str, policy: SandboxPolicy) -> str | None:
         # be allowed to make, never the reverse.  The list stays in
         # ``emrg/tools/file_policy.py`` because the legacy scanner reads it too.
         return f"{policy.mode} sandbox: blocked write to protected daemon file {file_path!r}"
-    roots = writable_roots(policy)
+    try:
+        roots = writable_roots(policy)
+    except GrantKindNotEnforced as refused:
+        # A grant this platform cannot enforce is refused rather than dropped
+        # (issue #2492, requirement 5). The fence answers in text because its
+        # callers render a refusal to the model; the profile builders let the
+        # same exception propagate instead, so a confined command fails closed
+        # rather than running with a boundary nobody applied.
+        return f"{policy.mode} sandbox: {refused.reason}"
     if any(_is_within_root(target, root) for root in roots):
         return None
     granted = (

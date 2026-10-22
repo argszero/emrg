@@ -26,7 +26,8 @@ import os
 
 from emrg.sandbox.contract import Runner, RunnerFailureRule
 from emrg.sandbox.policy import SandboxPolicy
-from emrg.sandbox.roots import writable_roots
+from emrg.sandbox.grants import GRANT_DIRECTORY, RootGrant
+from emrg.sandbox.roots import granted_grants
 
 #: ``sandbox-exec`` ships with every macOS at a fixed path; Apple marks the CLI
 #: deprecated but still ships and still enforces it (measured on macOS 26.6.2).
@@ -109,14 +110,14 @@ def seatbelt_profile_args(policy: SandboxPolicy) -> list[str]:
         "(deny file-write*)",
         f"(allow file-write* (literal {sbpl_string('/dev/null')}))",
     ]
-    roots = writable_roots(policy)
-    if roots:
-        grants = " ".join(_root_grant(root) for root in roots)
-        forms.append(f"(allow file-write* {grants})")
+    grants = granted_grants(policy)
+    if grants:
+        clauses = " ".join(_root_grant(grant) for grant in grants)
+        forms.append(f"(allow file-write* {clauses})")
     return ["-p", " ".join(forms)]
 
 
-def _root_grant(root: str) -> str:
+def _root_grant(grant: RootGrant) -> str:
     r"""One writable root as an SBPL clause — ``literal`` for a file, ``subpath`` for a directory.
 
     Both forms match their own path, so a directory and a file would both work
@@ -127,11 +128,16 @@ def _root_grant(root: str) -> str:
     that name ever became a directory.  ``literal`` is exactly the named path,
     which is what was asked for (rant 2026-10-09T09:43:39 §7).
 
-    :param root: one canonical writable root.
+    The form follows the grant's **recorded kind**, not the disk
+    (``os.path.isdir`` at profile-build time): asking the disk meant a name the
+    host granted as one file widened to the whole tree beneath it the day that
+    name became a directory (issue #2492).
+
+    :param grant: one canonical writable grant.
     :returns: the SBPL clause granting write access to it.
     """
-    form = "subpath" if os.path.isdir(root) else "literal"
-    return f"({form} {sbpl_string(root)})"
+    form = "subpath" if grant.kind == GRANT_DIRECTORY else "literal"
+    return f"({form} {sbpl_string(grant.target)})"
 
 
 def runner_argv(policy: SandboxPolicy) -> list[str]:

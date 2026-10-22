@@ -2283,11 +2283,28 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     elif notice:
                         chat.add("system", f"Sandbox roots: {notice}")
                     elif op == "list":
-                        listing = (
-                            ", ".join(current_roots) if current_roots
-                            else "none — this session writes only inside its workspace"
-                        )
-                        chat.add("system", f"Extra writable roots: {listing}")
+                        # The whole surface, typed, with where each grant came
+                        # from (issue #2492): the session's own grants and the
+                        # installation's defaults. A default shown without its
+                        # provenance would read as something the host named, and
+                        # one not shown at all could not be withdrawn — which is
+                        # the deployment constant host decision D5 deleted, back
+                        # under a new name.
+                        grants = [
+                            grant for grant in (data.get("grants") or [])
+                            if isinstance(grant, dict)
+                        ]
+                        if grants:
+                            listing = "\n  ".join(
+                                f"\n  {grant.get('target')!s}"
+                                f"  [{grant.get('kind')!s}, {grant.get('source')!s}]"
+                                for grant in grants
+                            )
+                        else:
+                            listing = (
+                                "none — this session writes only inside its workspace"
+                            )
+                        chat.add("system", f"Writable grants:{listing}")
                     elif op == "remove":
                         chat.add("system", "Sandbox root removed.")
                     else:

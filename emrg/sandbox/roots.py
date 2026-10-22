@@ -16,6 +16,17 @@ import os
 import tempfile
 from typing import TYPE_CHECKING, NamedTuple
 
+from emrg.sandbox.grants import (
+    GRANT_DIRECTORY,
+    GRANT_FILE,
+    GRANT_KINDS,
+    GRANT_REGISTRY,
+    GrantKindNotEnforced,
+    RootGrant,
+    default_grants,
+    enforcement_refusal,
+)
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from emrg.sandbox.policy import SandboxPolicy
 
@@ -45,77 +56,163 @@ def canonical_path(path: str) -> str:
         return path
 
 
-def writable_roots(policy: SandboxPolicy) -> list[str]:
-    """The roots one confined execution may WRITE under.
+def canonical_target(grant: RootGrant) -> str:
+    """A grant's target in the identity the enforcement layer compares.
 
-    The mode's meaning as a canonical, deduplicated allow-list — ``read-only``
-    (and ``danger-full-access``, which never asks) allow nothing;
-    ``workspace-write`` allows the policy's workspace root, the host ``/tmp``,
-    and the per-user platform temp dir (``tempfile.gettempdir()`` — the real
-    temp area for the ``mkstemp`` family; omitting it would deny what the mode
-    promises).
+    A path is canonicalized (:func:`canonical_path`) because that is what the
+    Seatbelt filters, the fence's containment test and the Windows ACL path all
+    compare.  A **registry key is not a path** and is returned exactly as
+    spelled: running ``realpath`` over ``HKCU\\Software\\LarkCli`` would rewrite a
+    key name into a filesystem path that means nothing, which is the identity bug
+    requirement 1 of issue #2492 exists to prevent.
 
-    The derivation is **total**: a temp source this host cannot report is
-    *absent* from the list, never fatal (issue #1561, ``_platform_temp_sources``).
-    The reading this deliberately does not take: treating a policy that cannot be
-    fully computed as one that cannot be enforced, and failing at the seam. That
-    reading belongs to ``contract.confine``, whose
-    :class:`~emrg.sandbox.contract.SandboxUnavailableError` means "no backend on
-    this platform can enforce the mode" — a missing temp *directory* is not that,
-    and reporting it there would tell the reader to install bubblewrap while
-    turning a host that can still confine to its workspace root into one where no
-    command runs at all.
+    :param grant: the grant to canonicalize.
+    :returns: the canonical path, or the key spelling for a registry grant.
+    """
+    if grant.kind == GRANT_REGISTRY:
+        return grant.target
+    return canonical_path(grant.target)
 
-    Two things this list deliberately does NOT contain:
 
-    * an extra deployer root.  The blueprint's allow-list is these three
-      sources and nothing else (``roots.ts:52-55``); EMRG's former
-      ``_trusted_write_zones()`` (``~/.emrg/evolution/.emrg/``) is deleted by
-      host decision D5, not carried over under another name, so the check that
-      it stays deleted belongs to the tests, not to a spare field here.  The
-      host-named roots this module now *does* carry are a different mechanism
-      and not that one revived: D5's root was a deployment constant nobody
-      chose and nothing could withdraw, while these are named per session by
-      the host, visible in ``/sandbox list`` and removable in one command.  The
-      name stays dead either way — the difference is in who can name a root,
-      which is why ``policy.extra_roots`` is a session's, not a config's.
-    * a fourth source on Windows, beyond the ``Temp\\<suffix>`` normalization
-      below — which is not a root of its own but the *parent* spelling of the
-      one ``gettempdir()`` already returned (issue #1093).
+def _dedupe(grants: "list[RootGrant] | tuple[RootGrant, ...]") -> list[RootGrant]:
+    """The grants, canonical, with no object granted twice, in the order given.
 
-    :param policy: the file-effect policy to derive the allow-list from.
-    :returns: the canonical writable roots; empty for every mode but
-        ``workspace-write`` (``read-only`` allows nothing by definition, and
-        ``danger-full-access`` never asks).
+    Deduplication is by ``(kind, canonical target)`` rather than by target alone:
+    one path can legitimately be named as a file and as a directory by two
+    callers, and collapsing those two into one would have to pick a kind — the
+    silent re-interpretation this model removes.  First occurrence wins, so a
+    caller that lists a session's own grants before the manifest's reports a hard
+    -typed root as ``session`` rather than as an installation default.
+
+    :param grants: the grants to canonicalize and de-duplicate.
+    :returns: the deduplicated list.
+    """
+    out: list[RootGrant] = []
+    seen: set[tuple[str, str]] = set()
+    for grant in grants:
+        canonical = canonical_target(grant)
+        key = (grant.kind, canonical)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(grant if canonical == grant.target else grant._replace(target=canonical))
+    return out
+
+
+def stored_grants(policy: SandboxPolicy) -> list[RootGrant]:
+    """Every grant this session names — typed, with provenance, mode-independently.
+
+    The **display** reader. It answers ``/sandbox list`` and nothing else, and it
+    deliberately does not consult the tier or the enforcement table:
+
+    * a grant named at ``read-only`` is stored and takes effect when the tier
+      rises (the behaviour ``judge_extra_root`` already documents), so a listing
+      that hid it would tell the host their command did nothing;
+    * a grant this platform cannot enforce is still *shown*, and only then
+      refused by whoever tries to enforce it. Hiding it would be the silent
+      ignore requirement 5 of issue #2492 forbids, one layer earlier.
+
+    The session's own grants come first, then the manifest's, so a root the host
+    typed that the manifest also supplies is reported as ``session`` — they named
+    it, and the provenance should say so.
+
+    :param policy: the policy to read, including its withheld targets.
+    :returns: the grants, canonical and deduplicated, with their sources.
+    """
+    withheld = set(policy.withheld_roots)
+    named = [
+        grant
+        for grant in (*policy.extra_grants, *default_grants())
+        if grant.target not in withheld and canonical_target(grant) not in withheld
+    ]
+    return _dedupe(named)
+
+
+def named_grants(policy: SandboxPolicy) -> list[RootGrant]:
+    """The grants a dialect may actually **act on**: :func:`stored_grants` with the enforcement check.
+
+    This is where a kind no dialect on this platform implements becomes loud.
+    Raising is the deliberate choice of three:
+
+    * silently dropping the grant would let the run report a boundary it does not
+      have (the failure requirement 5 names);
+    * passing a registry key to a path consumer would grant a *different* object
+      somewhere on the filesystem — a widening nobody asked for;
+    * so the derivation refuses, and each caller turns that into the loudest
+      answer it owns: the fence returns the sentence as its refusal, a profile
+      builder lets it propagate and the command fails closed.
+
+    :param policy: the policy to read.
+    :returns: the enforceable grants.
+    :raises GrantKindNotEnforced: when a stored grant's kind is not in
+        :func:`~emrg.sandbox.grants.enforced_kinds` for this platform.
+    """
+    grants = stored_grants(policy)
+    for grant in grants:
+        if enforcement_refusal(grant.kind, grant.target) is not None:
+            raise GrantKindNotEnforced(grant)
+    return grants
+
+
+def _mode_grants(policy: SandboxPolicy) -> list[RootGrant]:
+    """The grants the *mode* derives, before any host-named or default grant.
+
+    The workspace root and the two temp sources, each typed from the disk once
+    here (:meth:`~emrg.sandbox.grants.RootGrant.from_path`) rather than asked
+    again by every dialect.
+
+    :param policy: the policy to derive from.
+    :returns: the mode's grants, uncanonicalized and not yet deduplicated.
+    """
+    spellings = [policy.workspace_root, *_host_temp_spellings(), *_platform_temp_sources()]
+    return [RootGrant.from_path(spelling) for spelling in spellings]
+
+
+def granted_grants(policy: SandboxPolicy) -> list[RootGrant]:
+    """Every grant one confined execution may write under, typed.
+
+    The **one** derivation: the mode's own sources, then the session's and the
+    manifest's (:func:`named_grants`). The Seatbelt profile, the in-process
+    fence, the bubblewrap mounts and the Windows ACL path all read this, so "the
+    shell can write where ``write`` cannot" cannot arise between them.
+
+    The derivation is **total** over a temp source this host cannot report: it is
+    absent from the list, never fatal (issue #1561,
+    :func:`_platform_temp_sources`). It is *not* total over a grant whose kind
+    this platform cannot enforce — that raises (:func:`named_grants`).
+
+    ``read-only`` (and ``danger-full-access``, which never asks) grant nothing:
+    the early return below is what makes requirement 4 of issue #2492 true by
+    construction rather than by a check — a default manifest cannot widen a tier
+    that grants none, because this function never consults one for that tier.
+
+    :param policy: the file-effect policy to derive the grant list from.
+    :returns: the canonical, deduplicated grants; empty for every mode but
+        ``workspace-write``.
     """
     if policy.mode != "workspace-write":
         return []
-    spellings = [policy.workspace_root, *_host_temp_spellings()]
-    spellings.extend(_platform_temp_sources())
-    # The host-named roots join here rather than in a provider, and that
-    # placement is the requirement (rant 2026-10-09T09:43:39 §3): the Seatbelt
-    # profile, the bwrap mounts and the in-process fence all read this one list,
-    # so an extra root cannot end up writable for a spawned command and refused
-    # for `write` — the asymmetry this module exists to prevent.  A provider that
-    # carried its own extra allow-list would be a second home for the same fact.
-    #
-    # They are appended *after* the mode's own sources and are still subject to
-    # the same dedup below, so naming an already-granted root (the workspace, or
-    # a temp area) changes nothing — the caller is told that at the writer, where
-    # it can be reported, rather than silently repeated here.
-    #
-    # The `read-only` return above is what makes a stored extra root harmless at
-    # a tier that grants nothing: the list is a property of the *mode*, and the
-    # roots a session happens to carry never widen a mode that grants none.
-    spellings.extend(policy.extra_roots)
-    out: list[str] = []
-    seen: set[str] = set()
-    for spelling in spellings:
-        canonical = canonical_path(spelling)
-        if canonical not in seen:
-            seen.add(canonical)
-            out.append(canonical)
-    return out
+    return _dedupe([*_mode_grants(policy), *named_grants(policy)])
+
+
+def writable_roots(policy: SandboxPolicy) -> list[str]:
+    """The **paths** among :func:`granted_grants` — the projection path-readers use.
+
+    A derived view, not a second allow-list: it is built from
+    :func:`granted_grants` and can therefore never disagree with it. It exists
+    because several readers need nothing but paths — the fence's containment
+    test, the confined cache relocation, and the providers' own spellings — and
+    because a registry grant has no path to contribute, so a path-only reader
+    must not be handed one.
+
+    ``read-only`` still answers ``[]``, which is the property the host's rule
+    rests on: at a tier that grants nothing, nothing is writable however the
+    session or the manifest is configured.
+
+    :param policy: the file-effect policy to derive the allow-list from.
+    :returns: the canonical writable paths.
+    """
+    return [grant.target for grant in granted_grants(policy) if grant.kind != GRANT_REGISTRY]
 
 
 #: The shared POSIX temp root — one spelling, named once, read through
@@ -228,6 +325,12 @@ class ExtraRootVerdict(NamedTuple):
     #: Whether the caller should add ``canonical`` to the session's list. False
     #: only for a path already covered — a refusal never reaches this field.
     store: bool = True
+    #: The **typed** grant to store, when the verdict accepted one (issue #2492).
+    #: ``None`` for a refusal and for "already covered": in both cases the caller
+    #: stores nothing, and a grant here would be a second way to decide that.
+    #: The kind is decided at this boundary — from the disk for a path, from the
+    #: host's own word for a registry key — and never again by a dialect.
+    grant: "RootGrant | None" = None
 
 
 def _absolute_root_spelling(path: str) -> tuple[str, str | None]:
@@ -264,8 +367,10 @@ def _absolute_root_spelling(path: str) -> tuple[str, str | None]:
     return canonical_path(expanded), None
 
 
-def judge_extra_root(path: str, policy: SandboxPolicy) -> ExtraRootVerdict:
-    """Judge one host-named writable root — refuse it, or report it already covered.
+def judge_extra_root(
+    path: str, policy: SandboxPolicy, kind: str | None = None
+) -> ExtraRootVerdict:
+    """Judge one host-named writable grant — refuse it, or report it already covered.
 
     This is the **writer-side** half of the host's ``/sandbox add`` (rant
     2026-10-09T09:43:39 §5–§6): the daemon owns the command, and this function is
@@ -322,15 +427,41 @@ def judge_extra_root(path: str, policy: SandboxPolicy) -> ExtraRootVerdict:
     round before this, and the sentence promised what the code did not do.
 
     :param path: the path as the host typed it.
-    :param policy: the session's policy **including its stored extra roots**, so
-        that re-adding one is recognised as already covered.
-    :returns: the verdict — the canonical spelling, whether to store it, and any
-        refusal or notice.
+    :param policy: the session's policy **including its stored extra grants and
+        the manifest's defaults**, so that re-adding one is recognised as already
+        covered.
+    :param kind: the kind the host asked for, when they named one
+        (``/sandbox add --registry``); ``None`` means a path, whose kind is read
+        from the disk once here (:meth:`~emrg.sandbox.grants.RootGrant.from_path`)
+        rather than re-decided by every dialect at profile-build time.
+    :returns: the verdict — the canonical spelling, the typed grant to store, and
+        any refusal or notice.
     """
     # Imported here rather than at module scope: ``emrg.session`` imports this
     # module for ``canonical_path``, and that happens before the tool package is
     # on the import path. The list still has one home; this is a reference.
     from emrg.tools.file_policy import protected_paths
+
+    if kind is not None and kind not in (GRANT_DIRECTORY, GRANT_FILE, GRANT_REGISTRY):
+        return ExtraRootVerdict("", refusal=(
+            f"unknown grant kind {kind!r} — expected one of {', '.join(GRANT_KINDS)}"
+        ))
+    if kind == GRANT_REGISTRY:
+        # Terminal in this stage, and the sentence says why rather than pretending
+        # the key was judged: no platform enforces a registry grant yet
+        # (``grants.ENFORCED_KINDS``), so there is no key spelling to validate
+        # against. Stage 2 of issue #2492 replaces this branch with the key's own
+        # rules *and* the DACL that applies it — landing only one of the two would
+        # be a stored grant that no dialect acts on, which is the silent ignore
+        # requirement 5 forbids.
+        refusal = enforcement_refusal(GRANT_REGISTRY, path.strip())
+        if refusal is None:  # pragma: no cover - no platform reaches this in Stage 1
+            refusal = (
+                "a registry grant is enforced on this platform but its key spelling is not "
+                "validated yet — issue #2492 Stage 2 lands the validation and the enforcement "
+                "together"
+            )
+        return ExtraRootVerdict("", refusal=refusal)
 
     canonical, refusal = _absolute_root_spelling(path)
     if refusal:
@@ -364,17 +495,27 @@ def judge_extra_root(path: str, policy: SandboxPolicy) -> ExtraRootVerdict:
             f"{path!r} does not exist — a root names what is there, because a "
             "directory is granted as a tree and a file as itself"
         ))
-    for root in writable_roots(policy):
+    for grant in granted_grants(policy):
+        if grant.kind == GRANT_REGISTRY:  # no containment test exists for a key
+            continue
+        root = grant.target
         if canonical == root or canonical.startswith(root.rstrip(os.sep) + os.sep):
             return ExtraRootVerdict(canonical, store=False, notice=(
-                f"{root!r} already grants this path under the session's tier — "
-                "nothing to add"
+                f"{root!r} already grants this path under the session's tier "
+                f"({grant.source}) — nothing to add"
             ))
-    # The session's own list is consulted separately, because ``writable_roots``
-    # only carries it under ``workspace-write``: at ``read-only`` that derivation
-    # is empty by definition, so the loop above cannot see the root stored a
-    # moment ago and a second ``add`` of it would be stored twice.
-    stored = [canonical_path(extra) for extra in policy.extra_roots]
+    # The grants the session names itself are consulted separately, because
+    # ``granted_grants`` only carries them under ``workspace-write``: at
+    # ``read-only`` that derivation is empty by definition, so the loop above
+    # cannot see the grant stored a moment ago and a second ``add`` of it would
+    # be stored twice. The manifest's entries are *not* consulted here: those are
+    # withdrawn rather than removed, and naming one again at a tier that grants
+    # nothing should store it as the host's own (the add path drops it from the
+    # withheld list for exactly that reason).
+    stored = [
+        canonical_target(grant) for grant in policy.extra_grants
+        if grant.kind != GRANT_REGISTRY
+    ]
     if any(canonical == root or canonical.startswith(root.rstrip(os.sep) + os.sep)
            for root in stored):
         return ExtraRootVerdict(canonical, store=False, notice=(
@@ -386,13 +527,17 @@ def judge_extra_root(path: str, policy: SandboxPolicy) -> ExtraRootVerdict:
         # so — reading ``notice`` as "do not store" made this branch keep nothing
         # while telling the host it had, so the tier flip it advised left the
         # list empty (measured 2026-10-09 on head ``4eb69bab``). Storing here is
-        # harmless by construction: ``writable_roots`` returns ``[]`` for this
-        # mode, so a stored root can never widen a tier that grants none.
-        return ExtraRootVerdict(canonical, notice=(
-            "stored for this session, but the tier read-only grants no writable "
-            "root — it takes effect when the tier becomes workspace-write"
-        ))
-    return ExtraRootVerdict(canonical)
+        # harmless by construction: ``granted_grants`` returns ``[]`` for this
+        # mode, so a stored grant can never widen a tier that grants none.
+        return ExtraRootVerdict(
+            canonical,
+            notice=(
+                "stored for this session, but the tier read-only grants no writable "
+                "root — it takes effect when the tier becomes workspace-write"
+            ),
+            grant=RootGrant.from_path(canonical),
+        )
+    return ExtraRootVerdict(canonical, grant=RootGrant.from_path(canonical))
 
 
 def judge_root_removal(path: str, policy: SandboxPolicy) -> ExtraRootVerdict:

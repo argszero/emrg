@@ -869,6 +869,161 @@ def test_the_resume_snapshot_carries_the_roots(outside):
     assert meta["sandbox_roots"] == [canonical_path(str(elsewhere))]
 
 
+def test_list_carries_every_grant_with_its_provenance(outside, pin_default_manifest):
+    """Requirement 3 of issue #2492: the defaults are shown, and they say what they are.
+
+    Two keys, two questions, and a display needs both: ``roots`` is what the host
+    named (the list every existing client speaks), ``grants`` is the whole surface
+    typed, with ``source`` saying who named each one. A default that could not be
+    told from a host's own grant would be unwithdrawable in practice — nobody
+    removes something they did not know they had.
+    """
+    ws, elsewhere = outside
+    installation_default = ws.parent / "installation-state"
+    installation_default.mkdir()
+    pin_default_manifest(installation_default)
+    session = Session.create_with_id("s_provenance", ws)
+    session.set_sandbox("workspace-write")
+    session.set_sandbox_roots([str(elsewhere)])
+    server = _server()
+
+    frames = _drive(server, {
+        "type": "set_sandbox_roots",
+        "session_id": session.session_id,
+        "cwd": str(ws),
+        "op": "list",
+        "path": "",
+    })
+
+    reply = [f for f in frames if f.get("type") == "sandbox_roots"][-1]
+    by_target = {grant["target"]: grant for grant in reply["grants"]}
+
+    assert reply["roots"] == [canonical_path(str(elsewhere))], (
+        "`roots` is the host-named projection and must not grow the manifest's entries"
+    )
+    assert by_target[canonical_path(str(elsewhere))] == {
+        "kind": "directory",
+        "target": canonical_path(str(elsewhere)),
+        "source": "session",
+    }
+    assert by_target[canonical_path(str(installation_default))] == {
+        "kind": "directory",
+        "target": canonical_path(str(installation_default)),
+        "source": "default",
+    }
+
+
+def test_removing_a_default_withdraws_it_and_the_write_is_refused(outside, pin_default_manifest):
+    """Requirement 3's second half: one command withdraws a default.
+
+    A default applies without anyone typing anything, so "stop applying it" has
+    to be recorded state rather than an absence from a list nobody wrote — and
+    the acceptance is behavioural: after the withdrawal the same write is refused.
+    """
+    ws, elsewhere = outside
+    pin_default_manifest(elsewhere)
+    session = Session.create_with_id("s_withdraw", ws)
+    session.set_sandbox("workspace-write")
+    server = _server()
+    token = elsewhere / "token"
+
+    def current():
+        return resolve_policy(
+            mode="workspace-write",
+            workspace_root=str(ws),
+            session_id=session.session_id,
+            extra_grants=Session.load(session.session_id, ws).sandbox_grants,
+            withheld_roots=Session.load(session.session_id, ws).sandbox_withheld,
+        )
+
+    assert file_refusal(str(token), current()) is None, (
+        "the default did not apply — the withdrawal below would prove nothing"
+    )
+
+    frames = _drive(server, {
+        "type": "set_sandbox_roots",
+        "session_id": session.session_id,
+        "cwd": str(ws),
+        "op": "remove",
+        "path": str(elsewhere),
+    })
+
+    reply = [f for f in frames if f.get("type") == "sandbox_roots"][-1]
+    assert "error" not in reply, reply
+    assert "withdrawn" in (reply.get("notice") or "")
+    assert Session.load(session.session_id, ws).sandbox_withheld == [
+        canonical_path(str(elsewhere))
+    ]
+    assert file_refusal(str(token), current()) is not None, (
+        "the default was still granted after the command that withdrew it"
+    )
+
+
+def test_adding_a_withdrawn_default_back_makes_it_the_host_s(outside, pin_default_manifest):
+    """Withdrawal is not a one-way door, and the re-grant keeps its new provenance.
+
+    Storing the grant while leaving the withdrawal in place would store something
+    the derivation then subtracts: a command that reports success and changes
+    nothing.
+    """
+    ws, elsewhere = outside
+    pin_default_manifest(elsewhere)
+    session = Session.create_with_id("s_readd", ws)
+    session.set_sandbox("workspace-write")
+    server = _server()
+    for op, path in (("remove", str(elsewhere)), ("add", str(elsewhere))):
+        _drive(server, {
+            "type": "set_sandbox_roots",
+            "session_id": session.session_id,
+            "cwd": str(ws),
+            "op": op,
+            "path": path,
+        })
+
+    frames = _drive(server, {
+        "type": "set_sandbox_roots",
+        "session_id": session.session_id,
+        "cwd": str(ws),
+        "op": "list",
+        "path": "",
+    })
+
+    reply = [f for f in frames if f.get("type") == "sandbox_roots"][-1]
+    reloaded = Session.load(session.session_id, ws)
+
+    assert reloaded.sandbox_withheld == [], "the withdrawal outlived the re-grant"
+    assert [grant.source for grant in reloaded.sandbox_grants] == ["session"]
+    assert {
+        grant["target"]: grant["source"] for grant in reply["grants"]
+    }[canonical_path(str(elsewhere))] == "session"
+
+
+def test_a_registry_add_is_refused_with_the_one_sentence(outside):
+    """Requirement 5 at the command: the kind is named, not ignored.
+
+    Stage 1 stores no registry grant, because no dialect can enforce one yet
+    (``emrg/sandbox/grants.py``); the refusal is the same sentence
+    ``named_grants`` raises, so a host and a dialect cannot be told two different
+    things about one rule.
+    """
+    ws, _elsewhere = outside
+    session = Session.create_with_id("s_registry", ws)
+    server = _server()
+
+    frames = _drive(server, {
+        "type": "set_sandbox_roots",
+        "session_id": session.session_id,
+        "cwd": str(ws),
+        "op": "add",
+        "path": "HKCU\\Software\\LarkCli",
+        "kind": "registry",
+    })
+
+    reply = [f for f in frames if f.get("type") == "sandbox_roots"][-1]
+    assert "registry" in reply["error"] and "Stage 2" in reply["error"], reply
+    assert Session.load(session.session_id, ws).sandbox_grants == []
+
+
 # ── §7 the model's view of the boundary ───────────────────────────────────
 
 

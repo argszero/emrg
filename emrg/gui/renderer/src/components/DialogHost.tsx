@@ -554,6 +554,7 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
         // 没有可问的主语，界面该显示的是「先开一个会话」而不是一个借来的列表。
         // `?? null` 与 `sandboxBySid` 同一个语义：缺席 = daemon 还没说，不是空列表。
         roots={sid ? (appState.sandboxRootsBySid[sid] ?? null) : null}
+        grants={sid ? (appState.sandboxGrantsBySid[sid] ?? null) : null}
         notice={sid ? (appState.sandboxRootsNoticeBySid[sid] ?? null) : null}
         onOp={onSandboxRootsOp}
         onDismiss={() => closeDialog("sandboxRoots")}

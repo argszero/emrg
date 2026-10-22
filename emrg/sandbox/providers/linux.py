@@ -43,6 +43,7 @@ from __future__ import annotations
 
 from emrg.sandbox.contract import Runner, RunnerFailureRule
 from emrg.sandbox.policy import SandboxPolicy
+from emrg.sandbox.roots import named_grants
 
 #: The program name, resolved through ``PATH``.  Bubblewrap is packaged as
 #: ``bubblewrap``/``bwrap`` on every distribution that ships it; a host without
@@ -141,8 +142,8 @@ def bwrap_profile_args(policy: SandboxPolicy) -> list[str]:
         # this machine; this host cannot run bwrap at all, so that pairing is
         # **unmeasured** here and is exactly why the acceptance below names it
         # rather than claiming it.
-        for extra in policy.extra_roots:
-            args += ["--bind", extra, extra]
+        for grant in named_grants(policy):
+            args += ["--bind", grant.target, grant.target]
     return args
 
 

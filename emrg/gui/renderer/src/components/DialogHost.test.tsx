@@ -40,6 +40,9 @@ function appState(over: Partial<DaemonAppState> = {}): DaemonAppState {
     // 2026-09-30T09:30:16, GUI half) — absent is "the daemon has not said".
     sandboxBySid: {},
     sandboxRootsBySid: {},
+    // And the same surface typed, with provenance (issue #2492): absent is "the
+    // daemon has not said", which is what a renderer holds until the first frame.
+    sandboxGrantsBySid: {},
     sandboxRootsNoticeBySid: {},
     // Nothing has asked this session for its input history yet (issue #2349,
     // part 2/2) — absent is "not read", which is not the same as an empty list.

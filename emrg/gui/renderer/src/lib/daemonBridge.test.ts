@@ -594,6 +594,65 @@ describe("createDaemonBridge", () => {
     expect(bridge.store.get().sandboxRootsNoticeBySid["s1"]).toBeUndefined();
   });
 
+  it("sandbox_roots 帧里的 grants 带着来源进 store（issue #2492）", () => {
+    // 契约表（`roots`）与整张可写面（`grants`）是两个问题：前者是主人点名的那几项，
+    // 后者连安装自带的默认项一起，并且每项都带 `source`。GUI 两者都要——只画 `roots`
+    // 的话，默认项在 GUI 里既看不见也就无从撤回，正是 D5 删掉的那个部署常量换了名字。
+    const { emit, bridge } = setup();
+    emit({
+      type: "sandbox_roots",
+      sid: "s1",
+      data: {
+        type: "sandbox_roots", session_id: "s1", op: "list",
+        roots: ["/tmp/named"],
+        grants: [
+          { kind: "directory", target: "/tmp/named", source: "session" },
+          { kind: "directory", target: "/tmp/default", source: "default" },
+        ],
+      },
+    });
+    expect(bridge.store.get().sandboxGrantsBySid["s1"]).toEqual([
+      { kind: "directory", target: "/tmp/named", source: "session" },
+      { kind: "directory", target: "/tmp/default", source: "default" },
+    ]);
+    expect(bridge.store.get().sandboxRootsBySid["s1"]).toEqual(["/tmp/named"]);
+  });
+
+  it("读不懂的 grant 条目被丢掉，而不是被猜成一项授权", () => {
+    // 容忍只朝一个方向：读不懂的条目消失，可写面变小。猜一个会描述出这次运行
+    // 并不具备的边界。
+    const { emit, bridge } = setup();
+    emit({
+      type: "sandbox_roots",
+      sid: "s1",
+      data: {
+        type: "sandbox_roots", session_id: "s1", op: "list",
+        grants: [{ kind: "directory", target: "/tmp/ok", source: "session" }, {}, "x", null],
+      },
+    });
+    expect(bridge.store.get().sandboxGrantsBySid["s1"]).toEqual([
+      { kind: "directory", target: "/tmp/ok", source: "session" },
+    ]);
+  });
+
+  it("resume_result 的 meta.sandbox_grants → 后开的会话也能看到带来源的整张面", () => {
+    const { emit, bridge } = setup();
+    emit({
+      type: "command_result",
+      sid: "s1",
+      data: {
+        type: "resume_result", session_id: "s1",
+        meta: {
+          sandbox_roots: ["/tmp/named"],
+          sandbox_grants: [{ kind: "file", target: "/tmp/named", source: "session" }],
+        },
+      },
+    });
+    expect(bridge.store.get().sandboxGrantsBySid["s1"]).toEqual([
+      { kind: "file", target: "/tmp/named", source: "session" },
+    ]);
+  });
+
   it("resume_result 的 meta.sandbox_roots → 后开的会话也能看到清单（[] 是「确实没有」）", () => {
     const { emit, bridge } = setup();
     emit({

@@ -26,6 +26,7 @@ import tempfile
 
 import pytest
 
+from emrg.sandbox.grants import RootGrant
 from emrg.sandbox.policy import SandboxPolicy
 from emrg.sandbox.providers import win32 as provider
 from emrg.sandbox.roots import canonical_path
@@ -533,7 +534,15 @@ def test_the_runner_argv_carries_one_extra_root_flag_per_host_named_root(store, 
         mode="workspace-write",
         workspace_root=str(workspace),
         session_id="s1",
-        extra_roots=(str(directory), str(single), str(directory) + os.sep + ".", str(directory)),
+        # Typed since issue #2492: the kind is recorded with the grant instead of
+        # being asked of the disk per dialect. `from_path` reads it once here,
+        # which is what "the host named a path" means now.
+        extra_grants=tuple(
+            RootGrant.from_path(spelling)
+            for spelling in (
+                str(directory), str(single), str(directory) + os.sep + ".", str(directory),
+            )
+        ),
     )
 
     argv = provider.runner_argv(policy)
@@ -570,7 +579,7 @@ def test_a_read_only_policy_never_hands_the_runner_an_extra_root(store, monkeypa
             mode="read-only",
             workspace_root=str(workspace),
             session_id="s1",
-            extra_roots=(str(outside),),
+            extra_grants=(RootGrant.from_path(str(outside)),),
         )
     )
 
@@ -585,7 +594,7 @@ def test_an_agentless_run_still_carries_its_extra_roots(store, monkeypatch, tmp_
     The two branches differ in who applies the ACE, never in what the policy
     granted: dropping the roots here would make a root writable for ``bash`` and
     not for the ``pwsh`` seam's own spawn, which is the asymmetry the single
-    ``policy.extra_roots`` field exists to prevent.
+    ``policy.extra_grants`` field exists to prevent.
     """
     built, made = store
     monkeypatch.setattr(provider, "STORE", built)
@@ -595,7 +604,11 @@ def test_an_agentless_run_still_carries_its_extra_roots(store, monkeypatch, tmp_
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(temps))
 
     argv = provider.runner_argv(
-        SandboxPolicy(mode="workspace-write", workspace_root=str(workspace), extra_roots=(str(outside),))
+        SandboxPolicy(
+            mode="workspace-write",
+            workspace_root=str(workspace),
+            extra_grants=(RootGrant.from_path(str(outside)),),
+        )
     )
 
     assert [argv[i + 1] for i, token in enumerate(argv) if token == "--extra-root"] == [

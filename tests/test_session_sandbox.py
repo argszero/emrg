@@ -220,7 +220,8 @@ def test_the_injection_documents_every_argument_it_writes():
         "path",  # grep's spelling of the same fact
         "sandbox",  # the task's tier
         "workspace",  # the write boundary that rides with the tier
-        "writable_roots",  # the host's roots, injected unconditionally
+        "writable_roots",  # the host's grants as paths, injected unconditionally
+        "writable_grants",  # the same grants typed — the key a tool prefers
         "_parent_session_id",  # a delegation's parent — four facts the model
         "_parent_cwd",  # must not choose, all injected unconditionally
         "_parent_tools",
