@@ -4370,6 +4370,16 @@ class EmrgServer:
             args["_parent_tools"] = (
                 list(tool_names) if tool_names is not None else None
             )
+            # The child inherits **this turn's** tier, which is the tier the
+            # parent's own shell calls are running under — `req.sandbox`, the same
+            # value injected three lines above. Reading it from the session object
+            # instead was a hole: a scheduled task's tier is resolved from
+            # `tasks.yml` into the request and never written onto the session, so
+            # every child a task spawned inherited nothing and ran at
+            # `policy.DEFAULT_MODE` — unconfined — while the task body itself was
+            # confined. Injected unconditionally for the reason `_parent_tools` is:
+            # a tier the model could name for its own child is not a boundary.
+            args["_parent_sandbox"] = req.sandbox
 
     async def _apply_escalation(
         self, tc_name: str, args: dict, session, req: TaskRequest,
@@ -7615,6 +7625,7 @@ class EmrgServer:
     async def _run_subagent_tool(
         self, *, parent_session_id: str, parent_cwd: str, prompt: str,
         timeout_s: int, intent: str = "", parent_tools: list[str] | None = None,
+        parent_sandbox: str | None = None,
     ) -> dict:
         """Run one child session for one `subagent` call. Answers text or an error.
 
@@ -7639,6 +7650,7 @@ class EmrgServer:
             intent=intent,
             state=state,
             parent_tools=parent_tools,
+            parent_sandbox=parent_sandbox,
         ))
         try:
             done, _ = await asyncio.wait({child_task}, timeout=timeout_s)
@@ -7670,6 +7682,7 @@ class EmrgServer:
     async def _run_subagent_child(
         self, *, parent_session_id: str, parent_cwd: str, prompt: str,
         intent: str, state: dict, parent_tools: list[str] | None = None,
+        parent_sandbox: str | None = None,
     ) -> dict:
         """The body of one delegation: pick a slot, run the child, report its answer."""
         started = time.monotonic()
@@ -7723,8 +7736,13 @@ class EmrgServer:
             child.set_depth(depth + 1)
             # The child's tier is the parent's, never the child's own: authorization
             # a caller can choose for the thing it is authorizing is not a boundary.
-            if parent.sandbox:
-                child.set_sandbox(parent.sandbox)
+            # The session's own tier first — the source of truth for a client's
+            # session — then the tier this turn is running under, which is the only
+            # one a scheduled task has. Silence in both means unconfined, and that
+            # stays the meaning: `policy.DEFAULT_MODE`.
+            child_tier = getattr(parent, "sandbox", None) or parent_sandbox
+            if child_tier:
+                child.set_sandbox(child_tier)
             if parent.sandbox_roots:
                 try:
                     child.set_sandbox_roots(parent.sandbox_roots)
@@ -7739,7 +7757,7 @@ class EmrgServer:
                 cwd=str(slot_cwd),
                 prompt=prompt,
                 timestamp="",
-                sandbox=parent.sandbox,
+                sandbox=child_tier,
                 # Issue #2465: the child's tool set is the parent's — inherited
                 # the same way its tier is, because authorisation a caller can
                 # choose for the thing it is authorising is not a boundary.
@@ -7824,6 +7842,7 @@ class EmrgServer:
     async def _run_boss_tool(
         self, *, parent_session_id: str, parent_cwd: str, focus: str = "",
         timeout_s: int, intent: str = "", parent_tools: list[str] | None = None,
+        parent_sandbox: str | None = None,
     ) -> dict:
         """Run the owner session for one `boss` call. Answers text or an error.
 
@@ -7844,6 +7863,7 @@ class EmrgServer:
             intent=intent,
             state=state,
             parent_tools=parent_tools,
+            parent_sandbox=parent_sandbox,
         ))
         try:
             done, _ = await asyncio.wait({child_task}, timeout=timeout_s)
@@ -7871,6 +7891,7 @@ class EmrgServer:
     async def _run_boss_child(
         self, *, parent_session_id: str, parent_cwd: str, focus: str,
         intent: str, state: dict, parent_tools: list[str] | None = None,
+        parent_sandbox: str | None = None,
     ) -> dict:
         """The body of one owner call: open the retained session, run it, report."""
         started = time.monotonic()
@@ -7917,8 +7938,11 @@ class EmrgServer:
         child.set_depth(depth + 1)
         # The owner's tier is the parent's, never its own: authorization a caller
         # can choose for the thing it is authorizing is not a boundary.
-        if parent.sandbox:
-            child.set_sandbox(parent.sandbox)
+        # Same rule as `subagent`: the session's own tier first, then the tier this
+        # turn runs under — the only one a scheduled task has.
+        child_tier = getattr(parent, "sandbox", None) or parent_sandbox
+        if child_tier:
+            child.set_sandbox(child_tier)
         if parent.sandbox_roots:
             try:
                 child.set_sandbox_roots(parent.sandbox_roots)
@@ -7931,7 +7955,7 @@ class EmrgServer:
             cwd=str(boss_cwd),
             prompt=prompt,
             timestamp="",
-            sandbox=parent.sandbox,
+            sandbox=child_tier,
             # The owner inherits the executor's tool set the way any child does
             # (#2465). It includes `boss` itself; the depth limit above is what
             # bounds an owner that asks for an owner.

@@ -49,6 +49,7 @@ from emrg.server.daemon import (
     default_tool_names,
     scheduled_task_tool_names,
 )
+from emrg.protocol import TaskRequest
 from emrg.session import Session
 from emrg.tools.boss_tool import DEFAULT_TIMEOUT_S, BossTool
 
@@ -419,3 +420,41 @@ def test_the_depth_limit_bounds_an_owner_that_asks_for_an_owner(tmp_path, monkey
     assert out.get("error"), "an owner was started past the delegation depth limit"
     assert "delegations deep" in out["error"]
     assert seen == [], "the refused call still ran a turn"
+
+
+def test_an_owner_of_a_task_inherits_the_turns_tier(tmp_path, monkeypatch):
+    """The owner of a scheduled task runs where the task runs, not unconfined.
+
+    A task's tier is resolved from `tasks.yml` into the request and never written
+    onto the session object, so an owner that read only the session inherited
+    nothing — and an owner with a wider tier than its executor is the one shape of
+    this bug that can act on the answer it then gives. Driven through
+    `_inject_tool_arguments` and then the tool, because the injection is the half
+    that was missing.
+    """
+    server = _server(tmp_path, monkeypatch)
+    _stub_the_loop(server)
+    parent = Session.create_with_id("task-tier-owner", tmp_path)
+    assert parent.sandbox is None, (
+        "this test models a scheduled task, whose tier lives on the request"
+    )
+    req = TaskRequest(
+        id="owner-tier-turn", session_id=parent.session_id, cwd=str(tmp_path),
+        prompt="a task's tick", sandbox="read-only",
+    )
+
+    args = {"timeout_s": 10, "intent": "ask the owner"}
+    EmrgServer._inject_tool_arguments("boss", args, parent, req, None)
+    assert args.get("_parent_sandbox") == "read-only", (
+        f"the turn's tier never reached the call: {args}"
+    )
+    result = asyncio.run(BossTool(server._run_boss_tool).execute(args))
+    assert not result.error, result.content
+
+    owner = Session.load(
+        f"boss-{parent.session_id}", _boss_cwd(tmp_path, parent.session_id),
+    )
+    assert owner.sandbox == "read-only", (
+        "the owner of a confined task ran at a wider tier: an owner that may go "
+        "where its executor may not is the escape this inheritance refuses"
+    )
