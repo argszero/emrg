@@ -145,6 +145,20 @@ The new path's boundary exists on **macOS (Seatbelt)**, **Linux (bubblewrap)** a
 
 A confined run cannot write your home directory, which is where `uv`, `pip` and `npm` keep their caches by default: measured at `workspace-write`, `uv run` **fails** (`Failed to initialize cache at ~/.cache/uv`), `npm`'s `~/.npm` cannot be created, and `pip` quietly disables its cache. So the tool points those four variables (`XDG_CACHE_HOME`, `UV_CACHE_DIR`, `PIP_CACHE_DIR`, `npm_config_cache`) at `<temp>/emrg-confined-cache` for the confined child — a directory inside a root the policy already grants, so nothing is widened. **A variable you set yourself is never overridden**, which is how you keep a warm cache: point it at a directory inside the session's workspace.
 
+**A task's frequency by time of day** (`schedule` in `~/.emrg/tasks.yml`): a record's single `interval` answers at every instant unless it states `schedule`, an optional list of windows:
+
+```yaml
+- name: feishu-inbox
+  interval: 10800        # the frequency outside every window
+  schedule:              # optional; without it the task behaves exactly as before
+    - days: mon-fri      # optional = every day; mon, mon-fri, mon,fri, fri-mon
+      from: "09:00"      # quoted: unquoted, YAML reads 09:00 as a number
+      to: "18:00"        # 24:00 allowed, and later than `from`
+      interval: 900      # the frequency inside this window
+```
+
+Inside a window that window's `interval` answers; outside every window and between windows the top-level one does, so one instant never has two answers. Times are **local time only** — read with `datetime.now()`, with no timezone field and no DST rule — so the windows follow the host's clock; there are no public holidays and no make-up workdays, only the weekdays a window names (`fri-mon` wraps around the week). A wait that would run past the next edge is **cut to it**: a 3-hour weekend cadence that begins at 06:59 wakes at 09:00 rather than sleeping through the window it was about to enter, and a restart inside a window does not drop the task to the out-of-window frequency. Two windows of one day may not overlap, a window crossing midnight is written as two windows, and every field is validated when the file is read — a bad window is refused with the value it refused and the shape it expects. The daemon's create/update path and the task listing carry the same shape (`effective_interval` and `next_window_boundary_in_seconds` in `list_tasks`); until a client can edit windows, hand-editing this file is how to set one, and the scheduler picks the change up at the task's next wake.
+
 ---
 
 ## 🏗️ Architecture

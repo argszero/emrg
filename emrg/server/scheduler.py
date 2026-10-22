@@ -10,6 +10,10 @@ projects.yml remains for project tracking (_touch_project only).
 
 Task config schema:
   name, type, enabled, interval — common base fields.
+  schedule — optional; time-of-day windows that answer with their own interval while
+    open. Read in **local time only** (`datetime.now()`), so it follows the host's
+    clock and whatever its zone does with DST. Weekdays only: no holidays, no make-up
+    workdays.
   config — type-specific config, and the mapping the templates see as ``task``. For
     evolution: config.project links to projects.yml name.
   sandbox — optional; also accepted under config, where the record-level value wins.
@@ -28,7 +32,7 @@ import math
 import os
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import yaml
 
@@ -204,6 +208,230 @@ TASK_NAME_RE = re.compile(TASK_NAME_PATTERN)
 TASK_NAME_MAX = 32
 MIN_INTERVAL = 60
 DEFAULT_INTERVAL = 1800
+
+# ── Scheduling windows (issue #2486) ─────────────────────────────────────────
+#
+# A task carries one frequency — `interval` — and that stays the only knob unless it
+# states `schedule`: optional windows that answer with a different frequency while
+# they are open. Inside a window, that window's `interval`; outside every window and
+# between windows, the top-level one. Time is read with `datetime.now()` and nothing
+# else — no timezone argument, no DST rule, no holiday table — so the windows follow
+# the host's own clock, which is the clock the host works by.
+#
+#   schedule:
+#     - days: mon-fri      # optional = every day; mon, mon-fri, mon,fri, fri-mon
+#       from: "09:00"      # quoted: unquoted, YAML 1.1 reads 09:00 as a number
+#       to: "18:00"        # 24:00 allowed; to must be later than from
+#       interval: 900      # the frequency inside this window
+#
+# Two windows of the same day may not overlap: one instant cannot have two answers.
+# `effective_interval` is the one producer of "how often, right now" — the heartbeat,
+# the connection backoff, the wait and every reported row read it and none re-derives
+# the rule. `seconds_to_next_boundary` is what keeps a long wait from sleeping through
+# a window: a wait that would run past an edge is cut to it.
+WEEKDAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_WINDOW_TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
+
+
+def _minutes_to_hhmm(minutes: int) -> str:
+    """`540` → `09:00` — the one spelling of a window edge inside a message."""
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def _days_label(days) -> str:
+    """A sorted `mon,tue` label for a set of weekday indices."""
+    return ",".join(WEEKDAY_NAMES[day] for day in sorted(days))
+
+
+def _parse_window_time(text) -> int | None:
+    """`HH:MM` → minutes since midnight (`24:00` is 1440), or None when unparsable."""
+    if not isinstance(text, str):
+        return None
+    match = _WINDOW_TIME_RE.match(text.strip())
+    if match is None:
+        return None
+    hour, minute = int(match.group(1)), int(match.group(2))
+    if hour > 24 or minute > 59:
+        return None
+    return hour * 60 + minute
+
+
+def _parse_window_days(text) -> set[int] | None:
+    """`mon`, `mon-fri`, `mon,fri`, `fri-mon` → weekday indices (0 = Monday), or None.
+
+    Case and surrounding whitespace are irrelevant, and a range expands **around the
+    ring**, so `fri-mon` is Fri, Sat, Sun, Mon. Absent or null means every day: a window
+    naming no weekday is a time-of-day window, not a weekly one.
+    """
+    if text is None:
+        return set(range(7))
+    if not isinstance(text, str):
+        return None
+    days: set[int] = set()
+    for part in text.split(","):
+        part = part.strip().lower()
+        if not part:
+            continue
+        if "-" in part:
+            first, _, last = part.partition("-")
+            first, last = first.strip(), last.strip()
+            if first not in WEEKDAY_NAMES or last not in WEEKDAY_NAMES:
+                return None
+            start, end = WEEKDAY_NAMES.index(first), WEEKDAY_NAMES.index(last)
+            for step in range((end - start) % 7 + 1):
+                days.add((start + step) % 7)
+        else:
+            if part not in WEEKDAY_NAMES:
+                return None
+            days.add(WEEKDAY_NAMES.index(part))
+    return days or None
+
+
+def _normalise_schedule(schedule) -> list[dict]:
+    """The windows as parsed numbers; `[]` when the field is absent or unusable.
+
+    Unusable is not an exception path here: `validate_schedule` is what refuses a bad
+    window, and it runs in the loader (`validate_task_record`) and in both CRUD write
+    paths, so a record that reaches the loop has already been accepted. A hand edit that
+    slipped past every writer falls back to the top-level interval — a cadence that is
+    wrong until the next wake is recoverable; a raise on the event loop is not.
+    """
+    if not isinstance(schedule, list):
+        return []
+    windows: list[dict] = []
+    for entry in schedule:
+        if not isinstance(entry, dict):
+            return []
+        days = _parse_window_days(entry.get("days"))
+        start = _parse_window_time(entry.get("from"))
+        end = _parse_window_time(entry.get("to"))
+        interval = entry.get("interval")
+        if days is None or start is None or end is None:
+            return []
+        if not isinstance(interval, int) or isinstance(interval, bool):
+            return []
+        windows.append({"days": days, "start": start, "end": end, "interval": interval})
+    return windows
+
+
+def validate_schedule(schedule) -> str | None:
+    """Return why a `schedule` field cannot be run, or None when it is usable.
+
+    The one validator for the field: the loader and the daemon's create/update path
+    both call it, so a window means the same thing to the task that reads it and to the
+    form that writes it. Every message names the value it refused and the shape it
+    expects, because "invalid schedule" leaves a host with a file and no next step.
+    """
+    if schedule is None:
+        return None
+    if not isinstance(schedule, list):
+        return f"schedule of type {type(schedule).__name__}, not a list of windows"
+    if not schedule:
+        return "an empty schedule list - drop the field for one frequency all day"
+    parsed: list[dict] = []
+    for index, entry in enumerate(schedule, 1):
+        where = f"schedule window {index}"
+        if not isinstance(entry, dict):
+            return (
+                f"{where} of type {type(entry).__name__}, not a mapping of "
+                "days/from/to/interval"
+            )
+        days = _parse_window_days(entry.get("days"))
+        if days is None:
+            return (
+                f"{where} has days {entry.get('days')!r} - expected weekdays such as "
+                "`mon`, `mon-fri` or `mon,fri` (a range may wrap, e.g. `fri-mon`)"
+            )
+        start = _parse_window_time(entry.get("from"))
+        if start is None:
+            return (
+                f"{where} has from {entry.get('from')!r} - expected `HH:MM` written as a "
+                "quoted string (`\"09:00\"`; unquoted, YAML reads it as a number)"
+            )
+        end = _parse_window_time(entry.get("to"))
+        if end is None:
+            return (
+                f"{where} has to {entry.get('to')!r} - expected `HH:MM` written as a "
+                "quoted string, with 24:00 allowed"
+            )
+        if end <= start:
+            return (
+                f"{where} runs {_minutes_to_hhmm(start)}-{_minutes_to_hhmm(end)}, which "
+                "does not move forward - a window crossing midnight is two windows"
+            )
+        interval = entry.get("interval")
+        if not isinstance(interval, int) or isinstance(interval, bool) or interval < MIN_INTERVAL:
+            return f"{where} has interval {interval!r} (must be an integer >= {MIN_INTERVAL})"
+        parsed.append({"days": days, "start": start, "end": end, "interval": interval})
+    for index, first in enumerate(parsed):
+        for second in parsed[index + 1:]:
+            shared = first["days"] & second["days"]
+            if not shared:
+                continue
+            if first["start"] < second["end"] and second["start"] < first["end"]:
+                return (
+                    f"schedule windows overlap on {_days_label(shared)}: "
+                    f"{_minutes_to_hhmm(first['start'])}-{_minutes_to_hhmm(first['end'])} "
+                    f"and {_minutes_to_hhmm(second['start'])}-"
+                    f"{_minutes_to_hhmm(second['end'])} - one instant cannot have two "
+                    "frequencies"
+                )
+    return None
+
+
+def schedule_window_at(schedule, now: datetime) -> dict | None:
+    """The window `now` falls inside, or None when it falls outside every one."""
+    minutes = now.hour * 60 + now.minute
+    weekday = now.weekday()
+    for window in _normalise_schedule(schedule):
+        if weekday in window["days"] and window["start"] <= minutes < window["end"]:
+            return window
+    return None
+
+
+def effective_interval(record: dict, now: datetime | None = None) -> int:
+    """The frequency in force at `now` — the only place that answers it.
+
+    Inside a window, that window's interval; outside every window and between windows,
+    the record's top-level one. Without `schedule` the answer is the same at every
+    instant, which is exactly the cadence a task had before windows existed.
+    """
+    now = now or datetime.now()
+    window = schedule_window_at(record.get("schedule"), now)
+    if window is None:
+        return record.get("interval", DEFAULT_INTERVAL)
+    return window["interval"]
+
+
+def seconds_to_next_boundary(record: dict, now: datetime | None = None) -> float | None:
+    """Seconds until the effective interval next changes, or None without windows.
+
+    Every window edge — a start or an end, on every weekday that window names — is a
+    boundary, and a wait that would run past one is cut to it: a three-hour weekend wait
+    beginning at 06:59 must wake at 09:00 rather than sleep through the window it was
+    about to enter. Strictly in the future, so waking at an edge recomputes under the
+    frequency that edge selects instead of finding the same edge zero seconds away.
+    """
+    windows = _normalise_schedule(record.get("schedule"))
+    if not windows:
+        return None
+    now = now or datetime.now()
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    soonest: datetime | None = None
+    # Nine days reach every weekday at least once more, whichever day `now` falls on.
+    for offset in range(9):
+        day = midnight + timedelta(days=offset)
+        weekday = day.weekday()
+        for window in windows:
+            if weekday not in window["days"]:
+                continue
+            for edge_minutes in (window["start"], window["end"]):
+                edge = day + timedelta(minutes=edge_minutes)
+                if edge > now and (soonest is None or edge < soonest):
+                    soonest = edge
+    if soonest is None:
+        return None
+    return (soonest - now).total_seconds()
 
 # ── tasks.yml is the only source of truth (rant 2026-09-28T09:54:10) ──
 #
@@ -632,6 +860,9 @@ def validate_task_record(record: dict) -> str | None:
     interval = record.get("interval", DEFAULT_INTERVAL)
     if not isinstance(interval, int) or isinstance(interval, bool) or interval < MIN_INTERVAL:
         return f"task {name!r} has interval {interval!r} (must be an integer >= {MIN_INTERVAL})"
+    schedule_error = validate_schedule(record.get("schedule"))
+    if schedule_error:
+        return f"task {name!r} has {schedule_error}"
     cfg = record.get("config")
     if cfg is not None and not isinstance(cfg, dict):
         return f"task {name!r} has config of type {type(cfg).__name__}, not a mapping"
@@ -2284,7 +2515,8 @@ class TaskHandler:
                 continue
             if not _started_logged:
                 self._logger.info(
-                    "TaskHandler[%s] started — every %ds", self.name, self.interval
+                    "TaskHandler[%s] started — every %ds",
+                    self.name, self._effective_interval(),
                 )
                 _started_logged = True
 
@@ -2305,6 +2537,17 @@ class TaskHandler:
             # shorten to the remainder, or run immediately when the slot
             # already passed during downtime).
             wait_timeout = self._resume_wait_timeout(wait_timeout)
+            # Issue #2486 ④⑨: cut the wait to the next window edge. A wait that spans
+            # an edge would sleep through the whole window it was about to enter — the
+            # 3-hour weekend wait that begins at 06:59 must wake at 09:00, not at
+            # 09:59 — and waking at the edge recomputes under the frequency that edge
+            # selects, so this re-arms rather than spins. The resume slot folded in just
+            # above is clipped by the same rule, which is why a daemon restart inside a
+            # window does not drop the task to the out-of-window frequency. The cut only
+            # ever shortens: the slowdown and the backoff still set the wait it shortens.
+            _boundary = seconds_to_next_boundary(self._task)
+            if _boundary is not None and _boundary < wait_timeout:
+                wait_timeout = _boundary
             # Diagnostic log (rant 2026-08-18T20:48:45): expose which
             # scheduling mode drove the wait — normal | heartbeat | backoff —
             # so the saturation/backoff state machine is traceable end-to-end.
@@ -2315,8 +2558,8 @@ class TaskHandler:
             else:
                 _mode = "normal"
             self._logger.debug(
-                "TaskHandler[%s]: next run in %ds (mode=%s)",
-                self.name, int(wait_timeout), _mode,
+                "TaskHandler[%s]: next run in %ds (mode=%s, interval %ds)",
+                self.name, int(wait_timeout), _mode, self._effective_interval(),
             )
             # Wait for interval or manual trigger (interruptible)
             self._next_run_at = time.time() + wait_timeout
@@ -2502,12 +2745,19 @@ class TaskHandler:
         # start time to confuse it with any more: it existed only to render
         # `{{ uptime }}` and went with that placeholder, rant 2026-09-29T09:23:55.)
         started_at = self._cycle_start_time if self._cycle_running else None
+        # Issue #2486 ⑦: the frequency in force right now and when it next changes, so
+        # a client renders what the scheduler is actually doing instead of re-deriving
+        # it from the windows (and getting a different answer at a different instant).
+        boundary = seconds_to_next_boundary(self._task)
         return {
             "name": self.name,
             "running": self._cycle_running,
             "started_at": started_at,
             "next_run_in_seconds": remaining,
             "interval": self.interval,
+            "effective_interval": self._effective_interval(),
+            "schedule": self._task.get("schedule"),
+            "next_window_boundary_in_seconds": None if boundary is None else int(boundary),
             "last_run_at": last_run_at,
             "recent_runs": recent_runs,
             "saturation": saturation,
@@ -2525,8 +2775,23 @@ class TaskHandler:
         heartbeat = max(task_interval, min(task_interval * 8, 8 hours)).
         Protection = slow down, never stop. Long-interval tasks (>= 8h)
         keep their original cadence (the 8x/8h caps don't apply).
+
+        The base is the interval **in force right now** (`_effective_interval`), so a
+        window's frequency gets its own heartbeat instead of the out-of-window one
+        being slowed eightfold while the host is at work (issue #2486 ⑧).
         """
-        return max(self.interval, min(self.interval * 8, 8 * 3600))
+        interval = self._effective_interval()
+        return max(interval, min(interval * 8, 8 * 3600))
+
+    def _effective_interval(self) -> int:
+        """How often this task runs right now, from its own record's windows.
+
+        The one producer of that answer: `_heartbeat_interval`, `_connect_backoff`, the
+        wait and the reported rows all take their base from here and none re-derives
+        the rule, so the slowdown and the backoff apply to the frequency actually in
+        force rather than fighting the window (issue #2486 ③⑧).
+        """
+        return effective_interval(self._task)
 
     def _connect_backoff(self) -> float:
         """Exponential backoff while the daemon is unreachable.
@@ -2538,11 +2803,15 @@ class TaskHandler:
         Backoff = max(30s, interval * 2^n) capped at 10 minutes, where n
         is the consecutive-failure count. Returns the normal interval when
         there are no consecutive failures.
+        The base is the interval in force right now (`_effective_interval`), for the
+        same reason the heartbeat's is: the backoff grows from the cadence the window
+        has selected, never from the one it overrode (issue #2486 ⑧).
         """
+        interval = self._effective_interval()
         if self._connect_failures <= 0:
-            return float(self.interval)
+            return float(interval)
         n = min(self._connect_failures, 10)  # cap the exponent growth
-        backoff = max(30.0, float(self.interval) * (2 ** n))
+        backoff = max(30.0, float(interval) * (2 ** n))
         return min(backoff, 600.0)  # never wait longer than 10 minutes
 
     def _saturation_heartbeat_active(self) -> bool:
@@ -3314,12 +3583,19 @@ class TaskScheduler:
         """
         cfg = record.get("config") if isinstance(record.get("config"), dict) else {}
         project = cfg.get("project", "")
+        # Issue #2486 ⑦: the same three cadence keys the live handler reports — a
+        # client must not have to know whether a task has been started before it can
+        # render the frequency that is in force, or when it next changes.
+        boundary = seconds_to_next_boundary(record)
         return {
             "name": record.get("name"),
             "running": False,
             "started_at": None,
             "next_run_in_seconds": None,
             "interval": record.get("interval", DEFAULT_INTERVAL),
+            "effective_interval": effective_interval(record),
+            "schedule": record.get("schedule"),
+            "next_window_boundary_in_seconds": None if boundary is None else int(boundary),
             "last_run_at": None,
             "recent_runs": [],
             "saturation": {},
@@ -3419,6 +3695,7 @@ class TaskScheduler:
     @staticmethod
     def _validate_task_fields(
         name: str, task_type: str, project: str, interval: int,
+        schedule: list | None = None,
     ) -> str | None:
         """Return an error string, or None when the fields are valid."""
         if not TASK_NAME_RE.match(name) or len(name) > TASK_NAME_MAX:
@@ -3429,17 +3706,18 @@ class TaskScheduler:
             return f"project {project!r} is not registered in projects.yml"
         if not isinstance(interval, int) or isinstance(interval, bool) or interval < MIN_INTERVAL:
             return f"interval must be an integer >= {MIN_INTERVAL}"
-        return None
+        # The same validator the loader runs: one shape, one set of messages.
+        return validate_schedule(schedule)
 
     def task_create(
         self, name: str, task_type: str, project: str,
         interval: int | None = None, enabled: bool = True,
         repo: str | None = None, description: str | None = None,
-        sandbox: str | None = None,
+        sandbox: str | None = None, schedule: list | None = None,
     ) -> tuple[bool, str | dict]:
         """Create a task. Returns (ok, error) or (ok, task-dict)."""
         interval = DEFAULT_INTERVAL if interval is None else interval
-        err = self._validate_task_fields(name, task_type, project, interval)
+        err = self._validate_task_fields(name, task_type, project, interval, schedule)
         if err:
             return False, err
         if sandbox is not None and sandbox not in SANDBOX_MODES:
@@ -3466,6 +3744,8 @@ class TaskScheduler:
         }
         if sandbox is not None:
             task["sandbox"] = sandbox
+        if schedule is not None:
+            task["schedule"] = schedule
         if description:
             task["description"] = description
         tasks.append(task)
@@ -3485,7 +3765,10 @@ class TaskScheduler:
             cfg = task.get("config") if isinstance(task.get("config"), dict) else {}
             new_project = cfg.get("project", "")
         new_interval = fields.get("interval", task.get("interval", DEFAULT_INTERVAL))
-        err = self._validate_task_fields(name, new_type, new_project, new_interval)
+        new_schedule = fields.get("schedule", task.get("schedule"))
+        err = self._validate_task_fields(
+            name, new_type, new_project, new_interval, new_schedule,
+        )
         if err:
             return False, err
         if "type" in fields:
@@ -3502,6 +3785,15 @@ class TaskScheduler:
             task["config"] = cfg
         if "interval" in fields:
             task["interval"] = fields["interval"]
+        if "schedule" in fields:
+            # Only the keys a payload carries are written, and this field keeps that
+            # rule two ways: a payload that omits it leaves the windows alone (which is
+            # what lets a client that predates the field keep editing a task), while an
+            # explicit null means "one frequency all day", so the key leaves the file.
+            if fields["schedule"] is None:
+                task.pop("schedule", None)
+            else:
+                task["schedule"] = fields["schedule"]
         if "enabled" in fields:
             task["enabled"] = bool(fields["enabled"])
         if "description" in fields:

@@ -905,7 +905,12 @@ class TaskSelector(Widget):
             name = t.get("name", "?")
             running = t.get("running", False)
             next_in = t.get("next_run_in_seconds")
-            interval = t.get("interval", 0)
+            # Issue #2486 ⑦: the frequency in force, not the declared one — a
+            # task inside a window runs at that window's interval, and a client
+            # that printed the record's `interval` would describe a cadence the
+            # scheduler is not using. Older rows carry no `effective_interval`, so
+            # the declared value stays the fallback.
+            interval = t.get("effective_interval", t.get("interval", 0))
             if running:
                 status_str = "● RUNNING"
             elif next_in is not None:

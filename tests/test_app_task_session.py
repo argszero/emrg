@@ -57,6 +57,26 @@ def test_the_default_intent_is_trigger_and_says_so():
     assert "trigger" in title_of(TaskSelector([make_task()]))
 
 
+def test_the_task_row_shows_the_frequency_in_force_not_the_declared_one():
+    """Issue #2486 ⑦: inside a window the row must show the window's interval.
+
+    A task whose record says 3 hours and whose window says 15 minutes runs every 15
+    minutes; printing the declared value would describe a cadence nothing is using.
+    """
+    inside = TaskSelector([make_task(effective_interval=900)])
+    outside = TaskSelector([make_task(effective_interval=10800)])
+    older = TaskSelector([make_task()])  # a row from a daemon that predates the field
+    assert "(every 900s)" in " ".join(
+        s.text for line in inside.render(RenderContext(width=120)) for s in line.spans
+    )
+    assert "(every 10800s)" in " ".join(
+        s.text for line in outside.render(RenderContext(width=120)) for s in line.spans
+    )
+    assert "(every 300s)" in " ".join(
+        s.text for line in older.render(RenderContext(width=120)) for s in line.spans
+    )
+
+
 def test_a_session_picker_does_not_offer_to_trigger():
     """The other direction, and the point of the rant: the same list serves two
     commands, so a host with both open must be able to tell which one Enter is

@@ -3170,7 +3170,7 @@ class TestWSTaskWire:
                 try:
                     calls = {}
 
-                    def fake_create(name, task_type, project, interval=None, enabled=True, repo=None, description=None, sandbox=None):
+                    def fake_create(name, task_type, project, interval=None, enabled=True, repo=None, description=None, sandbox=None, schedule=None):
                         calls.update(name=name, task_type=task_type, project=project)
                         return True, {"name": name, "type": task_type}
 
@@ -3200,7 +3200,7 @@ class TestWSTaskWire:
                 try:
                     calls = {}
 
-                    def fake_create(name, task_type, project, interval=None, enabled=True, repo=None, description=None, sandbox=None):
+                    def fake_create(name, task_type, project, interval=None, enabled=True, repo=None, description=None, sandbox=None, schedule=None):
                         calls.update(name=name, task_type=task_type, project=project)
                         return True, {"name": name, "type": task_type}
 
@@ -3212,6 +3212,45 @@ class TestWSTaskWire:
                         })
                         assert resp["type"] == "task_result"
                         assert calls["task_type"] == "", "must not fall back to wire type 'task_create'"
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_task_create_passes_the_schedule_windows_through(self):
+        """The windows arrive at the scheduler in the shape the client sent them.
+
+        Issue #2486 ⑩: the loader, the daemon's create path and the client all read and
+        write one shape, so the wire must not reshape, filter or drop the field.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                server, _, cleanup = await _boot_server(cwd)
+                try:
+                    calls = {}
+
+                    def fake_create(name, task_type, project, interval=None, enabled=True,
+                                    repo=None, description=None, sandbox=None, schedule=None):
+                        calls.update(interval=interval, schedule=schedule)
+                        return True, {"name": name, "type": task_type}
+
+                    server._scheduler = self._mock_scheduler(create_side_effect=fake_create)
+                    ws = await connect_to_server()
+                    window = [
+                        {"days": "mon-fri", "from": "09:00", "to": "18:00", "interval": 900},
+                    ]
+                    try:
+                        resp = await self._cmd(ws, {
+                            "type": "task_create", "name": "daily",
+                            "task_type": "evolution", "project": "emrg",
+                            "interval": 10800, "schedule": window,
+                        })
+                        assert resp["type"] == "task_result"
+                        assert resp.get("ok") is True
+                        assert calls["interval"] == 10800
+                        assert calls["schedule"] == window, "the wire must not reshape it"
                     finally:
                         await ws.close()
                 finally:
