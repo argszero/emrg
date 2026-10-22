@@ -8055,24 +8055,51 @@ class EmrgServer:
             done, _ = await asyncio.wait({child_task}, timeout=timeout_s)
         except asyncio.CancelledError:
             # The executor's own round was cancelled. The owner is not left running
-            # behind it.
+            # behind it — and, like the timeout below, this call delivered nothing,
+            # so it must not consume the window (issue #2499): the same session's
+            # next round would otherwise be refused for four hours by a call that
+            # never put a question to anyone.
             child_task.cancel()
             await asyncio.gather(child_task, return_exceptions=True)
+            self._unconsume_the_window(state)
             raise
         if done:
             return child_task.result()
         child_task.cancel()
         await asyncio.gather(child_task, return_exceptions=True)
+        self._unconsume_the_window(state)
         logger.warning(
             "[boss] timed out after %ss: parent=%s child=%s",
             timeout_s, parent_session_id, state["child"],
         )
         return {"error": (
             f"boss: the owner did not answer within {timeout_s}s, so its turn was "
-            "cancelled. Nothing from it was delivered. Owner session: "
-            f"{state['child']}. Raise `timeout_s` if the owner needs longer to read "
-            "this session's history."
+            "cancelled. Nothing from it was delivered, and this call did not "
+            "consume the re-ask window, so retrying starts a turn. Raise "
+            "`timeout_s` if the owner needs longer to read this session's history. "
+            f"Owner session: {state['child']}."
         )}
+
+    @staticmethod
+    def _unconsume_the_window(state: dict) -> None:
+        """Put the owner clock back where this call found it (issue #2499).
+
+        A call that delivered nothing must not consume the four-hour window. The
+        window exists because *a direction that was just given stands*; a call
+        cancelled by `timeout_s`, or with its own round, gave no direction, so a
+        stamp left standing refuses the retry the timeout error asks for and makes
+        that error's only remedy impossible to carry out.
+
+        The stamp still goes down *before* the turn runs, and that is deliberate —
+        a turn that raised keeps it, because it ran and re-buying it is the cost
+        the window exists to prevent. So this restores rather than withholds: the
+        two outcomes are told apart here, one frame up, and not by moving the stamp.
+        """
+        owner = state.get("owner")
+        if owner is None:
+            # Cancelled before the call got as far as stamping anything.
+            return
+        owner.set_boss_asked_at(state.get("asked_at_before"))
 
     async def _run_boss_child(
         self, *, parent_session_id: str, parent_cwd: str,
@@ -8134,6 +8161,13 @@ class EmrgServer:
         # Stamped before the turn runs, never after it: a turn that dies mid-way
         # must still leave the clock written, or the next call pays for the same
         # judgement again with nothing to show for the first.
+        #
+        # Both halves are handed to the caller as well, because the two ways a
+        # call can end without answering are decided one frame up: `_run_boss_tool`
+        # holds the bound, and it is the only place that knows a turn was taken
+        # away rather than finished. Nothing here distinguishes them.
+        state["owner"] = child
+        state["asked_at_before"] = last_asked
         child.set_boss_asked_at(asked_at)
 
         prompt = _get_jinja_env().get_template("boss.j2").render(
