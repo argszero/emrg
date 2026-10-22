@@ -525,6 +525,9 @@ def test_load_and_start_feishu_task(tmp_path):
         ("Never start a fresh authorisation on one `missing` answer",
          "re-authorising on a symptom changes the host's account state, and a different "
          "`HOME` reproduces the symptom whatever the token says"),
+        ("`auth status` in the same environment the send will use",
+         "a check run elsewhere answers about that environment: the diagnosis only carries "
+         "when the identity is read the way the send will read it"),
     ):
         assert phrase in flat, f"the feishu template must state that {why}; {phrase!r} is missing"
 
