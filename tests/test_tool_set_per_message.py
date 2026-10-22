@@ -15,8 +15,12 @@ none of them proves another:
 * **the execution side**, driven for real: a registered tool that the turn's set
   omits must not run — with a **positive control** that runs it when the set
   admits it, so a red arm cannot be a harness that never executes anything;
+* **the order against the approval channel**: a name the set omits must not put a
+  question to the host first, since escalation asks permission for a command —
+  with its own control, the same hop on a set that admits the shell;
 * **the memory-reflection loop**, which builds its own table and therefore needs
-  its own assertion: a filter in `_run_tool_loop` alone leaves this copy whole;
+  its own assertion: a filter in `_run_tool_loop` alone leaves this copy whole,
+  and "no set stated" has to mean the default set here as it does everywhere;
 * **the two ends of the message** — what a producer states and what the receiver
   reads back.
 
@@ -40,9 +44,9 @@ from emrg.server.daemon import (
     effective_tool_names,
     scheduled_task_tool_names,
 )
-from emrg.server.tool_types import ToolResult
+from emrg.server.tool_types import ToolDefinition, ToolResult
 from emrg.session import Session
-from emrg.tools.shell_dialects import SHELL_TOOL_NAMES
+from emrg.tools.shell_dialects import SHELL_TOOL_NAMES, shell_tool_name
 
 
 def _registry(platform_name: str = "darwin"):
@@ -141,7 +145,8 @@ def test_the_two_whitelists_name_tools_that_exist():
 # ── the table offered to the model, and the execution side ────────────
 
 
-def _drive_tool_loop(tmp_path, monkeypatch, name, requested, call_name):
+def _drive_tool_loop(tmp_path, monkeypatch, name, requested, call_name,
+                     arguments='{"intent": "x"}', sandbox=None, prepare=None):
     """Run one turn whose first round calls `call_name`; report what it was offered."""
     monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", tmp_path / "fire")
     monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH", tmp_path / "rc")
@@ -151,6 +156,10 @@ def _drive_tool_loop(tmp_path, monkeypatch, name, requested, call_name):
     # The reflection loop is a subject of its own below; here it would only add a
     # background turn whose LLM is this test's stub.
     server._maybe_reflect_memory = lambda *a, **k: None
+    if prepare is not None:
+        # Lets a test stub what the escalation path would ask (`_approval_channel`)
+        # before the turn runs, without widening this harness's return value.
+        prepare(server)
 
     offered: dict = {"tools": None}
     state = {"round": 0}
@@ -166,7 +175,7 @@ def _drive_tool_loop(tmp_path, monkeypatch, name, requested, call_name):
                 "tool_calls": [{
                     "index": 0,
                     "id": "call_0",
-                    "function": {"name": call_name, "arguments": '{"intent": "x"}'},
+                    "function": {"name": call_name, "arguments": arguments},
                 }],
                 "finish_reason": "tool_calls",
                 "usage": None,
@@ -186,7 +195,7 @@ def _drive_tool_loop(tmp_path, monkeypatch, name, requested, call_name):
     server._broadcast = fake_broadcast
     req = TaskRequest(
         id=f"req-{name}", session_id=session.session_id, prompt="go",
-        tools=requested,
+        tools=requested, sandbox=sandbox,
     )
     asyncio.run(server._run_tool_loop(req, None, session))
     return offered["tools"], stub.calls, frames
@@ -226,6 +235,13 @@ def test_a_registered_tool_outside_the_set_does_not_run(tmp_path, monkeypatch):
         "the call has to be answered, not dropped in silence: the model has to learn "
         f"that the name is not available; frames said {said[:400]!r}"
     )
+    # The refusal names what this turn *does* have. Listing the whole registry
+    # would advertise, in the one message the model reads about availability, the
+    # tools the turn cannot use — the same leak as an unfiltered table, spoken.
+    assert f"Available: {['read']}" in said, (
+        "the refusal has to name the turn's own set; frames said "
+        f"{said[:400]!r}"
+    )
 
 
 def test_a_tool_inside_the_set_does_run(tmp_path, monkeypatch):
@@ -236,6 +252,80 @@ def test_a_tool_inside_the_set_does_run(tmp_path, monkeypatch):
         tmp_path, monkeypatch, "allowed", ["read", "write"], "write",
     )
     assert calls, "the harness cannot execute a tool at all, so the refusal above proves nothing"
+
+
+# ── the set decides before the host is asked anything ─────────────────
+
+
+def _record_approval_channel(asked):
+    """A `_approval_channel` stand-in that records each question, then refuses.
+
+    Refusing keeps the harness from running a command: the subject here is that
+    the host is asked at all, and a green assertion must not depend on what the
+    answer would have been.
+    """
+    async def channel(session_id):
+        asked.append(session_id)
+
+        async def ask(question):
+            return None
+        return ask
+    return channel
+
+
+def _hop_arguments():
+    """A shell call that asks for one hop — legal from `read-only` in one step."""
+    return json.dumps({
+        "intent": "x",
+        "sandbox_permissions": "workspace-write",
+        "justification": "the command needs to write inside the workspace",
+    })
+
+
+def test_a_name_outside_the_set_asks_the_host_nothing(tmp_path, monkeypatch):
+    # `read-only` is a tier the shell tool may widen from, so this call would
+    # reach the approval channel if the set were consulted afterwards. It is the
+    # order that is under test: an escalation for a tool the turn was never
+    # offered is a question about a command that cannot run either way.
+    asked: list[str] = []
+    shell = shell_tool_name()
+    _offered, calls, frames = _drive_tool_loop(
+        tmp_path, monkeypatch, "no-approval", ["read"], shell,
+        arguments=_hop_arguments(), sandbox="read-only",
+        prepare=lambda server: setattr(
+            server, "_approval_channel", _record_approval_channel(asked),
+        ),
+    )
+    assert asked == [], (
+        "the host was asked to approve an escalation for a tool this turn was "
+        "never offered — the question goes out before the answer that the call "
+        "cannot run, and a yes would be reported as the call's outcome"
+    )
+    assert calls == []
+    said = json.dumps(frames, ensure_ascii=False)
+    assert "unknown" in said.lower(), (
+        "the call still has to be answered as unknown, not dropped in silence; "
+        f"frames said {said[:400]!r}"
+    )
+
+
+def test_a_name_inside_the_set_does_ask_the_host(tmp_path, monkeypatch):
+    # The positive control for the arm above: same hop, same arguments, and the
+    # shell named in the set. Without it an `asked == []` assertion would also
+    # hold on a harness that can never reach the approval channel.
+    asked: list[str] = []
+    shell = shell_tool_name()
+    _drive_tool_loop(
+        tmp_path, monkeypatch, "approval", ["read", shell], shell,
+        arguments=_hop_arguments(), sandbox="read-only",
+        prepare=lambda server: setattr(
+            server, "_approval_channel", _record_approval_channel(asked),
+        ),
+    )
+    assert asked, (
+        "the stub cannot observe an approval question at all, so the arm above "
+        "proves nothing about whether one is skipped"
+    )
 
 
 # ── the memory-reflection loop, which builds its own table ────────────
@@ -278,6 +368,62 @@ def test_the_memory_reflection_loop_honours_the_same_set(tmp_path):
         assert stub.calls == [], (
             "the reflection loop executed a tool the turn's set does not contain"
         )
+
+    asyncio.run(_test())
+
+
+class _UnlistedTool:
+    """A registered tool no whitelist names — the shape a `boss`-style role has."""
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+        self.calls: list[dict] = []
+
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name=self._name,
+            description="registered but named in neither whitelist",
+            parameters={"type": "object", "properties": {}},
+        )
+
+    async def execute(self, args):
+        self.calls.append(dict(args))
+        return ToolResult(content="the unlisted tool ran")
+
+
+def test_the_reflection_loop_reads_silence_as_the_default_set(tmp_path):
+    """`None` means "no set stated", and the answer to that is the default set.
+
+    Reading the same silence as the **whole registry** is a second meaning for
+    one fact, and it opens exactly the hole the whitelists close: a tool
+    registered but named nowhere would be offered by this loop while every other
+    turn refuses it.
+    """
+    async def _test():
+        server = _server(tmp_path)
+        session = Session.create_with_id("tool-set-reflect-silence", tmp_path)
+        unlisted = _UnlistedTool("unlisted-role")
+        server.tools.register(unlisted)
+        tables: list[list[str]] = []
+
+        async def fake_chat(messages, tools=None):
+            tables.append([entry["function"]["name"] for entry in (tools or [])])
+            return {"content": "no new memories", "tool_calls": None}
+
+        server.llm.chat = fake_chat
+        server._maybe_reflect_memory(
+            session,
+            "a prompt long enough to be worth reflecting on " * 2,
+            "an answer long enough to be worth reflecting on " * 2,
+        )
+        await asyncio.sleep(0.2)
+        assert tables, "the reflection loop never ran, so it asserted nothing"
+        assert "unlisted-role" not in tables[0], (
+            "a tool registered but named in no whitelist was offered by the "
+            "reflection loop — one silence, two meanings"
+        )
+        assert unlisted.calls == []
+        assert tables[0] == effective_tool_names(server.tools, None)
 
     asyncio.run(_test())
 

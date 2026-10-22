@@ -5085,15 +5085,21 @@ class EmrgServer:
                         tc_name, args, session, req, turn_tool_names,
                     )
 
-                    # Execute
-                    refusal = await self._apply_escalation(
-                        tc_name, args, session, req,
-                    )
                     # Issue #2465: a name outside this turn's set is answered
                     # exactly as a name that was never registered — the refusal
-                    # below, not a second vocabulary for saying no.
+                    # below, not a second vocabulary for saying no. Decided
+                    # **before** the escalation path, because escalation is a
+                    # question put to the host: a call that cannot run must not
+                    # ask permission to run first, and an answer of "yes" would
+                    # then be reported as the call's outcome although the tool it
+                    # widened for was never dispatched.
                     tool = (
                         self.tools.get(tc_name) if tc_name in turn_tool_set else None
+                    )
+                    # Execute
+                    refusal = (
+                        await self._apply_escalation(tc_name, args, session, req)
+                        if tool is not None else None
                     )
                     if refusal is not None:
                         # A refused escalation is the call's outcome, and the
@@ -5122,7 +5128,9 @@ class EmrgServer:
                         result = ToolResult(
                             tool_call_id=tc_id,
                             name=tc_name,
-                            content=f"Unknown tool: {tc_name}. Available: {self.tools.names}",
+                            content=(
+                                f"Unknown tool: {tc_name}. Available: {turn_tool_names}"
+                            ),
                             error=True,
                         )
 
@@ -7916,11 +7924,17 @@ class EmrgServer:
                 # Issue #2465: this loop builds its **own** table, so a filter in
                 # `_run_tool_loop` alone would leave this copy offering every
                 # registered tool — the third enforcement point, not a duplicate.
-                tools = self.tools.to_openai_tools(tool_names)
-                reflect_tool_set = (
-                    set(tool_names) if tool_names is not None
-                    else set(self.tools.names)
-                )
+                #
+                # `None` is "the caller stated no set", and the answer to that is
+                # the **default set**, not the whole registry. Answering the same
+                # silence two ways is a gate with a hole in it: a tool registered
+                # but named in neither whitelist (the review/owner role this issue
+                # leaves room for) would be offered here while every other site
+                # refuses it. One silence, one meaning — and the meaning is the
+                # function that already states it.
+                reflect_names = effective_tool_names(self.tools, tool_names)
+                tools = self.tools.to_openai_tools(reflect_names)
+                reflect_tool_set = set(reflect_names)
                 messages: list[dict] = [{"role": "user", "content": prompt}]
                 max_rounds = 4
 
