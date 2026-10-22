@@ -3552,8 +3552,8 @@ class EmrgServer:
                 })
                 return
 
-            session_dir = Path(cwd) / ".emrg" / "sessions" / session_id
-            if not session_dir.exists():
+            session_path = session_dir(cwd, session_id)
+            if not session_path.exists():
                 await self._send(ws, {
                     "type": "session_deleted",
                     "error": f"Session {session_id} not found",
@@ -3918,8 +3918,8 @@ class EmrgServer:
 
     def _get_or_create_session(self, session_id: str, cwd: Path) -> Session:
         """Load an existing session or create a new one."""
-        session_dir = cwd / ".emrg" / "sessions" / session_id
-        if session_dir.exists() and (session_dir / "meta.json").exists():
+        session_path = session_dir(cwd, session_id)
+        if session_path.exists() and (session_path / "meta.json").exists():
             return Session.load(session_id, cwd)
         return Session.create_with_id(session_id, cwd)
 
@@ -7016,8 +7016,8 @@ class EmrgServer:
         或 message_count==0 时，按全局 sessions_index.json 校验请求 cwd 是否为
         该会话真实项目路径；不匹配 → not_found + warning（幽灵目录不再掩盖错误）。
         """
-        session_dir = cwd / ".emrg" / "sessions" / session_id
-        meta_path = session_dir / "meta.json"
+        session_path = session_dir(cwd, session_id)
+        meta_path = session_path / "meta.json"
 
         # ── Ask the meta's kind before opening it ──
         #
@@ -7064,7 +7064,7 @@ class EmrgServer:
         # this cwd can resume. A missing path is unchanged — `_non_regular_kind` answers
         # `None` for a subject whose `stat` fails.
         kind = _non_regular_kind(meta_path)
-        if kind or not session_dir.exists() or not meta_path.exists():
+        if kind or not session_path.exists() or not meta_path.exists():
             if kind:
                 logger.warning(
                     "resume rejected: %s is %s, not a regular file (session %s)",
@@ -7088,7 +7088,7 @@ class EmrgServer:
                 logger.warning(
                     "resume rejected: ghost session %s (0 messages) at %s — "
                     "real session lives at %s (canonical cwd from sessions index)",
-                    session_id, session_dir, canonical or "unknown",
+                    session_id, session_path, canonical or "unknown",
                 )
                 await self._send(ws, {
                     "type": "resume_result",
@@ -7410,14 +7410,14 @@ class EmrgServer:
             store = ProjectMemoryStore(cwd_path)
             index_path = store.index_path
         else:
-            session_dir = Path(cwd) / ".emrg" / "sessions" / session_id
-            if not session_dir.exists():
+            session_path = session_dir(cwd, session_id)
+            if not session_path.exists():
                 await self._send(ws, {
                     "type": "memories_list",
                     "error": f"Session {session_id} not found",
                 })
                 return
-            store = SessionMemoryStore(session_dir)
+            store = SessionMemoryStore(session_path)
             index_path = store.index_path
 
         memories = store.list()
@@ -7453,14 +7453,14 @@ class EmrgServer:
             cwd_path = Path(cwd) if cwd else Path.cwd()
             store = ProjectMemoryStore(cwd_path)
         else:
-            session_dir = Path(cwd) / ".emrg" / "sessions" / session_id
-            if not session_dir.exists():
+            session_path = session_dir(cwd, session_id)
+            if not session_path.exists():
                 await self._send(ws, {
                     "type": "memory_content",
                     "error": f"Session {session_id} not found",
                 })
                 return
-            store = SessionMemoryStore(session_dir)
+            store = SessionMemoryStore(session_path)
 
         # `get_with_reason` rather than `get`: "there is no such memory" and "the file
         # could not be read" are different answers, and a bare `None` collapses them

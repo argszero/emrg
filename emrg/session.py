@@ -1080,9 +1080,9 @@ class Session:
             )
             return False
 
-        session_dir = cwd / ".emrg" / "sessions" / session_id
-        if session_dir.exists():
-            shutil.rmtree(session_dir)
+        target = session_dir(cwd, session_id)
+        if target.exists():
+            shutil.rmtree(target)
             logger.info("session deleted: %s", session_id)
             # Global index (rant 2026-08-13T16:42:22): drop the deleted session.
             remove_session_index(session_id)

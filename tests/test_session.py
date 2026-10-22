@@ -1,7 +1,9 @@
 """Tests for session module: Session class and _validate_tool_messages."""
 
+import ast
 import json
 import os
+import warnings
 from datetime import datetime
 from pathlib import Path
 
@@ -42,6 +44,76 @@ def test_session_dir_keeps_the_workspace_it_was_given(tmp_path):
     """A relative workspace stays relative, so the caller's cwd still decides."""
     assert str(session_dir("project", "s_260101_0000_abcd")) == str(
         Path("project") / ".emrg" / "sessions" / "s_260101_0000_abcd"
+    )
+
+
+def _slash_chain(node: ast.AST) -> list[ast.AST]:
+    """`a / b / c` flattened to `[a, b, c]`, outermost division first."""
+    parts: list[ast.AST] = []
+    while isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        parts.append(node.right)
+        node = node.left
+    parts.append(node)
+    parts.reverse()
+    return parts
+
+
+def _spells_a_session_directory(tree: ast.AST) -> list[int]:
+    """Line numbers of expressions that build `<cwd>/.emrg/sessions/<id>`.
+
+    Read from the syntax tree rather than the text, because the subject is *who
+    builds the path*, not how it is spelled: a scan for one spelling passes a
+    second author who writes `sessions / sid`, and a scan of the text counts the
+    producer's own docstring as a second producer. The operand after `"sessions"`
+    is what makes it a leaf — `cwd / ".emrg" / "sessions"` without one names the
+    directory sessions live *in*, which several callers may legitimately ask for.
+    """
+    found: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Div):
+            continue
+        parts = _slash_chain(node)
+        for i in range(len(parts) - 2):
+            head, tail = parts[i], parts[i + 1]
+            if (
+                isinstance(head, ast.Constant) and head.value == ".emrg"
+                and isinstance(tail, ast.Constant) and tail.value == "sessions"
+                and not isinstance(parts[i + 2], ast.Constant)
+            ):
+                found.append(node.lineno)
+                break
+    return found
+
+
+def test_the_directory_a_session_lives_in_has_one_producer():
+    """The rule is `session_dir`, and no other module may build the path itself.
+
+    Dozens of call sites need this directory, and each one that spelled it out
+    was a copy that a change to the layout would have to find. They agreed, so
+    nothing was broken — which is exactly what makes a copy invisible to a
+    behavioural test: five of them survived a refactor that claimed to leave one
+    producer, because every copy still produced the right answer.
+    """
+    package_root = Path(__file__).resolve().parents[1] / "emrg"
+    producer, offenders = [], []
+    for path in sorted(package_root.rglob("*.py")):
+        rel = path.relative_to(package_root).as_posix()
+        # A module elsewhere in the package carries an invalid escape sequence in a
+        # string; parsing it warns, and that warning is about a file this test does
+        # not judge. Silenced here rather than fixed there, so the guard reads only
+        # what it asserts.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(path.read_bytes())
+        for lineno in _spells_a_session_directory(tree):
+            (producer if rel == "session.py" else offenders).append(f"{rel}:{lineno}")
+
+    assert offenders == [], (
+        "these build <cwd>/.emrg/sessions/<id> themselves instead of asking "
+        f"session_dir(): {offenders} — a second producer is a second rule"
+    )
+    assert len(producer) == 1, (
+        f"expected exactly one producer in session.py, found {producer}"
     )
 
 
