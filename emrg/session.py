@@ -411,6 +411,14 @@ class Session:
         # `subagent` call reads this, and a daemon restart must not reset the
         # count of a session that already exists on disk.
         self._depth: int = 0
+        # When this session — acting as an owner — was last asked for a stance, in
+        # seconds since the epoch (issue #2495). An owner is left alone for
+        # `REASK_WINDOW_S` after a call, because direction does not change inside
+        # four hours and a second call buys the same judgement again. It lives in
+        # `meta.json` for the same reason `depth` does: the session is retained on
+        # disk, so a daemon restart that reset this clock would let the very next
+        # round re-buy a decision it already paid for.
+        self._boss_asked_at: float | None = None
 
         # Lazy-initialized memory store
         self._memory_store = None
@@ -524,6 +532,15 @@ class Session:
             # a JSON `true` in this field would then read as depth 1.
             if isinstance(stored_depth, int) and not isinstance(stored_depth, bool):
                 session._depth = max(0, stored_depth)
+            stored_boss_asked_at = meta.get("boss_asked_at")
+            # The same care as `depth`: `True` is an int, and a JSON `true` here
+            # would read as the epoch's first second. Absent, malformed and
+            # non-numeric all mean "never asked", which is the state that permits
+            # a call — the safe direction for a value that only ever blocks one.
+            if isinstance(stored_boss_asked_at, (int, float)) and not isinstance(
+                stored_boss_asked_at, bool
+            ):
+                session._boss_asked_at = float(stored_boss_asked_at)
         logger.info("session loaded: %s (%d messages)", session_id, session._message_count)
         return session
 
@@ -591,6 +608,30 @@ class Session:
         self._depth = int(depth)
         self._save_meta()
         logger.info("session delegation depth set: %s -> %d", self.session_id, self._depth)
+
+    # ── The owner's clock ─────────────────────────────────────
+
+    @property
+    def boss_asked_at(self) -> float | None:
+        """When this session was last asked for a stance, or ``None`` if never.
+
+        Seconds since the epoch, so the quiet window's comparison is arithmetic
+        rather than a parse: a malformed instant would otherwise have to be told
+        apart from an absent one at the point where it decides something.
+        """
+        return self._boss_asked_at
+
+    def set_boss_asked_at(self, when: float) -> None:
+        """Persist the instant this session was last asked, into ``meta.json``.
+
+        The only writer of the key, and it is called *before* the owner's turn
+        runs rather than after it: a stamp written on completion leaves a turn that
+        died looking like one that never happened, and the next call would then pay
+        for the same judgement a second time.
+        """
+        self._boss_asked_at = float(when)
+        self._save_meta()
+        logger.info("session owner clock set: %s -> %.0f", self.session_id, self._boss_asked_at)
 
     # ── Sandbox tier ──────────────────────────────────────────
 
@@ -1098,6 +1139,10 @@ class Session:
         # key saying it is zero deep.
         if self._depth:
             meta["depth"] = self._depth
+        # Same rule again: a session that was never asked for a stance must not
+        # gain a key claiming one was.
+        if self._boss_asked_at is not None:
+            meta["boss_asked_at"] = self._boss_asked_at
         if title is not None:
             meta["title"] = title
         else:

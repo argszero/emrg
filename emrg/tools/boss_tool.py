@@ -16,9 +16,15 @@ So the owner is a tool of its own, with three properties that make it one:
 ``<parent session dir>/sub-agent/sub-boss``, so the parent's own session directory
 is two levels up and its ``history.jsonl`` is right there — the last ``user``
 record is the entire task statement, ``extra_prompt`` included. The parent supplies
-no text: ``focus`` is an optional *question*, never the brief. Measured on the
-evolution task, that statement runs to tens of thousands of characters, and every
-one of them is the position this role needs.
+no steering text at all, not even a question: naming what the owner should judge is
+choosing the direction, and a session that chose the question would be deciding how
+its own work is judged. What the caller supplies is ``intent`` — the one-line reason
+the log keeps — and nothing else.
+
+**It is left alone between calls.** Direction does not change inside four hours, so
+a call in that window starts no turn and buys no judgement; it answers with
+``BUSY_MARKER`` and the time the owner frees up, which is an ordinary result rather
+than an error because a busy owner is not a failure of the round that asked.
 
 **It is not cleared between rounds.** The nine ``subagent`` slots are
 least-recently-closed and emptied on use, which is right for a job that ends when
@@ -47,14 +53,26 @@ from emrg.server.tool_types import ToolDefinition, ToolResult
 from emrg.tools.base import ToolExecutor
 
 #: The runner the daemon supplies: ``await runner(parent_session_id=…,
-#: parent_cwd=…, focus=…, timeout_s=…, intent=…, parent_tools=…)`` answering
-#: either ``{"text": …}`` or ``{"error": …}``. ``parent_tools`` is the parent
-#: turn's effective tool set (#2465), which the child inherits.
+#: parent_cwd=…, timeout_s=…, intent=…, parent_tools=…, parent_sandbox=…)``
+#: answering either ``{"text": …}`` or ``{"error": …}``. ``parent_tools`` is the
+#: parent turn's effective tool set (#2465), which the child inherits.
 Runner = Callable[..., Awaitable[dict]]
 
 #: Generous enough for a real read of the parent's history, short enough that a
 #: wedged owner session cannot hold the parent's round for ever.
 DEFAULT_TIMEOUT_S = 600
+
+#: How long an owner is left alone after a call (issue #2495). Direction does not
+#: change inside four hours, so a second call in that window spends a full owner
+#: turn to re-buy a judgement that cannot have changed. The constant lives here,
+#: beside the description that tells the caller about it, so the advertised window
+#: and the enforced one are one number: the daemon reads this same constant.
+REASK_WINDOW_S = 4 * 60 * 60
+
+#: What a busy answer opens with, so that "the owner was left alone" is readable
+#: from the answer's shape rather than by running the prose through a reader. A
+#: stance never begins with it.
+BUSY_MARKER = "boss-busy-window"
 
 
 class BossTool(ToolExecutor):
@@ -75,20 +93,14 @@ class BossTool(ToolExecutor):
                 "for this round, not a list of problems to consider. Anything the "
                 "answer does not mention is still yours to decide. It is offered "
                 "to scheduled tasks only, keeps its memory across rounds, and its "
-                "round stands still until it answers."
+                "round stands still until it answers. It is also left alone for "
+                f"{REASK_WINDOW_S // 3600}h after a call: an answer that opens with "
+                f"`{BUSY_MARKER}` is that notice, carries no stance, and means carry "
+                "on with your own round rather than waiting."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "focus": {
-                        "type": "string",
-                        "description": (
-                            "Optional. The one thing you want the owner's "
-                            "judgement on — a question, not a summary of the work: "
-                            "it already reads the history. Omit it and the owner "
-                            "states its own stance."
-                        ),
-                    },
                     "timeout_s": {
                         "type": "integer",
                         "minimum": 1,
@@ -119,18 +131,6 @@ class BossTool(ToolExecutor):
                 content=(
                     "boss: `intent` is required and must not be empty — it is what "
                     "the log keeps of this call, and every tool call carries one."
-                ),
-                error=True,
-            )
-
-        focus = arguments.get("focus")
-        if focus is not None and not isinstance(focus, str):
-            return ToolResult(
-                name="boss",
-                content=(
-                    f"boss: `focus` must be a string, so got {focus!r}. It is an "
-                    "optional question, so leaving it out is how a caller states "
-                    "'no particular question'."
                 ),
                 error=True,
             )
@@ -195,7 +195,6 @@ class BossTool(ToolExecutor):
         outcome = await self._runner(
             parent_session_id=str(parent_session_id),
             parent_cwd=str(parent_cwd),
-            focus=(focus or ""),
             timeout_s=int(timeout_s),
             intent=intent,
             parent_tools=parent_tools,
