@@ -24,8 +24,9 @@ from pathlib import Path
 from typing import Iterable
 
 from emrg.memory import NotARegularFile, SessionMemoryStore
+from emrg.sandbox.grants import GRANT_REGISTRY, RootGrant
 from emrg.sandbox.policy import SANDBOX_MODES
-from emrg.sandbox.roots import canonical_path
+from emrg.sandbox.roots import canonical_path, canonical_target
 from emrg.sessions_index import remove_session_index, upsert_session_index
 from emrg.tools.base import non_regular_kind
 
@@ -390,13 +391,19 @@ class Session:
         # session's silence keeps meaning "unconfined" (`policy.DEFAULT_MODE`),
         # and a property that answered the default would erase that difference.
         self._sandbox: str | None = None
-        # The roots the host named for this session on top of the tier, in the
-        # order they were added (rant 2026-10-09T09:43:39). Empty is the honest
-        # default: a session nobody has named a root for grants exactly what its
-        # tier derives, which is what every session did before this existed.
-        # Canonical spellings only — the writer canonicalizes before storing, so
-        # a reader never has to wonder which spelling was meant.
-        self._sandbox_roots: list[str] = []
+        # The grants the host named for this session on top of the tier, in the
+        # order they were added (rant 2026-10-09T09:43:39), typed since issue
+        # #2492 so a kind no dialect has to re-decide is stored beside the object
+        # it names. Empty is the honest default: a session nobody has named a
+        # grant for grants exactly what its tier and the default manifest derive.
+        # Canonical targets only — the writer canonicalizes before storing, so a
+        # reader never has to wonder which spelling was meant.
+        self._sandbox_grants: list[RootGrant] = []
+        # The default-manifest targets this session's host has withdrawn (issue
+        # #2492). Per session, like the grants above and the tier: a default
+        # applies without anyone typing anything, so "stop applying it" is state,
+        # and the daemon is its only writer.
+        self._sandbox_withheld: list[str] = []
         # How many delegations deep this session is (issue #2451): 0 for a session
         # a client or the scheduler started, parent + 1 for one a `subagent` call
         # started. It lives in `meta.json` rather than in a daemon table because
@@ -493,9 +500,25 @@ class Session:
             session._updated_at = meta.get("updated_at", "")
             session._last_compact_at = meta.get("last_compact_at")
             session._sandbox = meta.get("sandbox")
-            stored_roots = meta.get("sandbox_roots")
-            if isinstance(stored_roots, list):
-                session._sandbox_roots = [r for r in stored_roots if isinstance(r, str)]
+            stored_grants = meta.get("sandbox_grants")
+            if isinstance(stored_grants, list):
+                session._sandbox_grants = [
+                    grant for grant in (RootGrant.from_wire(v) for v in stored_grants)
+                    if grant is not None
+                ]
+            else:
+                # A `meta.json` written before grants were typed (issue #2492):
+                # the path list is the same fact in the older spelling, and a
+                # session that predates the change must keep its boundary rather
+                # than silently lose it on the next daemon restart.
+                stored_roots = meta.get("sandbox_roots")
+                if isinstance(stored_roots, list):
+                    session._sandbox_grants = [
+                        RootGrant.from_path(r) for r in stored_roots if isinstance(r, str)
+                    ]
+            stored_withheld = meta.get("sandbox_withheld")
+            if isinstance(stored_withheld, list):
+                session._sandbox_withheld = [r for r in stored_withheld if isinstance(r, str)]
             stored_depth = meta.get("depth")
             # `isinstance(..., int)` is not enough on its own: `True` is an int, and
             # a JSON `true` in this field would then read as depth 1.
@@ -597,32 +620,81 @@ class Session:
         logger.info("session sandbox tier set: %s -> %s", self.session_id, mode)
 
     @property
-    def sandbox_roots(self) -> list[str]:
-        """The host-named writable roots this session carries, in added order.
+    def sandbox_grants(self) -> list[RootGrant]:
+        """The host-named writable grants this session carries, in added order.
 
         A copy, so a reader cannot mutate the session's list by accident — the
         daemon injects this value into every tool call, and an injected list a
         tool could edit in place would be a second writer of a fact the daemon
-        owns.
+        owns. Typed since issue #2492: the **kind** travels with the object it
+        names, so a dialect never re-decides it from the disk.
         """
-        return list(self._sandbox_roots)
+        return list(self._sandbox_grants)
 
-    def set_sandbox_roots(self, roots: "list[str] | tuple[str, ...]") -> None:
-        """Replace this session's host-named writable roots and persist them.
+    @property
+    def sandbox_roots(self) -> list[str]:
+        """The **paths** among this session's grants — the projection clients read.
 
-        The **only** writer of the key, and it does not validate the paths: the
-        refusals (``/``, the home directory, a root covering a protected daemon
-        file) belong to the daemon's command, which is where a person is waiting
-        for an answer and where a refusal can name the reason.  This method is
-        storage.  Its one precondition is the shape the reader depends on —
-        absolute, canonical spellings — and it canonicalizes rather than
-        trusting the caller, so a symlink handed in here is stored as the path
-        the enforcement layer will actually compare against.
+        Clients and `meta.json` consumers have always spoken in paths, and the two
+        filesystem kinds still are paths; a registry key is not, so it contributes
+        none. This is a derived view of
+        :attr:`sandbox_grants` and never a second store: it is computed on every
+        read, so it cannot disagree with the typed list.
+
+        Kept because the GUI's resume path reads ``meta.sandbox_roots`` (the
+        ``sandbox_roots`` frame is the live source, this key the reopened one) and
+        because a removal is still named by a path.
         """
-        self._sandbox_roots = [canonical_path(str(r)) for r in roots]
+        return [
+            grant.target for grant in self._sandbox_grants
+            if grant.kind != GRANT_REGISTRY
+        ]
+
+    @property
+    def sandbox_withheld(self) -> list[str]:
+        """Default-manifest targets this session's host has withdrawn."""
+        return list(self._sandbox_withheld)
+
+    def set_sandbox_grants(self, grants: "list[RootGrant] | tuple[RootGrant, ...]") -> None:
+        """Replace this session's host-named writable grants and persist them.
+
+        The **only** writer of the key, and it does not validate the grants: the
+        refusals (``/``, the home directory, a grant covering a protected daemon
+        file, a kind no platform enforces) belong to the daemon's command, which
+        is where a person is waiting for an answer and where a refusal can name
+        the reason. This method is storage. Its one precondition is the shape the
+        reader depends on — a canonical target — and it canonicalizes rather than
+        trusting the caller, so a symlink handed in here is stored as the path the
+        enforcement layer will actually compare against.
+        """
+        self._sandbox_grants = [
+            grant._replace(target=canonical_target(grant)) for grant in grants
+        ]
         self._save_meta()
         logger.info(
-            "session sandbox roots set: %s -> %d root(s)", self.session_id, len(self._sandbox_roots)
+            "session sandbox grants set: %s -> %d grant(s)",
+            self.session_id, len(self._sandbox_grants),
+        )
+
+    def set_sandbox_roots(self, roots: "list[str] | tuple[str, ...]") -> None:
+        """Replace this session's grants from **paths** — the pre-#2492 spelling.
+
+        Kept as a named convenience rather than a second store: it converts to
+        typed grants and calls :meth:`set_sandbox_grants`, so the one writer stays
+        one writer. Its cost is stated where callers meet it —
+        :meth:`~emrg.sandbox.grants.RootGrant.from_path` reads each kind off the
+        disk — which is why the daemon and the delegation paths use the typed
+        method and only a path-only caller reaches for this one.
+        """
+        self.set_sandbox_grants([RootGrant.from_path(str(root)) for root in roots])
+
+    def set_sandbox_withheld(self, targets: "list[str] | tuple[str, ...]") -> None:
+        """Replace the default-manifest targets this session withdraws."""
+        self._sandbox_withheld = [str(target) for target in targets]
+        self._save_meta()
+        logger.info(
+            "session sandbox withheld set: %s -> %d target(s)",
+            self.session_id, len(self._sandbox_withheld),
         )
 
     # ── Message persistence ───────────────────────────────────
@@ -1013,8 +1085,15 @@ class Session:
         # session's path from a client turn's (rant 2026-09-30T09:30:16).
         if self._sandbox:
             meta["sandbox"] = self._sandbox
-        if self._sandbox_roots:
-            meta["sandbox_roots"] = list(self._sandbox_roots)
+        if self._sandbox_grants:
+            meta["sandbox_grants"] = [grant.as_wire() for grant in self._sandbox_grants]
+            # The path projection is written beside the typed list because the
+            # GUI's resume path reads `meta.sandbox_roots` (its live source is the
+            # `sandbox_roots` frame). One producer — `sandbox_roots` is computed
+            # from the grants — so the two keys cannot disagree.
+            meta["sandbox_roots"] = self.sandbox_roots
+        if self._sandbox_withheld:
+            meta["sandbox_withheld"] = list(self._sandbox_withheld)
         # Same rule as `sandbox`: a session nobody delegated to must not gain a
         # key saying it is zero deep.
         if self._depth:

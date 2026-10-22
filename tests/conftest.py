@@ -1150,3 +1150,57 @@ def _refuse_a_real_probe_on_windows(monkeypatch):
     from tests.signal_probe_guard import RefusingProbe
 
     monkeypatch.setattr(os, "kill", RefusingProbe(os.kill, platform=sys.platform))
+
+
+@pytest.fixture(autouse=True)
+def _empty_default_manifest(monkeypatch):
+    """Keep the host's ``~`` out of every sandbox reading (issue #2492).
+
+    ``emrg/sandbox/grants.py::DEFAULT_MANIFEST`` is a **real** deployment
+    manifest: it names the directories ``lark-cli`` renews its token in, and on
+    this host ``~/.lark-cli`` exists, so ``default_grants()`` returns it and every
+    ``workspace-write`` derivation grants it. A test asserting an exact profile
+    would then be measuring the host's home rather than the code — the same
+    defect ``_redirect_the_config_path`` prevents for ``config.toml``, one layer
+    over: the host's state is not a test input.
+
+    Pinned to **empty** rather than to a fixed table, because a fixed table is a
+    second manifest that can drift from the real one. A test whose subject is the
+    manifest patches :data:`~emrg.sandbox.grants.DEFAULT_MANIFEST` itself, so
+    "a default applies without a command" is proved against a table the test
+    wrote, and the test that measures the real table reads it directly, past this
+    fixture — so "the real table is well formed" is proved on the real one.
+    """
+    from emrg.sandbox import grants
+
+    monkeypatch.setattr(grants, "DEFAULT_MANIFEST", {})
+
+
+@pytest.fixture
+def pin_default_manifest(monkeypatch):
+    """Give the default manifest a table the **test** wrote (issue #2492).
+
+    The autouse fixture above pins the manifest empty, so no ordinary test reads
+    the host's home. A test whose subject *is* the manifest needs a table, and
+    the safe table is one it wrote: pinning to the real deployment rows instead
+    would make "a default applies without a command" a claim about whether this
+    machine runs ``lark-cli``.
+
+    Every platform family gets the same rows, so the fixture answers the same on
+    all three CI legs rather than encoding the leg it was written on.
+
+    :returns: a callable taking the targets to grant as directories, which
+        returns the rows it installed.
+    """
+    from emrg.sandbox.grants import GRANT_DIRECTORY
+    from emrg.sandbox import grants
+
+    def _pin(*targets: str, kind: str = GRANT_DIRECTORY) -> tuple:
+        rows = tuple((kind, str(target)) for target in targets)
+        monkeypatch.setattr(
+            grants, "DEFAULT_MANIFEST",
+            {family: rows for family in ("darwin", "linux", "win32", "other")},
+        )
+        return rows
+
+    return _pin

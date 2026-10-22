@@ -141,4 +141,34 @@ describe("SandboxRootsDialog", () => {
     await userEvent.click(screen.getByTestId("sandbox-roots-close"));
     expect(onDismiss).toHaveBeenCalledTimes(1);
   });
+
+  it("默认项也画出来，并标明来源；移除按钮发的就是它的 target（issue #2492）", async () => {
+    // 需求 3 的两半：默认项必须**可见**（否则主人不知道该撤回什么），也必须能**撤回**。
+    // 两半是同一次渲染加同一次点击，所以钉在这里。
+    const onOp = vi.fn();
+    setup({
+      onOp,
+      roots: ["/tmp/named"],
+      grants: [
+        { kind: "directory", target: "/tmp/named", source: "session" },
+        { kind: "directory", target: "/tmp/default", source: "default" },
+      ],
+    });
+    const rows = screen.getAllByTestId("sandbox-roots-row");
+    expect(rows.map((row) => row.getAttribute("data-root"))).toEqual([
+      "/tmp/named",
+      "/tmp/default",
+    ]);
+    const sources = screen.getAllByTestId("sandbox-roots-source");
+    expect(sources.map((node) => node.textContent)).toEqual(["本会话命名", "安装默认"]);
+
+    await userEvent.click(screen.getAllByTestId("sandbox-roots-remove")[1]);
+    expect(onOp).toHaveBeenCalledWith("remove", "/tmp/default");
+  });
+
+  it("只有契约表、没有 grants 时仍按路径画（老状态不是空状态）", () => {
+    setup({ roots: ["/tmp/a"] });
+    expect(screen.getAllByTestId("sandbox-roots-row")).toHaveLength(1);
+    expect(screen.queryAllByTestId("sandbox-roots-source")).toHaveLength(0);
+  });
 });

@@ -76,7 +76,14 @@ from emrg.server.git_utils import (
 from emrg.sandbox import escalation
 from emrg.sandbox.policy import DEFAULT_MODE as DEFAULT_SANDBOX_MODE
 from emrg.sandbox.policy import SANDBOX_MODES, resolve_policy
-from emrg.sandbox.roots import judge_extra_root, judge_root_removal
+from emrg.sandbox.grants import manifest_targets
+from emrg.sandbox.roots import (
+    canonical_path,
+    granted_grants,
+    judge_extra_root,
+    judge_root_removal,
+    stored_grants,
+)
 from emrg.server import content_risk_probe
 from emrg.server.tool_types import ToolResult
 from emrg.memory import (
@@ -3441,6 +3448,7 @@ class EmrgServer:
                 msg.get("op", ""),
                 msg.get("path", ""),
                 ws,
+                msg.get("kind") or None,
             )
 
         elif msg_type == "list_projects":
@@ -4322,8 +4330,9 @@ class EmrgServer:
         * **the host names the writable roots, and only the host.** The tools
           that write under a root — the shell tools, ``write`` and ``edit``, the
           same set the tier reaches — receive ``writable_roots`` from the
-          session's ``sandbox_roots``, injected **unconditionally** (rant
-          2026-10-09T09:43:39 §4). The difference from the tier above is
+          session's ``sandbox_roots``, and ``writable_grants``, the same grants
+          **typed** with their kind and provenance, injected **unconditionally**
+          (rant 2026-10-09T09:43:39 §4; the typed key is issue #2492's). The difference from the tier above is
           deliberate on both sides: the tier's injection is guarded by
           ``req.sandbox`` because a call carrying no tier belongs to a host
           session whose unconfined default is silence, and silence cannot widen
@@ -4397,6 +4406,14 @@ class EmrgServer:
             # safe form is the unconditional one: whatever the session holds,
             # including nothing, is what the call runs with.
             args["writable_roots"] = session.sandbox_roots
+            # The same fact **typed** (issue #2492), and the one a tool prefers:
+            # `writable_roots` is the path projection, so a reader that took only
+            # that list would have to re-decide each object's kind from the disk —
+            # the defect the typed model exists to remove. Both keys are written
+            # from the session's one typed list, so they cannot disagree.
+            args["writable_grants"] = [
+                grant.as_wire() for grant in session.sandbox_grants
+            ]
         if tc_name in ("subagent", "boss"):
             # The parent's identity and cwd are facts the model must not choose
             # (issue #2451, #2467): the slot is derived from both, so a caller that
@@ -5463,13 +5480,31 @@ class EmrgServer:
         :param session: the session whose turn is being built.
         :returns: the context line, or ``""`` when the session names no root.
         """
-        roots = session.sandbox_roots
-        if not roots:
+        policy = resolve_policy(
+            mode=resolve_client_tier(session),
+            workspace_root=str(session.cwd),
+            session_id=session.session_id,
+            extra_grants=session.sandbox_grants,
+            withheld_roots=session.sandbox_withheld,
+        )
+        # What actually applies, not what is stored: `granted_grants` is empty at
+        # `read-only`, so a line built from the stored list would tell the model
+        # it may write where the fence will refuse it. The installation's
+        # defaults are included and labelled, because a model that does not know
+        # a directory is writable wastes the turn proving it either way.
+        granted = {grant.target for grant in granted_grants(policy)}
+        grants = [
+            grant for grant in stored_grants(policy)
+            if grant.target in granted
+        ]
+        if not grants:
             return ""
-        listed = ", ".join(repr(root) for root in roots)
+        listed = ", ".join(
+            f"{grant.target!r} ({grant.kind}, {grant.source})" for grant in grants
+        )
         return (
-            "[context] This session may also write (host-named, equal to the "
-            f"workspace for writing): {listed} — you cannot add to or widen these."
+            "[context] This session may also write (equal to the workspace for "
+            f"writing): {listed} — you cannot add to or widen these."
         )
 
     def _inject_context_message(
@@ -6867,9 +6902,10 @@ class EmrgServer:
         await self._broadcast_all(frame, exclude=ws)
 
     async def _handle_set_sandbox_roots(
-        self, session_id: str, cwd: str, op: str, path: str, ws
+        self, session_id: str, cwd: str, op: str, path: str, ws,
+        kind: str | None = None,
     ) -> None:
-        """Add, remove or list a session's host-named writable roots.
+        """Add, remove or list a session's host-named writable grants.
 
         Rant 2026-10-09T09:43:39. The middle tier the mode table was missing: a
         ``workspace-write`` session could reach a file outside its workspace only
@@ -6916,12 +6952,7 @@ class EmrgServer:
             return
         session = self._get_or_create_session(session_id, Path(cwd))
         if op == "list":
-            await self._send(ws, {
-                "type": "sandbox_roots",
-                "session_id": session_id,
-                "op": "list",
-                "roots": session.sandbox_roots,
-            })
+            await self._send(ws, self._sandbox_roots_frame(session, op="list"))
             return
         # The policy the *session* is under, so "already covered" is judged
         # against the tier in force and against the roots already stored — naming
@@ -6931,7 +6962,8 @@ class EmrgServer:
             mode=resolve_client_tier(session),
             workspace_root=cwd,
             session_id=session_id,
-            extra_roots=session.sandbox_roots,
+            extra_grants=session.sandbox_grants,
+            withheld_roots=session.sandbox_withheld,
         )
         # The op's own judge. They are two functions because they answer two
         # questions: `add` applies the six granting rules (is this a path the
@@ -6941,32 +6973,67 @@ class EmrgServer:
         # 2026-10-09 on head `4eb69bab`).
         verdict = (
             judge_root_removal(path, policy) if op == "remove"
-            else judge_extra_root(path, policy)
+            else judge_extra_root(path, policy, kind)
         )
         if verdict.refusal:
-            await self._send(ws, {
-                "type": "sandbox_roots",
-                "session_id": session_id,
-                "op": op,
-                "roots": session.sandbox_roots,
-                "error": verdict.refusal,
-            })
+            await self._send(
+                ws, self._sandbox_roots_frame(session, op=op, error=verdict.refusal)
+            )
             return
-        roots = session.sandbox_roots
         if op == "remove":
             # Removal is idempotent and never a policy refusal: a path that is not
             # in the list is answered with the list as it stands, which is the
             # state the host asked for. (A path that cannot be *read* is refused
             # above, and that is the judge's rule rather than this one's.) The
-            # comparison is on the canonical spelling, so a path removed with a
-            # different spelling than it was added with still comes out.
-            remaining = [r for r in roots if r != verdict.canonical]
-            notice = None if len(remaining) != len(roots) else (
-                f"{verdict.canonical!r} was not one of this session's roots — "
-                "nothing to remove"
-            )
-            if len(remaining) != len(roots):
-                session.set_sandbox_roots(remaining)
+            # comparison is on the canonical target, so a path removed with a
+            # different spelling than it was added with still comes out, and the
+            # **kind is carried through** rather than re-read off the disk: a
+            # `set_sandbox_roots` round trip here would have re-decided every
+            # remaining grant's kind from the filesystem (issue #2492).
+            remaining = [
+                grant for grant in session.sandbox_grants
+                if grant.target != verdict.canonical
+            ]
+            removed = len(remaining) != len(session.sandbox_grants)
+            if removed:
+                session.set_sandbox_grants(remaining)
+            # A default takes effect without anyone typing anything, so the only
+            # way to withdraw one is to record the withdrawal: it is state, not
+            # absence from a list nobody wrote (requirement 3 of issue #2492). A
+            # session grant that shadows a default is withdrawn for the same
+            # reason — removing it alone would uncover the default underneath.
+            withdrew_default = False
+            if any(
+                canonical_path(target) == verdict.canonical
+                for target in manifest_targets()
+            ):
+                if verdict.canonical not in session.sandbox_withheld:
+                    session.set_sandbox_withheld(
+                        [*session.sandbox_withheld, verdict.canonical]
+                    )
+                    withdrew_default = True
+            if removed and withdrew_default:
+                notice = (
+                    f"{verdict.canonical!r} removed, and it was in the installation's "
+                    "default manifest — withdrawn for this session as well"
+                )
+            elif removed:
+                notice = None
+            elif withdrew_default:
+                notice = (
+                    f"{verdict.canonical!r} is an installation default, not a root this "
+                    "session named — withdrawn for this session"
+                )
+            elif verdict.canonical in session.sandbox_withheld:
+                notice = (
+                    f"{verdict.canonical!r} is already withdrawn for this session — "
+                    "nothing to remove"
+                )
+            else:
+                notice = (
+                    f"{verdict.canonical!r} was not one of this session's grants and is "
+                    "no installation default — nothing to remove"
+                )
         else:
             # `store` is the judge's decision, not something inferred from a
             # notice: a root already covered is not stored, while one named at
@@ -6974,17 +7041,81 @@ class EmrgServer:
             # "do not store" kept nothing in that second case while the sentence
             # told the host it had (measured 2026-10-09 on head `4eb69bab`).
             notice = verdict.notice
-            if verdict.store:
-                session.set_sandbox_roots([*roots, verdict.canonical])
-        frame = {
-            "type": "sandbox_roots",
-            "session_id": session_id,
-            "op": op,
-            "roots": session.sandbox_roots,
-            "notice": notice,
-        }
+            if verdict.store and verdict.grant is not None:
+                session.set_sandbox_grants([*session.sandbox_grants, verdict.grant])
+                # Naming a withdrawn default again is a re-grant, so the
+                # withdrawal is lifted; leaving it would store a grant the
+                # derivation then subtracts, which reads as a command that did
+                # nothing.
+                if verdict.grant.target in session.sandbox_withheld:
+                    session.set_sandbox_withheld([
+                        target for target in session.sandbox_withheld
+                        if target != verdict.grant.target
+                    ])
+        frame = self._sandbox_roots_frame(session, op=op, notice=notice)
         await self._send(ws, frame)
         await self._broadcast_all(frame, exclude=ws)
+
+    def _sandbox_roots_frame(
+        self, session: Session, op: str, notice: str | None = None,
+        error: str | None = None,
+    ) -> dict:
+        """The one ``sandbox_roots`` frame — list, write and refusal alike.
+
+        Three ops and two failure shapes used to build five dicts in this
+        handler, which is five places for one of them to drift. There is one
+        producer now, and the frame carries the surface **twice** on purpose:
+
+        * ``roots`` — the session's own grants as paths. Every existing reader
+          speaks this (the TUI's confirmation line, ``meta.sandbox_roots`` on a
+          resume), and it means exactly what it always did: what the host named,
+          not what the manifest supplied.
+        * ``grants`` — the whole writable surface typed, with provenance
+          (requirement 3 of issue #2492): the session's grants first, then the
+          installation defaults this session has not withdrawn. A default that
+          no client could display would be the deployment constant host decision
+          D5 deleted, under a new name; showing it with ``source`` is what makes
+          «withdraw this» a command a person can type.
+        * ``withheld`` — the defaults this session withdrew, so a client shows
+          why a name is missing rather than leaving it unexplained.
+
+        ``stored_grants`` and not ``granted_grants``: this is the display, and a
+        grant named at ``read-only`` is on the session's list even though the
+        tier grants nothing — hiding it would tell the host their command did
+        nothing (the add path says when it takes effect).
+
+        :param session: the session whose surface is being reported.
+        :param op: the op that produced the frame — ``add``, ``remove`` or ``list``.
+        :param notice: what to tell the host when the outcome is more than a
+            plain acceptance.
+        :param error: the refusal, when the op was refused.
+        :returns: the frame to send and broadcast.
+        """
+        policy = resolve_policy(
+            mode=resolve_client_tier(session),
+            workspace_root=str(session.cwd),
+            session_id=session.session_id,
+            extra_grants=session.sandbox_grants,
+            withheld_roots=session.sandbox_withheld,
+        )
+        frame = {
+            "type": "sandbox_roots",
+            "session_id": session.session_id,
+            "op": op,
+            "roots": session.sandbox_roots,
+            "grants": [grant.as_wire() for grant in stored_grants(policy)],
+            "withheld": session.sandbox_withheld,
+        }
+        # A key is **present** when it has something to say, and absent
+        # otherwise: both clients read a notice or a refusal by checking whether
+        # the key is there, so a `None` value would read as "there is a refusal,
+        # and it is nothing" — the shape `tests/test_sandbox_extra_roots.py`
+        # caught on the first frame this helper produced.
+        if notice is not None:
+            frame["notice"] = notice
+        if error is not None:
+            frame["error"] = error
+        return frame
 
     def _apply_model_switch(self, model_name: str) -> dict:
         """The state change behind `/model`, as one reusable step.
@@ -7174,6 +7305,13 @@ class EmrgServer:
                 # never replayed, so this is the only frame a client opening a
                 # session later can learn them from.
                 "sandbox_roots": session.sandbox_roots,
+                # Typed and with provenance, so a client opening a session later
+                # shows the same surface the live frame carries — the defaults
+                # included (issue #2492). One producer, two frames.
+                "sandbox_grants": [
+                    grant.as_wire() for grant in session.sandbox_grants
+                ],
+                "sandbox_withheld": session.sandbox_withheld,
                 # A client opening a session learns the session's live state
                 # here, because `turn_start`/`turn_end` are broadcasts — they
                 # are addressed to whoever is subscribed at the time and are
@@ -7786,12 +7924,18 @@ class EmrgServer:
             child_tier = getattr(parent, "sandbox", None) or parent_sandbox
             if child_tier:
                 child.set_sandbox(child_tier)
-            if parent.sandbox_roots:
+            if parent.sandbox_grants:
                 try:
-                    child.set_sandbox_roots(parent.sandbox_roots)
+                    # Typed, so a grant the parent holds keeps the kind it was
+                    # named with instead of being re-read off the disk one level
+                    # down (issue #2492), and the withdrawals travel with them:
+                    # a child that inherited a grant without its withdrawal would
+                    # be wider than the parent that spawned it.
+                    child.set_sandbox_grants(parent.sandbox_grants)
+                    child.set_sandbox_withheld(parent.sandbox_withheld)
                 except (ValueError, OSError):
                     logger.warning(
-                        "[sub-%d] could not inherit the parent's writable roots", slot,
+                        "[sub-%d] could not inherit the parent's writable grants", slot,
                     )
 
             req = TaskRequest(
@@ -7986,11 +8130,12 @@ class EmrgServer:
         child_tier = getattr(parent, "sandbox", None) or parent_sandbox
         if child_tier:
             child.set_sandbox(child_tier)
-        if parent.sandbox_roots:
+        if parent.sandbox_grants:
             try:
-                child.set_sandbox_roots(parent.sandbox_roots)
+                child.set_sandbox_grants(parent.sandbox_grants)
+                child.set_sandbox_withheld(parent.sandbox_withheld)
             except (ValueError, OSError):
-                logger.warning("[boss] could not inherit the parent's writable roots")
+                logger.warning("[boss] could not inherit the parent's writable grants")
 
         req = TaskRequest(
             id=f"boss-{int(started * 1000)}",

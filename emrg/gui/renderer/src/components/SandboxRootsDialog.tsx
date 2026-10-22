@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../lib/i18n";
 import { Dialog } from "./Dialog";
-import type { SandboxRootsNotice } from "../lib/daemonBridge";
+import type { SandboxGrant, SandboxRootsNotice } from "../lib/daemonBridge";
 
 /**
  * SandboxRootsDialog — the GUI entry to a session's host-named extra writable
@@ -32,6 +32,16 @@ export interface SandboxRootsDialogProps {
   sid: string | null;
   /** The daemon's list, or null while nobody has asked. */
   roots?: string[] | null;
+  /**
+   * The whole surface typed, with provenance (issue #2492), or null while nobody
+   * has asked.
+   *
+   * The rows come from here when it is present, and fall back to `roots` when it
+   * is not: the manifest's entries are grants the host never typed, and a dialog
+   * that listed only what they typed could not show them the default that is
+   * already in force — nor offer the one command that withdraws it.
+   */
+  grants?: SandboxGrant[] | null;
   /** What the daemon said about the last op for this session, if anything. */
   notice?: SandboxRootsNotice | null;
   onOp?: (op: "add" | "remove" | "list", path: string) => void;
@@ -42,6 +52,7 @@ export function SandboxRootsDialog({
   open,
   sid,
   roots = null,
+  grants = null,
   notice = null,
   onOp,
   onDismiss,
@@ -63,6 +74,14 @@ export function SandboxRootsDialog({
   }, [open, sid]);
 
   const canWrite = Boolean(sid);
+  // One row shape for both sources: a typed grant when the daemon sent one, and
+  // the path alone when this client is reading an older state. The *rows* are the
+  // display, so the two forms converge here rather than in two lists.
+  const rows: { target: string; source: string | null }[] =
+    grants === null
+      ? (roots ?? []).map((target) => ({ target, source: null }))
+      : grants.map((grant) => ({ target: grant.target, source: grant.source }));
+  const asked = grants !== null || roots !== null;
   const submitAdd = (): void => {
     const value = path.trim();
     // An empty path is not sent: the daemon would refuse it, and a refusal the
@@ -122,34 +141,46 @@ export function SandboxRootsDialog({
           <div className="help-row" data-testid="sandbox-roots-nosession">
             <span className="help-hint">{t("sandboxRoots.noSession")}</span>
           </div>
-        ) : roots === null ? (
+        ) : !asked ? (
           <div className="help-row" data-testid="sandbox-roots-loading">
             <span className="help-hint">{t("dlg.loading")}</span>
           </div>
-        ) : roots.length === 0 ? (
+        ) : rows.length === 0 ? (
           <div className="help-row" data-testid="sandbox-roots-empty">
             <span className="help-hint">{t("sandboxRoots.empty")}</span>
           </div>
         ) : (
-          roots.map((root) => (
+          rows.map(({ target, source }) => (
             <div
               className="help-row"
               data-testid="sandbox-roots-row"
-              data-root={root}
-              key={root}
+              data-root={target}
+              data-source={source ?? undefined}
+              key={target}
               style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)" }}
             >
-              <span className="help-hint" title={root} style={{ flex: 1, wordBreak: "break-all" }}>
-                {root}
+              <span className="help-hint" title={target} style={{ flex: 1, wordBreak: "break-all" }}>
+                {target}
+                {source === null ? null : (
+                  <span
+                    className="help-hint"
+                    data-testid="sandbox-roots-source"
+                    style={{ marginLeft: "var(--sp-2)", color: "var(--text-2)" }}
+                  >
+                    {source === "default"
+                      ? t("sandboxRoots.source.default")
+                      : t("sandboxRoots.source.session")}
+                  </span>
+                )}
               </span>
               <button
                 type="button"
                 className="btn btn-ghost"
                 data-testid="sandbox-roots-remove"
-                data-root={root}
-                title={t("sandboxRoots.removeTitle", { path: root })}
-                aria-label={t("sandboxRoots.removeTitle", { path: root })}
-                onClick={() => onOp?.("remove", root)}
+                data-root={target}
+                title={t("sandboxRoots.removeTitle", { path: target })}
+                aria-label={t("sandboxRoots.removeTitle", { path: target })}
+                onClick={() => onOp?.("remove", target)}
               >
                 {t("sandboxRoots.remove")}
               </button>

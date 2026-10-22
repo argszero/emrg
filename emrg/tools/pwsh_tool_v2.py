@@ -64,6 +64,7 @@ from emrg.sandbox.contract import (
 from emrg.sandbox.policy import (
     DANGER_FULL_ACCESS,
     SandboxPolicy,
+    grants_from_arguments,
     resolve_policy,
 )
 from emrg.sandbox.escalation import with_retry_hint
@@ -827,7 +828,7 @@ class PwshToolV2(ToolExecutor):
             mode=arguments.get("sandbox"),
             workspace_root=workdir,
             session_id=arguments.get("session_id"),
-            extra_roots=arguments.get("writable_roots"),
+            extra_grants=grants_from_arguments(arguments),
         )
         # The command-text rules a checked tier makes (containment escape, and the
         # host's daemon-lifecycle red line) are read from the text by

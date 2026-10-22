@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 from emrg.sandbox.fence import file_refusal
-from emrg.sandbox.policy import resolve_policy
+from emrg.sandbox.policy import grants_from_arguments, resolve_policy
 from emrg.server.tool_types import ToolDefinition, ToolResult
 from emrg.tools.base import ToolExecutor, special_file_kind, special_file_refusal
 from emrg.tools.file_policy import resolve_file_target
@@ -86,7 +86,7 @@ class WriteTool(ToolExecutor):
             mode=arguments.get("sandbox"),
             workspace_root=str(arguments.get("workspace") or os.getcwd()),
             session_id=arguments.get("session_id"),
-            extra_roots=arguments.get("writable_roots"),
+            extra_grants=grants_from_arguments(arguments),
         )
         reason = file_refusal(target, policy)
         if reason:

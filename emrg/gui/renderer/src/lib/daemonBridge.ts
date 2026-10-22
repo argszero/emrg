@@ -167,6 +167,23 @@ export interface DaemonAppState {
    */
   sandboxRootsBySid: Record<string, string[]>;
   /**
+   * The same surface **typed, with provenance** (issue #2492): every grant the
+   * session may write under — the ones the host named and the ones the
+   * installation's default manifest supplies — each with its kind and its
+   * `source`.
+   *
+   * It exists beside `sandboxRootsBySid` rather than replacing it because they
+   * answer different questions: the path map is what this client shows as *the
+   * host's list* (and what `resume_result.meta.sandbox_roots` has always
+   * carried), while this one is the whole writable surface. Without it a default
+   * would be invisible in the GUI, and a grant nobody can see is one nobody can
+   * withdraw — the deployment constant host decision D5 deleted, back under a new
+   * name.
+   *
+   * An absent key means "the daemon has not said", exactly as above.
+   */
+  sandboxGrantsBySid: Record<string, SandboxGrant[]>;
+  /**
    * The last word the daemon had on a roots op for this session: a refusal (the
    * rule it named), a "nothing changed" notice, or a plain success.
    *
@@ -299,6 +316,47 @@ export function resumeSandboxRoots(meta: unknown): string[] | null {
   return roots.filter((r): r is string => typeof r === "string");
 }
 
+/**
+ * One typed writable grant, as the daemon reports it (issue #2492).
+ *
+ * `kind` is the object's kind (`directory`, `file`, and `registry` for the kind
+ * the model carries but no dialect enforces yet), and `source` says who named it:
+ * `session` for a grant the host typed, `default` for an entry of the
+ * installation's manifest. The GUI shows both, because a default that cannot be
+ * told from a root the host named is one they cannot decide to withdraw.
+ */
+export interface SandboxGrant {
+  kind: string;
+  target: string;
+  source: string;
+}
+
+/**
+ * The grants a `sandbox_roots` frame or a `resume_result` snapshot carries, or
+ * `null` when it carried none.
+ *
+ * Tolerant in one direction only, like the daemon's own reader: an entry that is
+ * not a grant is **dropped**, because a malformed entry that survived would
+ * describe a writable surface the run does not have.
+ */
+export function readSandboxGrants(value: unknown): SandboxGrant[] | null {
+  if (!Array.isArray(value)) return null;
+  return value.flatMap((entry): SandboxGrant[] => {
+    if (!entry || typeof entry !== "object") return [];
+    const { kind, target, source } = entry as Record<string, unknown>;
+    if (typeof kind !== "string" || typeof target !== "string" || typeof source !== "string") {
+      return [];
+    }
+    return [{ kind, target, source }];
+  });
+}
+
+/** The typed grants a resumed session's snapshot carries, or `null` (see above). */
+export function resumeSandboxGrants(meta: unknown): SandboxGrant[] | null {
+  const meta_ = meta as { sandbox_grants?: unknown } | null | undefined;
+  return readSandboxGrants(meta_?.sandbox_grants);
+}
+
 export function createDaemonAppStore(): SnapshotStore<DaemonAppState> {
   return createSnapshotStore<DaemonAppState>({
     connected: false,
@@ -320,6 +378,7 @@ export function createDaemonAppStore(): SnapshotStore<DaemonAppState> {
     disconnectedBySid: {},
     sandboxBySid: {},
     sandboxRootsBySid: {},
+    sandboxGrantsBySid: {},
     sandboxRootsNoticeBySid: {},
     inputHistoryBySid: {},
     upgradeBanner: null,
@@ -622,6 +681,10 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
         // by the TUI, by another GUI, or by this one before a restart — has no
         // other way to learn the list.
         const storedRoots = resumeSandboxRoots(resume.meta);
+        // And the same surface typed, so a session opened later shows the
+        // manifest's entries with their provenance rather than only the roots
+        // someone typed (issue #2492).
+        const storedGrants = resumeSandboxGrants(resume.meta);
         store.update((s) => ({
           ...s,
           turnStartBySid: startedMs === null ? rest : { ...s.turnStartBySid, [k]: startedMs },
@@ -632,6 +695,9 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
           ...(storedRoots === null
             ? {}
             : { sandboxRootsBySid: { ...s.sandboxRootsBySid, [k]: storedRoots } }),
+          ...(storedGrants === null
+            ? {}
+            : { sandboxGrantsBySid: { ...s.sandboxGrantsBySid, [k]: storedGrants } }),
         }));
         break;
       }
@@ -678,13 +744,14 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
         // state the session carries, which is why `roots` is read first and
         // unconditionally.
         const d = data as {
-          session_id?: string; op?: unknown; roots?: unknown;
+          session_id?: string; op?: unknown; roots?: unknown; grants?: unknown;
           error?: unknown; notice?: unknown;
         };
         const k = KEY(d.session_id ?? sid);
         const roots = Array.isArray(d.roots)
           ? d.roots.filter((r): r is string => typeof r === "string")
           : null;
+        const grants = readSandboxGrants(d.grants);
         const error = typeof d.error === "string" && d.error ? d.error : "";
         const notice = typeof d.notice === "string" && d.notice ? d.notice : "";
         const op = typeof d.op === "string" ? d.op : "";
@@ -707,6 +774,9 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
           return {
             ...s,
             ...(roots === null ? {} : { sandboxRootsBySid: { ...s.sandboxRootsBySid, [k]: roots } }),
+            ...(grants === null
+              ? {}
+              : { sandboxGrantsBySid: { ...s.sandboxGrantsBySid, [k]: grants } }),
             sandboxRootsNoticeBySid: notices,
           };
         });
