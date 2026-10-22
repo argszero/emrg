@@ -461,6 +461,28 @@ def test_load_and_start_ios_app_task(tmp_path):
         )
 
 
+def _template_section(text: str, heading: str) -> str:
+    """One `### ` section of a task template: its heading through to the next one.
+
+    A whole-file search cannot tell a rule from a mention. §3 named `lark-cli im +messages-send`
+    for months while naming no identity for it to run as, and a phrase asserted anywhere in the
+    file would have stayed green if §3 lost its own statement of the rule — which is the same
+    shape as the defect that sentence carried. So a rule is read from the section that owns it.
+
+    The bound has to stop: a region that runs to the end of the file is no bound, and it would
+    let a phrase in `Forbidden` satisfy a rule the section itself dropped. A missing next
+    heading is therefore a failure rather than an unbounded region.
+    """
+    start = text.index(heading) + len(heading)
+    rest = text[start:]
+    end = rest.find("\n### ")
+    assert end != -1, (
+        f"{heading!r} is the last `###` section of this template, so where it ends cannot be "
+        f"read — and the pins below are only a rule about this section if the region stops"
+    )
+    return rest[:end]
+
+
 def test_load_and_start_feishu_task(tmp_path):
     """`feishu` tasks start a TaskHandler with the `feishu` template.
 
@@ -530,6 +552,43 @@ def test_load_and_start_feishu_task(tmp_path):
          "when the identity is read the way the send will read it"),
     ):
         assert phrase in flat, f"the feishu template must state that {why}; {phrase!r} is missing"
+
+    # The rules below are about **which identity an `im` call runs as** and **where a question
+    # goes**, and neither is visible to a phrase-in-file pin (see `_template_section`). The
+    # identity is the sharper half: it is the whole difference between a message the host is
+    # notified about and the same text arriving, unnoticed, in a conversation named after the
+    # host himself — and both calls exit successfully, so a round cannot learn the difference
+    # from an exit code.
+    for section, phrase, why in (
+        ("### 1. Read", "`--as user`",
+         "reading a direct conversation needs the user identity, and the identity that reads is "
+         "not the identity that sends"),
+        ("### 1. Read", "`im +messages-search`",
+         "the search index lags a send by seconds, so the section has to name the listing that "
+         "answers whether the host replied and say why the other cannot"),
+        ("### 1. Read", "the one your own last message landed in",
+         "§3 reads a reply by position inside a conversation, so the round has to know which "
+         "conversation that is before the positional rule means anything"),
+        ("### 3. Send", "+messages-send --as bot",
+         "a send that names no identity is resolved by the CLI's own `auto` default, which "
+         "prefers the user account once it is authorised — so the message reaches the host's "
+         "own conversation with no notification, and the call still exits successfully"),
+        ("### 3. Send", "--user-id <open_id>",
+         "the recipient is part of the command: without it the conversation is chosen by that "
+         "same default rather than by the round"),
+        ("### 3. Send", "**A question addressed to the host**",
+         "a question with no draft yet — whether a message wants an answer at all, what it "
+         "should say — has no procedure under the third-party rule, so the round files it in "
+         "the report instead, which is where the host does not read"),
+        ("### 4. Report", "The report is a record, not a channel",
+         "a reported request reads as a discharged duty; the round has to name the message id "
+         "and the conversation it asked in, or count the request as unasked"),
+    ):
+        body = _template_section(text, section)
+        assert phrase in body, (
+            f"{section.lstrip('# ')} of the feishu template must state that {why}; "
+            f"{phrase!r} is missing from that section"
+        )
 
 
 def test_load_and_start_promote_task(tmp_path):
