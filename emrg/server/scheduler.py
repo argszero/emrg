@@ -3713,7 +3713,29 @@ class TaskScheduler:
         # The write goes through `AgentRegistry`, so the register keeps one writer
         # and one temp prefix; only the row's *meaning* (the evolution workspace) is
         # the scheduler's to decide.
-        reg = AgentRegistry(agents_file(config_dir()))
+        #
+        # Read and write must address the *same* file, and it must be the one the
+        # register is actually at. `agents_file` names where the register belongs,
+        # and a register still at its pre-rename name is what `register_for_reading`
+        # answers — the derivation every reader in this package now uses (#2546).
+        # Asking `agents_file` here instead put the two halves at two different
+        # files: `AgentRegistry._read` maps a missing file to `[]`, so this saw no
+        # `emrg` row, upserted one, and created a *second* register holding only
+        # that row — which, from the next call on, is the file `register_for_reading`
+        # prefers, so every other entry vanished from every reader. A write that
+        # cannot address the register it just read is worse than no write, so when
+        # the two names disagree this declines and leaves the move to
+        # `migrate_legacy_registry`, which the daemon runs at startup, before this
+        # function exists.
+        register = register_for_reading(config_dir())
+        if register != agents_file(config_dir()):
+            logger.info(
+                "TaskScheduler: agents.yml is still at %s — leaving the move to the "
+                "startup migration rather than writing a second register",
+                register.name,
+            )
+            return
+        reg = AgentRegistry(register)
         target = str(Path.home() / ".emrg" / "evolution" / "emrg")
         try:
             row = next((e for e in reg.entries() if e.get("name") == "emrg"), None)
