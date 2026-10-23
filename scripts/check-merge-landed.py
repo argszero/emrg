@@ -358,9 +358,18 @@ def check_pr(number: int, repo: str) -> Verdict:
             parts.append(f"no review body of #{number} names a tree")
         why = "; ".join(parts) + " - the landed tree was compared to nothing"
         if referenced:
+            # The runner is bound to a name before it is printed, and that name is
+            # load-bearing rather than cosmetic: the family's guard reads a printed
+            # command's interpreter by reconstructing each interpolation as its own source
+            # (`tests/test_printed_commands_carry_the_python_runner.py`), so a *call*
+            # inside the f-string reconstructs as `{cast_vote().RUNNER}` - a text no runner
+            # matcher reads as a runner - while `{RUNNER}` reconstructs to the one spelling
+            # it knows. The constant keeps its single home: it is read from the sibling
+            # that declares it, so this file adds no second copy of the spelling.
+            RUNNER = cast_vote().RUNNER
             why += (
                 ". A vote that is about a landing tree names the one "
-                f"`{cast_vote().RUNNER} scripts/check-merge-plan-suite.py {number}` reports"
+                f"`{RUNNER} scripts/check-merge-plan-suite.py {number}` reports"
             )
         return Verdict(
             pr=number,
