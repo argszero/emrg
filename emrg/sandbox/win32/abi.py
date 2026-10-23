@@ -8,6 +8,8 @@ file against the blueprint line by line (design §1.1 verbatim-copy list).
 
 from __future__ import annotations
 
+import ctypes
+
 #: OpenProcess access required to query the current process token.
 PROCESS_QUERY_INFORMATION = 0x0400
 #: Token right required by CreateProcessAsUserW.
@@ -135,11 +137,38 @@ REGISTRY_GRANT_MASK = (
 )
 #: ``SECURITY_DESCRIPTOR_REVISION``: the only revision ``InitializeSecurityDescriptor`` accepts.
 SECURITY_DESCRIPTOR_REVISION = 1
+class SecurityDescriptor(ctypes.Structure):
+    """``SECURITY_DESCRIPTOR`` — the absolute form ``InitializeSecurityDescriptor`` builds.
+
+    Declared here, beside the constant it sizes, so that constant can be
+    *measured*: a four-byte header (``Revision``, ``Sbz1``, ``Control``) followed
+    by four pointers is 20 bytes on a 32-bit interpreter and 40 on a 64-bit one,
+    and the DACL pointer — the last field the API writes — starts at offset 32
+    there.  A buffer sized by the 32-bit answer is overrun by half its length on a
+    64-bit host, and because the allocation is a raw byte buffer rather than a
+    Python object's storage, nothing raises: the surplus write lands in the
+    process heap (issue #2509).
+    """
+
+    _fields_ = [
+        ("Revision", ctypes.c_ubyte),
+        ("Sbz1", ctypes.c_ubyte),
+        ("Control", ctypes.c_ushort),
+        ("Owner", ctypes.c_void_p),
+        ("Group", ctypes.c_void_p),
+        ("Sacl", ctypes.c_void_p),
+        ("Dacl", ctypes.c_void_p),
+    ]
+
+
 #: The bytes an absolute ``SECURITY_DESCRIPTOR`` occupies.
 #:
 #: Named by the SDK for exactly this use — the buffer an absolute descriptor is
-#: built in before ``MakeSelfRelativeSD`` measures the form the API wants.
-SECURITY_DESCRIPTOR_MIN_LENGTH = 20
+#: built in before ``MakeSelfRelativeSD`` measures the form the API wants — and
+#: the SDK defines it as ``sizeof(SECURITY_DESCRIPTOR)``, so it is taken from the
+#: struct above and never written down.  A literal ``20`` here is the 32-bit
+#: answer: correct on one interpreter width and a 20-byte overrun on the other.
+SECURITY_DESCRIPTOR_MIN_LENGTH = ctypes.sizeof(SecurityDescriptor)
 
 # --- process creation (Win32 process owner, win32-process/src/abi.ts) -------
 
