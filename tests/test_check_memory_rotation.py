@@ -21,6 +21,11 @@ halves of "does it answer that question, and can a wrong answer look right":
   stamp that does not parse, and a row that matches two projects all answer exit **2**
   or exit **1** with the reason named, and `0` is reserved for a reading that covered
   every project and every row;
+* **the rotation's third key has a carrier or it is not a key** - a row's reading cycle is
+  found wherever the table puts it and printed beside its project, and a row that records
+  none is reported as recording none rather than left looking recently read: §1.5 orders the
+  rotation by "least recently visited", which no bookmark without that field can answer
+  (issue #2525);
 * **a note from an earlier day is re-measured, not repeated** - `no memory root` and
   `path missing` are readings, so a row carrying one the disk now contradicts is a fault
   rather than a verdict that hides a project for ever.
@@ -728,6 +733,71 @@ def test_a_bookmark_truncated_at_its_section_is_diagnosed_as_truncation(mod, tmp
     assert "another shape" in str(excinfo.value)
 
 
+# ------------------------------------------------------ the third key: who read this row
+
+
+def _bookmark_with_read_by(path: Path, rows: list[tuple[str, str, str]]) -> Path:
+    """A bookmark in the four-cell shape another installation writes.
+
+    Kept apart from `_bookmark` on purpose: that fixture is this host's three-cell table and
+    every other test in this file is written against it, so a second shape needs its own
+    writer rather than a changed one.
+    """
+    lines = ["# Bookmark", "",
+             "| project | newest read | files | read by |",
+             "| --- | --- | --- | --- |"]
+    lines += [f"| {key} | {value} | 0 | {cycle} |" for key, value, cycle in rows]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def test_a_row_that_records_its_reading_cycle_is_reported_with_it(mod, tmp_path):
+    """A bookmark that records the cycle and a report that drops it is the same as neither.
+
+    §1.5 orders the rotation by "least recently visited" once the changed projects are
+    taken, so the field is the only carrier that key has (issue #2525).
+    """
+    root = _root(tmp_path, "cycled")
+    _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
+    register = _projects(tmp_path / "projects.yml", [{"name": "cycled", "path": root}])
+    book = _bookmark_with_read_by(tmp_path / "book.md", [("`cycled`", BASE, "cyc20261020-141450")])
+    reading = mod.read(register, book)
+    assert [s["read_by"] for s in reading["states"]] == ["cyc20261020-141450"]
+    assert reading["rows_with_cycle"] == 1
+    report = mod.render(reading, True)
+    assert "read by cyc20261020-141450" in report, report
+    assert "reading cycles: 1 of 1 row(s) record the cycle that read them" in report, report
+
+
+def test_a_row_without_a_cycle_says_so_instead_of_looking_recent(mod, tmp_path):
+    """This host's shape: three cells, no cycle. The absence is a reading, not a fault."""
+    root = _root(tmp_path, "uncycled")
+    _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
+    reading = _reading(mod, tmp_path, [{"name": "uncycled", "path": root}],
+                       [("`uncycled`", BASE)])
+    assert reading["rows_with_cycle"] == 0
+    report = mod.render(reading, True)
+    assert "read by no cycle recorded" in report, report
+    assert "reading cycles: 0 of 1 row(s) record the cycle that read them" in report, report
+    assert "cannot be ordered from this bookmark" in report, report
+    # The row answers every question it was asked, so it is not a coverage fault: a fault
+    # here would send a cycle to rewrite a row that is already correct for its own shape.
+    assert reading["faults"] == []
+
+
+def test_a_cell_that_only_resembles_a_cycle_is_not_read_as_one(mod, tmp_path):
+    """Shape decides, as `_value_of` already decides for the stamp: `cyc` and a stamp of the
+    right width, or nothing. A near miss must not become an ordering key."""
+    root = _root(tmp_path, "almost")
+    _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
+    register = _projects(tmp_path / "projects.yml", [{"name": "almost", "path": root}])
+    for near_miss in ("cyc2026102-14145", "cyc20261020-1414", "cyc20261020-1414500",
+                      "cycle 20261020-141450", "2026-10-20 14:14:50"):
+        book = _bookmark_with_read_by(tmp_path / "book.md", [("`almost`", BASE, near_miss)])
+        reading = mod.read(register, book)
+        assert [s["read_by"] for s in reading["states"]] == [None], near_miss
+        assert reading["rows_with_cycle"] == 0, near_miss
+        assert "read by no cycle recorded" in mod.render(reading, True), near_miss
 # ------------------------------------------------- the register's name, mid-move
 
 
