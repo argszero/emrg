@@ -15,6 +15,7 @@ The DACL application itself is the blueprint's own code path, ported rather than
 re-invented.
 """
 
+import ast
 import ctypes
 import gc
 import json
@@ -23,6 +24,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -147,6 +149,115 @@ def test_the_descriptor_buffer_holds_the_whole_struct_the_api_fills():
         "Sacl",
         "Dacl",
     ]
+
+
+def _abi_measurement_faults(tree):
+    """The places a size or an offset is written down instead of measured (issue #2517).
+
+    :param tree: a parsed module.
+    :returns: one line per fault, empty when the module measures what it needs.
+    """
+    faults = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets, value = [node.target], node.value or ast.Constant(None)
+        else:
+            continue
+        if not isinstance(value, ast.Constant) or type(value.value) is not int:
+            continue
+        for target in targets:
+            name = getattr(target, "id", "")
+            if name.upper().endswith(("_SIZE", "_LENGTH")):
+                faults.append(f"{name} = {value.value} written down")
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        called = getattr(func, "attr", getattr(func, "id", ""))
+        if called not in {"from_address", "string_at"}:
+            continue
+        for arg in node.args:
+            for inner in ast.walk(arg):
+                if isinstance(inner, ast.Constant) and type(inner.value) is int:
+                    faults.append(f"{called}(…) offset written as {inner.value}")
+    return faults
+
+
+def test_a_size_or_an_offset_in_the_win32_abi_is_measured_from_its_struct():
+    """A size or an offset beside a Win32 struct is measured from the declaration.
+
+    Issue #2517, the class #2509 was one instance of. ``SECURITY_MAX_SID_SIZE``
+    was written down as ``68``: correct, and correct by the accident of the
+    struct's shape, with nothing saying so — and the same number was copied again
+    into two test buffers, so a changed constant would have left both sites
+    passing against a number they no longer matched. ``acl.py`` walked an ACE by
+    reading at ``+1``, ``+2``, ``+4`` and ``+8``, which are the
+    ``ACE_HEADER``/``ACCESS_ALLOWED_ACE`` layout and were checkable against
+    nothing.
+
+    This is an AST question, not a Windows one — a declaration lays out on any
+    interpreter — which is why the guard lives in the file's cross-platform half
+    and catches on the macOS and Linux legs, the legs that stay green.
+    """
+    package = Path(__file__).resolve().parent.parent / "emrg" / "sandbox" / "win32"
+    modules = sorted(package.glob("*.py"))
+    assert len(modules) >= 5, f"the ABI package was not read: {package}"
+
+    faults = [
+        f"{path.name}: {fault}"
+        for path in modules
+        for fault in _abi_measurement_faults(ast.parse(path.read_text(encoding="utf-8")))
+    ]
+    assert not faults, "sizes and offsets come from the declaration:\n" + "\n".join(faults)
+
+    # The matcher discriminates, proven on snippets rather than on today's tree:
+    # the constant #2509 shipped, and #2517's hand-computed offset.
+    assert _abi_measurement_faults(ast.parse("SECURITY_DESCRIPTOR_MIN_LENGTH = 20\n"))
+    assert _abi_measurement_faults(ast.parse("ace = ctypes.c_ubyte.from_address(base + 1)\n"))
+    # …and it stays quiet on the shape it asks for.
+    assert not _abi_measurement_faults(
+        ast.parse("SECURITY_DESCRIPTOR_MIN_LENGTH = ctypes.sizeof(SecurityDescriptor)\n")
+    )
+    assert not _abi_measurement_faults(
+        ast.parse("ace = ctypes.c_ubyte.from_address(base + AceHeader.AceFlags.offset)\n")
+    )
+
+
+def test_the_declared_win32_structs_measure_the_offsets_the_acl_walk_reads():
+    """``Sid``, ``AceHeader`` and ``AccessAllowedAce`` are the ruler the walk reads by.
+
+    Both directions, because either alone is satisfiable by a wrong declaration:
+    the value must equal the struct's own size, and the struct must have the shape
+    the platform defines. A truncated declaration shrinks both sides together, so
+    the SDK's numbers are pinned as well.
+    """
+    sid = abi.Sid
+    assert [name for name, _ in sid._fields_] == [
+        "Revision",
+        "SubAuthorityCount",
+        "IdentifierAuthority",
+        "SubAuthority",
+    ]
+    # The sub-authority array is as long as the constant allows, and its bytes are
+    # read through the field itself: a _ctypes field is a descriptor, not a list.
+    assert sid.SubAuthority.size == abi.SID_MAX_SUB_AUTHORITIES * ctypes.sizeof(ctypes.c_uint32)
+    # A SID holds no pointer, so this layout is the same at either interpreter
+    # width — and the SDK's own answer for it is 68.
+    assert ctypes.sizeof(sid) == abi.SECURITY_MAX_SID_SIZE
+    assert abi.SECURITY_MAX_SID_SIZE == 68
+    assert sid.SubAuthorityCount.offset == 1
+    assert sid.SubAuthority.offset == 8
+
+    assert ctypes.sizeof(ffi.ACLStructure) == 8
+    assert (
+        ffi.AceHeader.AceType.offset,
+        ffi.AceHeader.AceFlags.offset,
+        ffi.AceHeader.AceSize.offset,
+    ) == (0, 1, 2)
+    assert ffi.AccessAllowedAce.Mask.offset == 4
+    assert ffi.AccessAllowedAce.SidStart.offset == 8
 
 
 # ── capability SIDs ───────────────────────────────────────────────────────
@@ -1683,7 +1794,7 @@ def test_grant_caller_grants_a_sid_that_its_own_buffer_still_owns(tmp_path, monk
     def fake_caller_ace(bindings, path, sid_ptr):
         for _ in range(256):
             ctypes.create_string_buffer(_FAKE_TOKEN_USER_SIZE)  # this block's own class
-            ctypes.create_string_buffer(68)  # SECURITY_MAX_SID_SIZE
+            ctypes.create_string_buffer(abi.SECURITY_MAX_SID_SIZE)  # the SID buffer's own class
         gc.collect()
         granted.append((path, sid_ptr, ctypes.string_at(sid_ptr, 8)))
 
@@ -2152,7 +2263,7 @@ def test_the_sid_memory_survives_the_allocations_that_used_to_land_on_it():
     before = ctypes.string_at(handle.address, 8)
     for _ in range(256):
         ctypes.create_string_buffer(16)  # the size class of a SID_AND_ATTRIBUTES array
-        ctypes.create_string_buffer(68)  # SECURITY_MAX_SID_SIZE, the well-known SID's own
+        ctypes.create_string_buffer(abi.SECURITY_MAX_SID_SIZE)  # the well-known SID's own class
     gc.collect()
     assert ctypes.string_at(handle.address, 8) == before
 
