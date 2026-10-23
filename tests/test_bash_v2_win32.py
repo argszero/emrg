@@ -111,6 +111,44 @@ def test_a_key_has_one_canonical_spelling_so_one_hive_is_one_identity():
         canonical_key_spelling("HKCU")
 
 
+# ── the ABI declarations ─────────────────────────────────────────────────
+
+
+def test_the_descriptor_buffer_holds_the_whole_struct_the_api_fills():
+    """``SECURITY_DESCRIPTOR_MIN_LENGTH`` is a size, and it is measured, not chosen.
+
+    Issue #2509. The constant was written down as ``20`` — the 32-bit answer —
+    while ``InitializeSecurityDescriptor`` fills the whole struct, whose DACL
+    pointer alone starts at offset 32 on a 64-bit interpreter. The 20-byte buffer
+    ``registry.apply_dacl`` handed the API was overrun by 20 bytes, the surplus
+    write landed in the process heap instead of in an object ctypes bounds, and
+    the crash surfaced in whichever test file the same xdist worker loaded next.
+
+    This guard belongs on every platform, which is why it sits in this file's
+    cross-platform half: the Win32 *calls* need Windows, the struct's layout does
+    not, so the Linux and macOS legs — the ones that stay green — are exactly
+    where a hand-written size has to be caught.
+    """
+    descriptor = abi.SecurityDescriptor
+    pointer = ctypes.sizeof(ctypes.c_void_p)
+    # The property that broke: the buffer is the size of the struct.
+    assert abi.SECURITY_DESCRIPTOR_MIN_LENGTH == ctypes.sizeof(descriptor)
+    # …and the one that still holds where the first is trivially true: the last
+    # field the API writes lives inside the buffer it was handed.
+    assert descriptor.Dacl.offset + pointer <= abi.SECURITY_DESCRIPTOR_MIN_LENGTH
+    # A truncated declaration would shrink both sides together, so pin the shape
+    # the SDK defines: one pointer-size field per member, in order.
+    assert [name for name, _ in descriptor._fields_] == [
+        "Revision",
+        "Sbz1",
+        "Control",
+        "Owner",
+        "Group",
+        "Sacl",
+        "Dacl",
+    ]
+
+
 # ── capability SIDs ───────────────────────────────────────────────────────
 
 
