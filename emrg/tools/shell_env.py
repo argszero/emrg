@@ -47,6 +47,7 @@ import tempfile
 
 from emrg.sandbox.policy import SandboxPolicy
 from emrg.sandbox.roots import canonical_path, writable_roots
+from emrg.tools.file_policy import same_file
 
 #: The directory the relocated caches live in, under the granted temp root.
 CACHE_DIR_NAME = "emrg-confined-cache"
@@ -108,16 +109,32 @@ def _running_package_root() -> str:
 def _same_directory(left: str, right: str) -> bool:
     """Whether two spellings name one directory.
 
-    Canonical and case-folded, because ``PYTHONPATH`` is a deployer-editable
-    string: ``C:\\EMRG`` and ``c:\\emrg\\`` are one root, and treating them as two
-    would prepend a duplicate rather than leave a correct declaration alone.
+    ``PYTHONPATH`` is a deployer-editable string, so ``C:\\EMRG`` and ``c:\\emrg\\``
+    have to read as one root — treating them as two would prepend a duplicate
+    rather than leave a correct declaration alone.
+
+    Answered by the filesystem's own identity — ``st_dev`` + ``st_ino``, the pair
+    ``os.path.samefile`` compares, asked through the one home
+    (:func:`emrg.tools.file_policy.same_file`) — and **not** by a transform of the
+    two strings. The transform it used to be, ``os.path.normcase``, folds case
+    only where ``os.name`` is ``nt`` and is the *identity function* on POSIX: on a
+    volume that folds case while the platform is POSIX — APFS's default, which is
+    what macOS runs — it answered "two directories" for one directory and the root
+    was prepended a second time (#2557). Identity also covers the platform the old
+    spelling got right, and does it without asking which platform is running: NTFS
+    answers through the same pair.
+
+    A directory that is not there has no identity to compare, so it is not the
+    other one: ``False``, and the root is prepended. That is the fail-safe
+    direction — a redundant entry naming a directory that does not exist changes
+    nothing a run can see, while withholding an entry the runner needs breaks its
+    import.
 
     :param left: one spelling of a directory.
     :param right: the other spelling.
-    :returns: whether both resolve to the same directory.
+    :returns: whether both name one directory on disk.
     """
-    canonical = (canonical_path(left), canonical_path(right))
-    return os.path.normcase(canonical[0]) == os.path.normcase(canonical[1])
+    return same_file(canonical_path(left), canonical_path(right))
 
 
 def runner_import_env(environ: dict | None = None) -> dict[str, str]:
