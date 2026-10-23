@@ -818,6 +818,16 @@ def check_pr(
                 f"deletions this PR does not make:"
             )
             lines += [f"    {status}\t{path}" for status, path in reversed_inside]
+        # The pointer and the change it points at are in one stream, in that order
+        # (#2560). They used to be split across stdout and stderr, which makes their
+        # relative position a property of buffering rather than of program order: a
+        # reader combining the streams (`2>&1`, the way a cycle reads a tool) could get
+        # "the landing change is printed above it" *before* the landing change.
+        lines.append(
+            "  Read the landing change above, not diff(base, head): this is a reading "
+            "hazard, not a defect in the PR - the change above is what merges, and the "
+            "diff is that change plus the base's own later commits."
+        )
         return "backwards", "\n".join(lines)
     lines.append(
         f"  diff(base, head) lists {len(apparent)} path(s), and every one of them is "
@@ -886,13 +896,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 3
     if backwards:
+        # On stdout, like the clean verdict two lines below and unlike stderr, which is
+        # for what could not be measured (#2560). The two verdicts of one tool belong in
+        # one stream: split across two, the hazard summary is flushed first whenever the
+        # streams are combined, so the reader met the warning before the change it is
+        # about. A position is only meaningful inside a stream.
         print(
             "\n"
             + ", ".join(f"#{number}" for number in backwards)
             + " reads backwards: reading diff(master, head) as the change this PR lands "
-            "would review work the PR never touched. The landing change is printed above "
-            "it and is what merges. This is a reading hazard, not a defect in the PR.",
-            file=sys.stderr,
+            "would review work the PR never touched. Each PR's own block names the change "
+            "that merges. This is a reading hazard, not a defect in the PR."
         )
         return 1
     print("\nno path reads backwards: diff(master, head) is the change this lands")
