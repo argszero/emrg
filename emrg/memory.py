@@ -163,7 +163,7 @@ INDEX_COUNT_WARN = 100       # >N memory files → consolidation recommended
 #
 # The direction that matters holds for **both** of the cap's subjects, and it holds
 # because the advisory sits on the base store, not on one of the two that inherit
-# from it: `MemoryStore._save_index` calls `_warn_index_thresholds`, so a agent
+# from it: `MemoryStore._save_index` calls `_warn_index_thresholds`, so an agent
 # index and a session index are each flagged before the cap can see them. That is
 # structural rather than lucky — the cap can only truncate a file the advisory
 # already flagged, because UTF-8 never encodes a string in fewer bytes than
@@ -1006,7 +1006,7 @@ class MemoryStore:
     #
     # On the base class since 2026-09-24, because the embed cap truncates *both*
     # indexes a store writes and the advisory used to be wired to one of them: as a
-    # `SessionMemoryStore` method it left a agent index to cross the cap with no
+    # `SessionMemoryStore` method it left an agent index to cross the cap with no
     # reader ever having measured its size, falsifying the ordering the cap's own
     # comment relied on (issue #1581; measured on one fixture — 56,214 chars, the
     # agent store silent, the same file as a session index flagged). Here it covers

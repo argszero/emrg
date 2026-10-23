@@ -202,7 +202,7 @@ def _task_open_switch(pending: tuple[str, str] | None, resumed_sid: str) -> str 
     answer is about a *different* session than the one the open asked for. The
     second is not hypothetical — an open whose verdict never arrived (the
     connection dropped) leaves its target behind, and a later `/resume <id>`
-    succeeding must not then drag the host into a agent they never picked,
+    succeeding must not then drag the host into an agent they never picked,
     which is the defect a cwd is the wrong place to discover.
     """
     if pending is None or pending[1] != resumed_sid:
@@ -227,7 +227,7 @@ def _resume_target_from_resolution(
     names a different session than the one asked for. Same discipline as
     ``_task_open_switch`` at the other end of the same round trip, and for the
     same reason — a verdict that arrives after its request was abandoned must not
-    move the host into a agent they never picked.
+    move the host into an agent they never picked.
 
     An ``unknown`` answer is **not** the same reading as an answer that carries a
     cwd. The daemon cannot vouch for the session's agent when the global index

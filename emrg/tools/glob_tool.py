@@ -26,7 +26,7 @@ class GlobTool(ToolExecutor):
             description=(
                 "Find files matching a glob pattern. "
                 "Supports standard glob patterns: *, ?, [seq], ** for recursive. "
-                "Use this to discover files in a agent by name pattern — e.g., "
+                "Use this to discover files in an agent by name pattern — e.g., "
                 "'**/*.py' for all Python files, 'src/**/*.ts' for TypeScript, "
                 "'**/*test*' for test files. "
                 "Results are capped at 500 matches, sorted by path. "

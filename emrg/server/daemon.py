@@ -2712,7 +2712,7 @@ class EmrgServer:
         # cap keeping the head alone left the reader with the oldest part of the file
         # and hid the newest rows — the rows that exist to stop it re-doing work.
         # Saying where the text is without saying which part of it is gone leaves that
-        # to be guessed. Measured 2026-09-25 on a agent index this cap really
+        # to be guessed. Measured 2026-09-25 on an agent index this cap really
         # truncates (73,484 chars, 24 of its 163 rows kept out of the prompt — issue
         # #1554 holds that reading and its numbers). *Which* part should survive was
         # that issue's open decision and is now taken (issue #1676; the constant above

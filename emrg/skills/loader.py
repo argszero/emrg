@@ -171,7 +171,7 @@ def _parse_skill_file(file_path: Path, source: str) -> Optional[Skill]:
 def _agent_root(start: Path) -> Path:
     """The nearest ancestor of ``start`` carrying a ``.git``, else ``start`` itself.
 
-    A session is normally opened *inside* a agent rather than at its top, while the
+    A session is normally opened *inside* an agent rather than at its top, while the
     agent's skills sit at the top — so the root has to be resolved rather than
     assumed to be the directory the session happens to be in. A directory with no
     repository above it is its own root, which is what a scratch or temp directory

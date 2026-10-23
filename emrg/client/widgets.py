@@ -701,7 +701,7 @@ class AgentSelector(Widget):
         chrome, start, end, markers = window_plan(avail, n, self.selected_index)
         if chrome:
             lines.append(Line(
-                spans=[Span("○ ", style="dim"), Span("Select a agent (↑↓/j/k to move, Enter to confirm, Esc to cancel):", style="bold")],
+                spans=[Span("○ ", style="dim"), Span("Select an agent (↑↓/j/k to move, Enter to confirm, Esc to cancel):", style="bold")],
                 style=ctx.style,
             ))
         if markers and start > 0:

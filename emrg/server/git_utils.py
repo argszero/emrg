@@ -362,7 +362,7 @@ def git_cmd(*args: str, cwd: str | None = None, timeout: int = 10) -> subprocess
 # The dirt is EMRG's, not the repository's, so the repository's *local*
 # ignore file is where it belongs: `.git/info/exclude` is per-clone, is
 # never committed, and never touches the upstream `.gitignore` — which is
-# the file a agent's maintainers own.
+# the file an agent's maintainers own.
 
 # An anchored entry, and *relative to the repository root*: a task directory one
 # level down writes its runtime data into `<root>/work/clone/.emrg`, which the

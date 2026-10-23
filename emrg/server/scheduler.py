@@ -993,7 +993,7 @@ def _resolve_task_template(task_type: str) -> Path:
 
 
 def _resolve_agent_path(name: str) -> str | None:
-    """Resolve a agent name to its path from agents.yml."""
+    """Resolve an agent name to its path from agents.yml."""
     register = agents_file(config_dir())
     if not register.exists():
         return None
