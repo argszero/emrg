@@ -148,6 +148,6 @@ def test_only_the_daemon_process_entry_calls_the_migration():
     hits = []
     for path in sorted((root / "emrg").rglob("*.py")):
         if "migrate_task_config_keys()" in path.read_text(encoding="utf-8"):
-            hits.append(str(path.relative_to(root)))
+            hits.append(path.relative_to(root).as_posix())
 
     assert hits == ["emrg/server/__main__.py"]
