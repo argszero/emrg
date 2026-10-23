@@ -227,6 +227,47 @@ def test_the_register_written_is_the_one_that_exists(tmp_path, monkeypatch):
     ], "the row joined the register every reader opens, and no entry was lost"
 
 
+def test_a_fresh_install_registers_into_the_canonical_name(tmp_path, monkeypatch):
+    """With no register at either name, the daemon still creates `agents.yml`.
+
+    The other half of the claim above, and the half that would regress silently: a host
+    that has never registered anything has neither file, `register_for_reading` answers
+    the name the register belongs at, and `AgentRegistry.for_dir` creates it there. The
+    fix changes *which derivation* answers the path, not where a new register goes, so
+    this pins the equivalence for the state every new installation starts in.
+
+    Both derivations are pinned to one temporary path, so the two names agree here by
+    construction — which is why this test is the behaviour half and the disagreeing-name
+    test above is the one that discriminates the mutant. What this one would catch is a
+    fix that redirected a new register to the legacy name, or stopped creating one.
+    """
+    monkeypatch.setattr(
+        daemon_mod, "agents_file", lambda base=None: tmp_path / "agents.yml",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        daemon_mod, "register_for_reading", lambda base=None: tmp_path / "agents.yml",
+    )
+    assert daemon_mod.agents_file() == tmp_path / "agents.yml", (
+        "both derivations are pinned here so a mutant cannot reach a host's register"
+    )
+
+    server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
+    work = tmp_path / "work"
+    work.mkdir()
+    row = server._register_agent(work)
+
+    register = tmp_path / "agents.yml"
+    assert register.exists(), "a fresh install must still end up with a register"
+    assert row["path"] == str(work)
+    assert [e["path"] for e in yaml.safe_load(register.read_text(encoding="utf-8"))] == [
+        str(work),
+    ]
+    assert not (tmp_path / "projects.yml").exists(), (
+        "the legacy name is never the destination of a new register"
+    )
+
+
 def test_context_section_no_files(tmp_path):
     """No context files found → returns empty list."""
     server = _make_server()
