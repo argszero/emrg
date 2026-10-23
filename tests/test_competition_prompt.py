@@ -1092,6 +1092,31 @@ def test_phase_d_establishes_the_answer_on_a_sample_before_changing_the_class():
     )
 
 
+def test_a_probe_is_read_against_an_absolute_baseline():
+    """§Phase D must say what a probe is read *against*, not only that it is read.
+
+    The four steps read as complete while naming no baseline, and the baseline decides
+    whether the reading is decidable at all. A probe compared with the best submission
+    leaves a zero delta with two opposite meanings — the cases it targeted came back, or
+    it touched none of them — and one number is printed for both, so the submission
+    bought no fact. An absolute floor makes each probe a yes/no question. Asserted by
+    name for the same reason step 4 is: the rule is reasoning, and a reader who is not
+    given the reasoning has no ground for spending a submission on a floor.
+    """
+    text = PROMPT.read_text(encoding="utf-8")
+    start = text.index("#### Phase D — Iteration")
+    end = text.index("#### Phase E — Deadline wrap-up")
+    phase_d = text[start:end]
+    assert "against an absolute baseline rather than against your best score so far" in phase_d, (
+        "§Phase D does not name the baseline a probe is read against, so a zero delta "
+        "reads the same for a case that came back and one that was never touched"
+    )
+    assert "deliberately wrong answer in the same submission format" in phase_d, (
+        "§Phase D must say the floor submission is graded rather than rejected, or the "
+        "floor itself buys nothing and the round is back to an ambiguous zero"
+    )
+
+
 def test_a_discouraging_reading_is_written_as_the_gap_not_as_a_verdict(rendered):
     """§5 asks how likely the goal is; the answer has one accepted form.
 
