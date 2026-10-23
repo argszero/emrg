@@ -172,6 +172,48 @@ def _make_server() -> EmrgServer:
     return server
 
 
+def test_the_register_written_is_the_one_that_exists(tmp_path, monkeypatch):
+    """The daemon writes the register that is *there*, not the name it belongs at.
+
+    A register still carrying its pre-rename name is a state
+    `migrate_legacy_registry` documents and tolerates: a read-only home, a permission
+    boundary, or a caller that got there first each leave `projects.yml` exactly where
+    it is, and the daemon still starts. `AgentRegistry._read` answers a *missing* file
+    with `[]`, so a daemon asking the canonical name registered the first session
+    opened into a brand-new register holding that one row — and because readers prefer
+    the new name once it exists, every entry left at the old one disappeared from view
+    with nothing raised and nothing logged (#2549; the shape #2548 removed from the
+    scheduler's self-heal).
+
+    Both seams are pinned here so the two names disagree in exactly the way a stuck
+    migration leaves them, and the assertion names which one the write must reach.
+    """
+    legacy = tmp_path / "projects.yml"
+    legacy.write_text(
+        yaml.safe_dump([{"name": "other", "path": str(tmp_path / "gone")}]),
+        encoding="utf-8",
+    )
+    # The register belongs at `agents.yml`; it is actually at `projects.yml`.
+    monkeypatch.setattr(
+        daemon_mod, "agents_file", lambda base=None: tmp_path / "agents.yml",
+        raising=False,
+    )
+    monkeypatch.setattr(daemon_mod, "register_for_reading", lambda base=None: legacy)
+
+    server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
+    work = tmp_path / "work"
+    work.mkdir()
+    row = server._register_agent(work)
+
+    assert row["path"] == str(work)
+    assert not (tmp_path / "agents.yml").exists(), (
+        "a second register was created: the write addressed a file that does not exist"
+    )
+    assert [e["name"] for e in yaml.safe_load(legacy.read_text(encoding="utf-8"))] == [
+        "other", "work",
+    ], "the row joined the register every reader opens, and no entry was lost"
+
+
 def test_context_section_no_files(tmp_path):
     """No context files found → returns empty list."""
     server = _make_server()

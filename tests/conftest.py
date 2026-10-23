@@ -153,15 +153,16 @@ def _redirect_the_agent_register(monkeypatch, tmp_path):
     Autouse for the same reason as the guard above — the test that would leak is the one
     written three commits from now.
 
-    The seam is ``agents_file``, which is how the daemon asks where the register lives.
-    A test that wants to inspect or steer the register sets ``server._agents_log``
-    afterwards, and that assignment wins: the registry is rebuilt from it.
+    The seam is ``register_for_reading``, which is how the daemon asks where the register
+    lives — the file that is there, not the name it belongs at (#2549). A test that wants
+    to inspect or steer the register sets ``server._agents_log`` afterwards, and that
+    assignment wins: the registry is rebuilt from it.
     """
     import emrg.server.daemon as daemon_mod
 
     monkeypatch.setattr(
         daemon_mod,
-        "agents_file",
+        "register_for_reading",
         lambda base=None: tmp_path / "agent-register" / "agents.yml",
     )
 
