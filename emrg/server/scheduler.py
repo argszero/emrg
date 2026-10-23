@@ -994,11 +994,11 @@ def _resolve_task_template(task_type: str) -> Path:
 
 def _resolve_agent_path(name: str) -> str | None:
     """Resolve a agent name to its path from agents.yml."""
-    agents_file = agents_file(config_dir())
-    if not agents_file.exists():
+    register = agents_file(config_dir())
+    if not register.exists():
         return None
     try:
-        data = yaml.safe_load(_read_text(agents_file))
+        data = yaml.safe_load(_read_text(register))
     except (yaml.YAMLError, OSError):
         return None
     if not isinstance(data, list):
@@ -1017,11 +1017,11 @@ def _load_agent_config(name: str, source_dir: str) -> dict:
     the user in agents.yml are preserved, so templates can reference
     them via ``{{ agent.<field> }}`` without code changes.
     """
-    agents_file = agents_file(config_dir())
-    if not agents_file.exists():
+    register = agents_file(config_dir())
+    if not register.exists():
         return {}
     try:
-        data = yaml.safe_load(_read_text(agents_file))
+        data = yaml.safe_load(_read_text(register))
     except (yaml.YAMLError, OSError):
         return {}
     if not isinstance(data, list):
