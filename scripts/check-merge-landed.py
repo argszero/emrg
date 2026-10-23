@@ -241,21 +241,28 @@ def _tree_of(commit: str) -> tuple[str | None, str]:
     return got.stdout.strip(), ""
 
 
-def tree_claims(number: int, repo: str) -> tuple[list[str], int]:
-    """`(every tree this PR's reviews name, how many bodies named a token that is not one)`.
+def tree_claims(number: int, repo: str) -> tuple[list[str], int, int]:
+    """`(trees named, bodies naming nothing this clone resolves, bodies naming only a revision)`.
 
     Read through the counter's paginated helper (one request returns 30 reviews and
     the newest are the ones that count) and decoded by `cast-vote.py`'s
     `named_trees`, so the claim read here is the claim that was checked there.
 
-    The second element is the honest half of a limit `named_trees` carries by design:
-    it resolves each token against *this* clone, so a body naming a tree this checkout
-    does not have returns no claim — indistinguishable, in the bare list, from a body
-    naming nothing. Those are different situations with different repairs (a shallow
-    clone or pruned plan worktrees, versus a vote that was never about a landing tree),
-    so they are counted apart and reported apart. The token pattern is asked of the
-    sibling that owns it; a second regex here would be a second answer to "which token
-    is a claim".
+    `named_trees` answers "trees named here", so a body naming no tree returns an empty
+    list — and that empty list has **three** causes with three different repairs:
+
+    * a token this clone cannot resolve at all (a shallow clone, pruned plan worktrees,
+      or a token that was never a git object) — the first count;
+    * a **revision**, the ordinary sentence a review of a revision contains, which is a
+      reference and not a claim about what a merge lands — the second count;
+    * no token at all, and the body was never about a landing tree — neither count.
+
+    Counting the first and the second together made the report say a clone had failed at
+    a token it had resolved (#2555), which sends its reader to repair an environment that
+    is fine and teaches a voter that the audit is noise. Each count is per body, and a
+    body that names a tree is in neither. The token pattern and the object-kind reading
+    are both asked of the sibling that owns them; a second regex here would be a second
+    answer to "which token is a claim".
     """
     reviews = counter()._gh_json_paginated(
         [
@@ -267,6 +274,7 @@ def tree_claims(number: int, repo: str) -> tuple[list[str], int]:
     )
     claims: list[str] = []
     unresolved = 0
+    referenced = 0
     for r in reviews:
         assert isinstance(r, dict)
         # The projection must have applied: without it the fields arrive under their
@@ -280,12 +288,20 @@ def tree_claims(number: int, repo: str) -> tuple[list[str], int]:
             )
         body = str(r.get("body") or "")
         found = cast_vote().named_trees(body)
-        if not found and cast_vote()._HEX_TOKEN.findall(body):
-            unresolved += 1
         for tree in found:
             if tree not in claims:
                 claims.append(tree)
-    return claims, unresolved
+        if found:
+            continue
+        kinds = [kind for _token, kind in cast_vote().token_kinds(body)]
+        if not kinds:
+            continue                      # no token at all: never about a landing tree
+        readable = [kind for kind in kinds if kind != cast_vote().MISSING]
+        if readable:
+            referenced += 1               # names objects this clone reads; none is a tree
+        else:
+            unresolved += 1               # names nothing readable: the shallow-clone case
+    return claims, unresolved, referenced
 
 
 def check_pr(number: int, repo: str) -> Verdict:
@@ -316,23 +332,52 @@ def check_pr(number: int, repo: str) -> Verdict:
     if landed is None:
         raise RuntimeError(f"#{number}: {why}")
 
-    claimed, unresolved = tree_claims(number, repo)
+    claimed, unresolved, referenced = tree_claims(number, repo)
     if not claimed:
+        # Each count gets its own sentence because each has its own repair, and one
+        # suppressing the other hides the cause a reader most needs: measured on #2550,
+        # three bodies named the reviewed revision *and* a CI run id, so the
+        # shallow-clone sentence printed for bodies whose tokens resolved fine while the
+        # revision sentence — the true one — never appeared at all (#2555).
+        parts: list[str] = []
+        if referenced:
+            parts.append(
+                f"{referenced} review body/bodies of #{number} name a revision but no "
+                "tree: a commit is what a review read, not a claim about what a merge "
+                "lands"
+            )
+        if unresolved:
+            parts.append(
+                f"{unresolved} review body/bodies of #{number} name a token this clone "
+                "cannot resolve to a tree (a shallow clone or pruned plan worktrees read "
+                "this way; a token that was never a git object — a CI run id matches the "
+                "pattern — reads the same, and this tool has no question that separates "
+                "them)"
+            )
+        if not parts:
+            parts.append(f"no review body of #{number} names a tree")
+        why = "; ".join(parts) + " - the landed tree was compared to nothing"
+        if referenced:
+            # The runner is bound to a name before it is printed, and that name is
+            # load-bearing rather than cosmetic: the family's guard reads a printed
+            # command's interpreter by reconstructing each interpolation as its own source
+            # (`tests/test_printed_commands_carry_the_python_runner.py`), so a *call*
+            # inside the f-string reconstructs as `{cast_vote().RUNNER}` - a text no runner
+            # matcher reads as a runner - while `{RUNNER}` reconstructs to the one spelling
+            # it knows. The constant keeps its single home: it is read from the sibling
+            # that declares it, so this file adds no second copy of the spelling.
+            RUNNER = cast_vote().RUNNER
+            why += (
+                ". A vote that is about a landing tree names the one "
+                f"`{RUNNER} scripts/check-merge-plan-suite.py {number}` reports"
+            )
         return Verdict(
             pr=number,
             state=state,
             landed_tree=landed,
             claimed=[],
             reading=UNCHECKED,
-            reason=(
-                f"{unresolved} review body/bodies of #{number} name a token this clone "
-                "cannot resolve to a tree, so no claim could be read (a shallow clone "
-                "or pruned plan worktrees read this way) - the landed tree was "
-                "compared to nothing"
-                if unresolved
-                else f"no review body of #{number} names a tree, so the landed tree was "
-                "compared to nothing"
-            ),
+            reason=why,
         )
     if landed in claimed:
         return Verdict(
