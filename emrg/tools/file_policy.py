@@ -74,6 +74,65 @@ def protected_paths() -> list[str]:
     return out
 
 
+def same_file(a: str, b: str) -> bool:
+    """Whether two paths name one file, by the filesystem's own identity.
+
+    ``os.path.samefile`` compares ``st_dev``/``st_ino`` — the file-id pair on
+    Windows — which is the only answer that survives a spelling a volume folds.
+    On a volume that folds case (macOS's APFS default, and NTFS) ``config.toml``
+    and ``CONFIG.TOML`` are **one file with two spellings**, while
+    ``os.path.realpath`` returns whichever spelling it was handed: a comparison
+    of canonical *strings* answers "different file" for one file (#2551).
+
+    A path that is not there has no identity to compare, so this answers False:
+    it is not the (existing) file it is being compared with, and each caller's
+    other rules still give that path its own verdict.
+
+    :param a: one path.
+    :param b: the other.
+    :returns: whether both name the same file on disk.
+    """
+    if a == b:
+        return True
+    try:
+        return os.path.samefile(a, b)
+    except (OSError, ValueError):
+        return False
+
+
+def protected_hit(canonical: str, *, as_directory: bool = False) -> str | None:
+    """The protected daemon file this canonical path reaches, compared by identity.
+
+    The comparison is :func:`same_file` rather than string equality, because a
+    protected file is protected under **every** spelling that reaches it — the
+    alias a volume folds, and the hard link a case-sensitive volume cannot fold
+    away. Asking by identity is also what keeps a genuinely different file whose
+    name differs only in case reachable: ``normcase`` is the identity function on
+    POSIX, and lowering both sides would refuse it (#2551, requirement 2).
+
+    :param canonical: the target, already canonicalized by the caller.
+    :param as_directory: judge it as a root that would be granted as a tree, so
+        a directory **above** a protected file is a hit as well as the file
+        itself. The ancestor walk is by identity for the same reason the file
+        test is: ``~/.EMRG`` is ``~/.emrg`` on a folding volume.
+    :returns: the protected path that was reached, or ``None``.
+    """
+    for protected in protected_paths():
+        if same_file(canonical, protected):
+            return protected
+        if not as_directory:
+            continue
+        node = os.path.dirname(protected)
+        while True:
+            if same_file(canonical, node):
+                return protected
+            parent = os.path.dirname(node)
+            if parent == node:
+                break
+            node = parent
+    return None
+
+
 def trusted_write_zones() -> list[str]:
     """Canonicalized write roots that a ``workspace-write`` session may target.
 

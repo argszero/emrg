@@ -53,7 +53,7 @@ import os
 from emrg.sandbox.grants import GrantKindNotEnforced
 from emrg.sandbox.policy import DANGER_FULL_ACCESS, SandboxPolicy
 from emrg.sandbox.roots import canonical_path, named_grants, writable_roots
-from emrg.tools.file_policy import protected_paths
+from emrg.tools.file_policy import protected_hit
 
 
 def file_refusal(file_path: str, policy: SandboxPolicy) -> str | None:
@@ -79,7 +79,8 @@ def file_refusal(file_path: str, policy: SandboxPolicy) -> str | None:
         # unconfined.
         return None
     target = canonical_path(file_path)
-    if target in protected_paths():
+    protected = protected_hit(target)
+    if protected is not None:
         # The host's own daemon state (``~/.emrg/config.toml`` and its four
         # neighbours).  Containment already refuses all five in every deployment
         # this repo runs, because none of them sits inside a session's workspace
@@ -89,7 +90,16 @@ def file_refusal(file_path: str, policy: SandboxPolicy) -> str | None:
         # profile rather than identical to it: it can refuse a write bash would
         # be allowed to make, never the reverse.  The list stays in
         # ``emrg/tools/file_policy.py`` because the legacy scanner reads it too.
-        return f"{policy.mode} sandbox: blocked write to protected daemon file {file_path!r}"
+        #
+        # Asked by file identity, not by comparing canonical strings: on a volume
+        # that folds case two spellings are one file, and `realpath` hands back
+        # whichever spelling it was given — so the string test admitted
+        # `~/.emrg/CONFIG.TOML` while refusing `~/.emrg/config.toml` (#2551).
+        resolved = f" (resolves to {protected!r})" if protected != target else ""
+        return (
+            f"{policy.mode} sandbox: blocked write to protected daemon "
+            f"file {file_path!r}{resolved}"
+        )
     try:
         # The enforcement question is asked here rather than left to
         # ``writable_roots``, which agents paths and so has no answer for a

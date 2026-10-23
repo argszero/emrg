@@ -510,14 +510,16 @@ def judge_extra_root(
        visibly, rather than assembled out of a file grant.
     4. **Not the home directory** — same shape, one level in. The grant is meant
        to be the size of what was named.
-    5. **Never over a protected daemon state file** (:func:`~emrg.tools.file_policy.protected_paths`)
+    5. **Never over a protected daemon state file** (:func:`~emrg.tools.file_policy.protected_hit`)
        — those five are unreachable today by *geometry* (none sits inside a
        session workspace or a temp area). A host-named root makes them reachable
        as an ordinary write, so the guard has to be explicit rather than
-       incidental. The kernel profiles would grant them; the in-process fence
-       would refuse (``fence.file_refusal`` is deliberately the stricter of the
-       two) — that split is the "user-visible strange" the rant names, and this
-       rule is what keeps it unreachable.
+       incidental. It asks by **file identity**, so the file is refused under
+       every spelling that reaches it and the directories above it too — a
+       spelling a volume folds names the same file. The kernel profiles would
+       grant them; the in-process fence would refuse (``fence.file_refusal`` is
+       deliberately the stricter of the two) — that split is the "user-visible
+       strange" the rant names, and this rule is what keeps it unreachable.
     6. **The path must exist** — a grant is spelled differently for a directory
        (``subpath``) and a file (``literal``), and for a name that is not there
        yet that choice has to be guessed. Refusing it means every stored root
@@ -549,7 +551,7 @@ def judge_extra_root(
     # Imported here rather than at module scope: ``emrg.session`` imports this
     # module for ``canonical_path``, and that happens before the tool package is
     # on the import path. The list still has one home; this is a reference.
-    from emrg.tools.file_policy import protected_paths
+    from emrg.tools.file_policy import protected_hit
 
     if kind is not None and kind not in (GRANT_DIRECTORY, GRANT_FILE, GRANT_REGISTRY):
         return ExtraRootVerdict("", refusal=(
@@ -579,12 +581,15 @@ def judge_extra_root(
             f"{path!r} is the home directory — name the file or directory you "
             "mean, so the grant is the size you asked for"
         ))
-    for protected in protected_paths():
-        if canonical == protected or protected.startswith(canonical.rstrip(os.sep) + os.sep):
-            return ExtraRootVerdict(canonical, refusal=(
-                f"{path!r} would grant {protected!r}, a protected daemon state "
-                "file — those are refused at every tier"
-            ))
+    if (protected := protected_hit(canonical, as_directory=True)) is not None:
+        # By file identity, for the file *and* for any directory above it: on a
+        # volume that folds case the string test admitted `~/.EMRG` beside a
+        # protected `~/.emrg/config.toml`, which grants the very files this rule
+        # exists to keep unreachable (#2551, requirement 4).
+        return ExtraRootVerdict(canonical, refusal=(
+            f"{path!r} would grant {protected!r}, a protected daemon state "
+            "file — those are refused at every tier"
+        ))
     if not os.path.exists(canonical):
         return ExtraRootVerdict(canonical, refusal=(
             f"{path!r} does not exist — a root names what is there, because a "

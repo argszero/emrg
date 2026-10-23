@@ -52,7 +52,8 @@ ABSOLUTE_ELSEWHERE = os.path.join(os.path.abspath(os.sep), "emrg-not-granted")
 #: The helpers the *mechanics* keep in ``emrg/tools/file_policy.py``: where a
 #: relative spelling resolves, what "inside" means, and the host's protected
 #: files. The policy itself is no longer one of them.
-MECHANICS = ("resolve_file_target", "is_within", "is_absolute_path", "protected_paths")
+MECHANICS = ("resolve_file_target", "is_within", "is_absolute_path", "protected_paths",
+             "same_file", "protected_hit")
 
 
 def _run(coro):
@@ -104,9 +105,131 @@ def test_the_legacy_predicates_are_gone_everywhere(name):
         assert not hasattr(module, name), f"{module.__name__} re-binds {name}"
 
 
-def test_the_fence_imports_the_home_s_protected_paths():
-    """The fence names the host's protected files through the home, not around it."""
-    assert fence.protected_paths is file_policy.protected_paths
+def test_the_fence_asks_the_home_which_files_are_protected():
+    """The fence names the host's protected files through the home, not around it.
+
+    The name this pins moved when the comparison became an identity one (#2551):
+    the fence used to import the *list* and compare canonical strings, and it now
+    imports the lookup the home states the rule in. The requirement is unchanged
+    — one home, and the fence bound to the home's own object rather than a copy.
+    """
+    assert fence.protected_hit is file_policy.protected_hit
+
+
+def _fence_with_protected(monkeypatch, protected: Path, workspace: Path):
+    """A ``workspace-write`` policy whose protected list is one temporary file.
+
+    ``protected_paths()`` is derived from the *real* home, and no test here may
+    touch it; the seam is the home's own function, so what a test arms is a list
+    of temporary paths and the derivation keeps its own guard elsewhere. The
+    workspace is the same temporary directory on purpose: the file tools' fence
+    is deliberately stricter than containment, and a target the workspace grants
+    is the only place that difference is visible.
+    """
+    monkeypatch.setattr(
+        file_policy, "protected_paths", lambda: [os.path.realpath(protected)]
+    )
+    return resolve_policy(mode="workspace-write", workspace_root=str(workspace))
+
+
+def test_a_second_name_for_a_protected_file_is_refused(tmp_path, monkeypatch):
+    """One file, one verdict — by identity, not by the spelling that reached it.
+
+    A hard link asks this question with case folding taken out: two names, one
+    inode, and ``realpath`` returns each name as written, so the string
+    comparison this replaces answered "inside the workspace and not on the list"
+    and allowed the write. No volume can help here — a hard link is one file on
+    every filesystem this repo runs on — so this is the arm that holds on a
+    case-sensitive runner too (#2551).
+    """
+    victim = tmp_path / "config.toml"
+    victim.write_text("host state", encoding="utf-8")
+    alias = tmp_path / "not-the-config"
+    os.link(victim, alias)
+    policy = _fence_with_protected(monkeypatch, victim, tmp_path)
+
+    assert file_refusal(str(victim), policy) is not None
+    refusal = file_refusal(str(alias), policy)
+
+    assert refusal is not None and "protected daemon file" in refusal
+    # A judgment names the file it judged: the alias and the protected file
+    # differ in spelling, and a refusal printing only the spelling would send its
+    # reader looking for a second file that is not there.
+    assert os.path.realpath(victim) in refusal
+
+    # The same construction on a file the list does not name. Identity is what
+    # the answer is keyed to, so a second name for an ordinary file stays
+    # writable: the arm is "this IS a protected file", never "this file has two
+    # names" — and that direction is measurable on every volume, unlike the
+    # case-folding one below.
+    mine = tmp_path / "notes.md"
+    mine.write_text("mine", encoding="utf-8")
+    mine_alias = tmp_path / "notes-alias.md"
+    os.link(mine, mine_alias)
+    assert file_refusal(str(mine_alias), policy) is None
+
+
+def test_a_case_variant_spelling_of_a_protected_file_is_refused(tmp_path, monkeypatch):
+    """The same question on the volume the defect was reported against.
+
+    The volume is asked, not assumed: where it keeps the two spellings apart they
+    are two files and the old answer was already right, so the case is skipped
+    with that reason. On a volume that folds them — APFS's default, and NTFS —
+    ``CONFIG.TOML`` is ``config.toml``, and it was *allowed* before this fix
+    while its own spelling was refused (#2551, requirement 1).
+    """
+    victim = tmp_path / "config.toml"
+    victim.write_text("host state", encoding="utf-8")
+    variant = tmp_path / "CONFIG.TOML"
+    if not file_policy.same_file(str(variant), str(victim)):
+        pytest.skip("this volume keeps CONFIG.TOML and config.toml apart as two files")
+    policy = _fence_with_protected(monkeypatch, victim, tmp_path)
+
+    refusal = file_refusal(str(variant), policy)
+
+    assert refusal is not None and "protected daemon file" in refusal
+
+
+def test_a_distinct_file_whose_name_differs_only_in_case_stays_writable(
+    tmp_path, monkeypatch
+):
+    """The other direction, and why the mechanism is identity rather than lowering.
+
+    On a volume that tells the two names apart, ``notes.md`` beside ``NOTES.md``
+    is a second file the session owns, and refusing it would be the false
+    positive that makes a case-insensitive comparison unusable on Linux:
+    ``normcase`` is the identity function on POSIX, so a blanket ``.lower()`` is
+    the shape this test refuses (#2551, requirement 2). Skipped where the volume
+    folds the names, because then there is no second file to ask about.
+    """
+    victim = tmp_path / "config.toml"
+    victim.write_text("host state", encoding="utf-8")
+    sibling = tmp_path / "NOTES.md"
+    sibling.write_text("mine", encoding="utf-8")
+    shout = tmp_path / "notes.md"
+    if file_policy.same_file(str(shout), str(sibling)):
+        pytest.skip("this volume folds case, so notes.md and NOTES.md are one file")
+    policy = _fence_with_protected(monkeypatch, victim, tmp_path)
+
+    assert file_refusal(str(shout), policy) is None
+
+
+def test_a_target_that_is_not_there_still_gets_a_verdict(tmp_path, monkeypatch):
+    """An identity test cannot compare what is absent, and that must not read as a pass.
+
+    ``same_file`` answers False for a path with no inode, which leaves the target
+    to the containment rule it was always judged by: inside the workspace it is
+    writable, outside every granted root it is refused, and neither answer raises
+    (#2551, requirement 3).
+    """
+    victim = tmp_path / "config.toml"
+    victim.write_text("host state", encoding="utf-8")
+    policy = _fence_with_protected(monkeypatch, victim, tmp_path)
+
+    assert file_refusal(str(tmp_path / "not-there-yet.txt"), policy) is None
+    outside = os.path.join(ABSOLUTE_ELSEWHERE, "not-there-either.txt")
+    refusal = file_refusal(outside, policy)
+    assert refusal is not None and "outside every root" in refusal
 
 
 @pytest.mark.parametrize(
