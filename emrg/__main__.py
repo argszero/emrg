@@ -108,7 +108,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     rant_parser.add_argument(
         "-p", "--project",
-        help="Target project (from projects.yml). Omit for emrg itself.",
+        help="Target project (from agents.yml). Omit for emrg itself.",
         default=None,
     )
     rant_parser.add_argument(

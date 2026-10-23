@@ -293,9 +293,9 @@ def test_the_protected_file_itself_is_refused_too(outside):
     """The same rule one level down: a root *is* the file it names."""
     ws, _ = outside
 
-    verdict = judge_extra_root("~/.emrg/projects.yml", _ws_policy(ws))
+    verdict = judge_extra_root("~/.emrg/agents.yml", _ws_policy(ws))
 
-    assert verdict.refusal and "projects.yml" in verdict.refusal
+    assert verdict.refusal and "agents.yml" in verdict.refusal
 
 
 # ── §2 one derivation point ───────────────────────────────────────────────

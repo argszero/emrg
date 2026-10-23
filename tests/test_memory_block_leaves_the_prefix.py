@@ -47,10 +47,10 @@ def _make_server() -> EmrgServer:
     """A minimal server, with the projects log pointed away from the real one.
 
     The shape `tests/test_memory_row_bound_reach.py::_make_server` uses, for the same
-    reason: building a system prompt must never write the host's `~/.emrg/projects.yml`.
+    reason: building a system prompt must never write the host's `~/.emrg/agents.yml`.
     """
     server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
-    server._projects_log = Path(tempfile.mkdtemp()) / "projects.yml"
+    server._projects_log = Path(tempfile.mkdtemp()) / "agents.yml"
     return server
 
 

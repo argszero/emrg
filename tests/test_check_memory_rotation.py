@@ -102,7 +102,7 @@ def _bookmark(path: Path, rows: list[tuple[str, str]]) -> Path:
 
 
 def _reading(mod, tmp_path: Path, projects: list[dict], rows: list[tuple[str, str]]):
-    register = _projects(tmp_path / "projects.yml", projects)
+    register = _projects(tmp_path / "agents.yml", projects)
     book = _bookmark(tmp_path / "bookmark.md", rows)
     return mod.read(register, book)
 
@@ -178,7 +178,7 @@ def test_the_bookmark_does_not_count_as_memory_of_the_project_that_holds_it(mod,
     """
     root = Path(_root(tmp_path, "holder"))
     _write_memory(root, ".emrg/memory/MEMORY.md", _stamp(mod))
-    register = _projects(tmp_path / "projects.yml", [{"name": "holder", "path": str(root)}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "holder", "path": str(root)}])
     book = _bookmark(root / ".emrg/memory/bookmark.md", [("`holder`", BASE)])
     os.utime(book, (_stamp(mod, 60), _stamp(mod, 60)))
     reading = mod.read(register, book)
@@ -194,7 +194,7 @@ def test_a_memory_file_newer_than_the_row_still_reads_changed_beside_the_bookmar
     """
     root = Path(_root(tmp_path, "holder-with-news"))
     newer = _write_memory(root, ".emrg/memory/MEMORY.md", _stamp(mod, 60))
-    register = _projects(tmp_path / "projects.yml",
+    register = _projects(tmp_path / "agents.yml",
                          [{"name": "holder-with-news", "path": str(root)}])
     book = _bookmark(root / ".emrg/memory/bookmark.md", [("`holder-with-news`", BASE)])
     os.utime(book, (_stamp(mod, 30), _stamp(mod, 30)))
@@ -223,7 +223,7 @@ def test_a_row_stamped_later_than_the_clock_is_unmeasurable(mod, tmp_path, monke
     taken = datetime.strptime(BASE, mod.STAMP_FORMAT)
     monkeypatch.setattr(mod, "now", lambda: taken)
     ahead = (taken + timedelta(seconds=1)).strftime(mod.STAMP_FORMAT)
-    register = _projects(tmp_path / "projects.yml", [{"name": "ahead", "path": root}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "ahead", "path": root}])
     book = _bookmark(tmp_path / "ahead.md", [("`ahead`", ahead)])
     with pytest.raises(mod.Unmeasurable) as excinfo:
         mod.read(register, book)
@@ -246,7 +246,7 @@ def test_a_row_stamped_at_the_clock_is_read_normally(mod, tmp_path, monkeypatch)
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
     taken = datetime.strptime(BASE, mod.STAMP_FORMAT)
     monkeypatch.setattr(mod, "now", lambda: taken)
-    register = _projects(tmp_path / "projects.yml", [{"name": "at-the-clock", "path": root}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "at-the-clock", "path": root}])
     book = _bookmark(tmp_path / "at.md", [("`at-the-clock`", BASE)])
     reading = mod.read(register, book)
     assert reading["states"][0]["state"] == "unchanged"
@@ -355,7 +355,7 @@ def test_a_project_whose_name_looks_numeric_still_matches_its_row(mod, tmp_path)
     """
     root = _root(tmp_path, "numeric")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
-    register = tmp_path / "projects.yml"
+    register = tmp_path / "agents.yml"
     register.write_text(f"- name: 1\n  path: '{root}'\n", encoding="utf-8")
     book = _bookmark(tmp_path / "bookmark.md", [("`1`", BASE)])
     reading = mod.read(register, book)
@@ -392,7 +392,7 @@ def test_a_row_is_found_in_a_table_of_any_width(mod, tmp_path):
     narrow = _root(tmp_path, "narrow")
     for root in (wide, narrow):
         _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 60))
-    register = _projects(tmp_path / "projects.yml", [
+    register = _projects(tmp_path / "agents.yml", [
         {"name": "wide", "path": wide}, {"name": "narrow", "path": narrow}])
 
     # The same two rows, in the two tables the two installations write. The wide one puts
@@ -427,7 +427,7 @@ def test_a_row_that_carries_no_stamp_is_unmeasurable_rather_than_dropped(mod, tm
     original defect - so it is exit 2, and the message names the line it could not read.
     """
     root = _root(tmp_path, "unreadable")
-    register = _projects(tmp_path / "projects.yml", [{"name": "unreadable", "path": root}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "unreadable", "path": root}])
     book = _bookmark(tmp_path / "bookmark.md", [("`unreadable`", "read on Tuesday")])
     with pytest.raises(mod.Unmeasurable) as excinfo:
         mod.read(register, book)
@@ -446,7 +446,7 @@ def test_a_header_written_with_a_code_span_is_not_a_body_row(mod, tmp_path):
     """
     root = _root(tmp_path, "spanned")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 60))
-    register = _projects(tmp_path / "projects.yml", [{"name": "spanned", "path": root}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "spanned", "path": root}])
     book = tmp_path / "bookmark.md"
     book.write_text("\n".join([
         "# Bookmark", "",
@@ -471,7 +471,7 @@ def test_a_bookmark_in_another_shape_is_unmeasurable_rather_than_empty(mod, tmp_
     bookmark and a prose-only bookmark both answered `0 row(s)` with a fault per project.
     """
     root = _root(tmp_path, "unlisted")
-    register = _projects(tmp_path / "projects.yml", [{"name": "unlisted", "path": root}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "unlisted", "path": root}])
     for shape, text in (
             ("one line per project",
              f"# Rotation bookmark\n\n- `unlisted` {BASE} (cyc20261020-214924)\n"),
@@ -494,7 +494,7 @@ def test_a_body_row_that_names_its_project_in_no_code_span_is_unmeasurable(mod, 
     refusals are the same defect - a shape the reader does not know answered as an absence.
     """
     root = _root(tmp_path, "plain")
-    register = _projects(tmp_path / "projects.yml", [{"name": "plain", "path": root}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "plain", "path": root}])
     book = tmp_path / "bookmark.md"
     book.write_text("\n".join([
         "# Bookmark", "",
@@ -519,7 +519,7 @@ def test_a_bookmark_that_really_is_empty_still_reports_every_project_never_visit
     rotation would never start.
     """
     root = _root(tmp_path, "fresh")
-    register = _projects(tmp_path / "projects.yml", [{"name": "fresh", "path": root}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "fresh", "path": root}])
     book = tmp_path / "bookmark.md"
     book.write_text("\n".join([
         "# Bookmark", "",
@@ -562,7 +562,7 @@ def test_a_stamp_that_does_not_parse_is_unmeasurable_never_unchanged(mod, tmp_pa
 
 def test_no_register_and_no_bookmark_are_unmeasurable(mod, tmp_path):
     for subject in ("register", "bookmark"):
-        register = _projects(tmp_path / "projects.yml", [{"name": "x", "path": str(tmp_path)}])
+        register = _projects(tmp_path / "agents.yml", [{"name": "x", "path": str(tmp_path)}])
         book = _bookmark(tmp_path / "bookmark.md", [("`x`", BASE)])
         if subject == "register":
             register.unlink()
@@ -577,7 +577,7 @@ def test_the_bookmark_is_not_rewritten(mod, tmp_path):
     """It measures and never repairs: the bytes are the same after a run."""
     root = _root(tmp_path, "stable")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 4))
-    register = _projects(tmp_path / "projects.yml", [{"name": "stable", "path": root}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "stable", "path": root}])
     book = _bookmark(tmp_path / "bookmark.md", [("`stable`", BASE)])
     before = book.read_bytes()
     mod.read(register, book)
@@ -610,7 +610,7 @@ def test_the_exit_codes_are_0_1_and_2_and_2_is_never_a_pass(mod, tmp_path):
     """The contract a caller reads: clean, a coverage fault, unmeasurable."""
     root = _root(tmp_path, "codes")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
-    register = _projects(tmp_path / "projects.yml", [{"name": "codes", "path": root}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "codes", "path": root}])
     clean = _bookmark(tmp_path / "clean.md", [("`codes`", BASE)])
     faulty = _bookmark(tmp_path / "faulty.md", [("`codes`", BASE), ("`ghost`", BASE)])
     assert mod.main(["--projects", str(register), "--bookmark", str(clean)]) == 0
@@ -622,7 +622,7 @@ def test_the_exit_codes_are_0_1_and_2_and_2_is_never_a_pass(mod, tmp_path):
 def test_json_is_one_document_that_names_its_subjects(mod, tmp_path, capsys):
     root = _root(tmp_path, "documented")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 1))
-    register = _projects(tmp_path / "projects.yml", [{"name": "documented", "path": root}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "documented", "path": root}])
     book = _bookmark(tmp_path / "bookmark.md", [("`documented`", BASE)])
     assert mod.main(["--projects", str(register), "--bookmark", str(book), "--json"]) == 0
     document = json.loads(capsys.readouterr().out)
@@ -662,7 +662,7 @@ def test_a_second_cycle_section_is_a_fault_the_rows_cannot_show(mod, tmp_path):
     """
     root = _root(tmp_path, "growing")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
-    register = _projects(tmp_path / "projects.yml", [{"name": "growing", "path": root}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "growing", "path": root}])
     one = _sectioned(tmp_path / "one.md", [("`growing`", BASE)], 1)
     two = _sectioned(tmp_path / "two.md", [("`growing`", BASE)], 2)
 
@@ -691,7 +691,7 @@ def test_one_cycle_section_is_the_contract_and_none_is_legitimate(mod, tmp_path)
     """
     root = _root(tmp_path, "shapes")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
-    register = _projects(tmp_path / "projects.yml", [{"name": "shapes", "path": root}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "shapes", "path": root}])
     bare = _bookmark(tmp_path / "bare.md", [("`shapes`", BASE)])
     noted = tmp_path / "noted.md"
     noted.write_text("# Bookmark\n\n## Notes\n\n- the qualifier matters\n\n"
@@ -715,7 +715,7 @@ def test_a_bookmark_truncated_at_its_section_is_diagnosed_as_truncation(mod, tmp
     remedies, so the section-carrying case gets its own sentence, and the table-less file
     with no section keeps the original one.
     """
-    register = _projects(tmp_path / "projects.yml", [{"name": "cut", "path": str(tmp_path)}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "cut", "path": str(tmp_path)}])
     cut = tmp_path / "cut.md"
     cut.write_text(f"# Bookmark\n\n{SECTION}\n\nthe rewrite stopped here\n", encoding="utf-8")
     with pytest.raises(mod.Unmeasurable) as excinfo:
@@ -798,3 +798,75 @@ def test_a_cell_that_only_resembles_a_cycle_is_not_read_as_one(mod, tmp_path):
         assert [s["read_by"] for s in reading["states"]] == [None], near_miss
         assert reading["rows_with_cycle"] == 0, near_miss
         assert "read by no cycle recorded" in mod.render(reading, True), near_miss
+# ------------------------------------------------- the register's name, mid-move
+
+
+def test_the_default_reads_the_registers_old_name_while_the_move_is_pending(
+    mod, tmp_path, monkeypatch, capsys
+):
+    """A checkout can run ahead of the daemon that owns the register.
+
+    The rename travels in a release, and installing one is what restarts the daemon
+    that performs the move, so between the change landing and that release the default
+    names a file no host has yet. A default alone would answer `not measurable` every
+    cycle of that window and stop the rotation's clock - which is a silent way for step
+    0 to stop being answered, since the step is never skipped. So the default falls
+    back, and the report names the file it actually read.
+    """
+    root = _root(tmp_path, "pending")
+    _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 3))
+    # `agents.yml` is never created: the move has not happened on this host yet.
+    new_name = tmp_path / "agents.yml"
+    legacy = _projects(tmp_path / "projects.yml", [{"name": "pending", "path": root}])
+    book = _bookmark(tmp_path / "bookmark.md", [("`pending`", BASE)])
+    monkeypatch.setattr(mod, "DEFAULT_PROJECTS", str(new_name))
+    monkeypatch.setattr(mod, "LEGACY_PROJECTS", str(legacy))
+    monkeypatch.setattr(mod, "DEFAULT_BOOKMARK", str(book))
+
+    assert mod.main([]) == 0
+
+    captured = capsys.readouterr()
+    assert str(legacy) in captured.out.splitlines()[0], (
+        "the first line is the reading's subject; it must name the file that was opened"
+    )
+    assert "does not exist yet" in captured.err and str(legacy) in captured.err
+    assert "changed since their bookmark: 1" in captured.out
+
+
+def test_an_explicit_register_is_never_second_guessed(mod, tmp_path, monkeypatch, capsys):
+    """The fallback belongs to the default alone.
+
+    A caller that named a register asked about that register. Falling back on it would
+    answer a question nobody put, and would hide a mistyped path behind a plausible
+    reading of a different file.
+    """
+    root = _root(tmp_path, "explicit")
+    _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 1))
+    decoy = _projects(tmp_path / "projects.yml", [{"name": "decoy", "path": root}])
+    wanted = _projects(tmp_path / "named-by-caller.yml", [{"name": "explicit", "path": root}])
+    book = _bookmark(tmp_path / "bookmark.md", [("`explicit`", BASE)])
+    monkeypatch.setattr(mod, "DEFAULT_PROJECTS", str(tmp_path / "agents.yml"))
+    monkeypatch.setattr(mod, "LEGACY_PROJECTS", str(decoy))
+
+    assert mod.main(["--projects", str(wanted), "--bookmark", str(book)]) == 0
+
+    captured = capsys.readouterr()
+    assert str(wanted) in captured.out.splitlines()[0]
+    assert "does not exist yet" not in captured.err
+
+
+def test_with_neither_name_the_reading_is_unmeasurable_never_a_pass(
+    mod, tmp_path, monkeypatch, capsys
+):
+    """The fallback is not a way to manufacture a reading out of nothing."""
+    book = _bookmark(tmp_path / "bookmark.md", [("`gone`", BASE)])
+    monkeypatch.setattr(mod, "DEFAULT_PROJECTS", str(tmp_path / "agents.yml"))
+    monkeypatch.setattr(mod, "LEGACY_PROJECTS", str(tmp_path / "projects.yml"))
+    monkeypatch.setattr(mod, "DEFAULT_BOOKMARK", str(book))
+
+    assert mod.main([]) == 2
+
+    captured = capsys.readouterr()
+    assert "not measurable" in captured.err
+    assert "does not exist yet" not in captured.err
+

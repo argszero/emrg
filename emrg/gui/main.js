@@ -908,7 +908,7 @@ vision = false
       return { ok: true, path: p };
     });
 
-    // P5 slice 2：删除项目 = 只删 projects.yml 条目（保留磁盘数据）+ 关闭该项目已打开会话
+    // P5 slice 2：删除项目 = 只删 agents.yml 条目（保留磁盘数据）+ 关闭该项目已打开会话
     // 受保护项目不可删除（内置 project emrg / 内置 task emrg-task → 演化依赖，删了悬空）；
     // `.emrg` 是 _touch_project 历史记录**非内置 → 可删**（再次访问重新注册）。
     // 返回 { ok, removed, closed: [sids] }；renderer 收到后负责切换激活会话。

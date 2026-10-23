@@ -176,7 +176,7 @@ def _server(tmp_path: Path) -> EmrgServer:
     import tempfile
 
     server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
-    server._projects_log = Path(tempfile.mkdtemp()) / "projects.yml"
+    server._projects_log = Path(tempfile.mkdtemp()) / "agents.yml"
     return server
 
 

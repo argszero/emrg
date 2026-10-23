@@ -250,7 +250,7 @@ def sched(tmp_path, monkeypatch):
     original = mod.config_dir
     monkeypatch.setattr(mod, "config_dir", lambda: tmp_path)
     # A registered project, so `task_create` has something to be valid against.
-    (tmp_path / "projects.yml").write_text(
+    (tmp_path / "agents.yml").write_text(
         yaml.safe_dump([{"name": "emrg", "path": str(tmp_path)}])
     )
     try:

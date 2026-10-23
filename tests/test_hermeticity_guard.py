@@ -1,10 +1,10 @@
-"""Hermeticity guard tests (2026-08-13 ~/.emrg/projects.yml leak).
+"""Hermeticity guard tests (2026-08-13 ~/.emrg/agents.yml leak).
 
 Verifies the autouse conftest fixture is wired (both server modules
 carry the guarded wrapper) and that the discriminator is reliable in
 BOTH states (#455 lesson):
-- tmp projects.yml writes pass through unchanged (negative state);
-- the real ~/.emrg/projects.yml / tasks.yml paths raise AssertionError
+- tmp agents.yml writes pass through unchanged (negative state);
+- the real ~/.emrg/agents.yml / tasks.yml paths raise AssertionError
   (positive state) — the raise happens before any write, so this test
   is safe.
 """
@@ -28,10 +28,10 @@ def test_guard_installed_in_both_modules():
 
 
 def test_guard_allows_tmp_projects_yml(tmp_path):
-    """Writes to a tmp projects.yml pass through to the original writer."""
+    """Writes to a tmp agents.yml pass through to the original writer."""
     import emrg.server.scheduler as sched_mod
 
-    target = tmp_path / "projects.yml"
+    target = tmp_path / "agents.yml"
     sched_mod.atomic_write_yaml(
         [{"name": "x", "path": "p", "last_active": "t"}],
         target,
@@ -43,10 +43,10 @@ def test_guard_allows_tmp_projects_yml(tmp_path):
 
 
 def test_guard_rejects_real_projects_yml():
-    """Writing the real ~/.emrg/projects.yml is a hard error."""
+    """Writing the real ~/.emrg/agents.yml is a hard error."""
     import emrg.server.scheduler as sched_mod
 
-    real = (Path.home() / ".emrg" / "projects.yml").resolve()
+    real = (Path.home() / ".emrg" / "agents.yml").resolve()
     with pytest.raises(AssertionError, match="hermetic"):
         sched_mod.atomic_write_yaml([], real, prefix=".projects_")
 

@@ -221,6 +221,66 @@ def logs_dir() -> Path:
     return config_dir() / "logs"
 
 
+#: The register's name before an Agent became the record of the directory a
+#: session runs in (#2521). Spelled here and nowhere else in the package: the
+#: move below is what retires it.
+_LEGACY_AGENTS_NAME = "projects.yml"
+
+
+def agents_file(base: Path | None = None) -> Path:
+    """Returns the path of the agent registry (`~/.emrg/agents.yml`).
+
+    **The one derivation of that path** (#2521): every reader and writer of
+    the register asks this rather than spelling `config_dir() / <name>` again —
+    the daemon, the scheduler, the rant tool's candidate-name reader, the
+    sandbox's protected-files list and `scripts/check-memory-rotation.py` —
+    which is the treatment :func:`logs_dir` already gives the log directory.
+
+    A pure path: asking where the register lives opens and moves nothing.
+    :func:`migrate_legacy_registry` is the one call that moves it, from the one
+    process that owns it.
+
+    ``base`` is the caller's own data directory, for a reader whose directory
+    is not the host's (the rant tool's tests point it at a temp directory).
+    """
+    directory = config_dir() if base is None else base
+    return directory / "agents.yml"
+
+
+def migrate_legacy_registry(base: Path | None = None) -> bool:
+    """Move a register still at the pre-rename name onto the new one.
+
+    Returns whether this call moved it. ``Path.rename`` within one directory is
+    a single filesystem operation, so the register is wholly at the old name or
+    wholly at the new one and never half of each: the count of entries, every
+    field and ``last_active`` travel with the file because nothing is read or
+    rewritten to carry them.
+
+    Called from the daemon's startup and nowhere else — the one process that
+    owns the register — and not from :func:`agents_file`, so that asking for
+    the path never mutates a host's state. A test suite constructs the objects
+    that read the register but never runs that startup, which is exactly the
+    separation that keeps a run of the suite from renaming the host's file
+    under a daemon that is still reading the old name.
+
+    Nothing moves once the new name exists (an older daemon that re-created the
+    legacy file leaves both, and the new name governs), a register that never
+    existed is not created, and a move that cannot happen — a read-only home, a
+    permission boundary, a concurrent caller that got there first — answers
+    ``False`` and leaves the legacy file exactly where it is.
+    """
+    directory = config_dir() if base is None else base
+    target = agents_file(directory)
+    legacy = directory / _LEGACY_AGENTS_NAME
+    try:
+        if target.exists() or not legacy.exists():
+            return False
+        legacy.rename(target)
+        return True
+    except OSError:
+        return False
+
+
 def config_path() -> Path:
     """Returns the config file path."""
     home = Path.home()

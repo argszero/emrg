@@ -314,7 +314,7 @@ NOT_TREE_READERS = {
     "check-patch-files.py": "reads the patch files it is given as arguments",
     "check-memory-rotation.py": (
         "reads two host-state subjects it names before any verdict - the project register "
-        "(`~/.emrg/projects.yml`) and the rotation bookmark (a Markdown table of the newest "
+        "(`~/.emrg/agents.yml`) and the rotation bookmark (a Markdown table of the newest "
         "memory modification time already read per project) - then walks each project's "
         "`.emrg/memory/` and `.emrg/sessions/*/memory/`, which are gitignored host data no "
         "checkout carries. A working tree is not its subject and no tree's name would answer "

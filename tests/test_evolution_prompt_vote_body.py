@@ -88,7 +88,7 @@ def rendered(tmp_path, monkeypatch) -> str:
     monkeypatch.setattr(mod, "config_dir", lambda: tmp_path)
     project_dir = tmp_path / "demoproj"
     project_dir.mkdir(exist_ok=True)
-    (tmp_path / "projects.yml").write_text(
+    (tmp_path / "agents.yml").write_text(
         yaml.safe_dump([{"name": "demoproj", "path": str(project_dir)}]), encoding="utf-8"
     )
     handler = make_handler(
