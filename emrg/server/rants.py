@@ -22,9 +22,9 @@ from pathlib import Path
 from emrg.memory import NotARegularFile
 from emrg.tools.base import non_regular_kind
 
-# Canonical field order: timestamp → project → status → progress → completed → message
-# (project right after timestamp per user feedback; message last)
-_RANT_FIELDS = ("timestamp", "project", "status", "progress", "completed", "message")
+# Canonical field order: timestamp → agent → status → progress → completed → message
+# (agent right after timestamp per user feedback; message last)
+_RANT_FIELDS = ("timestamp", "agent", "status", "progress", "completed", "message")
 
 # State machine: pending → in_progress → completed (never skip a level)
 _ALLOWED_STATUS_TRANSITIONS = {
@@ -38,9 +38,16 @@ def _normalize_rant(raw) -> dict | None:
     """Normalize one parsed line to the canonical 6-field dict.
 
     Accepts dict rows (canonical). Converts legacy array rows
-    ``[timestamp, project, status, progress, completed, message]`` back to
+    ``[timestamp, agent, status, progress, completed, message]`` back to
     dicts (the 2026-08-18 format-drift incident). Unknown field shapes /
     corrupt rows return None and are skipped.
+
+    The array form maps by **position**, and the rename left that position where it was:
+    the second slot still holds the target's name, so a row written before the rename
+    converts to ``agent`` with no move of its own. Nothing here reads a dict row's
+    ``project`` key — a table still carrying it is moved by
+    :func:`migrate_rant_agent_field` before any reader sees it, and a fallback here
+    would keep both spellings alive, which is what the move exists to end.
     """
     if isinstance(raw, dict):
         return {k: raw.get(k) for k in _RANT_FIELDS}
@@ -130,13 +137,13 @@ def _write_rants(rants_log: Path, rants: list[dict]) -> None:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
 
-def append_rant(rants_log: Path, message: str, project: str = "") -> int:
+def append_rant(rants_log: Path, message: str, agent: str = "") -> int:
     """Append a rant entry to ``rants_log``, sorted by timestamp.
 
     Args:
         rants_log: Path to rants.jsonl (e.g. ``~/.emrg/rants.jsonl``).
         message: The rant body (already user-confirmed / polished).
-        project: Optional target project name (empty = EMRG itself).
+        agent: Optional target agent name (empty = EMRG itself).
 
     Returns:
         The new total rant count.
@@ -148,7 +155,7 @@ def append_rant(rants_log: Path, message: str, project: str = "") -> int:
     # consistent regardless of which client submitted the rant.
     entry: dict = {
         "timestamp": datetime.now().astimezone().isoformat(),
-        "project": project,
+        "agent": agent,
         "status": "pending",
         "progress": None,
         "completed": None,
@@ -166,13 +173,13 @@ def append_rant(rants_log: Path, message: str, project: str = "") -> int:
 def list_rants(
     rants_log: Path,
     status: str | None = None,
-    project: str | None = None,
+    agent: str | None = None,
 ) -> list[dict]:
-    """Return rant entries, optionally filtered by status and/or project."""
+    """Return rant entries, optionally filtered by status and/or agent."""
     return [
         r for r in _read_rants(rants_log)
         if (status is None or r.get("status") == status)
-        and (project is None or r.get("project") == project)
+        and (agent is None or r.get("agent") == agent)
     ]
 
 

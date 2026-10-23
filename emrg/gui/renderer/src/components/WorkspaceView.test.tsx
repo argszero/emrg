@@ -35,7 +35,7 @@ const task = (name: string, over: Partial<TaskRec> = {}): TaskRec => ({
 
 const rant = (over: Partial<RantRec> = {}): RantRec => ({
   timestamp: "2026-08-26T12:16:48+08:00",
-  project: "emrg",
+  agent: "emrg",
   status: "pending",
   progress: null,
   message: "## 测试 rant\n正文",

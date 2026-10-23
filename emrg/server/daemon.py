@@ -3222,17 +3222,17 @@ class EmrgServer:
                 await self._send(ws, {"error": "rant requires a message"})
                 return
 
-            # Optional project targeting (multi-project support)
-            project = msg.get("project", "").strip()
+            # Optional agent targeting (multi-agent support)
+            agent = msg.get("agent", "").strip()
 
             # Shared write logic (rant 2026-08-17T11:51:59): daemon ``rant``
             # command and the submit_rant tool use the same append_rant, so
             # the file format / sort / daemon-authoritative timestamp stay
             # consistent no matter which path recorded the rant.
-            count = append_rant(self._rants_log, rant_message, project)
+            count = append_rant(self._rants_log, rant_message, agent)
 
             logger.info("rant recorded (%d total)%s: %s",
-                count, f" project={project}" if project else "", redact_prefix(rant_message, 100))
+                count, f" agent={agent}" if agent else "", redact_prefix(rant_message, 100))
             await self._send(ws, {"ok": True, "count": count})
 
         elif msg_type == "list_rants":

@@ -625,7 +625,7 @@ def open_rant_rows(rants: str | None = None, repo: str = REPO) -> list[Rant]:
         for row in wanted
         if not named[str(row.get("timestamp", ""))]
         and not by_timestamp.get(str(row.get("timestamp", "")))
-        and could_declare_here(str(row.get("project", "") or ""), repo)
+        and could_declare_here(str(row.get("agent", "") or ""), repo)
     ]
     if unplaced:
         since = min(
@@ -680,7 +680,10 @@ def open_rant_rows(rants: str | None = None, repo: str = REPO) -> list[Rant]:
                 issues=sorted(open_here),
                 closed_issues=sorted(closed_here),
                 unread_issues=sorted(unread_here),
-                project=str(row.get("project", "") or ""),
+                # The ledger's own key is `agent` (the record's target); the name
+                # this model keeps for the concept is its own, and the output rows below
+                # still label it `project`.
+                project=str(row.get("agent", "") or ""),
             )
         )
     return sorted(out, key=lambda rant: rant.timestamp, reverse=True)

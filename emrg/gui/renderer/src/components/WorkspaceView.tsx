@@ -453,7 +453,7 @@ function RantList({
   return (
     <div className="task-list" data-testid="rant-list">
       {rants.map((r) => {
-        const key = String(r.timestamp || r.project || r.message || Math.random());
+        const key = String(r.timestamp || r.agent || r.message || Math.random());
         const ts = rantTimestamp(r.timestamp);
         const st = rantStatusMeta(r.status, t);
         const firstLine = rantFirstLine(r.message);
@@ -466,14 +466,14 @@ function RantList({
               onClick={() => onToggle(key)}
             >
               <span className="rant-col-time">{ts}</span>
-              <span className="rant-col-project">{r.project || "—"}</span>
+              <span className="rant-col-project">{r.agent || "—"}</span>
               <span className={`task-badge ${st.badgeCls}`} data-testid="rant-status-badge">{st.text}</span>
               <span className="rant-col-progress">{r.progress ? String(r.progress) : "—"}</span>
               <span className="rant-col-content">{firstLine}</span>
             </div>
             {isExpanded && (
               <div className="rant-detail" style={{ padding: "6px 8px", borderTop: "1px solid var(--border)", fontSize: "var(--fs-secondary)" }}>
-                <div className="rant-meta">{ts} · {r.project || "—"} · {st.text}</div>
+                <div className="rant-meta">{ts} · {r.agent || "—"} · {st.text}</div>
                 <div className="rant-section">
                   <div className="rant-section-label">{t("rants.colContent")}</div>
                   {/* markdown 渲染（rant 2026-09-30T09:06:16 / #1763）：preprocessRantMarkdown 的

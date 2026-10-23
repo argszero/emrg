@@ -27,7 +27,7 @@ function mockEmrg() {
   const compactSession = vi.fn().mockResolvedValue({ ok: true });
   const listProjects = vi.fn().mockResolvedValue([{ name: "emrg", path: "/p/emrg" }]);
   const listTasks = vi.fn().mockResolvedValue([{ name: "evo", type: "evolution", enabled: true, session_id: "evo", project_path: "/p/emrg" }]);
-  const listRants = vi.fn().mockResolvedValue([{ timestamp: "2026-08-26T12:00:00+08:00", project: "emrg", status: "pending", message: "x" }]);
+  const listRants = vi.fn().mockResolvedValue([{ timestamp: "2026-08-26T12:00:00+08:00", agent: "emrg", status: "pending", message: "x" }]);
   const listMemories = vi.fn().mockResolvedValue([]);
   const listSkills = vi.fn().mockResolvedValue([]);
   const listHistory = vi.fn().mockResolvedValue({ messages: [] });
@@ -695,7 +695,7 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     // 因此断言的是真渲染产物：#### 【现象】 → <h4>。
     const m = mockEmrg();
     m.listRants.mockResolvedValue([
-      { timestamp: "2026-09-30T09:06:16+08:00", project: "emrg", status: "pending", message: "【现象】\n**加粗**正文" },
+      { timestamp: "2026-09-30T09:06:16+08:00", agent: "emrg", status: "pending", message: "【现象】\n**加粗**正文" },
     ]);
     render(wrapper(<Shell />));
     await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
@@ -847,7 +847,7 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     fireEvent.change(screen.getByTestId("rant-message"), { target: { value: "测试 rant" } });
     fireEvent.change(screen.getByTestId("rant-project"), { target: { value: "emrg" } });
     fireEvent.click(screen.getByTestId("rant-submit"));
-    await waitFor(() => expect(m.sendRant).toHaveBeenCalledWith({ message: "测试 rant", project: "emrg" }));
+    await waitFor(() => expect(m.sendRant).toHaveBeenCalledWith({ message: "测试 rant", agent: "emrg" }));
     await waitFor(() => expect(m.listRants).toHaveBeenCalledTimes(2));
     expect(screen.queryByTestId("rant-dialog")).not.toBeInTheDocument();
   });
@@ -994,7 +994,7 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
     const input = await screen.findByTestId("composer-input");
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     await waitFor(() =>
-      expect(m.sendRant).toHaveBeenCalledWith({ message: "hello world", project: "emrg" }),
+      expect(m.sendRant).toHaveBeenCalledWith({ message: "hello world", agent: "emrg" }),
     );
   });
 

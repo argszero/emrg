@@ -7,7 +7,7 @@ import type { ProjectRec } from "../lib/workspaceView";
 /**
  * RantDialog.test.tsx — Batch 5 slice 8：Rant 提交对话框。
  * 镜像 vanilla openRantForm/submitRantForm 语义：打开清空 + 聚焦、消息必填、
- * 项目下拉（已注册项目）、提交 payload {message, project}。
+ * 项目下拉（已注册项目）、提交 payload {message, agent}。
  */
 
 function wrapper(node: React.ReactNode) {
@@ -41,14 +41,14 @@ describe("RantDialog", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
-  it("提交 payload {message, project}（选项目）", async () => {
+  it("提交 payload {message, agent}（选项目）", async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     render(wrapper(<RantDialog open projects={PROJECTS} onSubmit={onSubmit} onDismiss={vi.fn()} />));
     fireEvent.change(screen.getByTestId("rant-message"), { target: { value: "侧栏太宽了" } });
     fireEvent.change(screen.getByTestId("rant-project"), { target: { value: "emrg" } });
     fireEvent.click(screen.getByTestId("rant-submit"));
     await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
-    expect(onSubmit.mock.calls[0][0]).toEqual({ message: "侧栏太宽了", project: "emrg" });
+    expect(onSubmit.mock.calls[0][0]).toEqual({ message: "侧栏太宽了", agent: "emrg" });
   });
 
   it("项目选填：留空提交 project=''", async () => {
@@ -57,7 +57,7 @@ describe("RantDialog", () => {
     fireEvent.change(screen.getByTestId("rant-message"), { target: { value: "hello" } });
     fireEvent.click(screen.getByTestId("rant-submit"));
     await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
-    expect(onSubmit.mock.calls[0][0]).toEqual({ message: "hello", project: "" });
+    expect(onSubmit.mock.calls[0][0]).toEqual({ message: "hello", agent: "" });
   });
 
   it("closed (open=false) → 不渲染", () => {

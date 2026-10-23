@@ -295,7 +295,7 @@ Promotion is two-way. Community feedback gathered during promotion — **proacti
 **Writing rules** — one tool call, and never a hand-written rewrite of the file:
 
 ```
-submit_rant(action="submit", project="{{ project.name }}",
+submit_rant(action="submit", agent="{{ project.name }}",
             message="community feedback (<channel> <link>): <summary of the user's intent>")
 ```
 
@@ -307,8 +307,8 @@ here, because a second copy of a rule is a copy that can disagree. So there is
 nothing for this prompt to write by hand — and no reason to open the file at all,
 not even to read it.
 
-- `project` = the promoted project's registered short name (as in `~/.emrg/agents.yml`); the rant is then handled by that project's evolution task. The tool warns when the name is not registered.
-- Deduplicate before submitting: `submit_rant(action="list", project="{{ project.name }}")` and skip feedback that is already queued.
+- `agent` = the promoted project's registered short name (as in `~/.emrg/agents.yml`); the rant is then handled by that project's evolution task. The tool warns when the name is not registered.
+- Deduplicate before submitting: `submit_rant(action="list", agent="{{ project.name }}")` and skip feedback that is already queued.
 - Each message notes the source (channel + link) so the evolution task can trace back.
 
 **Also file a public GitHub issue on the promoted project** (PR #932, rant 2026-08-22T08:14:31) — a rant is an internal queue (no issue number, not community-visible); a public issue is transparent, traceable, and lets the community participate. For **valuable feedback** (same table above — feature request / bug report / negative experience / new problem / inspiration):

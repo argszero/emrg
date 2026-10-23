@@ -11,7 +11,7 @@ export type RantFilter = "" | "pending" | "in_progress" | "completed";
 
 export interface RantRec {
   timestamp?: string;
-  project?: string;
+  agent?: string;
   status?: string;
   progress?: string | null;
   message?: string;

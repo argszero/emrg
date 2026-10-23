@@ -76,7 +76,7 @@ interface WorkspaceBridge {
   taskLimits?(): Promise<{ minInterval?: number }>;
   taskDelete(p: { name: string }): Promise<unknown>;
   taskTemplateList(): Promise<{ name: string }[]>;
-  sendRant(p: { message: string; project?: string }): Promise<{ ok?: boolean; count?: number }>;
+  sendRant(p: { message: string; agent?: string }): Promise<{ ok?: boolean; count?: number }>;
   /**
    * 升级横幅重启（rant 2026-09-01T20:09:41）：调 emrg:restartDaemon —— 完整 stop
    * 链（TUI→daemon，--skip-gui 跳过 GUI 防自杀）→ GUI 自己 relaunch → 新 GUI
@@ -428,7 +428,7 @@ export function Shell() {
     });
   }
 
-  async function submitRant(payload: { message: string; project: string }) {
+  async function submitRant(payload: { message: string; agent: string }) {
     const b = wsBridge();
     if (!b?.sendRant) return;
     try {
@@ -660,20 +660,20 @@ export function Shell() {
     }
   }
 
-  /** /rant：有参 → 直发（/@project 前缀指定项目，对齐 TUI）；无参/空内容 → 对话框。 */
+  /** /rant：有参 → 直发（/@name 前缀指定目标，对齐 TUI）；无参/空内容 → 对话框。 */
   async function handleRantCommand(args: string[]) {
     const first = args[0] ?? "";
-    let project = "";
+    let agent = "";
     let message = args.join(" ");
     if (first.startsWith("@")) {
-      project = first.slice(1);
+      agent = first.slice(1);
       message = args.slice(1).join(" ");
     }
     if (!message.trim()) {
       await newRant();
       return;
     }
-    await submitRant({ message, project });
+    await submitRant({ message, agent });
   }
 
   /** /trigger：有参 → 直发任务；无参 → 任务面板。 */

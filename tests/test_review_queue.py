@@ -2144,7 +2144,7 @@ def _links(monkeypatch, tool, rows, issues=(), path="/tmp/rants.jsonl", closed_i
 
 
 def _row(stamp, status="pending", message="a rant", progress=None):
-    row = {"timestamp": stamp, "status": status, "message": message, "project": "emrg"}
+    row = {"timestamp": stamp, "status": status, "message": message, "agent": "emrg"}
     if progress is not None:
         row["progress"] = progress
     return row
@@ -2198,7 +2198,7 @@ def test_a_rants_project_is_carried_from_the_row_the_ledger_parsed(monkeypatch):
         [
             _row("2026-09-30T09:17:54+08:00"),
             {"timestamp": "2026-09-30T09:30:16+08:00", "status": "pending", "message": "m"},
-            {"timestamp": "2026-09-30T09:35:04+08:00", "status": "pending", "project": None},
+            {"timestamp": "2026-09-30T09:35:04+08:00", "status": "pending", "agent": None},
         ],
     )
 
@@ -2270,7 +2270,7 @@ def test_another_projects_rants_do_not_widen_the_closed_window(monkeypatch):
         [
             _row(emrg_stamp),
             {"timestamp": other_stamp, "status": "pending", "message": "theirs",
-             "project": "silicon-science-cs"},
+             "agent": "silicon-science-cs"},
         ],
     )
 
@@ -2302,7 +2302,7 @@ def test_a_foreign_project_alone_spends_no_closed_reading(monkeypatch):
         monkeypatch,
         tool,
         [{"timestamp": "2026-09-11T23:51:35.442412+08:00", "status": "pending",
-          "message": "theirs", "project": "silicon-science-cs"}],
+          "message": "theirs", "agent": "silicon-science-cs"}],
     )
 
     (rant,) = tool.open_rant_rows(None, tool.REPO)
@@ -2333,7 +2333,7 @@ def test_the_two_spellings_of_this_project_both_match(monkeypatch):
     links = _links(
         monkeypatch, tool,
         [{"timestamp": stamp, "status": "pending", "message": "ours",
-          "project": tool.REPO}],
+          "agent": tool.REPO}],
         closed_issues=[(1807, f"Origin: rant {stamp}\n\nbody")],
     )
 
