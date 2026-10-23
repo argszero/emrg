@@ -108,7 +108,7 @@ def rendered(tmp_path_factory) -> str:
     tmp_path = tmp_path_factory.mktemp("index-rule")
     project_dir = tmp_path / "demoproj"
     project_dir.mkdir(exist_ok=True)
-    (tmp_path / "projects.yml").write_text(
+    (tmp_path / "agents.yml").write_text(
         yaml.safe_dump([{"name": "demoproj", "path": str(project_dir)}]), encoding="utf-8"
     )
     original = mod.config_dir

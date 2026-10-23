@@ -57,7 +57,7 @@ def _ctx(width: int = 100) -> RenderContext:
 
 def _make_server() -> EmrgServer:
     server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
-    server._projects_log = Path(tempfile_dir()) / "projects.yml"
+    server._projects_log = Path(tempfile_dir()) / "agents.yml"
     return server
 
 

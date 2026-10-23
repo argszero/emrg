@@ -106,7 +106,7 @@ async def _boot_server(tmp: Path):
     daemon_mod.EMRGD_PORT = _test_port
     connect_mod.EMRGD_PORT = _test_port
 
-    # Isolate config dir to tmp (port file, tasks.yml, projects.yml, etc.)
+    # Isolate config dir to tmp (port file, tasks.yml, agents.yml, etc.)
     daemon_mod.config_dir = lambda: tmp
     sched_mod.config_dir = lambda: tmp  # scheduler builds its own projects_file (#738)
     connect_mod.config_dir = lambda: tmp

@@ -59,13 +59,13 @@ def rendered(tmp_path_factory) -> str:
 
     The context is the one a real records-driven call produces (a project and nothing
     else); `config_dir` is redirected at a tmp tree — the shape
-    `tests/test_evolution_prompt_index_rule.py` uses — so the `projects.yml` read lands
+    `tests/test_evolution_prompt_index_rule.py` uses — so the `agents.yml` read lands
     on a file this test made, never on the host's `~/.emrg`.
     """
     tmp_path = tmp_path_factory.mktemp("competition-prompt")
     project_dir = tmp_path / PROMPT_PROJECT
     project_dir.mkdir(exist_ok=True)
-    (tmp_path / "projects.yml").write_text(
+    (tmp_path / "agents.yml").write_text(
         yaml.safe_dump([{"name": PROMPT_PROJECT, "path": str(project_dir)}]),
         encoding="utf-8",
     )

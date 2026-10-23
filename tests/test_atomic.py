@@ -61,13 +61,13 @@ def test_atomic_write_empty_list(tmp_path: Path):
 def test_atomic_write_no_temp_leak(tmp_path: Path):
     """Verifies no temp files remain after write."""
     before = set(os.listdir(str(tmp_path)))
-    target = tmp_path / "projects.yml"
+    target = tmp_path / "agents.yml"
     atomic_write_yaml([{"name": "test"}], target)
     after = set(os.listdir(str(tmp_path)))
 
     # Only the target file should exist, no temp leftovers
-    assert "projects.yml" in after
-    assert after - before == {"projects.yml"}
+    assert "agents.yml" in after
+    assert after - before == {"agents.yml"}
 
 
 def test_atomic_write_bytes_basic(tmp_path: Path):

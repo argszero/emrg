@@ -17,10 +17,10 @@ anything: **which registered projects' memory is newer than that project's
 bookmark line, and what is the newest file**. Step 0 is the step that is never
 skipped, and nothing in this repository performed it - `check-memory-index.py`
 measures an index against the index rule's two numbers and never looks at
-`projects.yml`. Every cycle therefore hand-wrote the probe in a `bash` heredoc,
+`agents.yml`. Every cycle therefore hand-wrote the probe in a `bash` heredoc,
 and it answered wrongly in two ways that both read as a clean result.
 
-**Keying.** A probe that keys rows by `projects.yml`'s `name` field cannot
+**Keying.** A probe that keys rows by `agents.yml`'s `name` field cannot
 resolve every row the bookmark carries. The bookmark writes a row's key as
 whatever disambiguates that project, and this host's bookmark has three forms:
 `emrg` (a bare name), `aitokenpool (github)` (a name plus the parenthetical that
@@ -41,7 +41,7 @@ about out loud (a stamp that does not parse is exit **2**, never "unchanged").
 
 What it reads, and what it prints first
 --------------------------------------
-Two subjects, both named before any verdict: the `projects.yml` (the register of
+Two subjects, both named before any verdict: the `agents.yml` (the register of
 projects this installation tracks) and the **bookmark** (one Markdown-table row
 per project: the newest memory modification time already read, and the cycle
 that read it). Per project it looks under `.emrg/memory/**/*.md` and under
@@ -68,7 +68,7 @@ taken on a day rather than a property: both are re-measured on every run, and a 
 contradicts (`row says path missing`, `row says no memory root`) is a fault with the row named.
 Repeating a note would hide a project that came back, or one that started writing memory, for
 ever - the same stale-past-state defect as comparing a whole second against a sub-second mtime.
-    no bookmark row  the project has a line in `projects.yml` and none in the
+    no bookmark row  the project has a line in `agents.yml` and none in the
                      bookmark: it has never been visited, and §1.5 reads it
 
 Exit codes
@@ -77,9 +77,22 @@ Exit codes
     1  the coverage the bookmark exists to guarantee is broken: a project with no row,
        a row naming no project, a row that matches more than one, or a row whose state
        field is none of the three forms above
-    2  nothing was measured: no `projects.yml`, no bookmark, or a stamp that cannot be
+    2  nothing was measured: no `agents.yml`, no bookmark, or a stamp that cannot be
        ordered against an mtime - a value that does not parse, or one later than the
        instant of the reading - which is never a pass
+
+**The register's name, and one window where two names exist.** The register is
+`agents.yml`. It was called `projects.yml` until an Agent became the record of the
+directory a session runs in, and the mopping-up move belongs to the daemon that owns
+the file (`emrg.config.migrate_legacy_registry`), which performs it when it starts.
+This tree can therefore run ahead of that daemon: the rename travels in a release,
+and installing a release is what restarts the daemon that does the move. In that
+window the no-argument form - the one every cycle is told to run - would answer
+`not measurable` on every run and stop the rotation's clock. So the default falls
+back: when `agents.yml` is absent and `projects.yml` is present, the reading is taken
+on `projects.yml`, a note on stderr says so, and the first line of the report names
+that file as the subject. Once the daemon has moved the register the fallback is
+never reached, and a run that names `--projects` explicitly is never second-guessed.
 
 What it does not do
 -------------------
@@ -166,8 +179,24 @@ SESSIONS_SUBDIR = (".emrg", "sessions")
 #: Both defaults are this host's paths. They are defaults rather than required
 #: arguments because step 0 runs every cycle on this installation; any other
 #: layout is reached by naming the two paths, and the report says which it read.
-DEFAULT_PROJECTS = "~/.emrg/projects.yml"
+DEFAULT_PROJECTS = "~/.emrg/agents.yml"
 DEFAULT_BOOKMARK = "~/.emrg/evolution/emrg/.emrg/memory/project-memory-rotation-bookmark.md"
+
+#: The register's name before an Agent became the record of the directory a
+#: session runs in. **Named here because this script runs without the package** —
+#: it is stdlib-only, so it cannot ask `emrg.config`, and `emrg.config` is where
+#: the move itself lives.
+#:
+#: The fallback below exists for one window, and the window is not hypothetical:
+#: a checkout can run ahead of the daemon that holds the register. The code that
+#: moves the file ships in a release, and what restarts the daemon that performs
+#: the move is installing one — so between the change landing and the next
+#: release, this tree names `agents.yml` while the host still keeps its register
+#: at the old name. A default naming only the new file would answer
+#: `not measurable` on every cycle of that window and stop the rotation's clock;
+#: the fallback reads what is there and **says which file it read**, so the
+#: reading never claims a subject it did not open.
+LEGACY_PROJECTS = "~/.emrg/projects.yml"
 
 
 class Unmeasurable(Exception):
@@ -689,6 +718,19 @@ def main(argv: list[str] | None = None) -> int:
 
     projects_path = Path(os.path.expanduser(args.projects))
     bookmark_path = Path(os.path.expanduser(args.bookmark))
+    # The one window where two names exist, and never a second guess at an
+    # explicit argument: only the default is allowed to fall back, so a caller
+    # that named a register is answered about that register.
+    if args.projects == DEFAULT_PROJECTS and not projects_path.exists():
+        legacy_path = Path(os.path.expanduser(LEGACY_PROJECTS))
+        if legacy_path.exists():
+            print(
+                f"note: {projects_path} does not exist yet - reading {legacy_path}, "
+                f"the register's pre-rename name (it moves when the daemon that owns it "
+                f"next starts)",
+                file=sys.stderr,
+            )
+            projects_path = legacy_path
     try:
         reading = read(projects_path, bookmark_path)
     except Unmeasurable as exc:

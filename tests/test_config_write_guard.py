@@ -51,7 +51,7 @@ def test_the_three_real_files_are_named():
     """All three, not two: `config.toml` is the one the incident was about."""
     home = Path.home()
     assert conftest._is_real_config_target(home / ".emrg" / "config.toml")
-    assert conftest._is_real_config_target(home / ".emrg" / "projects.yml")
+    assert conftest._is_real_config_target(home / ".emrg" / "agents.yml")
     assert conftest._is_real_config_target(home / ".emrg" / "tasks.yml")
 
 
@@ -64,7 +64,7 @@ def test_a_scratch_path_is_never_a_real_file(tmp_path):
 
 
 def test_yaml_writer_is_refused(guarded_file):
-    """`projects.yml` / `tasks.yml`'s own seam, which the guard already had."""
+    """`agents.yml` / `tasks.yml`'s own seam, which the guard already had."""
     from emrg.server import scheduler as sched_mod
 
     with pytest.raises(AssertionError, match=REFUSAL):

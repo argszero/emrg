@@ -90,7 +90,7 @@ def test_the_collector_embeds_exactly_the_files_the_constant_names(tmp_path: Pat
     be "every file in the directory".
     """
     server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
-    server._projects_log = Path(tempfile.mkdtemp()) / "projects.yml"
+    server._projects_log = Path(tempfile.mkdtemp()) / "agents.yml"
     for name in PROJECT_CONTEXT_FILES:
         (tmp_path / name).write_text(f"# {name}\n", encoding="utf-8")
     (tmp_path / "NOTES.md").write_text("# not in the embedded set\n", encoding="utf-8")

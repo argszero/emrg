@@ -286,7 +286,7 @@ def test_registering_a_project_writes_the_exclude_too(tmp_path):
     _runtime_dir(repo)
     assert TaskHandler._is_dirty_tree_sync(str(repo)) is True, "precondition: real dirt"
     server = object.__new__(EmrgServer)
-    server._projects_log = tmp_path / "config" / "projects.yml"
+    server._projects_log = tmp_path / "config" / "agents.yml"
 
     server._touch_project(str(repo))
 
@@ -327,7 +327,7 @@ def test_a_nested_project_directory_learns_to_ignore_its_own_runtime_dir(tmp_pat
     assert TaskHandler._is_dirty_tree_sync(str(nested)) is True, "precondition: real dirt"
 
     server = object.__new__(EmrgServer)
-    server._projects_log = tmp_path / "config" / "projects.yml"
+    server._projects_log = tmp_path / "config" / "agents.yml"
     server._touch_project(str(nested))
 
     entries = _exclude_file(repo).read_text(encoding="utf-8").splitlines()
@@ -351,12 +351,12 @@ def test_touch_project_writes_nothing_for_a_directory_in_no_repository(tmp_path,
     before = sorted(p.name for p in plain.iterdir())
 
     server = object.__new__(EmrgServer)
-    server._projects_log = tmp_path / "config" / "projects.yml"
+    server._projects_log = tmp_path / "config" / "agents.yml"
     with caplog.at_level("INFO"):
         server._touch_project(str(plain))
 
     assert sorted(p.name for p in plain.iterdir()) == before
     assert not (plain / ".git").exists(), "no git dir is conjured into a plain directory"
     assert "now ignores .emrg/" not in caplog.text, caplog.text
-    registered = (tmp_path / "config" / "projects.yml").read_text(encoding="utf-8")
+    registered = (tmp_path / "config" / "agents.yml").read_text(encoding="utf-8")
     assert str(plain) in registered, "the registration half must be unaffected"

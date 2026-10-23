@@ -127,7 +127,7 @@ Read what others landed, why, and whether it needs follow-up. Use `FETCH_HEAD`, 
 **Coverage is not negotiable; depth is.** Every cycle asks about **every** project whether anything changed — step 0 reads no content, and it is the step that is never skipped. How far into a project the cycle then goes is decided by evidence. Nothing here shrinks §1: every step of §1–§4 is still executed, and R10's rule — a cycle saves rounds by asking for several things at once, never by asking for less — is not relaxed by a word of it.
 
 ```bash
-cat ~/.emrg/projects.yml
+cat ~/.emrg/agents.yml
 # step 0, per project: what under its memory is newer than its bookmark time?
 find <project>/.emrg -newermt '<bookmark-time>' \
      \( -path '*/memory/*.md' -o -name 'MEMORY.md' \) 2>/dev/null | head
