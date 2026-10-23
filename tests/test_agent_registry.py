@@ -151,6 +151,98 @@ def test_removing_a_row_drops_it_and_frees_its_name(tmp_path):
     assert reg.remove("src-2") is False, "a second removal finds nothing to remove"
 
 
+# ── a dead row does not hold its name ───────────────────────────────────────
+
+def test_a_dead_rows_name_is_taken_over_instead_of_getting_a_suffix(tmp_path):
+    """A row whose directory is gone does not reserve its name for ever."""
+    reg = _registry(tmp_path)
+    leaked = tmp_path / "leaked" / "src"
+    leaked.mkdir(parents=True)
+    assert reg.for_dir(str(leaked))["name"] == "src"
+    leaked.rmdir()  # the 2026-08-12 shape: the row outlives its directory
+
+    real = tmp_path / "real" / "src"
+    real.mkdir(parents=True)
+    row = reg.for_dir(str(real))
+
+    assert row["name"] == "src", (
+        "the scheduler repairs an entry *by name*, so a live directory suffixed to "
+        "`src-2` beside a dead `src` row is what let the repair move the dead row onto "
+        "the directory the new row already named"
+    )
+    assert [(r["name"], r["path"]) for r in reg.entries()] == [("src", str(real))], (
+        "taking the name over drops the dead row: one name, one row"
+    )
+
+
+def test_a_dead_row_does_not_cost_a_living_one_its_name(tmp_path):
+    """Both rows once held `src`; only the one whose directory is gone gives way."""
+    reg = _registry(tmp_path)
+    reg.path.parent.mkdir(parents=True, exist_ok=True)
+    living = tmp_path / "living" / "src"
+    living.mkdir(parents=True)
+    gone = tmp_path / "gone" / "src"
+    reg.path.write_text(
+        f"- path: {gone}\n  name: src\n"
+        f"- path: {living}\n  name: src-2\n",
+        encoding="utf-8",
+    )
+
+    row = reg.for_dir(str(tmp_path / "fresh" / "src"))
+
+    assert row["name"] == "src", "the dead holder is the one the name is taken from"
+    assert {r["name"]: r["path"] for r in reg.entries()} == {
+        "src": str(tmp_path / "fresh" / "src"),
+        "src-2": str(living),
+    }, "a living row keeps its name and its path; nothing was suffixed to `src-3`"
+
+
+# ── one directory, one row ──────────────────────────────────────────────────
+
+def test_the_stale_row_a_registration_and_the_heal_leave_one_row(tmp_path):
+    """The three steps the daemon takes, which used to end in two rows on one path."""
+    reg = _registry(tmp_path)
+    leaked = tmp_path / "leaked-pytest-dir" / "emrg"
+    leaked.mkdir(parents=True)
+    assert reg.for_dir(str(leaked))["name"] == "emrg"
+    leaked.rmdir()  # 1. a stale `emrg` row, the incident self-heal exists for
+
+    workspace = tmp_path / "evolution" / "emrg"
+    workspace.mkdir(parents=True)
+    assert reg.for_dir(str(workspace))["name"] == "emrg", (
+        "2. a session opens the workspace — it starts at `emrg`, not at `emrg-2`"
+    )
+
+    reg.upsert("emrg", str(workspace))  # 3. the scheduler's self-heal, every tick
+
+    rows = reg.entries()
+    assert [r["path"] for r in rows] == [str(workspace)], (
+        "one directory, one row: two rows for one path is what rendered the workspace "
+        f"twice in the pickers: {[(r['name'], r['path']) for r in rows]}"
+    )
+    assert [r["name"] for r in rows] == ["emrg"]
+
+
+def test_upsert_cannot_leave_two_rows_on_one_path(tmp_path):
+    """Whatever a caller passes, the register comes out with one row per directory."""
+    reg = _registry(tmp_path)
+    one = tmp_path / "one"
+    two = tmp_path / "two"
+    one.mkdir()
+    two.mkdir()
+    reg.for_dir(str(one))
+    reg.for_dir(str(two))
+
+    reg.upsert("one", str(two))  # the row `one` moves onto the path row `two` holds
+    assert [r["path"] for r in reg.entries()] == [str(two)], (
+        "a directory is registered as itself: the second row for it must go"
+    )
+    assert [r["name"] for r in reg.entries()] == ["one"]
+
+    reg.upsert("fresh", str(two))  # no row named `fresh` yet: the creating branch
+    assert [(r["name"], r["path"]) for r in reg.entries()] == [("fresh", str(two))]
+
+
 def test_a_register_that_cannot_be_opened_answers_no_decision(tmp_path):
     """``None`` is not ``False``: nothing was read, so nothing was decided."""
     reg = _registry(tmp_path)

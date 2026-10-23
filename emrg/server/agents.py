@@ -28,6 +28,15 @@ whichever was written last. The suffix is allocated when the row is created, aga
 the names present at that moment; it is not part of the row's identity, and removing a
 row frees its name.
 
+**A name is reserved only while its directory is there.** A basename held by a row whose
+``path`` is gone does not push the next arrival onto ``-2``: that name is taken over,
+and the dead row goes with it. Both halves matter. The scheduler repairs a stale entry
+*by name*, so a task may still be resolving through the dead row's name — taking the
+name over is what puts it back on a directory. Suffixing beside it instead is what left
+**two rows on one path**: the repair then moved the dead row onto the directory the new
+row had already been given ``-2`` for. Two rows for one directory is never a legal
+state, and ``upsert`` cannot write one however it is called.
+
 Two directories are not registered, and each for a stated reason rather than a guess:
 
 * **the home directory** — a session opened there would put its own session directory
@@ -223,10 +232,22 @@ class AgentRegistry:
                 base,
             )
 
-        name = _unique_name(
-            os.path.basename(base.rstrip(os.sep)) or base,
-            {row.get("name") for row in rows if row.get("name")},
-        )
+        # A name is reserved only while the directory holding it is there. A row pointing
+        # at a path that is gone is the 2026-08-12 shape, and the scheduler repairs it
+        # *by name* — so a task may still be resolving through that name, and taking the
+        # name over is what puts it back on a directory. Appending `-2` beside it instead
+        # is what left two rows on one path: the repair then moved the dead row onto the
+        # directory the new row already named.
+        living = {
+            row.get("name")
+            for row in rows
+            if row.get("name") and os.path.isdir(row.get("path") or "")
+        }
+        name = _unique_name(os.path.basename(base.rstrip(os.sep)) or base, living)
+        # The name is this row's now: whatever still holds it points at a directory that
+        # is gone (a living holder would have been in `living`), so that row is the one
+        # the name is taken from.
+        rows = [row for row in rows if row.get("name") != name]
         row = {"path": base, "name": name, "last_active": now}
         rows.append(row)
         self._write(rows)
@@ -239,19 +260,36 @@ class AgentRegistry:
         For a caller that owns a row by name rather than by directory — the scheduler's
         self-heal, which keeps an ``emrg`` row pointing at the evolution workspace. It
         writes through this module so the file keeps one writer and one temp prefix.
+
+        The name decides which row **moves**; the path decides what may survive beside
+        it. A row already naming ``path`` is the same directory said twice, so it goes:
+        one directory, one row. That state was reachable — the heal moved a stale
+        ``emrg`` row onto a directory a second row had been given ``-2`` for — and the
+        reachable half is closed at its origin, by ``for_dir`` taking a dead row's name
+        over rather than suffixing beside it. What is left here is the guarantee, for a
+        register a hand-edit or an older file left in that shape.
         """
         rows = self._read()
         if rows is None:
             return {}
         now = datetime.now().isoformat()
-        for row in rows:
-            if row.get("name") == name:
-                row["path"] = str(path)
-                row["last_active"] = now
-                self._write(rows)
-                return row
-        row = {"path": str(path), "name": name, "last_active": now}
-        rows.append(row)
+        target = str(path)
+        row = next((r for r in rows if r.get("name") == name), None)
+        if row is None:
+            row = {"path": target, "name": name, "last_active": now}
+            rows.append(row)
+        else:
+            row["path"] = target
+            row["last_active"] = now
+        # A dropped row may be the one a task was resolving through, so its name is kept
+        # in the log: after this the task finds nothing, and that is what a reader of the
+        # log needs to be able to see.
+        for other in [r for r in rows if r is not row and r.get("path") == target]:
+            logger.warning(
+                "register: dropping row %r, which names %s as well — upsert(%r) leaves "
+                "one row per directory", other.get("name"), target, name,
+            )
+            rows.remove(other)
         self._write(rows)
         return row
 
