@@ -20,20 +20,30 @@ whether that symbol exists.
 What is measured, and what a role claims
 ----------------------------------------
 A role is a *declaration*: `func` says "callable", `class` says "type", `meth` says "method",
-`data` says "a value". Each is a claim the tree can answer, because the claim is that the cited
-name exists. Two spellings resolve differently:
+`data` says "a value", `attr` says "member", `mod` says "module". Each is a claim the tree can
+answer, because the claim is that the cited name exists. The role and the spelling together
+decide the rule:
 
-* a **bare** name is the claim that the tree defines it -- any def, class, assignment or import
-  anywhere under the scanned directories, or a builtin;
-* a **dotted** name is a claim made *through* something, and static resolution cannot follow the
-  tail of `os.path.expandvars`. So the bound is the head: the first segment must be a name the
-  citing file can see -- imported by it, bound somewhere in the tree, or a builtin. That is the
-  decidable half of the claim ("do not cite through a module you never opened") and it is where
-  the guard stops.
-
-The `attr` role is deliberately outside the scan. It names a member of an object, not a binding
-a module holds, so the tree's `attr` references are `ctypes` structure fields -- three sites a
-rule reading them as module bindings would report and be wrong about every time.
+* a **bare symbol name** is the claim that the tree defines it -- any def, class, assignment or
+  import anywhere under the scanned directories, or a builtin;
+* a **dotted symbol name** is a claim made *through* something, and static resolution cannot
+  follow the tail of `os.path.expandvars`. So the bound is the head: the first segment must be a
+  name the citing file can see -- imported by it, bound somewhere in the tree, or a builtin. That
+  is the decidable half of the claim ("do not cite through a module you never opened");
+* a **member name** asks almost the same question, and the difference is one list. Dotted, it
+  resolves through its head exactly as a symbol does, because the tail is a member of that head.
+  Bare, it resolves against the bound names a symbol is answered by, plus the field names a
+  `_fields_` list declares as **strings** -- the one member a reader can follow that is not a
+  Python binding anywhere. That list is not a convenience: of this tree's member references, two
+  name a `ctypes` field and ten name an ordinary class attribute, and only the field names are
+  absent from the symbol set -- so a member rule that skipped them would report two true
+  references, and one that stopped there would be narrower than the claim;
+* a **module name** is not a symbol at all, and the head rule cannot be borrowed for it. Every
+  module path begins with a package that is bound somewhere in the tree, so a module reference
+  read by its head would resolve every time and report nothing however stale the tail was. The
+  whole path must be a module: one this tree's files form, or one the interpreter can find. That
+  is strictly more than the symbol rule asks, which is why it is a rule of its own rather than
+  another name in a list.
 
 What this does not measure
 --------------------------
@@ -49,6 +59,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+import importlib.util
 import re
 from pathlib import Path
 
@@ -60,9 +71,9 @@ SCANNED = ("emrg", "scripts", "tests")
 #: Vendored trees inside a scanned directory, whose sources are not this project's.
 SKIPPED = ("node_modules", "site-packages")
 
-#: A cross-reference role whose subject is a symbol the tree can be asked about. `attr` is out
-#: for the reason the module docstring gives: it names a member, not a binding.
-ROLE = re.compile(r":(?P<role>func|class|meth|data):`~?(?P<name>[^`\n]+)`")
+#: Every cross-reference role this project writes. The role decides which rule answers it -- a
+#: symbol, a member or a module are three different questions, and the module docstring says why.
+ROLE = re.compile(r":(?P<role>func|class|meth|data|attr|mod):`~?(?P<name>[^`\n]+)`")
 
 
 def tree_roots(root: Path = REPO_ROOT) -> list[Path]:
@@ -112,6 +123,70 @@ def bound(path: Path) -> set[str]:
     return names
 
 
+def module_paths(roots) -> dict[Path, str]:
+    """Each scanned file's importable module name, under the root it was walked from.
+
+    A root that is itself a package contributes its own name as the first segment, so `emrg`'s
+    `server/daemon.py` answers `emrg.server.daemon`. A root that is not a package contributes
+    nothing but its files, which is what makes a temporary directory's `citing.py` answer
+    `citing` rather than `<some tmp dir name>.citing`.
+    """
+    found: dict[Path, str] = {}
+    for root in roots:
+        root = Path(root)
+        package = (root / "__init__.py").is_file()
+        for path in sources([root]):
+            relative = path.relative_to(root)
+            parts = list(relative.parent.parts)
+            if relative.stem != "__init__":
+                parts.append(relative.stem)
+            if not parts:
+                continue
+            if package:
+                parts.insert(0, root.name)
+            found[path] = ".".join(parts)
+    return found
+
+
+def declared_fields(path: Path) -> set[str]:
+    """The field names a structure declares as strings in a `_fields_` list.
+
+    This is the one member name a reader can follow that is not a Python binding anywhere: a
+    `ctypes` structure spells its fields as strings, so an ordinary class attribute is already in
+    the bound-name set and needs no second list. Narrowing this to what it actually adds is what
+    keeps the member rule from looking wider than it is.
+    """
+    try:
+        tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, SyntaxError):
+        return set()
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if not any(isinstance(t, ast.Name) and t.id == "_fields_" for t in targets):
+            continue
+        for element in ast.walk(node.value):
+            if isinstance(element, ast.Constant) and isinstance(element.value, str):
+                names.add(element.value)
+    return names
+
+
+def module_resolves(name: str, modules: dict[Path, str], heads: set[str]) -> bool:
+    """Whether the whole dotted path is a module of this tree, or one the interpreter can find."""
+    if name in set(modules.values()):
+        return True
+    head = name.split(".")[0]
+    if head in heads:
+        # It claims a module under a package this tree has, and the tree does not have that path.
+        return False
+    try:
+        return importlib.util.find_spec(head) is not None
+    except (ImportError, ModuleNotFoundError, ValueError):
+        return False
+
+
 def scan(roots) -> list[str]:
     """One finding per cross-reference that lands on no name the scanned tree has."""
     paths = sources(roots)
@@ -119,6 +194,11 @@ def scan(roots) -> list[str]:
     tree_names: set[str] = set()
     for names in per_file.values():
         tree_names |= names
+    modules = module_paths(roots)
+    module_heads = {name.split(".")[0] for name in modules.values()}
+    field_names: set[str] = set()
+    for path in paths:
+        field_names |= declared_fields(path)
 
     findings = []
     for path in paths:
@@ -134,6 +214,34 @@ def scan(roots) -> list[str]:
             if not name:
                 continue
             line = text.count("\n", 0, match.start()) + 1
+            if role == "mod":
+                if module_resolves(name, modules, module_heads):
+                    continue
+                findings.append(
+                    f"{path}:{line}: cites {name!r} as a module, and no module this tree's files "
+                    f"form, nor one the interpreter can find, has that path — the reader is sent "
+                    f"to a module that is not there"
+                )
+                continue
+            if role == "attr":
+                if "." in name:
+                    head = name.split(".")[0]
+                    if head in visible or head in tree_names or head in vars(builtins):
+                        continue
+                    findings.append(
+                        f"{path}:{line}: cites {name!r} as a member, and {head!r} is neither "
+                        f"imported in this file nor bound anywhere in the tree — the member is "
+                        f"cited through something nothing here has opened"
+                    )
+                    continue
+                if name in tree_names or name in field_names or name in vars(builtins):
+                    continue
+                findings.append(
+                    f"{path}:{line}: cites {name!r} as a member, and no def, class, assignment "
+                    f"or `_fields_` field under {', '.join(str(r) for r in roots)} declares it "
+                    f"— the reader follows the pointer to a member that is not there"
+                )
+                continue
             if "." in name:
                 head = name.split(".")[0]
                 if head in visible or head in tree_names or head in vars(builtins):
@@ -264,8 +372,8 @@ def test_a_bare_backticked_name_in_prose_is_not_a_reference(tmp_path):
     )
 
 
-def test_a_member_role_is_not_a_module_binding(tmp_path):
-    """`attr` names a field of a structure, not a name the module binds."""
+def test_a_member_role_naming_a_declared_field_resolves(tmp_path):
+    """A structure's field is spelled as a string, so no binding anywhere holds its name."""
     site = tmp_path / "fields.py"
     site.write_text(
         f'"""{_ref("attr", "SubAuthority")} is a field of the struct below."""\n\n\n'
@@ -273,9 +381,77 @@ def test_a_member_role_is_not_a_module_binding(tmp_path):
         encoding="utf-8",
     )
     assert scan([tmp_path]) == [], (
-        "an `attr` reference to a structure field was reported as a missing module binding; "
-        "that role makes no such claim"
+        "an `attr` reference to a field the structure declares was reported; its name is a "
+        "string in a `_fields_` list, not a binding, and the reader can still follow it"
     )
+
+
+def test_a_bare_member_role_nothing_declares_is_reported(tmp_path):
+    """Without this arm the member rule would be satisfied by any word at all."""
+    (tmp_path / "holder.py").write_text("class Holder:\n    start_line = 1\n", encoding="utf-8")
+    site = tmp_path / "citing.py"
+    site.write_text(f'"""{_ref("attr", "absent_member")} sizes it."""\n', encoding="utf-8")
+    findings = scan([tmp_path])
+    assert findings, (
+        "a member reference no class declares and no module binds was read as resolved"
+    )
+    assert "absent_member" in findings[0], findings[0]
+
+
+def test_a_member_role_through_its_class_resolves(tmp_path):
+    """A member cited through the class that declares it is a fair pointer."""
+    (tmp_path / "holder.py").write_text("class Holder:\n    start_line = 1\n", encoding="utf-8")
+    site = tmp_path / "citing.py"
+    site.write_text(
+        f'"""Reading {_ref("attr", "Holder.start_line")} first."""\n', encoding="utf-8"
+    )
+    assert scan([tmp_path]) == [], (
+        "a member cited through a class the tree declares was reported; the tail is the "
+        "member of a head that exists"
+    )
+
+
+def test_a_module_reference_the_tree_has_resolves(tmp_path):
+    """A module claim is answered by the whole path, and the tree's own files form it."""
+    (tmp_path / "owner.py").write_text("VALUE = 1\n", encoding="utf-8")
+    site = tmp_path / "citing.py"
+    site.write_text(f'"""Built through {_ref("mod", "owner")}."""\n', encoding="utf-8")
+    assert scan([tmp_path]) == [], "a module reference to a module the tree has was reported"
+
+
+def test_a_module_reference_past_a_module_the_tree_has_is_reported(tmp_path):
+    """The tail of a module path is decidable, so it is not excused by its head."""
+    (tmp_path / "owner.py").write_text("VALUE = 1\n", encoding="utf-8")
+    site = tmp_path / "citing.py"
+    site.write_text(
+        f'"""Built through {_ref("mod", "owner.gone")}."""\n\nimport owner\n',
+        encoding="utf-8",
+    )
+    findings = scan([tmp_path])
+    assert findings, "a module reference to a path no module has was read as resolved"
+    assert "owner.gone" in findings[0], findings[0]
+
+
+def test_the_symbol_rule_would_have_passed_that_module_reference(tmp_path):
+    """The arm that makes the rule above a rule rather than a wish."""
+    (tmp_path / "owner.py").write_text("VALUE = 1\n", encoding="utf-8")
+    site = tmp_path / "citing.py"
+    site.write_text(
+        f'"""Built through {_ref("func", "owner.gone")}."""\n\nimport owner\n',
+        encoding="utf-8",
+    )
+    assert scan([tmp_path]) == [], (
+        "the symbol rule reported a dotted name whose head the file imports, which is the "
+        "behaviour it is documented to have -- and the reason a module reference cannot be "
+        "answered by it"
+    )
+
+
+def test_a_std_library_module_resolves(tmp_path):
+    """A module the interpreter can find is a module, whoever wrote it."""
+    site = tmp_path / "stdmod.py"
+    site.write_text(f'"""Marshals through {_ref("mod", "ctypes")}."""\n', encoding="utf-8")
+    assert scan([tmp_path]) == [], "a reference to a std-library module was reported"
 
 
 def test_a_reference_in_a_comment_is_still_a_reference(tmp_path):
