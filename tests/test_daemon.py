@@ -194,11 +194,24 @@ def test_the_register_written_is_the_one_that_exists(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     # The register belongs at `agents.yml`; it is actually at `projects.yml`.
+    #
+    # `raising=False` is load-bearing rather than tolerance: the fixed module no longer
+    # imports `agents_file`, so this pin exists *for the mutant*. A canonical-name call
+    # re-introduced by a regression resolves through this module global, which is what
+    # makes the arm fail on the assertion below — the one that names the defect — instead
+    # of writing the host's register, where the suite's config guard would refuse with a
+    # different message and a reader would debug the guard. The assertion right after it
+    # keeps that true mechanically: delete the pin and this test says so instead of
+    # passing for the wrong reason.
     monkeypatch.setattr(
         daemon_mod, "agents_file", lambda base=None: tmp_path / "agents.yml",
         raising=False,
     )
     monkeypatch.setattr(daemon_mod, "register_for_reading", lambda base=None: legacy)
+    assert daemon_mod.agents_file() == tmp_path / "agents.yml", (
+        "the canonical-name pin is what the red direction resolves through; without it "
+        "a regression would reach the host's register instead of failing here"
+    )
 
     server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
     work = tmp_path / "work"
