@@ -155,7 +155,16 @@ def test_a_second_name_for_a_protected_file_is_refused(tmp_path, monkeypatch):
     # A judgment names the file it judged: the alias and the protected file
     # differ in spelling, and a refusal printing only the spelling would send its
     # reader looking for a second file that is not there.
-    assert os.path.realpath(victim) in refusal
+    #
+    # The clause is read, not grepped for the bare path. The message renders the
+    # resolved identity with `!r`, so on Windows it carries escaped backslashes
+    # and `realpath` is *not* a substring of it: the bare-path form of this
+    # assertion passed here and failed `test-windows` (measured on #2552's run
+    # 39962749524, `1 failed, 5346 passed`). Comparing the clause with the same
+    # rendering asks the question the sentence asks — is the file it names the
+    # one that was reached — on every platform.
+    resolved = refusal.split("(resolves to ", 1)[1].rstrip(")")
+    assert resolved == repr(os.path.realpath(victim)), refusal
 
     # The same construction on a file the list does not name. Identity is what
     # the answer is keyed to, so a second name for an ordinary file stays
