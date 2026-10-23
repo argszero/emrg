@@ -16,11 +16,15 @@ rows, field loss, history pruning).
 from __future__ import annotations
 
 import json
+import logging
+import os
 from datetime import datetime
 from pathlib import Path
 
 from emrg.memory import NotARegularFile
 from emrg.tools.base import non_regular_kind
+
+logger = logging.getLogger(__name__)
 
 # Canonical field order: timestamp → agent → status → progress → completed → message
 # (agent right after timestamp per user feedback; message last)
@@ -45,7 +49,7 @@ def _normalize_rant(raw) -> dict | None:
     The array form maps by **position**, and the rename left that position where it was:
     the second slot still holds the target's name, so a row written before the rename
     converts to ``agent`` with no move of its own. Nothing here reads a dict row's
-    ``agent`` key — a table still carrying it is moved by
+    ``project`` key — a ledger still carrying it is moved by
     :func:`migrate_rant_agent_field` before any reader sees it, and a fallback here
     would keep both spellings alive, which is what the move exists to end.
     """
@@ -135,6 +139,103 @@ def _write_rants(rants_log: Path, rants: list[dict]) -> None:
     with open(rants_log, "w", encoding="utf-8") as f:
         for r in rants:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+
+def migrate_rant_agent_field(rants_log: Path | None = None) -> int:
+    """Move every row's target from ``project`` to ``agent``, in place.
+
+    Returns how many rows this call rewrote, so the caller can say whether it did
+    anything rather than guess.
+
+    **This is the half the rename cannot do by itself.** :func:`_normalize_rant` builds
+    every row as ``{k: raw.get(k) for k in _RANT_FIELDS}``, so a row still carrying the
+    old key reads back with ``agent: None`` — and :func:`_write_rants` is the only writer
+    while :func:`append_rant` is a read-modify-write, so the next submission would
+    rewrite the whole ledger and drop every pre-rename target. That is also why the move
+    is code rather than a fallback in the reader: a fallback would keep both spellings
+    alive, which is the ambiguity the rename exists to end.
+
+    **Called from the daemon's process entry and nowhere else** — the separation
+    :func:`emrg.config.migrate_legacy_registry` and
+    :func:`emrg.server.scheduler.migrate_task_config_keys` both use, for the same reason:
+    the suite drives this store against ledgers of its own, and a migration reachable
+    from those paths would rewrite a host's live feedback channel under a daemon still
+    reading the old key. The reader never writes — :func:`_read_rants` answers a row
+    exactly as written, old key and all — which is the property the migration's tests pin.
+
+    The key moves **at its own position**, so every other key, its order and its value
+    travel across unchanged, and a line that needs no move is written back verbatim
+    rather than re-serialized. A row already carrying ``agent`` keeps it and loses the
+    stale ``project``; a row with neither key, an array row (:func:`_normalize_rant`
+    already maps it by position) and an unparsable line are left exactly as they are.
+    The rewrite is one atomic ``os.replace`` of a sibling file, so a reader sees the old
+    ledger or the new one and never a half-written one, and a ledger with nothing to move
+    is never opened for writing at all.
+
+    ``rants_log`` defaults to the one derivation of the host's ledger
+    (``config_dir()/rants.jsonl``), imported here rather than at module scope so this
+    store does not depend on the config module to be importable.
+    """
+    if rants_log is None:
+        from emrg.config import config_dir
+
+        rants_log = config_dir() / "rants.jsonl"
+    try:
+        kind = non_regular_kind(rants_log)
+    except OSError:
+        # Absent: nothing to move, and this migrates a ledger — it never seeds one.
+        return 0
+    if kind:
+        # A FIFO would block this open until a writer appears, and this runs at startup.
+        logger.warning("%s not migrated — %s", rants_log, _rant_log_refusal(rants_log, kind))
+        return 0
+    try:
+        with open(rants_log, encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError as exc:
+        logger.warning("%s not migrated — %s", rants_log, exc)
+        return 0
+
+    out: list[str] = []
+    changed = 0
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            out.append(line)
+            continue
+        try:
+            raw = json.loads(stripped)
+        except json.JSONDecodeError:
+            out.append(line)
+            continue
+        if not isinstance(raw, dict) or "project" not in raw:
+            out.append(line)
+            continue
+        moved: dict = {}
+        for key, value in raw.items():
+            if key == "project":
+                if "agent" not in raw:
+                    moved["agent"] = value
+                continue
+            moved[key] = value
+        out.append(json.dumps(moved, ensure_ascii=False) + ("\n" if line.endswith("\n") else ""))
+        changed += 1
+    if not changed:
+        return 0
+
+    tmp = rants_log.with_name(rants_log.name + ".migrating")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.writelines(out)
+        os.replace(tmp, rants_log)
+    except OSError as exc:
+        logger.warning("%s not migrated — %s", rants_log, exc)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return 0
+    return changed
 
 
 def append_rant(rants_log: Path, message: str, agent: str = "") -> int:
