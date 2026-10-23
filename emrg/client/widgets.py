@@ -1037,7 +1037,8 @@ _COMMAND_HELP: dict[str, str] = {
     "/rant":     "Send feedback to the evolution system [/rant | /rant @<project> <msg>]",
     "/model":    "Switch LLM model [/model | /model <name>]",
     "/sandbox":  "Set this session's sandbox tier, or its extra writable roots "
-                 "[/sandbox | /sandbox <mode> | /sandbox add|remove|list <path>]",
+                 "[/sandbox | /sandbox <mode> | /sandbox add|remove|list <path>] "
+                 "[/sandbox add|remove --registry <key> names a registry key]",
     "/trigger":  "List or manually trigger scheduled tasks [/trigger | /trigger <name>]",
     "/task-session": "Open a scheduled task's session (no args = interactive picker)",
     "/skills":   "List loaded skills (user + project)",

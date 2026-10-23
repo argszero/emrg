@@ -11,7 +11,8 @@ those are measured in ``test_sandbox_extra_roots.py`` §4 and
 The layout follows the issue's requirements: §1 the kind is explicit (§1), §2 the
 manifest supplies grants nobody typed (§2), §3 it is visible and withdrawable
 (§3), §4 it never widens a tier that grants nothing (§4), §5 a kind no platform
-enforces is refused by name rather than dropped (§5).
+enforces is refused by name rather than dropped (§5), §6 a host can state a kind
+when they type one (§6).
 
 Two readings this file is written around:
 
@@ -41,6 +42,7 @@ from emrg.sandbox.grants import (
     GRANT_FILE,
     GRANT_KINDS,
     GRANT_REGISTRY,
+    KIND_FLAGS,
     SOURCE_DEFAULT,
     SOURCE_SESSION,
     GrantKindNotEnforced,
@@ -49,6 +51,7 @@ from emrg.sandbox.grants import (
     enforced_kinds,
     enforcement_refusal,
     manifest_targets,
+    split_kind_flag,
 )
 from emrg.sandbox.policy import grants_from_arguments, resolve_policy
 from emrg.sandbox.providers.darwin import sbpl_string, seatbelt_profile_args
@@ -399,7 +402,9 @@ def test_a_registry_grant_is_either_enforced_here_or_refused_by_name(tmp_path):
 
     assert "registry" in refused.value.reason
     assert "HKCU\\Software\\X" in refused.value.reason
-    assert "Stage 2" in refused.value.reason
+    # The sentence names where the kind *is* enforced, derived from the table, so
+    # it says "win32" rather than promising a stage that would add it.
+    assert "win32" in refused.value.reason, refused.value.reason
 
 
 def test_every_dialect_refuses_a_registry_grant_rather_than_losing_it(tmp_path):
@@ -491,7 +496,7 @@ def test_the_shipped_manifest_only_promises_kinds_its_platform_enforces():
     A manifest row promising a grant the run cannot enforce is the lying boundary
     this module refuses everywhere else — so the table is held to
     :data:`ENFORCED_KINDS`, which is why the Windows registry keys the issue also
-    names are absent from it until Stage 2 can enforce them.
+    names are absent from the families whose dialects cannot apply a key's DACL.
     """
     assert _SHIPPED_MANIFEST, "the shipped manifest is empty — nothing was measured"
     for family, rows in _SHIPPED_MANIFEST.items():
@@ -529,3 +534,59 @@ def test_the_session_keeps_a_grant_s_typed_kind_across_a_reload(tmp_path):
     assert meta["sandbox_roots"] == [named.target], "the projection, from the same producer"
     assert reloaded.sandbox_grants == [named]
     assert reloaded.sandbox_roots == [named.target]
+
+
+# ── §6 a host can state a kind when they type one ─────────────────────────
+
+
+def test_the_flag_that_states_a_kind_has_one_producer():
+    """The client and the daemon read one mapping, so neither can invent a kind.
+
+    ``/sandbox add --registry HKCU\\Software\\X`` is the only way a key can be
+    named: the kind is *stated* by the host, never read off the disk (requirement
+    1 of issue #2492 — a key has nothing on a POSIX disk to read it off).
+    """
+    assert split_kind_flag("--registry HKCU\\Software\\LarkCli") == (
+        GRANT_REGISTRY,
+        "HKCU\\Software\\LarkCli",
+    )
+    # No flag means a path, and the argument comes back exactly as typed — this is
+    # what every command before `--registry` did, so it must not be reformatted.
+    assert split_kind_flag("~/notes") == (None, "~/notes")
+    assert split_kind_flag("") == (None, "")
+    # A target may contain spaces; only the first word is ever the flag.
+    assert split_kind_flag("--registry HKCU\\Software\\My Key") == (
+        GRANT_REGISTRY,
+        "HKCU\\Software\\My Key",
+    )
+    # The flag with nothing after it still states a kind — the judge refuses the
+    # empty spelling with the parser's own sentence rather than re-reading it as a
+    # path called "--registry".
+    assert split_kind_flag("--registry") == (GRANT_REGISTRY, "")
+    # …and a leading `--` that is not one of the known flags stays part of the
+    # target, so the mapping cannot absorb a path it does not name.
+    assert split_kind_flag("--not-a-flag x") == (None, "--not-a-flag x")
+
+
+def test_every_stated_flag_is_named_in_the_command_help():
+    """A flag nobody can read about is half a feature.
+
+    The help line is the only place a host learns the syntax, and it is prose —
+    exactly the carrier that goes stale in silence. So it is held to the table
+    that produces the flags: a kind added to :data:`KIND_FLAGS` without a word in
+    ``_COMMAND_HELP`` fails here rather than shipping undiscoverable.
+    """
+    from emrg.client.widgets import _COMMAND_HELP
+
+    sandbox_help = _COMMAND_HELP["/sandbox"]
+    for flag, kind in KIND_FLAGS.items():
+        assert flag in sandbox_help, (
+            f"{kind} can be named with {flag}, but /sandbox's help never mentions it: "
+            f"{sandbox_help!r}"
+        )
+
+
+def test_every_stated_flag_names_a_kind_the_model_has():
+    """A flag for a kind outside :data:`GRANT_KINDS` would be a second vocabulary."""
+    assert set(KIND_FLAGS.values()) <= set(GRANT_KINDS)
+    assert all(flag.startswith("--") for flag in KIND_FLAGS)

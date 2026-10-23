@@ -410,6 +410,72 @@ def _absolute_root_spelling(path: str) -> tuple[str, str | None]:
     return canonical_path(expanded), None
 
 
+def judge_registry_key(
+    key: str, policy: SandboxPolicy, platform: str | None = None
+) -> ExtraRootVerdict:
+    """Judge one host-named registry key — the refusal, the duplicate, or the grant.
+
+    A third judge beside :func:`judge_extra_root` and :func:`judge_root_removal`,
+    for the reason those two are separate functions: a key answers a different
+    question.  None of the six granting rules has a meaning for one — a key is not
+    the filesystem root, is not the home directory, has no protected daemon state
+    file beneath it and nothing to ``stat`` — while two questions are its own:
+    *is the spelling one key* and *can this platform apply it at all*.
+
+    **Validation and enforcement are kept apart here**, in that order.  The
+    spelling is checked first, because a malformed key is malformed on every
+    platform, and it is checked with
+    :func:`~emrg.sandbox.win32.registry.split_key` — the parser the DACL applier
+    itself uses — so a key this judge accepts is one that path can address, and no
+    second parser with a second wording exists.  Only then does the platform
+    answer, through :func:`~emrg.sandbox.grants.enforcement_refusal`, which stays
+    the one producer of that sentence.
+
+    The stored target is the **canonical** spelling
+    (:func:`~emrg.sandbox.win32.registry.canonical_key_spelling`), because a
+    capability SID is derived from the spelling: ``HKCU`` and
+    ``HKEY_CURRENT_USER`` are both accepted and would otherwise be two identities
+    on one key.  Naming a key twice is therefore recognised by a case-insensitive
+    comparison, since the registry namespace is case-insensitive.
+
+    That comparison reads :func:`stored_grants` rather than
+    :func:`granted_grants`, and the difference is the tier rather than the
+    enforcement: the second reader answers ``[]`` for every mode but
+    ``workspace-write``, so a key named at ``read-only`` would not be found and
+    would be stored twice — the same defect the path judge's own second loop
+    exists to prevent.  A key is granted as itself, with no containment test to
+    run, so "is it on the list" is the whole question and the mode-independent
+    list is the whole answer.
+
+    :param key: the key as the host typed it.
+    :param policy: the session's policy **including its stored grants**, so a key
+        already granted is reported rather than stored twice.
+    :param platform: the platform to judge; defaults to ``sys.platform``.  It is a
+        parameter for the same reason :func:`enforcement_refusal` has one — the
+        spelling rules are ordinary Python, so a POSIX leg holds them to their
+        rule without a Windows host.
+    :returns: the verdict — the canonical spelling, and either a refusal or the
+        typed grant to store.
+    """
+    from emrg.sandbox.win32.registry import RegistryKeyError, canonical_key_spelling
+
+    try:
+        canonical = canonical_key_spelling(key.strip())
+    except RegistryKeyError as exc:
+        return ExtraRootVerdict("", refusal=str(exc))
+    refusal = enforcement_refusal(GRANT_REGISTRY, canonical, platform)
+    if refusal is not None:
+        return ExtraRootVerdict("", refusal=refusal)
+    for grant in stored_grants(policy):
+        if grant.kind == GRANT_REGISTRY and grant.target.lower() == canonical.lower():
+            return ExtraRootVerdict(canonical, notice=(
+                f"{canonical!r} is already granted for this session — a registry namespace "
+                "is case-insensitive and both accepted spellings of a root name one key, so "
+                "this is the grant you already have"
+            ), store=False)
+    return ExtraRootVerdict(canonical, grant=RootGrant(GRANT_REGISTRY, canonical))
+
+
 def judge_extra_root(
     path: str, policy: SandboxPolicy, kind: str | None = None
 ) -> ExtraRootVerdict:
@@ -490,21 +556,7 @@ def judge_extra_root(
             f"unknown grant kind {kind!r} — expected one of {', '.join(GRANT_KINDS)}"
         ))
     if kind == GRANT_REGISTRY:
-        # Terminal in this stage, and the sentence says why rather than pretending
-        # the key was judged: no platform enforces a registry grant yet
-        # (``grants.ENFORCED_KINDS``), so there is no key spelling to validate
-        # against. Stage 2 of issue #2492 replaces this branch with the key's own
-        # rules *and* the DACL that applies it — landing only one of the two would
-        # be a stored grant that no dialect acts on, which is the silent ignore
-        # requirement 5 forbids.
-        refusal = enforcement_refusal(GRANT_REGISTRY, path.strip())
-        if refusal is None:  # pragma: no cover - no platform reaches this in Stage 1
-            refusal = (
-                "a registry grant is enforced on this platform but its key spelling is not "
-                "validated yet — issue #2492 Stage 2 lands the validation and the enforcement "
-                "together"
-            )
-        return ExtraRootVerdict("", refusal=refusal)
+        return judge_registry_key(path, policy)
 
     canonical, refusal = _absolute_root_spelling(path)
     if refusal:
@@ -583,7 +635,9 @@ def judge_extra_root(
     return ExtraRootVerdict(canonical, grant=RootGrant.from_path(canonical))
 
 
-def judge_root_removal(path: str, policy: SandboxPolicy) -> ExtraRootVerdict:
+def judge_root_removal(
+    path: str, policy: SandboxPolicy, kind: str | None = None
+) -> ExtraRootVerdict:
     """Judge one ``/sandbox remove`` — the canonical spelling, or why it cannot be read.
 
     Removal asks a different question from :func:`judge_extra_root`, and this is
@@ -603,12 +657,28 @@ def judge_root_removal(path: str, policy: SandboxPolicy) -> ExtraRootVerdict:
     not grant this" — a path that is simply not on the list is answered with the
     list as it stands, which is what "removal is idempotent" means.
 
-    :param path: the path as the host typed it.
-    :param policy: unused — carried so the two judges are called alike, and so a
-        later removal rule has somewhere to read the session's state from.
-    :returns: the verdict — canonical spelling, and a refusal only for a path
+    **A key is withdrawn by its own spelling rule and no other.** ``kind`` is the
+    kind the host stated (``/sandbox remove --registry``); when it names a
+    registry key the target is canonicalized the way the grant was stored, and
+    none of the path rules run — there is no absolute path to require and no
+    disk to stat. A grant that can be added must be withdrawable, so this branch
+    can refuse only an unreadable *spelling*, never the policy.
+
+    :param path: the path, or key, as the host typed it.
+    :param policy: unused by the path rules — carried so the two judges are called
+        alike, and so a later removal rule has somewhere to read the session's
+        state from.
+    :param kind: the kind the host stated, or ``None`` for a path.
+    :returns: the verdict — canonical spelling, and a refusal only for an argument
         that could not be read.
     """
+    if kind == GRANT_REGISTRY:
+        from emrg.sandbox.win32.registry import RegistryKeyError, canonical_key_spelling
+
+        try:
+            return ExtraRootVerdict(canonical_key_spelling(path.strip()))
+        except RegistryKeyError as exc:
+            return ExtraRootVerdict("", refusal=str(exc))
     canonical, refusal = _absolute_root_spelling(path)
     if refusal:
         return ExtraRootVerdict(canonical, refusal=refusal)

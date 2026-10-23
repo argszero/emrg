@@ -41,10 +41,11 @@ lying about it. :data:`ENFORCED_KINDS` names what has an implementation;
 :func:`enforcement_refusal` produces the one sentence a caller shows when a kind
 is not there, and every dialect refuses such a grant **by name** rather than
 dropping it — dropping it would report a boundary the run does not have, and
-passing it on as a path would grant something else entirely. Today ``registry``
-is in no platform's set: the model carries the kind, the writer refuses it with
-that sentence, and the enforcement itself — a DACL on a registry key, in
-``emrg/sandbox/win32/`` — is Stage 2 of issue #2492.
+passing it on as a path would grant something else entirely. ``registry`` is in
+``win32``'s set alone — a key's DACL is read and rewritten through
+``RegGetKeySecurity`` / ``RegSetKeySecurity`` in ``emrg/sandbox/win32/registry.py``
+— so the other three families refuse such a grant with that sentence, while a
+Windows host may name a key.
 """
 
 from __future__ import annotations
@@ -67,13 +68,42 @@ SOURCE_SESSION = "session"
 SOURCE_DEFAULT = "default"
 GRANT_SOURCES: tuple[str, ...] = (SOURCE_SESSION, SOURCE_DEFAULT)
 
+#: The flag a host types to **state** an object's kind, by the kind it names.
+#:
+#: One entry today, and a mapping rather than a bare string because it is the one
+#: producer of the answer: the client parses the typed command with
+#: :func:`split_kind_flag` and the daemon judges the kind it carries, so the two
+#: cannot spell one kind two ways.  Stating the kind is the whole point — reading
+#: it off the disk is the defect issue #2492 exists to remove, and a key has
+#: nothing on a POSIX disk to read it off.
+KIND_FLAGS: dict[str, str] = {"--registry": GRANT_REGISTRY}
+
+
+def split_kind_flag(argument: str) -> tuple[str | None, str]:
+    """Split one ``/sandbox add|remove`` argument into its stated kind and target.
+
+    The flag is only the **first** word: everything after it is the target,
+    whitespace included, because a path may legitimately contain spaces and a
+    leading ``--`` never can.  An argument that does not open with a known flag is
+    a target with no stated kind — the caller then applies the path rules, which
+    is what every command before this one did.
+
+    :param argument: the argument as typed, after the subcommand.
+    :returns: ``(kind, target)``; ``kind`` is ``None`` when none was stated.
+    """
+    words = argument.split(None, 1)
+    if words and words[0].lower() in KIND_FLAGS:
+        return KIND_FLAGS[words[0].lower()], (words[1].strip() if len(words) > 1 else "")
+    return None, argument
+
 #: The kinds **this platform's dialects implement**, per platform family.
 #:
 #: ``registry`` is enforced on ``win32`` alone: a key's DACL is read and rewritten
 #: through ``RegGetKeySecurity`` / ``RegSetKeySecurity``
 #: (:mod:`emrg.sandbox.win32.registry`).  The other three families name no
 #: registry API at all, so for them the kind stays modelled and unenforced, and
-#: :func:`enforcement_refusal` says so by name (issue #2492 Stage 2).  A set
+#: :func:`enforcement_refusal` says so by name — deriving from this table which
+#: family *does* enforce it, so no sentence can outlive the row it describes.  A set
 #: rather than a comment because two callers read it — the refusal sentence, and
 #: the guard that keeps :data:`DEFAULT_MANIFEST` from claiming a kind its
 #: platform cannot honour.
@@ -175,11 +205,23 @@ def enforcement_refusal(kind: str, target: str = "", platform: str | None = None
     # full of backslashes, and `repr` doubles every one of them, so the sentence a
     # host reads would name a key that looks nothing like the one they typed.
     named = f" '{target}'" if target else ""
+    # Where the kind *is* enforced, read off the table rather than written as
+    # prose. The sentence this replaces closed by promising a future stage would
+    # ship the enforcement — and #2498 shipped it, so the sentence went on
+    # telling a Windows host that a key could not be applied while
+    # `ENFORCED_KINDS["win32"]` said otherwise. A derived clause cannot drift
+    # from the table it is derived from.
+    enforcing = sorted(f for f, kinds in ENFORCED_KINDS.items() if kind in kinds)
+    elsewhere = (
+        f" ({kind} grants are enforceable on {', '.join(enforcing)})"
+        if enforcing
+        else f" (no platform enforces a {kind} grant yet)"
+    )
     return (
         f"a {kind} grant{named} cannot be enforced on {platform_family(platform)} — this "
         f"platform enforces {', '.join(allowed)}. Dropping it would report a boundary the "
         f"run does not have, and honouring it as a path would grant a different object, so "
-        f"it is refused instead (issue #2492 Stage 2 adds {kind} enforcement)"
+        f"it is refused instead{elsewhere}"
     )
 
 

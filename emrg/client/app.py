@@ -25,6 +25,7 @@ from emrg.client.widgets import (
 from websockets.exceptions import ConnectionClosed
 from emrg.protocol import TaskResponse, ToolEnd, ToolStart, new_task_id
 from emrg.sandbox.escalation import APPROVAL_TIMEOUT_SECONDS
+from emrg.sandbox.grants import split_kind_flag
 from emrg.sandbox.policy import SANDBOX_MODES
 from emrg.session import generate_session_id, session_dir
 # The credential rule is a stdlib-only leaf (`emrg/server/redaction.py`), deliberately
@@ -3652,9 +3653,16 @@ Streaming
                     sub = parts[1].strip() if len(parts) > 1 else ""
                     rest = parts[2].strip() if len(parts) > 2 else ""
                     if sub in ("add", "remove", "list"):
+                        # The kind is *stated*, never inferred, and the mapping
+                        # lives in `grants.split_kind_flag` so this client cannot
+                        # spell a kind the model does not have (issue #2492
+                        # requirement 1). No flag means a path, which is what
+                        # every command before `--registry` did.
+                        kind, target = split_kind_flag(rest)
                         await conn.send_command(
                             "set_sandbox_roots",
-                            session_id=session_id, cwd=cwd, op=sub, path=rest,
+                            session_id=session_id, cwd=cwd, op=sub, path=target,
+                            kind=kind,
                         )
                         status.update(center=f"sandbox roots: {sub}...")
                     elif sub:
