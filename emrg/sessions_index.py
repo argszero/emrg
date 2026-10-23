@@ -22,6 +22,7 @@ import os
 import tempfile
 from pathlib import Path
 
+from emrg.agent import as_agent
 from emrg.config import config_dir
 
 # The "is this path a regular file" rule is the tool layer's, reached at a path. Imported
@@ -185,7 +186,7 @@ def _read_meta_session_id(meta_path: Path) -> str | None:
 
 def _iter_project_sessions(project_path: Path):
     """Yield (session_id, session_dir) from <project>/.emrg/sessions/*/meta.json."""
-    sessions_dir = project_path / ".emrg" / "sessions"
+    sessions_dir = as_agent(project_path).sessions_dir
     if not sessions_dir.is_dir():
         return
     for entry in sorted(sessions_dir.iterdir()):

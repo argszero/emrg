@@ -152,17 +152,53 @@ def _spells_a_session_directory(tree: ast.AST) -> list[int]:
     return sorted(found)
 
 
-def test_the_directory_a_session_lives_in_has_one_producer():
-    """The rule is `session_dir`, and no other module may build the path itself.
+def _spells_a_layout_leaf(tree: ast.AST) -> list[int]:
+    """Line numbers of expressions that build `<dir>/.emrg/{sessions,memory}`.
 
-    Dozens of call sites need this directory, and each one that spelled it out
-    was a copy that a change to the layout would have to find. They agreed, so
-    nothing was broken — which is exactly what makes a copy invisible to a
-    behavioural test: five of them survived a refactor that claimed to leave one
-    producer, because every copy still produced the right answer.
+    The same walk as `_spells_a_session_directory`, with the second component widened to
+    the whole layout: a module that spells `<some dir>/.emrg/sessions` or
+    `<some dir>/.emrg/memory` is holding a copy of the Agent's derivation whether or not
+    it goes on to name a leaf inside it.
+
+    A formatted string is not a path builder and is deliberately not walked here: a
+    prompt that *tells a reader* where memory lives spells the same two components, and
+    flagging it would report a clean tree as dirty. The spelling that hides the
+    components in a format string — `cwd / f".emrg/sessions/{sid}"` — is still caught,
+    because the division that builds the path is the node that carries them. That
+    exemption is measured, not assumed: see
+    `test_a_prompt_that_names_the_layout_is_not_a_producer`.
+    """
+    found: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.BinOp, ast.Call)):
+            continue
+        parts = _path_components(node)
+        if parts is None:
+            continue
+        for i in range(len(parts) - 1):
+            if parts[i] == ".emrg" and parts[i + 1] in ("sessions", "memory"):
+                found.add(node.lineno)
+                break
+    return sorted(found)
+
+
+def test_the_directory_a_session_lives_in_has_one_producer():
+    """The rule is `Agent.sessions_dir`; no module may build the layout itself.
+
+    Dozens of call sites need a session's directory, and each one that spelled it out
+    was a copy that a change to the layout would have to find. They agreed, so nothing
+    was broken — which is exactly what makes a copy invisible to a behavioural test:
+    five of them survived a refactor that claimed to leave one producer, because every
+    copy still produced the right answer.
+
+    The producer is an object now, so this guard's subject moved with it and its
+    assertion got wider rather than weaker: **no module may spell the layout at all** —
+    neither the session leaf nor either half of the derivation — because the one place
+    that does is `Agent`. That the Agent's own literals *are* the layout is pinned
+    behaviourally in `tests/test_agent.py`, which is the half no source scan can see.
     """
     package_root = Path(__file__).resolve().parents[1] / "emrg"
-    producer, offenders = [], []
+    spellings: list[str] = []
     for path in sorted(package_root.rglob("*.py")):
         rel = path.relative_to(package_root).as_posix()
         # A module elsewhere in the package carries an invalid escape sequence in a
@@ -172,15 +208,12 @@ def test_the_directory_a_session_lives_in_has_one_producer():
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", SyntaxWarning)
             tree = ast.parse(path.read_bytes())
-        for lineno in _spells_a_session_directory(tree):
-            (producer if rel == "session.py" else offenders).append(f"{rel}:{lineno}")
+        for lineno in _spells_a_layout_leaf(tree):
+            spellings.append(f"{rel}:{lineno}")
 
-    assert offenders == [], (
-        "these build <cwd>/.emrg/sessions/<id> themselves instead of asking "
-        f"session_dir(): {offenders} — a second producer is a second rule"
-    )
-    assert len(producer) == 1, (
-        f"expected exactly one producer in session.py, found {producer}"
+    assert spellings == [], (
+        "these build a `<dir>/.emrg/{sessions,memory}` path themselves instead of "
+        f"asking the Agent: {spellings} — a second producer is a second rule"
     )
 
 
@@ -229,6 +262,37 @@ def test_the_sessions_root_is_not_a_session_directory(expression):
     other direction, and the one that teaches a reader to ignore the guard.
     """
     assert _spells_a_session_directory(ast.parse(expression)) == []
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        'cwd / ".emrg" / "sessions"',
+        'Path(cwd, ".emrg", "memory")',
+        'os.path.join(cwd, ".emrg", "sessions")',
+        'cwd / f".emrg/sessions/{sid}"',
+        'session.cwd / ".emrg" / "memory" / "MEMORY.md"',
+    ],
+)
+def test_every_builder_of_the_layout_is_found(expression):
+    """Both halves of the derivation, in every joining syntax a caller uses."""
+    assert _spells_a_layout_leaf(ast.parse(expression)) == [1]
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        # A prompt that tells a reader where memory lives is prose, not a producer.
+        'f"Project: `{cwd}/.emrg/memory/` (project-scope, cross-session)"',
+        # The host's install root is a different fact from a directory's layout.
+        'Path.home() / ".emrg" / "install"',
+        'cwd / ".emrg" / "config.toml"',
+        'agent.memory_dir / "MEMORY.md"',
+    ],
+)
+def test_a_prompt_that_names_the_layout_is_not_a_producer(expression):
+    """The exemption above, measured: naming the layout is not building it."""
+    assert _spells_a_layout_leaf(ast.parse(expression)) == []
 
 
 def _javascript_without_comments(source: str) -> str:
