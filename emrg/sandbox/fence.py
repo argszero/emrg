@@ -88,8 +88,11 @@ def file_refusal(file_path: str, policy: SandboxPolicy) -> str | None:
         # session whose cwd is ``~`` would make the OS fence grant them.  So this
         # is the one place the in-process fence is **stricter** than the kernel
         # profile rather than identical to it: it can refuse a write bash would
-        # be allowed to make, never the reverse.  The list stays in
-        # ``emrg/tools/file_policy.py`` because the legacy scanner reads it too.
+        # be allowed to make, never the reverse.  The list itself lives in
+        # ``emrg/tools/file_policy.py``, and ``protected_hit`` there is the one
+        # predicate this module and ``emrg/sandbox/roots.py`` both ask — the
+        # in-process fence and the kernel profile refuse the same five paths
+        # because they ask one derivation, not because two lists happen to agree.
         #
         # Asked by file identity, not by comparing canonical strings: on a volume
         # that folds case two spellings are one file, and `realpath` hands back
