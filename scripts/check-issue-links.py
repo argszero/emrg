@@ -120,9 +120,8 @@ States
                  that change, and the state is kept because silently dropping it would
                  report those issues as if the line had never been written
     origin-duplicate
-                 two or more open issues declare the same rant origin and at least one
-                 carries no `Part: n/N` — which is what makes a deliberate split of one rant
-                 across several issues distinguishable from a duplicate claim of it
+                 two or more open issues declare the same rant origin: one rant is one
+                 issue, so a second claim of it cannot be told from a duplicate of the first
 
 The last two read a **file**, not GitHub, and that difference is why they exist at all
 ----------------------------------------------------------------------------------------
@@ -410,13 +409,6 @@ _ORIGIN = re.compile(
     r"(?im)^[ \t]*origin:[ \t]*rant[ \t:]+[`*_]{0,2}"
     r"(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)"
 )
-
-#: The escape hatch R5 defines for a rant carried by more than one issue: `Part: 1/3`. Two
-#: open issues naming the same rant are the shape the one-rant-one-issue default forbids,
-#: *unless* each says which part it is — then the reading can tell a deliberate split from
-#: a duplicate claim, which is the whole reason the clause exists.
-_PART = re.compile(r"(?i)\bpart:[ \t]*\d+[ \t]*/[ \t]*\d+")
-
 
 def _without_code(text: str) -> str:
     """`text` with inline code spans and fenced blocks blanked out, same length."""
@@ -914,11 +906,10 @@ def judge_origins(
       pruned the record at all, and whether the citation is newer than every record the ledger
       ranks: the fact that decides whether this store could have held the handle, or whether it
       was written on the machine that owns the ledger it resolves against.
-    * `origin-duplicate` — two or more **open** issues declare the same rant and at least
-      one of them carries no `Part: n/N`. R5's default is one rant, one issue; the split is
-      legitimate only when every part says which part it is, so an unlabelled one makes the
-      two indistinguishable from a duplicate claim — which is the reading `--json` and a
-      reviewer both need before they can tell deliberate from accidental.
+    * `origin-duplicate` — two or more **open** issues declare the same rant. One rant is one
+      issue, so every claimant after the first is indistinguishable from a duplicate of it, and
+      the reading says so about each rather than picking one to spare: folding them into the one
+      issue that finishes the rant is the remedy, and there is no label that substitutes for it.
 
       The subject is counted by **issue, not by occurrence**: one issue that writes its
       origin line twice (a body carrying the line at the top and again in a provenance
@@ -941,12 +932,10 @@ def judge_origins(
     """
     faults: dict[int, tuple[str, str]] = {}
     by_ts: dict[str, set[int]] = {}
-    labelled: dict[int, bool] = {}
     store = _ledger_timestamps(rows)
     for issue in issues:
         number = int(issue["number"])
         body = issue.get("body") or ""
-        labelled[number] = bool(_PART.search(_without_code(body)))
         for ts in _origin_lines(body):
             by_ts.setdefault(ts, set()).add(number)
             if ts in store:
@@ -965,17 +954,13 @@ def judge_origins(
     for ts, numbers in by_ts.items():
         if len(numbers) < 2:
             continue
-        unlabelled = sorted(n for n in numbers if not labelled[n])
-        if not unlabelled:
-            continue
-        for number in unlabelled:
+        for number in sorted(numbers):
+            others = sorted(n for n in numbers if n != number)
             faults[number] = (
                 "origin-duplicate",
-                f"{_numbers(numbers)} name the same rant origin `{ts}` and "
-                f"{_numbers(unlabelled)} carry no `Part: n/N` - one rant is one issue by "
-                "default, so either fold these into the one issue that finishes the rant, "
-                "or label each with the part it is (`Part: 1/2`) so a reader can tell a "
-                "deliberate split from a duplicate claim",
+                f"{_numbers(numbers)} name the same rant origin `{ts}` - one rant is one "
+                f"issue, so {_numbers(others)} cannot be told from a duplicate of it. Fold "
+                "them into the one issue that finishes the rant; no label substitutes for that",
             )
     return faults
 
