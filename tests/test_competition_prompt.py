@@ -75,7 +75,7 @@ def rendered(tmp_path_factory) -> str:
         handler = make_handler(
             name="competition-task",
             type="competition",
-            config={"project": PROMPT_PROJECT},
+            config={"agent": PROMPT_PROJECT},
             identity=InstanceIdentity(),
             template_path=PROMPT,
         )
@@ -353,7 +353,7 @@ def test_preparation_and_closing_summary_are_mandatory():
     assert "a round that ends without a summary strands the next one" in text
     assert "Seven questions the closing summary must answer" in text
     # Rant scan must match the project field exactly, like the other templates.
-    assert "exactly `{{ task.project }}`" in text
+    assert "exactly `{{ task.agent }}`" in text
 
 
 def test_error_handling_and_forbidden_sections_exist():
@@ -998,7 +998,7 @@ def test_the_render_substitutes_values_and_carries_no_template_syntax(rendered):
 
     Two ways a render assertion goes vacuous, both closed here. If the block were read
     with its syntax intact — a `{% raw %}` wrapper, or the text copied out of a literal —
-    the round would be sent `{{ task.project }}` and would be told nothing; and if what
+    the round would be sent `{{ task.agent }}` and would be told nothing; and if what
     this test examined were the file, the same assertion catches it. Then the substituted
     value has to arrive, so "it rendered" is measured by what the round can read rather
     than by the absence of braces alone.
@@ -1010,7 +1010,7 @@ def test_the_render_substitutes_values_and_carries_no_template_syntax(rendered):
     assert PROMPT_PROJECT in rendered, (
         "the render does not carry the project name "
         f"{PROMPT_PROJECT!r}: "
-        "`{{ task.project }}` resolved to nothing (`jinja2.Undefined` renders empty), so "
+        "`{{ task.agent }}` resolved to nothing (`jinja2.Undefined` renders empty), so "
         "the round is told its project is blank"
     )
 

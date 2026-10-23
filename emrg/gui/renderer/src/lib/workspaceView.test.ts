@@ -117,10 +117,10 @@ describe("preprocessRantMarkdown", () => {
 });
 
 describe("buildEvolveProjects", () => {
-  it("收集 config.project 集合（含 evolution 任务）", () => {
+  it("收集 config.agent 集合（含 evolution 任务）", () => {
     const tasks: TaskRec[] = [
-      { name: "a", config: { project: "emrg" } },
-      { name: "b", config: { project: "aitokenpool" } },
+      { name: "a", config: { agent: "emrg" } },
+      { name: "b", config: { agent: "aitokenpool" } },
       { name: "c", config: {} },
     ];
     const set = buildEvolveProjects(tasks);
@@ -176,7 +176,7 @@ describe("taskStatusBadge", () => {
 
 describe("taskHint", () => {
   it("项目 / 间隔 / 停用 join ·", () => {
-    const h = taskHint({ config: { project: "emrg" }, interval: 1800 }, t);
+    const h = taskHint({ config: { agent: "emrg" }, interval: 1800 }, t);
     expect(h).toBe('emrg · app.taskInterval={"n":1800}');
     expect(taskHint({ enabled: false }, t)).toBe("app.taskDisabled");
   });

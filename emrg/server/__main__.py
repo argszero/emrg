@@ -9,6 +9,7 @@ from emrg.config import logs_dir, migrate_legacy_registry
 from emrg.logfiles import migrate_legacy_logs
 from emrg.server.daemon import DaemonExit, _non_regular_kind, run_server
 from emrg.server.logcontext import session_label
+from emrg.server.scheduler import migrate_task_config_keys
 from emrg.tool_path import ensure_tool_dirs
 
 
@@ -202,6 +203,13 @@ def main() -> None:
         # fails without touching the host's register at all, and it sits in no path
         # derivation — asking where the register lives must never move it.
         migrate_legacy_registry()
+        # The task table's agent key moved from `project` to `agent` (issue #2531),
+        # and it moves here for the same reason: this is a process that owns the
+        # file, it runs before the scheduler is constructed below, and no test path
+        # reaches it — so a suite run cannot rewrite a host's live table under a
+        # daemon still reading the old key. Asking a record for its agent never
+        # writes; only this call does.
+        migrate_task_config_keys()
         result = asyncio.run(run_server(config.llm))
     except KeyboardInterrupt:
         # SIGINT delivered at the event-loop poll point escapes the main

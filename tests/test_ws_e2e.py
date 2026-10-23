@@ -3170,8 +3170,8 @@ class TestWSTaskWire:
                 try:
                     calls = {}
 
-                    def fake_create(name, task_type, project, interval=None, enabled=True, repo=None, description=None, sandbox=None, schedule=None):
-                        calls.update(name=name, task_type=task_type, project=project)
+                    def fake_create(name, task_type, agent, interval=None, enabled=True, repo=None, description=None, sandbox=None, schedule=None):
+                        calls.update(name=name, task_type=task_type, agent=agent)
                         return True, {"name": name, "type": task_type}
 
                     server._scheduler = self._mock_scheduler(create_side_effect=fake_create)
@@ -3179,12 +3179,12 @@ class TestWSTaskWire:
                     try:
                         resp = await self._cmd(ws, {
                             "type": "task_create", "name": "daily",
-                            "task_type": "evolution", "project": "emrg",
+                            "task_type": "evolution", "agent": "emrg",
                         })
                         assert resp["type"] == "task_result"
                         assert resp.get("ok") is True
                         assert calls["task_type"] == "evolution", "daemon must read task_type"
-                        assert calls["project"] == "emrg"
+                        assert calls["agent"] == "emrg"
                     finally:
                         await ws.close()
                 finally:
@@ -3200,15 +3200,15 @@ class TestWSTaskWire:
                 try:
                     calls = {}
 
-                    def fake_create(name, task_type, project, interval=None, enabled=True, repo=None, description=None, sandbox=None, schedule=None):
-                        calls.update(name=name, task_type=task_type, project=project)
+                    def fake_create(name, task_type, agent, interval=None, enabled=True, repo=None, description=None, sandbox=None, schedule=None):
+                        calls.update(name=name, task_type=task_type, agent=agent)
                         return True, {"name": name, "type": task_type}
 
                     server._scheduler = self._mock_scheduler(create_side_effect=fake_create)
                     ws = await connect_to_server()
                     try:
                         resp = await self._cmd(ws, {
-                            "type": "task_create", "name": "daily", "project": "emrg",
+                            "type": "task_create", "name": "daily", "agent": "emrg",
                         })
                         assert resp["type"] == "task_result"
                         assert calls["task_type"] == "", "must not fall back to wire type 'task_create'"
@@ -3231,7 +3231,7 @@ class TestWSTaskWire:
                 try:
                     calls = {}
 
-                    def fake_create(name, task_type, project, interval=None, enabled=True,
+                    def fake_create(name, task_type, agent, interval=None, enabled=True,
                                     repo=None, description=None, sandbox=None, schedule=None):
                         calls.update(interval=interval, schedule=schedule)
                         return True, {"name": name, "type": task_type}
@@ -3244,7 +3244,7 @@ class TestWSTaskWire:
                     try:
                         resp = await self._cmd(ws, {
                             "type": "task_create", "name": "daily",
-                            "task_type": "evolution", "project": "emrg",
+                            "task_type": "evolution", "agent": "emrg",
                             "interval": 10800, "schedule": window,
                         })
                         assert resp["type"] == "task_result"

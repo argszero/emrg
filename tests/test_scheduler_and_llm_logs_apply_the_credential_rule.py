@@ -207,7 +207,7 @@ def _handler(tmp_path, monkeypatch, name="emrg-task"):
     monkeypatch.setattr(sched_mod, "config_dir", lambda: tmp_path)
     return make_handler(
         name=name,
-        config={"project": "emrg"},
+        config={"agent": "emrg"},
         interval=60,
         identity=InstanceIdentity(),
     )

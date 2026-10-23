@@ -127,6 +127,11 @@ def test_the_daemon_entrypoint_migrates_before_it_serves(monkeypatch):
         lambda *a, **k: calls.append("migrate") or True,
     )
     monkeypatch.setattr(
+        server_main,
+        "migrate_task_config_keys",
+        lambda *a, **k: calls.append("migrate-tasks") or 0,
+    )
+    monkeypatch.setattr(
         "emrg.config.load_config",
         lambda: types.SimpleNamespace(llm=None),
     )
@@ -146,7 +151,7 @@ def test_the_daemon_entrypoint_migrates_before_it_serves(monkeypatch):
     with pytest.raises(SystemExit):
         server_main.main()
 
-    assert calls == ["migrate", "serve"], calls
+    assert calls == ["migrate", "migrate-tasks", "serve"], calls
 
 
 def test_the_old_name_is_spelled_only_where_the_move_is():
