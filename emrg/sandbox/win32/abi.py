@@ -95,8 +95,35 @@ ACCESS_ALLOWED_ACE_TYPE = 0
 SID_MAX_SUB_AUTHORITIES = 15
 #: ACE flag marking inherited entries.
 INHERITED_ACE = 0x10
-#: Maximum SID allocation size in bytes.
-SECURITY_MAX_SID_SIZE = 68
+class Sid(ctypes.Structure):
+    """``SID`` — the security identifier, sized by its own declaration.
+
+    Declared here, beside the constant that describes it, so that constant can be
+    *measured*: a two-byte header, a six-byte identifier authority and the
+    sub-authority array.  The struct holds no pointer, so its layout is the same
+    on a 32-bit and a 64-bit interpreter — which is exactly why a literal ``68``
+    reads as correct and stays correct by accident, with nothing saying so.
+
+    The offsets the ACL walk reads are taken from here rather than written down:
+    :attr:`SubAuthority` starts the variable-length tail an inline ACE SID is
+    read from, and :attr:`SubAuthorityCount` is the byte that sizes it.
+    """
+
+    _fields_ = [
+        ("Revision", ctypes.c_ubyte),
+        ("SubAuthorityCount", ctypes.c_ubyte),
+        ("IdentifierAuthority", ctypes.c_ubyte * 6),
+        ("SubAuthority", ctypes.c_uint32 * SID_MAX_SUB_AUTHORITIES),
+    ]
+
+
+#: The most bytes a ``SID`` may occupy, and the buffer size a SID is copied into.
+#:
+#: The SDK defines this as ``sizeof(SID)`` with the sub-authority array at its
+#: maximum, so it is taken from the struct above and never written down.  A
+#: literal here would be a number a reader cannot check: the declaration is what
+#: says how large a SID is, and it costs nothing to ask it (issue #2517).
+SECURITY_MAX_SID_SIZE = ctypes.sizeof(Sid)
 
 # --- registry keys (issue #2492 Stage 2) -----------------------------------
 

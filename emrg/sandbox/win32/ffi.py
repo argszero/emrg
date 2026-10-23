@@ -106,6 +106,42 @@ class ACLStructure(ctypes.Structure):
     ]
 
 
+class AceHeader(ctypes.Structure):
+    """``ACE_HEADER`` — the three fields every ACE begins with.
+
+    The ACL walk reads these three by offset, and a number read byte-wise is a
+    number nobody can check against anything.  Declared, the walk names the field
+    it is reading and the layout is the ruler (issue #2517).
+
+    Fixed-width field types, deliberately: ``ctypes.wintypes.DWORD`` is
+    ``c_ulong``, which is four bytes on Windows and **eight** on a 64-bit Linux or
+    macOS interpreter, so a ``DWORD`` in a Win32 declaration describes a different
+    struct on the very legs that run the guard.  Measured here: the same bytes
+    put ``Mask`` at offset 4 with these types and at 8 with ``wintypes.DWORD``.
+    """
+
+    _fields_ = [
+        ("AceType", ctypes.c_ubyte),
+        ("AceFlags", ctypes.c_ubyte),
+        ("AceSize", ctypes.c_uint16),
+    ]
+
+
+class AccessAllowedAce(ctypes.Structure):
+    """``ACCESS_ALLOWED_ACE`` — the header, the access mask, and the inline SID.
+
+    ``SidStart`` is the first four bytes of the SID the ACE carries **inside
+    itself**, not a pointer to one, so its offset is where a bounded reader starts
+    and the ACE's own size is what bounds it.
+    """
+
+    _fields_ = [
+        ("Header", AceHeader),
+        ("Mask", ctypes.c_uint32),
+        ("SidStart", ctypes.c_uint32),
+    ]
+
+
 class StartupInfoW(ctypes.Structure):
     """``STARTUPINFOW``."""
 

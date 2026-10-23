@@ -26,6 +26,8 @@ import os
 from emrg.sandbox.win32 import abi
 from emrg.sandbox.win32.ffi import (
     ACLStructure,
+    AccessAllowedAce,
+    AceHeader,
     ExplicitAccessW,
     Overlapped,
     Win32Bindings,
@@ -303,24 +305,29 @@ def has_exact_grant(
     header = ACLStructure.from_address(old_acl)
     acl_size = int(header.AclSize)
     ace_count = int(header.AceCount)
-    if acl_size < 8 or acl_size > 1_048_576:
+    header_size = ctypes.sizeof(ACLStructure)
+    if acl_size < header_size or acl_size > 1_048_576:
         return False  # implausible: fall back to the merge path
     target = read_sid_bytes(api, sid_ptr)
-    offset = 8  # the first ACE follows the 8-byte ACL header
+    offset = header_size  # the first ACE follows the ACL header
     for _ in range(ace_count):
-        ace_type = ctypes.c_ubyte.from_address(old_acl + offset).value
-        ace_flags = ctypes.c_ubyte.from_address(old_acl + offset + 1).value
-        ace_size = int(ctypes.c_uint16.from_address(old_acl + offset + 2).value)
-        if ace_size < 8 or offset + ace_size > acl_size:
+        ace = old_acl + offset
+        ace_type = ctypes.c_ubyte.from_address(ace).value
+        ace_flags = ctypes.c_ubyte.from_address(ace + AceHeader.AceFlags.offset).value
+        ace_size = int(ctypes.c_uint16.from_address(ace + AceHeader.AceSize.offset).value)
+        if ace_size < AccessAllowedAce.SidStart.offset or offset + ace_size > acl_size:
             return False  # implausible: fall back to the merge path
-        ace_mask = int(ctypes.c_uint32.from_address(old_acl + offset + 4).value)
+        ace_mask = int(ctypes.c_uint32.from_address(ace + AccessAllowedAce.Mask.offset).value)
         exact = (
             ace_type == abi.ACCESS_ALLOWED_ACE_TYPE
             and ace_flags == abi.SUB_CONTAINERS_AND_OBJECTS_INHERIT
             and ace_mask == mask
         )
         if exact:
-            inline = _inline_sid_bytes(old_acl + offset + 8, ace_size - 8)
+            inline = _inline_sid_bytes(
+                ace + AccessAllowedAce.SidStart.offset,
+                ace_size - AccessAllowedAce.SidStart.offset,
+            )
             if inline is not None and inline == target:
                 return True
         offset += ace_size
@@ -334,12 +341,14 @@ def _inline_sid_bytes(address: int, available: int) -> bytes | None:
     :param available: how many bytes of the ACE remain at that address.
     :returns: the SID's bytes, or ``None`` when the SID does not fit.
     """
-    if available < 8:
+    if available < abi.Sid.SubAuthority.offset:
         return None
-    sub_authority_count = int(ctypes.c_ubyte.from_address(address + 1).value)
+    sub_authority_count = int(
+        ctypes.c_ubyte.from_address(address + abi.Sid.SubAuthorityCount.offset).value
+    )
     if sub_authority_count > abi.SID_MAX_SUB_AUTHORITIES:
         return None
-    length = 8 + 4 * sub_authority_count
+    length = abi.Sid.SubAuthority.offset + ctypes.sizeof(ctypes.c_uint32) * sub_authority_count
     if length > available:
         return None
     return ctypes.string_at(address, length)
