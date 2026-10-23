@@ -6,7 +6,7 @@ instead of holding a copy. `reconcile()` starts a handler for an enabled record
 that has none and can do nothing else, so a write cannot disturb a running cycle
 (rant 2026-09-28T09:54:10).
 
-agents.yml remains for project tracking (_touch_project only).
+agents.yml remains for agent registration (emrg/server/agents.py only).
 
 Task config schema:
   name, type, enabled, interval — common base fields.
@@ -47,6 +47,7 @@ from emrg.tools.base import non_regular_kind
 from emrg.sandbox.policy import SANDBOX_MODES
 from websockets.exceptions import ConnectionClosed
 from emrg.protocol import EvolutionLog, InstanceIdentity
+from emrg.server.agents import AgentRegistry
 from emrg.server.atomic import atomic_write_yaml
 # The credential rule, imported rather than restated: this module logs text it did not
 # author — an error string off the daemon's wire, and an abort reason built from an
@@ -3645,50 +3646,33 @@ class TaskScheduler:
         path is fixed to ~/.emrg/evolution/emrg; an existing entry is preserved as-is
         (dev machines may configure a custom path).
         """
-        # agents.yml — add name=emrg entry if missing (preserve existing).
-        projects_file = agents_file(config_dir())
+        # The write goes through `AgentRegistry`, so the register keeps one writer
+        # and one temp prefix; only the row's *meaning* (the evolution workspace) is
+        # the scheduler's to decide.
+        reg = AgentRegistry(agents_file(config_dir()))
+        target = str(Path.home() / ".emrg" / "evolution" / "emrg")
         try:
-            entries: list[dict] = []
-            if projects_file.exists():
-                data = yaml.safe_load(_read_text(projects_file))
-                if isinstance(data, list):
-                    entries = [e for e in data if isinstance(e, dict)]
-            if not any(e.get("name") == "emrg" for e in entries):
-                entries.append({
-                    "name": "emrg",
-                    "path": str(Path.home() / ".emrg" / "evolution" / "emrg"),
-                    "last_active": datetime.now().isoformat(),
-                })
-                atomic_write_yaml(entries, projects_file, prefix=".projects_")
-                logger.info(
-                    "TaskScheduler: self-heal — added emrg entry to agents.yml"
-                )
-            else:
-                # Repair a stale emrg entry whose path no longer exists
-                # (2026-08-12 incident: a pytest temp dir leaked into
-                # agents.yml by a test run; the dir is deleted after the
-                # suite, leaving the entry pointing at a dead path forever —
-                # list_projects/GUI pickers show a wrong path and the handler
-                # re-resolves a dangling dir every cycle). Dev machines with a
-                # real custom checkout keep their path (is_dir() True).
-                for entry in entries:
-                    if entry.get("name") != "emrg":
-                        continue
-                    existing = entry.get("path")
-                    if existing and Path(existing).is_dir():
-                        break  # real checkout — preserved as-is
-                    entry["path"] = str(Path.home() / ".emrg" / "evolution" / "emrg")
-                    entry["last_active"] = datetime.now().isoformat()
-                    atomic_write_yaml(entries, projects_file, prefix=".projects_")
-                    logger.info(
-                        "TaskScheduler: self-heal — repaired stale emrg entry "
-                        "%r -> %s", existing, entry["path"],
-                    )
-                    break
-        except (yaml.YAMLError, OSError) as e:
-            logger.warning(
-                "TaskScheduler: agents.yml self-heal failed: %s", e
+            row = next((e for e in reg.entries() if e.get("name") == "emrg"), None)
+            if row is None:
+                reg.upsert("emrg", target)
+                logger.info("TaskScheduler: self-heal — added emrg entry to agents.yml")
+                return
+            # Repair a stale emrg entry whose path no longer exists
+            # (2026-08-12 incident: a pytest temp dir leaked into agents.yml by a test
+            # run; the dir is deleted after the suite, leaving the entry pointing at a
+            # dead path forever — list_projects/GUI pickers show a wrong path and the
+            # handler re-resolves a dangling dir every cycle). Dev machines with a real
+            # custom checkout keep their path (is_dir() True).
+            existing = row.get("path")
+            if existing and Path(existing).is_dir():
+                return
+            reg.upsert("emrg", target)
+            logger.info(
+                "TaskScheduler: self-heal — repaired stale emrg entry %r -> %s",
+                existing, target,
             )
+        except OSError as e:
+            logger.warning("TaskScheduler: agents.yml self-heal failed: %s", e)
 
     # ── Task CRUD + hot reload (rant 2026-08-12T18:23:15 P2) ────────
 

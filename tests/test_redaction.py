@@ -240,7 +240,7 @@ def test_the_pwsh_argv_line_masks_whatever_element_it_prints(monkeypatch, tmp_pa
 
 def _make_server(tmp_path: Path) -> EmrgServer:
     server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
-    server._projects_log = tmp_path / "agents.yml"
+    server._agents_log = tmp_path / "agents.yml"
     return server
 
 

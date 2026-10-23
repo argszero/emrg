@@ -46,7 +46,7 @@ def _server() -> EmrgServer:
     # ~/.emrg/agents.yml (the 2026-08-13 leak).
     import tempfile  # noqa: PLC0415 — local to the fixture helper
 
-    server._projects_log = Path(tempfile.mkdtemp()) / "agents.yml"
+    server._agents_log = Path(tempfile.mkdtemp()) / "agents.yml"
     return server
 
 

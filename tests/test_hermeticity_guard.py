@@ -17,13 +17,18 @@ from pathlib import Path
 import pytest
 
 
-def test_guard_installed_in_both_modules():
-    """Both scheduler and daemon carry the guarded atomic_write_yaml."""
-    import emrg.server.daemon as daemon_mod
+def test_guard_is_installed_in_every_module_that_writes_a_config_file():
+    """The scheduler and the agent register both carry the guarded writer.
+
+    Named per module rather than "both": the set moved when the register's only writer
+    became ``agents.py`` (#2527), and a guard that names a module which no longer
+    imports the function stops covering the one that does.
+    """
+    import emrg.server.agents as agents_mod
     import emrg.server.scheduler as sched_mod
 
     wrapped = sched_mod.atomic_write_yaml
-    assert wrapped is daemon_mod.atomic_write_yaml
+    assert wrapped is agents_mod.atomic_write_yaml
     assert wrapped.__name__ == "guarded"
 
 

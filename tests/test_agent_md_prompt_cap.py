@@ -39,7 +39,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 def _make_server() -> EmrgServer:
     """A minimal server; its project log is redirected off the real `~/.emrg`."""
     server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
-    server._projects_log = Path(tempfile.mkdtemp()) / "agents.yml"
+    server._agents_log = Path(tempfile.mkdtemp()) / "agents.yml"
     return server
 
 

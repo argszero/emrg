@@ -272,11 +272,11 @@ def test_real_dirt_still_triggers_the_guard(tmp_path):
 
 
 def test_registering_a_project_writes_the_exclude_too(tmp_path):
-    """The daemon-side call site: `_touch_project` is where this instance takes a
+    """The daemon-side call site: `AgentRegistry.for_dir` is where this instance takes a
     directory on as a project, so a later session in it never starts from a tree
     whose dirt is EMRG's own bookkeeping.
 
-    Built with `object.__new__` on purpose — `_touch_project` reads one path
+    Built with `object.__new__` on purpose — `for_dir` reads one path
     attribute and writes one file, and a test of it has no business constructing
     (let alone starting) a server.
     """
@@ -286,9 +286,9 @@ def test_registering_a_project_writes_the_exclude_too(tmp_path):
     _runtime_dir(repo)
     assert TaskHandler._is_dirty_tree_sync(str(repo)) is True, "precondition: real dirt"
     server = object.__new__(EmrgServer)
-    server._projects_log = tmp_path / "config" / "agents.yml"
+    server._agents_log = tmp_path / "config" / "agents.yml"
 
-    server._touch_project(str(repo))
+    server._agents.for_dir(str(repo))
 
     assert EXCLUDE_ENTRY in _exclude_file(repo).read_text(encoding="utf-8")
     assert TaskHandler._is_dirty_tree_sync(str(repo)) is False
@@ -297,7 +297,7 @@ def test_registering_a_project_writes_the_exclude_too(tmp_path):
 def test_a_nested_project_directory_learns_to_ignore_its_own_runtime_dir(tmp_path):
     """The daemon-side call site, one directory shape over (issue #1527).
 
-    `_touch_project` used to call the exclude helper only when `<cwd>/.git`
+    `AgentRegistry.for_dir` used to call the exclude helper only when `<cwd>/.git`
     existed — the *root* question, `repo_scope`'s other answer. A project
     registered at a directory inside a repository (a package in a monorepo, this
     instance's own `work/` tree, a clone nested in a larger checkout) therefore
@@ -327,8 +327,8 @@ def test_a_nested_project_directory_learns_to_ignore_its_own_runtime_dir(tmp_pat
     assert TaskHandler._is_dirty_tree_sync(str(nested)) is True, "precondition: real dirt"
 
     server = object.__new__(EmrgServer)
-    server._projects_log = tmp_path / "config" / "agents.yml"
-    server._touch_project(str(nested))
+    server._agents_log = tmp_path / "config" / "agents.yml"
+    server._agents.for_dir(str(nested))
 
     entries = _exclude_file(repo).read_text(encoding="utf-8").splitlines()
     assert "/work/clone/.emrg/" in entries, entries
@@ -336,7 +336,7 @@ def test_a_nested_project_directory_learns_to_ignore_its_own_runtime_dir(tmp_pat
     assert TaskHandler._is_dirty_tree_sync(str(nested)) is False
 
 
-def test_touch_project_writes_nothing_for_a_directory_in_no_repository(tmp_path, caplog):
+def test_the_register_writes_nothing_for_a_directory_in_no_repository(tmp_path, caplog):
     """The same deletion's other direction (issue #1527).
 
     With the marker gate gone, the callee's own refusal is the guard: a directory
@@ -351,9 +351,9 @@ def test_touch_project_writes_nothing_for_a_directory_in_no_repository(tmp_path,
     before = sorted(p.name for p in plain.iterdir())
 
     server = object.__new__(EmrgServer)
-    server._projects_log = tmp_path / "config" / "agents.yml"
+    server._agents_log = tmp_path / "config" / "agents.yml"
     with caplog.at_level("INFO"):
-        server._touch_project(str(plain))
+        server._agents.for_dir(str(plain))
 
     assert sorted(p.name for p in plain.iterdir()) == before
     assert not (plain / ".git").exists(), "no git dir is conjured into a plain directory"

@@ -49,7 +49,8 @@ from emrg.config import (
 )
 from emrg.connect import EMRGD_PORT, cleanup_server, is_server_running_sync
 from emrg.server.abort_runs import AbortRuns
-from emrg.server.atomic import atomic_write_bytes, atomic_write_yaml
+from emrg.server.agents import AgentRegistry
+from emrg.server.atomic import atomic_write_bytes
 from emrg.server.config_reload import (
     POLL_INTERVAL_SECONDS,
     ConfigReloader,
@@ -69,7 +70,6 @@ from emrg.server.llm import (
 )
 from emrg.server.git_utils import (
     _detect_git_remote,
-    ensure_local_exclude,
     no_prompt_env,
     parse_gh_auth_user,
     resolve_git_gh,
@@ -869,7 +869,7 @@ class EmrgServer:
         # (session_id → (text, injected_ms)) so unchanged context is not
         # re-sent (context_refresh_interval_ms gating).
         self._context_snapshots: dict[str, tuple[str, float]] = {}
-        self._projects_log = agents_file(runtime_dir)
+        self._agents_log = agents_file(runtime_dir)
         self._rants_log = runtime_dir / "rants.jsonl"
 
         # ── Phase 2 broadcast model (protocol-contract §2.6) ──
@@ -1256,30 +1256,7 @@ class EmrgServer:
         from emrg.sessions_index import rebuild_sessions_index
 
         try:
-            project_paths: list[str] = []
-            kind = _non_regular_kind(self._projects_log)
-            if kind is not None:
-                # Not opened, and **said so** rather than caught and dropped: the reader
-                # below answers a registry it cannot read with no paths, and the
-                # difference between "the file is not there" and "the file cannot be
-                # read to an end" is the whole point of asking the kind (`#2062`). A FIFO
-                # here would hold this startup task — and the event loop with it — for
-                # ever, before any client can connect.
-                logger.debug(
-                    "sessions index backfill: %s is %s, not a regular file; not opened",
-                    self._projects_log, kind,
-                )
-            elif self._projects_log.exists():
-                try:
-                    data = yaml.safe_load(self._projects_log.read_text(encoding="utf-8"))
-                    if isinstance(data, list):
-                        project_paths = [
-                            e.get("path", "")
-                            for e in data
-                            if isinstance(e, dict) and e.get("path")
-                        ]
-                except (yaml.YAMLError, OSError):
-                    pass
+            project_paths: list[str] = self._agents.paths()
             count = rebuild_sessions_index(config_dir(), project_paths)
             logger.info("sessions index rebuilt: %d sessions indexed", count)
         except Exception:
@@ -1460,7 +1437,10 @@ class EmrgServer:
             # re-triggered by the next tick (version.txt unchanged).
             self._session_pending.setdefault(session_id, []).append((req, True))
             return
-        session = self._get_or_create_session(session_id, Path(cwd))
+        # `register=False`: this session's directory is the installation's own upgrade
+        # work area (`UPGRADE_WORK_DIR`), not a directory a host opened, and a register
+        # row for it would claim the installation's bookkeeping is a workspace.
+        session = self._get_or_create_session(session_id, Path(cwd), register=False)
         self._session_busy[session_id] = True
         cancel_event = asyncio.Event()
         # Publish the turn's cancel **event** under its session, exactly as the read
@@ -1657,8 +1637,10 @@ class EmrgServer:
                         # task's cwd, and that is the sender's own.
                         self._session_subscribers.setdefault(new_sid, {})[ws] = data["cwd"]
                 if data.get("cwd"):
+                    # Kept for the subscriber record below; registration no longer
+                    # happens here — a message that names a directory is not a session
+                    # opened in it (`_get_or_create_session` registers).
                     last_cwd = data["cwd"]
-                    self._touch_project(last_cwd)
 
                 # ── Cancel: interrupt running tool loop ──────────
                 if data.get("type") == "approval_response":
@@ -2101,129 +2083,33 @@ class EmrgServer:
             except Exception:
                 pass  # individual connection failure is non-fatal
 
-    # ── Project tracking ─────────────────────────────────────
+    # ── Agent register ───────────────────────────────────────
+    #
+    # The register itself is `emrg/server/agents.py`: pure logic, no daemon import and
+    # no server state. What stays here is the one instance and the places that call it.
 
-    def _touch_project(self, cwd: str) -> None:
-        """Record a project as active in ~/.emrg/agents.yml.
+    @property
+    def _agents_log(self) -> Path:
+        """Where the agent register (``agents.yml``) lives."""
+        return self._agents.path
 
-        Used by the evolution cycle to discover which projects have
-        recent user activity and analyze their sessions for improvement ideas.
+    @_agents_log.setter
+    def _agents_log(self, path: Path | str) -> None:
+        # A setter rather than a plain attribute, so that a reassignment cannot leave
+        # the daemon holding a registry pointed at the file it used to name. The
+        # registry keeps no state of its own — every call reads the file — so replacing
+        # the instance costs nothing.
+        self._agents = AgentRegistry(Path(path))
 
-        Normalizes the path via realpath() so symlinked directories don't
-        cause duplicate entries.
-        owner/repo is detected at runtime from git remote, not stored.
+    def _register_agent(self, cwd: Path) -> dict:
+        """Take the directory a session runs in into the register, and answer its row.
+
+        Called where a session is opened, which is when a directory becomes an Agent.
+        `AgentRegistry.for_dir` owns every rule about *whether* — the home directory and
+        the directories under an Agent's own `.emrg/` are declined there — so this is
+        the daemon's one line of policy: a client's session registers.
         """
-        cwd = os.path.realpath(cwd)
-        # Don't track the home directory as a project
-        home = os.path.expanduser("~")
-        if cwd == home:
-            return
-        # Registration is where this instance takes a directory on as a
-        # project, so it is where the directory learns to ignore the `.emrg/`
-        # runtime data EMRG will write into it (rant 2026-09-21T10:12:01).
-        # Idempotent: an explicit call, not a guess — `git status` is what the
-        # task-level dirty-tree guard reads, and this keeps this instance's own
-        # bookkeeping out of that verdict.
-        #
-        # Unconditional, because the callee answers the question this site used
-        # to guess at (issue #1527): testing `<cwd>/.git` reads "is this the root
-        # of a checkout?", while the question is "is this directory in a tree?"
-        # — and the two differ for every directory that is not a root (a package
-        # in a monorepo, a `work/` tree, a clone nested in a larger repository),
-        # which is exactly where EMRG's runtime data stayed unignored. The entry
-        # is scoped by the enclosing repository's own answer, so a nested
-        # directory gets `/<prefix>/.emrg/` and the root's `/.emrg/` is not a
-        # substitute for it. `ensure_local_exclude` refuses by itself where there
-        # is nothing to write — a directory in no repository or one that does not
-        # exist answers `"not-a-repo"`, writing nothing and logging nothing — so
-        # the marker test added suppression and nothing else.
-        exclude_status = ensure_local_exclude(cwd)
-        if exclude_status == "added":
-            logger.info(
-                "_touch_project: %s now ignores .emrg/ locally "
-                "(its own .git/info/exclude)", cwd,
-            )
-        self._projects_log.parent.mkdir(parents=True, exist_ok=True)
-        now = datetime.now().isoformat()
-
-        # Read existing entries (normalize by realpath to avoid duplicates)
-        projects: dict[str, dict] = {}
-        kind = _non_regular_kind(self._projects_log)
-        if kind is not None:
-            # Skipped, and skipped **before** the read rather than inside the `except`
-            # below: this method reads the registry and then rewrites it, so falling
-            # through to the "rebuilding" branch would answer a host file it could not
-            # read with an **empty** registry — deleting every project the host
-            # registered, in one write, to report a problem it never mentioned.
-            # Registration is bookkeeping, so the honest reading is "not this time":
-            # the file keeps what it had and the warning names the kind.
-            logger.warning(
-                "_touch_project: %s is %s, not a regular file — leaving the project "
-                "registry unread and unrewritten", self._projects_log, kind,
-            )
-            return
-        if self._projects_log.exists():
-            try:
-                data = yaml.safe_load(self._projects_log.read_text(encoding="utf-8"))
-                if isinstance(data, list):
-                    for entry in data:
-                        if isinstance(entry, dict) and entry.get("path"):
-                            key = os.path.realpath(entry["path"])
-                            # Strip dead fields from pre-task-scheduler era
-                            entry.pop("auto_evolve", None)
-                            entry.pop("interval", None)
-                            projects[key] = entry
-            except (yaml.YAMLError, TypeError, OSError):
-                logger.warning(
-                    "_touch_project: failed to parse %s, rebuilding",
-                    self._projects_log,
-                    exc_info=True,
-                )
-
-        # Update or add entry
-        if cwd in projects:
-            projects[cwd]["last_active"] = now
-        else:
-            # Check if cwd is a subdirectory of an existing project.
-            # Prefer the longest matching parent path (most specific).
-            parent = ""
-            for known_path in projects:
-                if cwd.startswith(known_path + os.sep):
-                    if len(known_path) > len(parent):
-                        parent = known_path
-            # Determine whether to merge into parent or create a new entry.
-            # If cwd is itself a git repo root, or if the parent is the home
-            # directory (which is not a real project), create a new entry.
-            is_git_root = os.path.isdir(os.path.join(cwd, ".git"))
-            if parent and not is_git_root and parent != home:
-                # Merge into parent: child directory with no git repo of its own
-                projects[parent]["last_active"] = now
-            elif parent == home or (parent and is_git_root):
-                # Parent is home dir or cwd is a git repo → create new entry
-                name = os.path.basename(cwd.rstrip("/"))
-                projects[cwd] = {
-                    "name": name,
-                    "path": cwd,
-                    "last_active": now,
-                }
-                logger.info("new project tracked (git root under parent): %s", name)
-                # Clean up stale home-dir entry if it exists
-                if home in projects:
-                    del projects[home]
-                    logger.info("removed stale home-dir project entry")
-            else:
-                name = os.path.basename(cwd.rstrip("/"))
-                projects[cwd] = {
-                    "name": name,
-                    "path": cwd,
-                    "last_active": now,
-                }
-                logger.info("new project tracked: %s", name)
-
-        # Build sorted YAML list
-        entries = sorted(projects.values(), key=lambda e: e.get("path", ""))
-
-        atomic_write_yaml(entries, self._projects_log, prefix=".projects_")
+        return self._agents.for_dir(str(cwd))
 
     async def _check_github_auth(self) -> dict:
         """Detect whether GitHub auth is configured (rant 2026-08-07T10:17:27).
@@ -3037,12 +2923,17 @@ class EmrgServer:
         elif msg_type == "init_auto_evolve":
             cwd = msg.get("cwd", "")
             if cwd:
-                self._touch_project(cwd)
+                # Registering here is deliberate and is not the message hook returning
+                # by another door: auto-evolve is a host asking for a directory to be
+                # worked in, and the task it creates must name the row's own name —
+                # `src` and `src-2` are two directories, and the basename is only the
+                # first one's name.
+                _row = self._register_agent(Path(cwd))
                 # Create a task entry in tasks.yml — through task_create, because the
                 # legacy `create_task` was a second, unvalidated path to the same file
                 # (rant 2026-09-28T09:54:10, D8). Enabling auto-evolve twice is a
                 # no-op rather than an error: the intent is already satisfied.
-                name = os.path.basename(cwd.rstrip("/"))
+                name = _row.get("name") or os.path.basename(cwd.rstrip("/"))
                 if self._scheduler:
                     ok, res = self._scheduler.task_create(
                         name=name, task_type="evolution",
@@ -3936,8 +3827,24 @@ class EmrgServer:
                 "received": msg_type,
             })
 
-    def _get_or_create_session(self, session_id: str, cwd: Path) -> Session:
-        """Load an existing session or create a new one."""
+    def _get_or_create_session(
+        self, session_id: str, cwd: Path, *, register: bool = True
+    ) -> Session:
+        """Load an existing session or create a new one.
+
+        Registering here — rather than on an inbound message carrying a ``cwd``, which
+        is where it used to happen — is what makes "a directory becomes an Agent" true
+        of the moment a session is opened in it. The old hook only ever saw a client's
+        message, so every session the server creates itself went unregistered, and a
+        client that merely mentioned a directory registered one nothing ran in.
+
+        ``register=False`` is for the one session that has no directory a host opened:
+        the upgrade session runs in the installation's own work directory. Every other
+        server-created directory — the sub-session slot, the boss session — is declined
+        by path instead, in `AgentRegistry.for_dir`.
+        """
+        if register:
+            self._register_agent(cwd)
         session_path = session_dir(cwd, session_id)
         if session_path.exists() and (session_path / "meta.json").exists():
             return Session.load(session_id, cwd)
@@ -6685,121 +6592,68 @@ class EmrgServer:
     async def _handle_list_projects(
         self, ws
     ) -> None:
-        """Read agents.yml and return all project entries.
+        """Return every registered Agent, ordered by its latest session activity.
 
-        Ordered by each project's latest session activity (created_at desc,
-        parallel scan) — P6 of the GUI multi-session rant (2026-08-10T15:07:19)
-        so the open/new-session dialogs show the most recently active projects
-        first.
+        The rows come from `AgentRegistry`. What stays here is the part that needs the
+        daemon: each directory's latest session ``created_at`` (P6 of the GUI
+        multi-session rant, 2026-08-10T15:07:19, so the open/new-session dialogs show
+        the most recently active first) and its git remote.
 
-        No evolution-workspace filter (rant 2026-08-07T10:48:00): agents.yml
-        only contains explicitly registered entries, and on packaged installs
-        the emrg project's only path IS ~/.emrg/evolution/emrg — filtering it
-        hid emrg from /rant entirely.
+        No evolution-workspace filter (rant 2026-08-07T10:48:00): the register holds the
+        directories this installation has opened sessions in, and on packaged installs
+        the emrg project's only path IS ~/.emrg/evolution/emrg — filtering it hid emrg
+        from /rant entirely.
         """
-        projects: list[dict] = []
-        try:
-            if self._projects_log.exists():
-                # Every client asks this on connect, so an unguarded open here is the
-                # daemon's event loop stopping on the first frame a GUI or TUI sends —
-                # the refusal lands in the `except` below, which is already this
-                # method's answer for a registry it cannot read (`#2062`).
-                _refuse_non_regular_file(self._projects_log)
-                data = yaml.safe_load(self._projects_log.read_text(encoding="utf-8"))
-                if isinstance(data, list):
-                    entries = [p for p in data if isinstance(p, dict)]
-                    # P6 验收（rant 2026-08-10T15:07:19）：项目按"该项目最新会话活跃"倒序
-                    # ——并行扫描各项目 sessions 目录取最大 created_at（GUI 单连接无法并发
-                    # list_sessions：_pending 按 respType 键控会互相覆盖，故 daemon 侧聚合）。
-                    async def _latest_session_at(entry: dict) -> str:
-                        p = entry.get("path", "")
-                        if not p:
-                            return ""
-                        try:
-                            sessions = Session.list_sessions(Path(p))
-                            return sessions[0].get("created_at", "") if sessions else ""
-                        except (OSError, ValueError, json.JSONDecodeError):
-                            return ""
+        entries = self._agents.entries()
 
-                    ats = await asyncio.gather(*(_latest_session_at(e) for e in entries))
-                    ordered = sorted(zip(entries, ats), key=lambda t: t[1], reverse=True)
-                    # rant 2026-08-19T01:05:47 — _detect_git_remote runs a sync
-                    # git subprocess per project; offload to worker threads so a
-                    # slow git probe never freezes the event loop (websocket
-                    # clients would otherwise time out during list_projects).
-                    repos = await asyncio.gather(*(
-                        asyncio.to_thread(_detect_git_remote, p.get("path", ""))
-                        for p, _ in ordered
-                    ))
-                    projects = [
-                        {"name": p.get("name", ""),
-                         "repo": repo,
-                         "path": p.get("path", ""),
-                         "latest_session_at": at}
-                        for (p, at), repo in zip(ordered, repos)
-                    ]
-        except (yaml.YAMLError, OSError):
-            logger.exception("Failed to read agents.yml")
+        # P6 验收（rant 2026-08-10T15:07:19）：项目按"该项目最新会话活跃"倒序
+        # ——并行扫描各项目 sessions 目录取最大 created_at（GUI 单连接无法并发
+        # list_sessions：_pending 按 respType 键控会互相覆盖，故 daemon 侧聚合）。
+        async def _latest_session_at(entry: dict) -> str:
+            p = entry.get("path", "")
+            if not p:
+                return ""
+            try:
+                sessions = Session.list_sessions(Path(p))
+                return sessions[0].get("created_at", "") if sessions else ""
+            except (OSError, ValueError, json.JSONDecodeError):
+                return ""
+
+        ats = await asyncio.gather(*(_latest_session_at(e) for e in entries))
+        ordered = sorted(zip(entries, ats), key=lambda t: t[1], reverse=True)
+        # rant 2026-08-19T01:05:47 — _detect_git_remote runs a sync git subprocess per
+        # project; offload to worker threads so a slow git probe never freezes the
+        # event loop (websocket clients would otherwise time out during list_projects).
+        repos = await asyncio.gather(*(
+            asyncio.to_thread(_detect_git_remote, p.get("path", ""))
+            for p, _ in ordered
+        ))
+        projects: list[dict] = [
+            {"name": p.get("name", ""),
+             "repo": repo,
+             "path": p.get("path", ""),
+             "latest_session_at": at}
+            for (p, at), repo in zip(ordered, repos)
+        ]
         await self._send(ws, {
             "type": "projects_list",
             "projects": projects,
         })
 
     async def _handle_remove_project(self, name: str, ws) -> None:
-        """Remove a project entry from agents.yml by name.
+        """Drop one row from the register by name; the directory's data stays.
 
-        P1 of the GUI multi-session feature (rant 2026-08-10T15:07:19):
-        deletes only the agents.yml entry — on-disk session data under
-        <path>/.emrg/sessions/ is preserved (a later _touch_project
-        re-registers the project). Mirrors _touch_project's read path and
-        atomic_write_yaml. Responses:
+        Deletes only the ``agents.yml`` row — what is on disk under
+        ``<path>/.emrg/sessions/`` is preserved, and opening a session there again
+        registers the directory anew (P1 of the GUI multi-session feature,
+        rant 2026-08-10T15:07:19). Responses:
           {"type": "project_removed", "removed": true,  "name": name}
           {"type": "project_removed", "removed": false, "name": name, ...}
         """
-        if not self._projects_log.exists():
-            await self._send(ws, {
-                "type": "project_removed",
-                "removed": False,
-                "name": name,
-            })
-            return
         try:
-            # The same refusal as `_handle_list_projects`, and this caller already has
-            # the branch for it: an unreadable registry is answered with `removed:
-            # false` and the reason, so a FIFO cannot hold the event loop (`#2062`).
-            _refuse_non_regular_file(self._projects_log)
-            data = yaml.safe_load(self._projects_log.read_text(encoding="utf-8"))
-        except (yaml.YAMLError, OSError):
-            logger.exception("remove_project: failed to read %s", self._projects_log)
-            await self._send(ws, {
-                "type": "project_removed",
-                "removed": False,
-                "name": name,
-                "error": "failed to read agents.yml",
-            })
-            return
-        if not isinstance(data, list):
-            await self._send(ws, {
-                "type": "project_removed",
-                "removed": False,
-                "name": name,
-            })
-            return
-        remaining = [
-            e for e in data
-            if not (isinstance(e, dict) and e.get("name") == name)
-        ]
-        if len(remaining) == len(data):
-            await self._send(ws, {
-                "type": "project_removed",
-                "removed": False,
-                "name": name,
-            })
-            return
-        try:
-            atomic_write_yaml(remaining, self._projects_log, prefix=".projects_")
+            removed = self._agents.remove(name)
         except OSError:
-            logger.exception("remove_project: failed to write %s", self._projects_log)
+            logger.exception("remove: failed to write %s", self._agents_log)
             await self._send(ws, {
                 "type": "project_removed",
                 "removed": False,
@@ -6807,10 +6661,20 @@ class EmrgServer:
                 "error": "failed to write agents.yml",
             })
             return
-        logger.info("remove_project: removed %s from agents.yml", name)
+        if removed is None:
+            # Not "no such entry": the register could not be opened, so nothing was
+            # decided. Answering `removed: false` here would tell the host there is no
+            # such row about a file this method never read (`#2062`).
+            await self._send(ws, {
+                "type": "project_removed",
+                "removed": False,
+                "name": name,
+                "error": "failed to read agents.yml",
+            })
+            return
         await self._send(ws, {
             "type": "project_removed",
-            "removed": True,
+            "removed": bool(removed),
             "name": name,
         })
 

@@ -76,7 +76,7 @@ class _StubTool:
 
 def _server() -> EmrgServer:
     server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
-    server._projects_log = Path(tempfile.mkdtemp()) / "agents.yml"
+    server._agents_log = Path(tempfile.mkdtemp()) / "agents.yml"
     return server
 
 

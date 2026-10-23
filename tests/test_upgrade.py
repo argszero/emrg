@@ -533,7 +533,7 @@ def test_daemon_upgrade_session_runner(monkeypatch, tmp_path):
     # ⛔ Red line (host 2026-08-21T10:35:57): tests must never create/write the
     # real emrg-upgrade session — isolate the session factory (the conftest
     # autouse guard raises on the real one for SESSION_ID).
-    monkeypatch.setattr(server, "_get_or_create_session", lambda sid, cwd: object())
+    monkeypatch.setattr(server, "_get_or_create_session", lambda sid, cwd, **kwargs: object())
     ran = []
 
     async def fake_loop(req, ws, session, cancel_event, allow_tools=True):
@@ -574,7 +574,7 @@ def test_daemon_upgrade_session_is_reachable_by_a_clients_cancel(monkeypatch, tm
     from tests.test_daemon import _make_server
 
     server = _make_server()
-    monkeypatch.setattr(server, "_get_or_create_session", lambda sid, cwd: object())
+    monkeypatch.setattr(server, "_get_or_create_session", lambda sid, cwd, **kwargs: object())
     seen: dict[str, object] = {}
 
     async def fake_loop(req, ws, session, cancel_event, allow_tools=True):
@@ -613,7 +613,7 @@ def test_daemon_upgrade_session_publishes_no_turn_task(monkeypatch, tmp_path):
     from tests.test_daemon import _make_server
 
     server = _make_server()
-    monkeypatch.setattr(server, "_get_or_create_session", lambda sid, cwd: object())
+    monkeypatch.setattr(server, "_get_or_create_session", lambda sid, cwd, **kwargs: object())
     seen: dict[str, object] = {}
 
     async def fake_loop(req, ws, session, cancel_event, allow_tools=True):

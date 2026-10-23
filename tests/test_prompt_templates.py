@@ -351,7 +351,7 @@ def test_the_journal_prompt_takes_its_identity_from_the_task_config(
 #     template that acted on it ("every 3-5 rounds"), and 50 is divisible by 5, so the
 #     rule fired every round.
 #   * `evolution_cwd` — the definition `~/.emrg/evolution`, which `_ensure_self_evolution_task`
-#     and `_touch_project` now spell out at their own call sites.
+#     and `AgentRegistry.for_dir` now spell out at their own call sites.
 #
 # `_placeholder_names` reads the two shapes a template can name a context key in: an
 # expression (`{{ x }}`, filters and attribute access included — only the root name is

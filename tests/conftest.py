@@ -92,11 +92,18 @@ def _guard_real_config_files(monkeypatch):
     import builtins
     import io
 
+    import emrg.server.agents as agents_mod
     import emrg.server.daemon as daemon_mod
     import emrg.server.scheduler as sched_mod
 
+    # Every module that *writes* a config file imports the same function; a module
+    # that stops importing it stops being covered here, which is why each one is
+    # named rather than discovered. `agents.py` is the register's only writer since
+    # #2527, so the daemon no longer imports this at all.
     orig = sched_mod.atomic_write_yaml
-    assert orig is daemon_mod.atomic_write_yaml, "both modules must share atomic_write_yaml"
+    assert orig is agents_mod.atomic_write_yaml, (
+        "the register's writer and the task table's must share atomic_write_yaml"
+    )
 
     def guarded(data, path, **kwargs):
         if _is_real_config_target(path):
@@ -104,7 +111,7 @@ def _guard_real_config_files(monkeypatch):
         return orig(data, path, **kwargs)
 
     monkeypatch.setattr(sched_mod, "atomic_write_yaml", guarded)
-    monkeypatch.setattr(daemon_mod, "atomic_write_yaml", guarded)
+    monkeypatch.setattr(agents_mod, "atomic_write_yaml", guarded)
 
     orig_open = builtins.open
     orig_io_open = io.open
@@ -134,6 +141,29 @@ def _guard_real_config_files(monkeypatch):
     # patched; measured, dropping either one leaves the other's callers open.
     monkeypatch.setattr(builtins, "open", guarded_open)
     monkeypatch.setattr(io, "open", guarded_io_open)
+
+
+@pytest.fixture(autouse=True)
+def _redirect_the_agent_register(monkeypatch, tmp_path):
+    """Every test's agent register is its own file.
+
+    Opening a session registers the directory it runs in (#2527), so the write now sits
+    on a path nearly every daemon test reaches: a test that builds an `EmrgServer` and
+    sends one message would otherwise append to the HOST's ``~/.emrg/agents.yml``.
+    Autouse for the same reason as the guard above — the test that would leak is the one
+    written three commits from now.
+
+    The seam is ``agents_file``, which is how the daemon asks where the register lives.
+    A test that wants to inspect or steer the register sets ``server._agents_log``
+    afterwards, and that assignment wins: the registry is rebuilt from it.
+    """
+    import emrg.server.daemon as daemon_mod
+
+    monkeypatch.setattr(
+        daemon_mod,
+        "agents_file",
+        lambda base=None: tmp_path / "agent-register" / "agents.yml",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -1105,7 +1135,7 @@ def _guard_upgrade_hermeticity(monkeypatch, tmp_path):
     #    loud failure; tests that exercise the runner stub the factory after.
     _orig_get_or_create = daemon_mod.EmrgServer._get_or_create_session
 
-    def _guarded_get_or_create(self, session_id, cwd):
+    def _guarded_get_or_create(self, session_id, cwd, **kwargs):
         if session_id == up_mod.SESSION_ID:
             raise AssertionError(
                 "test attempted to create the REAL emrg-upgrade session — ⛔ "
@@ -1113,7 +1143,10 @@ def _guard_upgrade_hermeticity(monkeypatch, tmp_path):
                 "session factory (monkeypatch.setattr(server, "
                 "'_get_or_create_session', lambda sid, cwd: <fake>))"
             )
-        return _orig_get_or_create(self, session_id, cwd)
+        # `**kwargs` passes straight through: this wrapper's subject is the session
+        # *id*, and a call shape it cannot express would break every test that reaches
+        # the factory for a reason of its own (`register=False`, #2527).
+        return _orig_get_or_create(self, session_id, cwd, **kwargs)
 
     monkeypatch.setattr(
         daemon_mod.EmrgServer, "_get_or_create_session", _guarded_get_or_create

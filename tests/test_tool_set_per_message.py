@@ -64,7 +64,7 @@ def _registry(platform_name: str | None = None):
 
 def _server(tmp_path) -> EmrgServer:
     server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
-    server._projects_log = tmp_path / "agents.yml"
+    server._agents_log = tmp_path / "agents.yml"
     return server
 
 
