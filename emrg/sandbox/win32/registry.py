@@ -158,6 +158,37 @@ def split_key(key: str) -> tuple[int, str]:
     return root, subkey
 
 
+#: The one spelling each root is **stored** as, by the ``HKEY`` value it resolves to.
+#:
+#: :data:`KEY_ROOTS` accepts two spellings per hive because a host may type
+#: either, and this is the second half of that decision: a capability SID is
+#: derived from the spelling (:func:`~emrg.sandbox.win32.sid.registry_write_sid`),
+#: so two spellings of one key would be two identities on one key — the same
+#: failure the ``KEY_ROOTS`` note names for a *third* hive spelling, one level in.
+CANONICAL_ROOT_NAMES: dict[int, str] = {
+    abi.HKEY_CURRENT_USER: "HKCU",
+    abi.HKEY_LOCAL_MACHINE: "HKLM",
+}
+
+
+def canonical_key_spelling(key: str) -> str:
+    """The one spelling a key grant is stored as: the short root, then the subkey.
+
+    The registry namespace is case-insensitive and
+    :func:`~emrg.sandbox.win32.sid.registry_write_sid` lowercases what it derives,
+    so the subkey keeps the case the host typed — it is display.  What has to
+    converge is the **root**, where ``HKCU`` and ``HKEY_CURRENT_USER`` are two
+    accepted spellings of one hive and would otherwise derive two SIDs for one
+    key.
+
+    :param key: the key's full spelling, in any accepted form.
+    :returns: the canonical spelling, e.g. ``HKCU\\Software\\LarkCli``.
+    :raises RegistryKeyError: when the spelling names no key (:func:`split_key`).
+    """
+    root, subkey = split_key(key)
+    return f"{CANONICAL_ROOT_NAMES[root]}\\{subkey}"
+
+
 def key_exists(key: str) -> bool:
     """Whether this host has the key.
 

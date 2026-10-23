@@ -43,12 +43,14 @@ from emrg.config import LlmConfig
 from emrg.protocol import TaskRequest
 from emrg.sandbox import roots as roots_mod
 from emrg.sandbox.fence import file_refusal
+from emrg.sandbox.grants import GRANT_REGISTRY, RootGrant
 from emrg.sandbox.policy import SandboxPolicy, resolve_policy
 from emrg.sandbox.providers.darwin import seatbelt_profile_args
 from emrg.sandbox.providers.linux import BWRAP_BIN, bwrap_profile_args, runner_argv
 from emrg.sandbox.roots import (
     canonical_path,
     judge_extra_root,
+    judge_registry_key,
     judge_root_removal,
     writable_roots,
 )
@@ -543,6 +545,130 @@ def test_a_session_that_named_nothing_injects_an_empty_list(tmp_path):
     assert args["writable_roots"] == []
 
 
+# ── §5b a registry key is judged by its own rules ─────────────────────────
+
+
+def test_a_key_is_validated_by_the_parser_the_applier_uses():
+    """A key the judge accepts is a key the DACL path can address — same parser.
+
+    Two questions are a key's own and this is the first: *is the spelling one
+    key*. It is answered by ``registry.split_key``, the parser
+    ``apply_dacl`` itself calls, so the judge cannot accept a spelling the
+    enforcement then fails to resolve. The stored target is the canonical form,
+    because the capability SID is derived from the spelling.
+    """
+    verdict = judge_registry_key(
+        "HKEY_CURRENT_USER\\Software\\LarkCli\\keychain", _ws_policy("/tmp"), platform="win32"
+    )
+    assert verdict.refusal is None, verdict
+    assert verdict.grant == RootGrant(GRANT_REGISTRY, "HKCU\\Software\\LarkCli\\keychain")
+    assert verdict.canonical == "HKCU\\Software\\LarkCli\\keychain"
+    assert verdict.store is True
+
+
+@pytest.mark.parametrize("bad, phrase", [
+    ("", "empty string"),
+    ("HKCU", "whole hive"),
+    ("HKU\\Software\\X", "not one of"),
+    ("Software\\LarkCli", "not one of"),
+])
+def test_a_key_that_names_no_key_is_refused_with_the_parsers_own_reason(bad, phrase):
+    """One parser, one wording: the refusal a host reads is `split_key`'s."""
+    verdict = judge_registry_key(bad, _ws_policy("/tmp"), platform="win32")
+    assert verdict.refusal and phrase in verdict.refusal, verdict
+    # ``store`` is deliberately not asserted: :class:`ExtraRootVerdict` documents
+    # it as the caller's instruction for the *accepted* outcomes — "False only
+    # for a path already covered — a refusal never reaches this field" — so it
+    # keeps its default ``True`` here and reading it would be reading noise.
+    assert verdict.grant is None, verdict
+
+
+def test_the_spelling_is_judged_before_the_platform():
+    """A malformed key is malformed everywhere, so that is the sentence that wins.
+
+    On a platform that cannot apply a key's DACL, "this key does not exist" is
+    the more useful answer than "this platform has no registry" — the host would
+    otherwise fix the platform question and meet the spelling one afterwards.
+    """
+    verdict = judge_registry_key("HKCU", _ws_policy("/tmp"), platform="darwin")
+    assert verdict.refusal and "whole hive" in verdict.refusal, verdict
+
+
+def test_a_platform_that_cannot_apply_a_key_refuses_it_with_the_platform_sentence():
+    """The refusal names the platform's limit, and never a stage that has landed."""
+    verdict = judge_registry_key(
+        "HKCU\\Software\\LarkCli", _ws_policy("/tmp"), platform="darwin"
+    )
+    assert verdict.refusal, verdict
+    assert "cannot be enforced on" in verdict.refusal
+    # The sentence this replaces claimed the enforcement had not shipped, which
+    # `ENFORCED_KINDS["win32"]` had already falsified by the time a Windows host
+    # could reach it.
+    assert "not validated yet" not in verdict.refusal
+    assert verdict.grant is None
+
+
+def test_naming_a_key_twice_reports_the_grant_that_is_stored():
+    """A duplicate is answered, not stored twice — and case is not a difference.
+
+    The registry namespace is case-insensitive, so ``hkcu\\software\\x`` and
+    ``HKCU\\Software\\X`` are one key with one identity; storing both would put
+    two grants on the session's list for one ACE.
+    """
+    policy = resolve_policy(
+        mode="workspace-write",
+        workspace_root="/tmp",
+        extra_grants=[RootGrant(GRANT_REGISTRY, "HKCU\\Software\\LarkCli")],
+    )
+    verdict = judge_registry_key(
+        "HKEY_CURRENT_USER\\software\\larkcli", policy, platform="win32"
+    )
+    assert verdict.refusal is None, verdict
+    assert verdict.store is False
+    assert verdict.grant is None
+    assert verdict.notice and "already granted" in verdict.notice
+
+
+def test_a_key_named_twice_at_read_only_is_not_stored_twice():
+    """The duplicate check reads the mode-independent list, so the tier cannot hide it.
+
+    ``granted_grants`` answers ``[]`` for every mode but ``workspace-write``, so a
+    duplicate check built on it finds nothing at ``read-only`` and stores the same
+    key a second time — one key, two grants, two capability SIDs derived from one
+    spelling. The session's list follows the session and not the tier, exactly as
+    it does for a path, so the reader that does not consult the tier is the one
+    that answers "is this already on the list".
+    """
+    policy = resolve_policy(
+        mode="read-only",
+        workspace_root="/tmp",
+        extra_grants=[RootGrant(GRANT_REGISTRY, "HKCU\\Software\\LarkCli")],
+    )
+    verdict = judge_registry_key(
+        "HKEY_CURRENT_USER\\Software\\LarkCli", policy, platform="win32"
+    )
+    assert verdict.refusal is None, verdict
+    assert verdict.store is False, "a key already on the list must not be stored again"
+    assert verdict.grant is None, verdict
+    assert verdict.notice and "already granted" in verdict.notice, verdict
+
+
+def test_a_key_is_withdrawn_by_the_flag_that_added_it():
+    """An added grant must be withdrawable, so removal has the key's own branch.
+
+    The path rules are skipped entirely: a key is not absolute, and there is
+    nothing on a disk to stat. Only the spelling can be refused here — never the
+    policy, because a withdrawal is not a grant.
+    """
+    verdict = judge_root_removal(
+        "HKEY_CURRENT_USER\\Software\\LarkCli", _ws_policy("/tmp"), GRANT_REGISTRY
+    )
+    assert verdict.refusal is None, verdict
+    assert verdict.canonical == "HKCU\\Software\\LarkCli"
+    refused = judge_root_removal("HKCU", _ws_policy("/tmp"), GRANT_REGISTRY)
+    assert refused.refusal and "whole hive" in refused.refusal
+
+
 # ── §6 the daemon's command ───────────────────────────────────────────────
 
 
@@ -614,6 +740,43 @@ def test_a_refused_path_is_not_stored(outside):
 
     assert session._meta_path.read_text(encoding="utf-8") == before
     assert "sandbox_roots" not in _meta(session)
+
+
+def test_a_typed_registry_kind_is_answered_without_a_stale_sentence(outside):
+    """The command carries a *stated* kind, and the daemon judges it as a key.
+
+    The answer has two legitimate shapes — a platform whose dialects can apply a
+    key's DACL stores the typed grant, one that cannot says so with the platform
+    sentence — and this asserts the invariant that holds in both: the refusal is
+    never for a reason the model has moved past. Before this, the sentence told a
+    Windows host that the enforcement had not shipped, when it had.
+    """
+    ws, _ = outside
+    session = Session.create_with_id("s_registry", ws)
+    server = _server()
+
+    frames = _drive(server, {
+        "type": "set_sandbox_roots",
+        "session_id": session.session_id,
+        "cwd": str(ws),
+        "op": "add",
+        "path": "HKCU\\Software\\LarkCli",
+        "kind": "registry",
+    })
+
+    reply = [f for f in frames if f.get("type") == "sandbox_roots"][-1]
+    # Reloaded, not read off the object this test built: the daemon loads the
+    # session itself, so an assertion on ``session`` here would be about a copy
+    # nothing wrote to — it would hold whatever the daemon did.
+    stored = Session.load(session.session_id, ws).sandbox_grants
+    refused = reply.get("error")
+    if refused:
+        assert "cannot be enforced on" in refused, refused
+        assert "not validated yet" not in refused, refused
+        assert stored == [], stored
+    else:
+        assert [grant.kind for grant in stored] == [GRANT_REGISTRY], stored
+        assert stored[0].target == "HKCU\\Software\\LarkCli", stored
 
 
 def test_remove_withdraws_the_root_and_is_idempotent(outside):
@@ -996,32 +1159,6 @@ def test_adding_a_withdrawn_default_back_makes_it_the_host_s(outside, pin_defaul
     assert {
         grant["target"]: grant["source"] for grant in reply["grants"]
     }[canonical_path(str(elsewhere))] == "session"
-
-
-def test_a_registry_add_is_refused_with_the_one_sentence(outside):
-    """Requirement 5 at the command: the kind is named, not ignored.
-
-    Stage 1 stores no registry grant, because no dialect can enforce one yet
-    (``emrg/sandbox/grants.py``); the refusal is the same sentence
-    ``named_grants`` raises, so a host and a dialect cannot be told two different
-    things about one rule.
-    """
-    ws, _elsewhere = outside
-    session = Session.create_with_id("s_registry", ws)
-    server = _server()
-
-    frames = _drive(server, {
-        "type": "set_sandbox_roots",
-        "session_id": session.session_id,
-        "cwd": str(ws),
-        "op": "add",
-        "path": "HKCU\\Software\\LarkCli",
-        "kind": "registry",
-    })
-
-    reply = [f for f in frames if f.get("type") == "sandbox_roots"][-1]
-    assert "registry" in reply["error"] and "Stage 2" in reply["error"], reply
-    assert Session.load(session.session_id, ws).sandbox_grants == []
 
 
 # ── §7 the model's view of the boundary ───────────────────────────────────

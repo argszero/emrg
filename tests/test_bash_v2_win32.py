@@ -35,6 +35,7 @@ from emrg.sandbox.win32 import abi, ffi
 from emrg.sandbox.win32.ffi import SIDAndAttributes
 from emrg.sandbox.win32.registry import (
     RegistryKeyError,
+    canonical_key_spelling,
     key_exists,
     read_current_key_dacl,
     split_key,
@@ -74,6 +75,40 @@ REGISTRY_SID_SHAPE = re.compile(r"^S-1-4-(\d+)-(\d+)-2$")
 
 #: The sub-authority ceiling the derivation reduces into (30-bit).
 SUB_AUTHORITY_CEILING = 2**30 - 1
+
+
+# ── the canonical key spelling ───────────────────────────────────────────
+
+
+def test_a_key_has_one_canonical_spelling_so_one_hive_is_one_identity():
+    """``HKCU`` and ``HKEY_CURRENT_USER`` are one hive, so they must be one key.
+
+    ``split_key`` accepts both spellings on purpose — a host may type either — and
+    ``registry_write_sid`` derives the capability SID from the spelling it is
+    handed. Left alone, those two facts put **two identities on one key**: two
+    ACEs where one was asked for, and a restricted token carrying a SID the other
+    half of the grant never derives. The convergence has to happen where the grant
+    is stored, which is what ``canonical_key_spelling`` is.
+    """
+    # The hazard is real: the raw spellings derive two different SIDs.
+    assert registry_write_sid("HKCU\\Software\\LarkCli") != registry_write_sid(
+        "HKEY_CURRENT_USER\\Software\\LarkCli"
+    )
+    # …and canonicalizing is what removes it, for both accepted roots.
+    assert canonical_key_spelling("HKCU\\Software\\LarkCli") == "HKCU\\Software\\LarkCli"
+    assert (
+        canonical_key_spelling("HKEY_CURRENT_USER\\Software\\LarkCli")
+        == "HKCU\\Software\\LarkCli"
+    )
+    assert canonical_key_spelling("hkey_local_machine\\Software\\X") == "HKLM\\Software\\X"
+    # The subkey's case is display, not identity — one derivation lowercases it.
+    assert (
+        canonical_key_spelling("HKCU\\Software\\LarkCli").lower()
+        == canonical_key_spelling("HKCU\\software\\larkcli").lower()
+    )
+    # A spelling the parser refuses is refused here too, with the parser's reason.
+    with pytest.raises(RegistryKeyError, match="whole hive"):
+        canonical_key_spelling("HKCU")
 
 
 # ── capability SIDs ───────────────────────────────────────────────────────

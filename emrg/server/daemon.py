@@ -6972,7 +6972,7 @@ class EmrgServer:
         # root whose path was deleted impossible to withdraw (measured
         # 2026-10-09 on head `4eb69bab`).
         verdict = (
-            judge_root_removal(path, policy) if op == "remove"
+            judge_root_removal(path, policy, kind) if op == "remove"
             else judge_extra_root(path, policy, kind)
         )
         if verdict.refusal:
