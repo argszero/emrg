@@ -82,7 +82,7 @@ describe("WorkspaceView", () => {
     expect(screen.getByTestId("projects-empty")).toBeInTheDocument();
 
     const projects = [project("emrg"), project("aitokenpool", "/scm/aitokenpool")];
-    const tasks = [{ name: "emrg-task", config: { project: "emrg" } }] as TaskRec[];
+    const tasks = [{ name: "emrg-task", config: { agent: "emrg" } }] as TaskRec[];
     const { rerender } = setup({ projects, tasks });
     expect(screen.getAllByTestId("project-row")).toHaveLength(2);
     // emrg 有演化任务 → ⚡ 徽标；aitokenpool 无

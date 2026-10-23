@@ -116,7 +116,7 @@ def rendered(tmp_path_factory) -> str:
     try:
         handler = make_handler(
             name="demo-task",
-            config={"project": "demoproj"},
+            config={"agent": "demoproj"},
             interval=300,
             identity=InstanceIdentity(),
             template_path=PROMPTS_DIR / "evolution_prompt.md",

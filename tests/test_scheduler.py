@@ -37,7 +37,7 @@ def test_task_handler_logger_adapter_carries_task_column(tmp_path):
     try:
         handler = make_handler(
             name="emrg-task",
-            config={"project": "emrg"},
+            config={"agent": "emrg"},
             interval=60,
             identity=InstanceIdentity(),
         )
@@ -124,7 +124,7 @@ def test_write_table_replaces_atomically(tmp_path):
     tasks_yml.write_text(yaml.safe_dump([{"name": "old"}]))
 
     write_table([
-        {"name": "test1", "type": "evolution", "config": {"project": "emrg"}},
+        {"name": "test1", "type": "evolution", "config": {"agent": "emrg"}},
     ], tasks_yml)
 
     data = yaml.safe_load(tasks_yml.read_text())
@@ -224,7 +224,7 @@ def _task_create_fixture(tmp_path, monkeypatch, sched):
     )
     sched._tasks_file = tmp_path / "tasks.yml"
     sched._tasks_file.write_text(yaml.safe_dump([
-        {"name": "emrg-task", "type": "evolution", "config": {"project": "emrg"}},
+        {"name": "emrg-task", "type": "evolution", "config": {"agent": "emrg"}},
     ]))
 
 
@@ -260,9 +260,9 @@ def test_task_delete_and_update_do_not_touch_other_records(tmp_path, monkeypatch
     sched = TaskScheduler(InstanceIdentity())
     _task_create_fixture(tmp_path, monkeypatch, sched)
     sched._tasks_file.write_text(yaml.safe_dump([
-        {"name": "emrg-task", "type": "evolution", "config": {"project": "emrg"}},
-        {"name": "keep", "type": "evolution", "config": {"project": "proj"}, "interval": 300},
-        {"name": "drop", "type": "evolution", "config": {"project": "proj"}, "interval": 400},
+        {"name": "emrg-task", "type": "evolution", "config": {"agent": "emrg"}},
+        {"name": "keep", "type": "evolution", "config": {"agent": "proj"}, "interval": 300},
+        {"name": "drop", "type": "evolution", "config": {"agent": "proj"}, "interval": 400},
     ]))
     before = yaml.safe_load(sched._tasks_file.read_text())
 
@@ -336,7 +336,7 @@ def test_load_and_start_no_file_seeds_the_default_table(tmp_path):
 def test_load_and_start_enabled_task(tmp_path):
     """Starts a coroutine for each enabled task, and the interval is the record's."""
     snapshot = asyncio.run(_boot(tmp_path, [
-        {"name": "emrg", "type": "evolution", "config": {"project": "emrg"},
+        {"name": "emrg", "type": "evolution", "config": {"agent": "emrg"},
          "interval": 99, "enabled": True},
     ]))
 
@@ -350,7 +350,7 @@ def test_load_and_start_enabled_task(tmp_path):
 def test_load_and_start_skips_disabled(tmp_path):
     """Disabled tasks are not started."""
     snapshot = asyncio.run(_boot(tmp_path, [
-        {"name": "enabled", "type": "evolution", "config": {"project": "emrg"}, "enabled": True},
+        {"name": "enabled", "type": "evolution", "config": {"agent": "emrg"}, "enabled": True},
         {"name": "disabled", "type": "evolution", "config": {"path": "/tmp"}, "enabled": False},
     ]))
 
@@ -405,7 +405,7 @@ def test_load_and_start_competition_task(tmp_path):
     """
     snapshot = asyncio.run(_boot(tmp_path, [
         {"name": "competition-task", "type": "competition",
-         "config": {"project": "competitions"},
+         "config": {"agent": "competitions"},
          "interval": 3600, "enabled": True},
     ]))
 
@@ -428,7 +428,7 @@ def test_load_and_start_ios_app_task(tmp_path):
     """
     snapshot = asyncio.run(_boot(tmp_path, [
         {"name": "ios-app-task", "type": "ios-app",
-         "config": {"project": "iosapps"},
+         "config": {"agent": "iosapps"},
          "interval": 3600, "enabled": True},
     ]))
 
@@ -504,7 +504,7 @@ def test_load_and_start_feishu_task(tmp_path):
     """
     snapshot = asyncio.run(_boot(tmp_path, [
         {"name": "feishu-task", "type": "feishu",
-         "config": {"project": "emrg"},
+         "config": {"agent": "emrg"},
          "interval": 900, "enabled": True},
     ]))
 
@@ -595,7 +595,7 @@ def test_load_and_start_promote_task(tmp_path):
     """Promote tasks start a TaskHandler with the promote template."""
     snapshot = asyncio.run(_boot(tmp_path, [
         {"name": "olr-promote", "type": "promote",
-         "config": {"project": "openlocalrouter"},
+         "config": {"agent": "openlocalrouter"},
          "interval": 3600, "enabled": True},
     ]))
 
@@ -672,7 +672,7 @@ def test_load_and_start_journal_task(tmp_path):
     """Journal tasks start a TaskHandler with the journal template."""
     snapshot = asyncio.run(_boot(tmp_path, [
         {"name": "journal-task", "type": "journal",
-         "config": {"project": "mem", "role": "author", "author_id": "author-a"},
+         "config": {"agent": "mem", "role": "author", "author_id": "author-a"},
          "interval": 3600, "enabled": True},
     ]))
 
@@ -720,7 +720,7 @@ def test_journal_template_renders_with_context():
     ctx = dict(
         instance_id="test", host_name="host", owner="x", repo="y", source_dir="/tmp/j", timestamp="20260824-182903",
         current_time_human="2026-08-24 18:29",
-        task={"role": "author", "project": "j", "author_id": "author-a"},
+        task={"role": "author", "agent": "j", "author_id": "author-a"},
     )
     out = template.render(**ctx)
     # Current-time injection (rant 18:19:08)
@@ -1037,7 +1037,7 @@ def test_task_handler_emrg_configured_by_default():
     """The emrg evolution task is always repo-configured (defaults to argszero/emrg)."""
     handler = make_handler(
         name="emrg-task",
-        config={"project": "emrg"},
+        config={"agent": "emrg"},
         interval=1800,
         identity=InstanceIdentity(),
     )
@@ -1049,7 +1049,7 @@ def test_task_handler_repo_configured_from_config():
     """config owner/repo overrides the default and enables self-heal (rant 18:14:46 P1)."""
     handler = make_handler(
         name="paper-x",
-        config={"project": "some-proj", "owner": "acme", "repo": "paper-x"},
+        config={"agent": "some-proj", "owner": "acme", "repo": "paper-x"},
         interval=1800,
         identity=InstanceIdentity(),
     )
@@ -1123,7 +1123,7 @@ def test_journal_template_renders_the_continuity_contract():
     template = env.from_string(template_path.read_text(encoding="utf-8"))
     out = template.render(
         instance_id="test", host_name="host", source_dir="/tmp/journal", session_id="s1", timestamp="20260919-100129",
-        current_time_human="2026-09-19 10:01", task={"role": "editor", "project": "silicon-science-cs"},
+        current_time_human="2026-09-19 10:01", task={"role": "editor", "agent": "silicon-science-cs"},
         project={}, owner="argszero", repo="silicon-science-cs",
     )
     # The state and reflection files were retired (rant 2026-09-14T14:35:47): the
@@ -1152,7 +1152,7 @@ def test_open_source_template_renders_with_context():
         instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
         timestamp="20260813",
-        task={"role": "committer", "project": "aitokenpool"},
+        task={"role": "committer", "agent": "aitokenpool"},
         project={}, git_path="git", gh_path="gh",
     )
     assert "The rant queue" in out, "rant-scan 0.5 节应渲染"
@@ -1160,7 +1160,7 @@ def test_open_source_template_renders_with_context():
     assert "config.project" in out, "project 匹配过滤应渲染"
     # Rant 2026-08-17T14:17:03: rant project matching is the SINGLE value
     # config.project — owner/repo dual-compat removed (host decision).
-    assert "aitokenpool" in out, "task.project 值应渲染进 0.5 节"
+    assert "aitokenpool" in out, "task.agent 值应渲染进 0.5 节"
     assert "does **NOT** match" in out, "owner/repo 形式明确不匹配"
     # the unmatched-rant hint may still mention the owner/repo form for
     # detecting rants the host should fix — that is a hint, not a match rule
@@ -1200,13 +1200,13 @@ def test_open_source_template_allow_self_merge_conditional():
     )
 
     # default (allow_self_merge absent) → rule stands, no override
-    out_default = template.render(task={"role": "committer", "project": "aitokenpool"}, **base)
+    out_default = template.render(task={"role": "committer", "agent": "aitokenpool"}, **base)
     assert "Do not merge your own PRs (wait for other Committers to review)" in out_default
     assert "allow_self_merge: true" not in out_default
 
     # explicit true → override text appears + opt-in note in role section
     out_true = template.render(
-        task={"role": "committer", "project": "aitokenpool", "allow_self_merge": True}, **base
+        task={"role": "committer", "agent": "aitokenpool", "allow_self_merge": True}, **base
     )
     assert "allow_self_merge" in out_true, "allow_self_merge 说明应渲染"
     assert "may review and merge their own PRs" in out_true, "self-merge 允许说明应渲染"
@@ -1214,7 +1214,7 @@ def test_open_source_template_allow_self_merge_conditional():
 
     # explicit false → same as default
     out_false = template.render(
-        task={"role": "committer", "project": "aitokenpool", "allow_self_merge": False}, **base
+        task={"role": "committer", "agent": "aitokenpool", "allow_self_merge": False}, **base
     )
     assert "Do not merge your own PRs (wait for other Committers to review)" in out_false
     assert "**overridden**" not in out_false
@@ -1269,7 +1269,7 @@ def test_open_source_template_never_stashes_host_work():
         instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
         timestamp="20260820",
-        task={"role": "committer", "project": "aitokenpool"},
+        task={"role": "committer", "agent": "aitokenpool"},
         project={}, git_path="git", gh_path="gh",
     )
     # the old data-losing instruction is gone
@@ -1301,7 +1301,7 @@ def test_open_source_template_full_code_study_b2b():
         instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
         timestamp="20260814",
-        task={"role": "committer", "project": "aitokenpool"},
+        task={"role": "committer", "agent": "aitokenpool"},
         project={}, git_path="git", gh_path="gh",
     )
     # 1) the new section exists (positive discrimination: absent section → red)
@@ -1335,7 +1335,7 @@ def test_open_source_template_measures_the_shipped_artifact():
         instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
         timestamp="20260814",
-        task={"role": "committer", "project": "aitokenpool"},
+        task={"role": "committer", "agent": "aitokenpool"},
         project={}, git_path="git", gh_path="gh",
     )
     # 1) a defect is measured on the shipped artifact, not only on the checkout
@@ -1379,7 +1379,7 @@ def test_open_source_template_distinguishes_an_unrunnable_toolchain():
         instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
         timestamp="20260814",
-        task={"role": "committer", "project": "aitokenpool"},
+        task={"role": "committer", "agent": "aitokenpool"},
         project={}, git_path="git", gh_path="gh",
     )
     # 1) the resolver runs before the suite and says what an absent tool is not
@@ -1418,7 +1418,7 @@ def test_open_source_template_parallel_recon_c15():
         instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
         timestamp="20260824",
-        task={"role": "committer", "project": "aitokenpool"},
+        task={"role": "committer", "agent": "aitokenpool"},
         project={}, git_path="git", gh_path="gh",
     )
     # 1) the new section exists
@@ -1472,7 +1472,7 @@ def test_open_source_entry_check_reads_the_claim_thread():
         instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
         timestamp="20260824",
-        task={"role": "committer", "project": "aitokenpool"},
+        task={"role": "committer", "agent": "aitokenpool"},
         project={}, git_path="git", gh_path="gh",
     )
     # 1) the entry check asks for the thread, which is where a claim is written
@@ -1515,7 +1515,7 @@ def test_open_source_template_empty_recon_names_the_extension_surface():
         instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
         timestamp="20260824",
-        task={"role": "committer", "project": "aitokenpool"},
+        task={"role": "committer", "agent": "aitokenpool"},
         project={}, git_path="git", gh_path="gh",
     )
     assert "no gap inside the project's extension surface" in out, "空 Recon 结论须含扩展面阅读"
@@ -1546,7 +1546,7 @@ def test_open_source_template_reads_the_extension_surface():
         instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
         timestamp="20260824",
-        task={"role": "committer", "project": "aitokenpool"},
+        task={"role": "committer", "agent": "aitokenpool"},
         project={}, git_path="git", gh_path="gh",
     )
     # 1) the section exists and says what a contribution through that layer even is
@@ -1579,7 +1579,7 @@ def test_promote_template_learn_latest_state_04():
         instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/pm", source_dir="/tmp/pm", session_id="s1",
         timestamp="20260814",
-        task={"project": "aitokenpool"},
+        task={"agent": "aitokenpool"},
         project={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
         git_path="git", gh_path="gh",
     )
@@ -1615,7 +1615,7 @@ def test_promote_template_homework_first_dehardening():
         instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/pm", source_dir="/tmp/pm", session_id="s1",
         timestamp="20260815",
-        task={"project": "aitokenpool"},
+        task={"agent": "aitokenpool"},
         project={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
         git_path="git", gh_path="gh",
     )
@@ -1655,7 +1655,7 @@ def test_promote_template_direct_cdp_rule():
         instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/pm", source_dir="/tmp/pm", session_id="s1",
         timestamp="20260825",
-        task={"project": "aitokenpool"},
+        task={"agent": "aitokenpool"},
         project={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
         git_path="git", gh_path="gh",
     )
@@ -1683,7 +1683,7 @@ def test_promote_template_registration_blog_sections():
         instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/pm", source_dir="/tmp/pm", session_id="s1",
         timestamp="20260815",
-        task={"project": "aitokenpool"},
+        task={"agent": "aitokenpool"},
         project={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
         git_path="git", gh_path="gh",
     )
@@ -1720,7 +1720,7 @@ def _make_handler(tmp_path, name="emrg-task", project="emrg", path=None):
     try:
         handler = make_handler(
             name=name,
-            config={"project": project} if project else {},
+            config={"agent": project} if project else {},
             interval=60,
         )
     finally:
@@ -1745,7 +1745,7 @@ def test_a_record_deleted_from_an_existing_file_stays_deleted(tmp_path):
 
     tasks_yml = tmp_path / "tasks.yml"
     tasks_yml.write_text(yaml.safe_dump([
-        {"name": "other", "type": "evolution", "config": {"project": "other"}, "enabled": True},
+        {"name": "other", "type": "evolution", "config": {"agent": "other"}, "enabled": True},
     ]))
 
     sched = TaskScheduler(InstanceIdentity())
@@ -2703,7 +2703,7 @@ def test_connect_backoff_zero_failures_returns_interval():
     from emrg.server.scheduler import TaskHandler
 
     handler = make_handler(
-        name="emrg-task", config={"project": "emrg"}, interval=60,
+        name="emrg-task", config={"agent": "emrg"}, interval=60,
         identity=InstanceIdentity(),
     )
     handler._connect_failures = 0
@@ -2715,7 +2715,7 @@ def test_connect_backoff_grows_exponentially_capped(tmp_path):
     from emrg.server.scheduler import TaskHandler
 
     handler = make_handler(
-        name="emrg-task", config={"project": "emrg"}, interval=60,
+        name="emrg-task", config={"agent": "emrg"}, interval=60,
         identity=InstanceIdentity(),
     )
     # interval=60s: 2^1=2 → 120s; 2^2=4 → 240s; 2^3=8 → 480s; 2^4=16 → 960s → capped 600s
@@ -2732,7 +2732,7 @@ def test_connect_backoff_floor_30s_for_small_interval(tmp_path):
     from emrg.server.scheduler import TaskHandler
 
     handler = make_handler(
-        name="emrg-task", config={"project": "emrg"}, interval=10,
+        name="emrg-task", config={"agent": "emrg"}, interval=10,
         identity=InstanceIdentity(),
     )
     handler._connect_failures = 2
@@ -2888,7 +2888,7 @@ def test_list_tasks_logs_slow_status(tmp_path, caplog):
     sched = mod.TaskScheduler(InstanceIdentity())
     sched._tasks_file = tmp_path / "tasks.yml"
     sched._tasks_file.write_text(yaml.safe_dump([
-        {"name": "slow", "type": "evolution", "config": {"project": "emrg"}, "enabled": True},
+        {"name": "slow", "type": "evolution", "config": {"agent": "emrg"}, "enabled": True},
     ]))
     sched._live = {"slow": handler}
     with caplog.at_level(logging.WARNING, logger="emrg.server.scheduler"):
@@ -2915,7 +2915,7 @@ def test_list_tasks_reads_the_record_for_the_declared_fields(tmp_path):
     sched._tasks_file = tmp_path / "tasks.yml"
     sched._tasks_file.write_text(yaml.safe_dump([
         {"name": "journal", "type": "journal",
-         "config": {"project": "sci", "repo": "argszero/sci"},
+         "config": {"agent": "sci", "repo": "argszero/sci"},
          "interval": 3600, "enabled": False, "sandbox": "read-only"},
     ]))
 
@@ -2926,7 +2926,7 @@ def test_list_tasks_reads_the_record_for_the_declared_fields(tmp_path):
     assert row["name"] == "journal"
     assert row["type"] == "journal"
     assert row["enabled"] is False
-    assert row["config"] == {"project": "sci", "repo": "argszero/sci"}
+    assert row["config"] == {"agent": "sci", "repo": "argszero/sci"}
     assert row["sandbox"] == "read-only"
     assert row["running"] is False, "no handler is live for it yet"
     assert row["interval"] == 3600
@@ -2943,8 +2943,8 @@ def test_list_tasks_shows_a_deleted_task_gone_at_once(tmp_path):
     sched = TaskScheduler(InstanceIdentity())
     sched._tasks_file = tmp_path / "tasks.yml"
     sched._tasks_file.write_text(yaml.safe_dump([
-        {"name": "keep", "type": "evolution", "config": {"project": "emrg"}},
-        {"name": "drop", "type": "evolution", "config": {"project": "emrg"}},
+        {"name": "keep", "type": "evolution", "config": {"agent": "emrg"}},
+        {"name": "drop", "type": "evolution", "config": {"agent": "emrg"}},
     ]))
     assert [t["name"] for t in sched.list_tasks()] == ["keep", "drop"]
 
@@ -3000,7 +3000,7 @@ def test_task_create_and_duplicate(tmp_path):
         sched._tasks_file = tasks_file
         ok, task = sched.task_create("daily", "evolution", "mem", 300, repo="acme/x")
         assert ok and task["name"] == "daily" and task["interval"] == 300
-        assert task["config"] == {"project": "mem", "repo": "acme/x"}
+        assert task["config"] == {"agent": "mem", "repo": "acme/x"}
         saved = yaml.safe_load(tasks_file.read_text(encoding="utf-8"))
         assert any(t["name"] == "daily" for t in saved)
         ok, err = sched.task_create("daily", "evolution", "emrg", 60)
@@ -3033,7 +3033,7 @@ def test_a_record_the_file_carries_runs_even_with_uppercase_in_its_name(tmp_path
             "name": "OfficeCLI-opensource-task",
             "type": "open-source",
             "sandbox": "workspace-write",
-            "config": {"project": "OfficeCLI", "role": "contributor"},
+            "config": {"agent": "OfficeCLI", "role": "contributor"},
             "interval": 3600,
             "enabled": True,
         }
@@ -3143,8 +3143,8 @@ def test_reconcile_starts_what_is_missing_and_cancels_nothing(tmp_path):
         sched = TaskScheduler(InstanceIdentity())
         sched._tasks_file = tmp_path / "tasks.yml"
         sched._write_table([
-            {"name": "a", "type": "evolution", "config": {"project": "emrg"}, "interval": 300, "enabled": True},
-            {"name": "b", "type": "evolution", "config": {"project": "mem"}, "interval": 300, "enabled": True},
+            {"name": "a", "type": "evolution", "config": {"agent": "emrg"}, "interval": 300, "enabled": True},
+            {"name": "b", "type": "evolution", "config": {"agent": "mem"}, "interval": 300, "enabled": True},
         ])
 
         async def _run():
@@ -3152,8 +3152,8 @@ def test_reconcile_starts_what_is_missing_and_cancels_nothing(tmp_path):
             running_a = sched._live["a"]
             # b is deleted and c added; a's interval changes.
             sched._write_table([
-                {"name": "a", "type": "evolution", "config": {"project": "emrg"}, "interval": 900, "enabled": True},
-                {"name": "c", "type": "evolution", "config": {"project": "mem"}, "interval": 900, "enabled": True},
+                {"name": "a", "type": "evolution", "config": {"agent": "emrg"}, "interval": 900, "enabled": True},
+                {"name": "c", "type": "evolution", "config": {"agent": "mem"}, "interval": 900, "enabled": True},
             ])
             second = sched.reconcile()
             # Nothing has yielded yet, so no handler has woken: this is the live set
@@ -3190,7 +3190,7 @@ def test_reconcile_is_idempotent(tmp_path):
         sched = TaskScheduler(InstanceIdentity())
         sched._tasks_file = tmp_path / "tasks.yml"
         sched._write_table([
-            {"name": "a", "type": "evolution", "config": {"project": "emrg"}, "interval": 300, "enabled": True},
+            {"name": "a", "type": "evolution", "config": {"agent": "emrg"}, "interval": 300, "enabled": True},
         ])
 
         async def _run():
@@ -3220,7 +3220,7 @@ def test_reconcile_changes_nothing_when_the_table_is_unreadable(tmp_path):
         sched = TaskScheduler(InstanceIdentity())
         sched._tasks_file = tmp_path / "tasks.yml"
         sched._write_table([
-            {"name": "a", "type": "evolution", "config": {"project": "emrg"}, "interval": 300, "enabled": True},
+            {"name": "a", "type": "evolution", "config": {"agent": "emrg"}, "interval": 300, "enabled": True},
         ])
 
         async def _run():
@@ -3361,10 +3361,10 @@ def test_evolution_template_renders_dual_project_match():
         instance_id="test", host_name="host", repo_url="https://github.com/argszero/emrg.git", owner="argszero",
         repo="emrg", local_source="/tmp/evo", source_dir="/tmp/evo",
         session_id="s1", timestamp="20260817",
-        task={"role": "committer", "project": "emrg"},
+        task={"role": "committer", "agent": "emrg"},
         project={}, git_path="git", gh_path="gh",
     )
-    assert "emrg" in out, "task.project 值应渲染"
+    assert "emrg" in out, "task.agent 值应渲染"
     assert "argszero/emrg" in out, "owner/repo 形式应渲染"
     assert "ignore rants without a `project` field entirely" in out
 
@@ -3388,7 +3388,7 @@ def test_sandbox_resolution_unified_default_rule():
     # no name-based defaults: emrg-task no longer implies workspace-write
     # via the old special case — it is the unified default now
     handler = make_handler(
-        name="emrg-task", config={"project": "emrg"}, interval=60,
+        name="emrg-task", config={"agent": "emrg"}, interval=60,
         identity=InstanceIdentity(),
     )
     assert handler._sandbox == "workspace-write"

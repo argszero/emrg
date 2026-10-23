@@ -968,15 +968,15 @@ vision = false
 
     // ── Task/template CRUD IPC (rant 2026-08-12T18:23:15 P3) ──────────
     ipcMain.handle("emrg:taskCreate", async (_e, payload) => {
-      const { name, type, project, interval, enabled, repo, description, sandbox, schedule } = payload || {};
+      const { name, type, agent, interval, enabled, repo, description, sandbox, schedule } = payload || {};
       if (typeof name !== "string" || !name.trim()) throw new Error("invalid task name");
       if (typeof type !== "string" || !type.trim()) throw new Error("invalid task type");
-      if (typeof project !== "string" || !project.trim()) throw new Error("invalid project");
+      if (typeof agent !== "string" || !agent.trim()) throw new Error("invalid agent");
       // `schedule` 必须原样转发：这张固定字段表此前把它丢掉，于是 GUI 永远只能建
       // 单一频次的任务，daemon 收了也白收（issue #2490）。只有 payload 真的带了这个
       // 键才发，缺席＝不声明，与 task_update 的「缺省不动该字段」一致。
       const fields = {
-        name: name.trim(), task_type: type.trim(), project: project.trim(),
+        name: name.trim(), task_type: type.trim(), agent: agent.trim(),
         interval, enabled, repo, description, sandbox,
       };
       if ("schedule" in (payload || {})) fields.schedule = schedule;

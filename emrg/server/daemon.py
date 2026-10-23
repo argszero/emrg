@@ -2937,7 +2937,7 @@ class EmrgServer:
                 if self._scheduler:
                     ok, res = self._scheduler.task_create(
                         name=name, task_type="evolution",
-                        project=name, interval=600,
+                        agent=name, interval=600,
                     )
                     if ok:
                         self._scheduler.reconcile()
@@ -3004,7 +3004,7 @@ class EmrgServer:
             ok, res = self._scheduler.task_create(
                 name=msg.get("name", "").strip(),
                 task_type=msg.get("task_type", "").strip(),
-                project=msg.get("project", "").strip(),
+                agent=msg.get("agent", "").strip(),
                 interval=msg.get("interval"),
                 enabled=msg.get("enabled", True),
                 repo=msg.get("repo"),
@@ -3026,7 +3026,7 @@ class EmrgServer:
             if not self._scheduler:
                 await self._send(ws, {"type": "task_result", "error": "scheduler not running"})
                 return
-            fields = {k: msg[k] for k in ("task_type", "project", "interval", "enabled", "repo", "description", "sandbox", "schedule") if k in msg}
+            fields = {k: msg[k] for k in ("task_type", "agent", "interval", "enabled", "repo", "description", "sandbox", "schedule") if k in msg}
             if "task_type" in fields:
                 fields["type"] = fields.pop("task_type")
             ok, res = self._scheduler.task_update(msg.get("name", "").strip(), **fields)

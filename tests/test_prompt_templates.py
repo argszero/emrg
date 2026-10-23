@@ -62,7 +62,7 @@ LEFTOVER_TAG = re.compile(r"\{\{|\{%")
 # Optional task/project fields the prompts guard on. Populated only by the strict
 # render, so that a "missing" name there is a typo rather than a design choice.
 FULL_TASK_CONFIG: dict = {
-    "project": "demoproj",
+    "agent": "demoproj",
     "role": "committer",
     "author_id": "argszero",
     "keywords": "demo, wiring",
@@ -95,7 +95,7 @@ def _make_handler(
 ) -> TaskHandler:
     """A real handler, from a hermetic config dir, pointed at a real template."""
     monkeypatch.setattr(mod, "config_dir", lambda: tmp_path)
-    name = config.get("project", "demoproj")
+    name = config.get("agent", "demoproj")
     _write_projects_yml(tmp_path, name, project_entry or {"name": name})
     return make_handler(
         name="demo-task",
@@ -112,7 +112,7 @@ def _builtin_templates() -> list[tuple[str, str]]:
 
 def test_every_prompt_template_renders_through_the_real_builder(tmp_path, monkeypatch) -> None:
     """Each built-in task type renders, with the optional sections unset."""
-    minimal = {"project": "demoproj"}
+    minimal = {"agent": "demoproj"}
     for task_type, filename in _builtin_templates():
         handler = _make_handler(tmp_path, monkeypatch, filename, minimal)
         rendered = handler._build_evolution_prompt()

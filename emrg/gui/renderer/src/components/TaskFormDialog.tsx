@@ -19,7 +19,7 @@ import { Dialog } from "./Dialog";
 export interface TaskFormPayload {
   name: string;
   type: string;
-  project: string;
+  agent: string;
   interval: number;
   enabled: boolean;
   repo?: string;
@@ -114,8 +114,8 @@ export function TaskFormDialog({
     const curType =
       (task?.type && types.includes(task.type) ? task.type : types[0]) || "evolution";
     if (typeRef.current) typeRef.current.value = curType;
-    const curProj = projects.some((p) => (p.name || p.path || "") === task?.config?.project)
-      ? (task?.config?.project as string)
+    const curProj = projects.some((p) => (p.name || p.path || "") === task?.config?.agent)
+      ? (task?.config?.agent as string)
       : (projects[0]?.name || projects[0]?.path || "");
     if (projectRef.current) projectRef.current.value = curProj;
     if (intervalRef.current) intervalRef.current.value = String(task?.interval ?? 1800);
@@ -176,7 +176,7 @@ export function TaskFormDialog({
     const payload: TaskFormPayload = {
       name,
       type: typeRef.current.value,
-      project: projectRef.current.value,
+      agent: projectRef.current.value,
       interval,
       enabled: enabledRef.current?.checked ?? true,
       repo: repoRef.current?.value.trim() || undefined,

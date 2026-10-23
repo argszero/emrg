@@ -37,7 +37,7 @@ function taskWith(overrides: Partial<TaskRec> = {}): TaskRec {
     type: "evolution",
     interval: 10800,
     enabled: true,
-    config: { project: "emrg" },
+    config: { agent: "emrg" },
     ...overrides,
   };
 }
@@ -91,7 +91,7 @@ describe("TaskFormDialog", () => {
   });
 
   it("编辑：预填任务字段，name 只读不可改名", () => {
-    const task = taskWith({ type: "journal", interval: 3600, enabled: false, config: { project: "sci" } });
+    const task = taskWith({ type: "journal", interval: 3600, enabled: false, config: { agent: "sci" } });
     (task as TaskRec & { sandbox?: string }).sandbox = "read-only";
     render(
       wrapper(
@@ -161,7 +161,7 @@ describe("TaskFormDialog", () => {
     expect(payload).toEqual({
       name: "t1",
       type: "journal",
-      project: "sci",
+      agent: "sci",
       interval: 300,
       enabled: false,
       repo: undefined,

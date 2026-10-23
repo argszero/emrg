@@ -5784,9 +5784,9 @@ def test_the_tasks_list_frame_carries_the_minimum_interval(tmp_path, monkeypatch
     sched = TaskScheduler(InstanceIdentity())
     sched._tasks_file = tmp_path / "tasks.yml"
     sched._tasks_file.write_text(yaml.safe_dump([
-        {"name": "windowed", "type": "evolution", "config": {"project": "emrg"},
+        {"name": "windowed", "type": "evolution", "config": {"agent": "emrg"},
          "interval": 10800, "enabled": True, "schedule": windows},
-        {"name": "plain", "type": "evolution", "config": {"project": "emrg"},
+        {"name": "plain", "type": "evolution", "config": {"agent": "emrg"},
          "interval": 1800, "enabled": True},
     ]))
 
