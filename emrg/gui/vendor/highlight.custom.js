@@ -5445,7 +5445,7 @@ modules['lang/markdown'] = function(module, exports, require) { /*
 Language: Markdown
 Requires: xml.js
 Author: John Crepezzi <john.crepezzi@gmail.com>
-Website: https://daringfireball.net/agents/markdown/
+Website: https://daringfireball.net/projects/markdown/
 Category: common, markup
 */
 
