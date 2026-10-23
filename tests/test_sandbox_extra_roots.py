@@ -56,6 +56,7 @@ from emrg.sandbox.roots import (
 )
 from emrg.server.daemon import EmrgServer
 from emrg.session import Session
+from emrg.tools import file_policy
 
 
 class _RecordingWs:
@@ -296,6 +297,41 @@ def test_the_protected_file_itself_is_refused_too(outside):
     verdict = judge_extra_root("~/.emrg/agents.yml", _ws_policy(ws))
 
     assert verdict.refusal and "agents.yml" in verdict.refusal
+
+
+def test_a_root_naming_the_protected_directory_by_another_spelling_is_refused(
+    outside, tmp_path, monkeypatch
+):
+    """The grant arm reads identity too, and the directory is where it matters.
+
+    A root is granted as a tree, so the question is not only "is this the file"
+    but "does this name a directory above one". On a volume that folds case,
+    ``~/.EMRG`` beside a protected ``~/.emrg/config.toml`` is that directory, and
+    the string comparison this replaces admitted it — the grant the rule exists
+    to refuse (#2551, requirement 4).
+
+    The volume is asked rather than assumed: where it keeps the two spellings
+    apart they are two directories, the grant is the size the host asked for, and
+    the case is skipped with that reason. The protected list is a temporary one,
+    because ``protected_paths()`` derives from the real home and no test here
+    touches it.
+    """
+    ws, _ = outside
+    home = tmp_path / "home"
+    (home / ".emrg").mkdir(parents=True)
+    victim = home / ".emrg" / "config.toml"
+    victim.write_text("host state", encoding="utf-8")
+    variant = home / ".EMRG"
+    if not file_policy.same_file(str(variant), str(home / ".emrg")):
+        pytest.skip("this volume keeps .EMRG and .emrg apart as two directories")
+    monkeypatch.setattr(
+        file_policy, "protected_paths", lambda: [os.path.realpath(victim)]
+    )
+
+    verdict = judge_extra_root(str(variant), _ws_policy(ws))
+
+    assert verdict.refusal, verdict
+    assert "protected daemon state file" in verdict.refusal
 
 
 # ── §2 one derivation point ───────────────────────────────────────────────
