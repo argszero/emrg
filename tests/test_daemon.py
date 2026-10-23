@@ -167,8 +167,8 @@ def _make_server() -> EmrgServer:
     server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
     # Point the project log at a tmp file by default so context/message tests
     # can never write the real ~/.emrg/agents.yml (2026-08-13 leak). Tests
-    # that exercise _projects_log override it explicitly afterwards.
-    server._projects_log = Path(tempfile.mkdtemp()) / "agents.yml"
+    # that exercise _agents_log override it explicitly afterwards.
+    server._agents_log = Path(tempfile.mkdtemp()) / "agents.yml"
     return server
 
 
@@ -3194,7 +3194,7 @@ def test_list_projects_includes_evolution_workspace(tmp_path, monkeypatch):
         "- name: other\n  path: /home/u/work/other\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(server, "_projects_log", projects_file)
+    monkeypatch.setattr(server, "_agents_log", projects_file)
 
     writer = _FakeWriter()
     asyncio.run(server._handle_list_projects(writer))
@@ -3211,13 +3211,13 @@ def test_list_projects_includes_evolution_workspace(tmp_path, monkeypatch):
 
 
 def _server_with_projects(tmp_path: Path, entries: list[dict]) -> tuple[EmrgServer, Path]:
-    """Server whose _projects_log points at a tmp agents.yml with entries."""
+    """Server whose _agents_log points at a tmp agents.yml with entries."""
     server = _make_server()
     projects_file = tmp_path / "agents.yml"
     projects_file.write_text(
         yaml.safe_dump(entries, allow_unicode=True), encoding="utf-8"
     )
-    server._projects_log = projects_file
+    server._agents_log = projects_file
     return server, projects_file
 
 
@@ -3278,7 +3278,7 @@ def test_remove_project_preserves_disk_session_data(tmp_path):
 def test_remove_project_no_projects_file(tmp_path):
     """No agents.yml → removed=False without raising."""
     server = _make_server()
-    server._projects_log = tmp_path / "agents.yml"  # never created
+    server._agents_log = tmp_path / "agents.yml"  # never created
     writer = _FakeWriter()
     asyncio.run(server._handle_remove_project("alpha", writer))
     assert _decode_frames(writer)[0] == {
@@ -3291,7 +3291,7 @@ def test_remove_project_corrupt_yaml_reports_error(tmp_path):
     server = _make_server()
     projects_file = tmp_path / "agents.yml"
     projects_file.write_text("a: [unclosed", encoding="utf-8")
-    server._projects_log = projects_file
+    server._agents_log = projects_file
     writer = _FakeWriter()
     asyncio.run(server._handle_remove_project("alpha", writer))
     replies = _decode_frames(writer)
@@ -3338,7 +3338,7 @@ def test_list_projects_ordered_by_latest_session_activity(tmp_path, monkeypatch)
         f"- name: nosess\n  path: {p_none}\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(server, "_projects_log", projects_file)
+    monkeypatch.setattr(server, "_agents_log", projects_file)
 
     writer = _FakeWriter()
     asyncio.run(server._handle_list_projects(writer))
@@ -4987,17 +4987,18 @@ def test_the_rant_panel_survives_a_legacy_array_row_and_a_bare_scalar(tmp_path):
 # ── agents.yml: the registry every client reads first ─────────────
 #
 # These are the daemon's four readers of one file, `~/.emrg/agents.yml`, and each of
-# them runs on the daemon's **event loop**: the startup backfill, the per-message project
-# touch, `list_projects` — which every client sends on connect, so it is the first frame
-# a GUI or TUI ever gets an answer to — and `remove_project`. A FIFO at that path
-# therefore does not fail a request, it stops the daemon answering anyone again, which is
-# the condition issue #2062 named for the three file tools and #2073 for the daemon's own
-# readers. Measured 2026-10-11 (`cyc20261011-173122`) on master `60541e39`: each of the
-# four calls below **did not return** under a FIFO, while the pipe-free controls ran.
+# them runs on the daemon's **event loop**: the startup backfill, the register write that
+# opening a session makes, `list_projects` — which every client sends on connect, so it is
+# the first frame a GUI or TUI ever gets an answer to — and `remove_project`. A FIFO at
+# that path therefore does not fail a request, it stops the daemon answering anyone again,
+# which is the condition issue #2062 named for the three file tools and #2073 for the
+# daemon's own readers. Measured 2026-10-11 (`cyc20261011-173122`) on master `60541e39`:
+# each of the four calls below **did not return** under a FIFO, while the pipe-free
+# controls ran.
 #
 # Two shapes, and the difference is deliberate: a **reader** answers the refusal through
 # the `except OSError` it already has for a registry it cannot read (so no new branch is
-# added), while `_touch_project` — which reads the registry and then **rewrites** it —
+# added), while `AgentRegistry.for_dir` — which reads the registry and then **rewrites** it —
 # skips the registration instead of falling through to its "rebuilding" branch, because
 # that branch would answer a host file it could not read with an *empty* registry and
 # delete every project the host had registered.
@@ -5016,7 +5017,7 @@ def test_a_named_pipe_registry_does_not_stop_the_project_listing(tmp_path, monke
     server = _make_server()
     fifo = tmp_path / "agents.yml"
     os.mkfifo(fifo)
-    monkeypatch.setattr(server, "_projects_log", fifo)
+    monkeypatch.setattr(server, "_agents_log", fifo)
     writer = _FakeWriter()
 
     within(DEADLINE_SECONDS, lambda: asyncio.run(server._handle_list_projects(writer)))
@@ -5032,7 +5033,7 @@ def test_a_directory_registry_is_refused_by_its_kind_in_the_listing(
     server = _make_server()
     registry = tmp_path / "agents.yml"
     registry.mkdir()
-    monkeypatch.setattr(server, "_projects_log", registry)
+    monkeypatch.setattr(server, "_agents_log", registry)
     writer = _FakeWriter()
 
     with caplog.at_level(logging.ERROR):
@@ -5045,7 +5046,7 @@ def test_a_directory_registry_is_refused_by_its_kind_in_the_listing(
 
 
 @_needs_mkfifo
-def test_a_named_pipe_registry_is_neither_read_nor_rewritten_by_touch_project(
+def test_a_named_pipe_registry_is_neither_read_nor_rewritten_by_the_register(
         tmp_path, monkeypatch):
     """The read-then-write site: skipped, and the registry is left as it was."""
     import stat
@@ -5053,25 +5054,25 @@ def test_a_named_pipe_registry_is_neither_read_nor_rewritten_by_touch_project(
     server = _make_server()
     fifo = tmp_path / "agents.yml"
     os.mkfifo(fifo)
-    monkeypatch.setattr(server, "_projects_log", fifo)
+    monkeypatch.setattr(server, "_agents_log", fifo)
 
-    within(DEADLINE_SECONDS, lambda: server._touch_project(str(tmp_path)))
+    within(DEADLINE_SECONDS, lambda: server._agents.for_dir(str(tmp_path)))
 
     assert stat.S_ISFIFO(os.stat(fifo).st_mode), (
         "the registry was rewritten — a read that answered 'no entries' would have "
         "deleted every project the host registered")
 
 
-def test_a_directory_registry_warns_touch_project_and_keeps_it(
+def test_a_directory_registry_warns_the_register_and_keeps_it(
         tmp_path, monkeypatch, caplog):
     """The pipe-free half: the warning names the kind, and no write replaces it."""
     server = _make_server()
     registry = tmp_path / "agents.yml"
     registry.mkdir()
-    monkeypatch.setattr(server, "_projects_log", registry)
+    monkeypatch.setattr(server, "_agents_log", registry)
 
     with caplog.at_level(logging.WARNING):
-        server._touch_project(str(tmp_path))
+        server._agents.for_dir(str(tmp_path))
 
     assert registry.is_dir(), "the registry was replaced by the write this guard prevents"
     assert "not a regular file" in caplog.text, (
@@ -5086,7 +5087,7 @@ def test_a_named_pipe_registry_does_not_stop_the_index_backfill(tmp_path, monkey
     server = _make_server()
     fifo = tmp_path / "agents.yml"
     os.mkfifo(fifo)
-    monkeypatch.setattr(server, "_projects_log", fifo)
+    monkeypatch.setattr(server, "_agents_log", fifo)
     seen: dict[str, list[str]] = {}
     monkeypatch.setattr(
         sessions_index_mod, "rebuild_sessions_index",
@@ -5107,7 +5108,7 @@ def test_a_directory_registry_is_refused_by_its_kind_in_the_backfill(
     server = _make_server()
     registry = tmp_path / "agents.yml"
     registry.mkdir()
-    monkeypatch.setattr(server, "_projects_log", registry)
+    monkeypatch.setattr(server, "_agents_log", registry)
     monkeypatch.setattr(
         sessions_index_mod, "rebuild_sessions_index", lambda cfg, paths: 0)
 
@@ -5123,7 +5124,7 @@ def test_a_named_pipe_registry_does_not_stop_remove_project(tmp_path):
     server = _make_server()
     fifo = tmp_path / "agents.yml"
     os.mkfifo(fifo)
-    server._projects_log = fifo
+    server._agents_log = fifo
     writer = _FakeWriter()
 
     within(DEADLINE_SECONDS,
@@ -5141,7 +5142,7 @@ def test_a_directory_registry_is_refused_by_its_kind_in_remove_project(
     server = _make_server()
     registry = tmp_path / "agents.yml"
     registry.mkdir()
-    monkeypatch.setattr(server, "_projects_log", registry)
+    monkeypatch.setattr(server, "_agents_log", registry)
     writer = _FakeWriter()
 
     with caplog.at_level(logging.ERROR):

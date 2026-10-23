@@ -272,7 +272,7 @@ def _server(tmp_path, monkeypatch) -> EmrgServer:
     monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", tmp_path / "fire")
     monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH", tmp_path / "rc")
     server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
-    server._projects_log = tmp_path / "agents.yml"
+    server._agents_log = tmp_path / "agents.yml"
     server._maybe_reflect_memory = lambda *a, **k: None
     return server
 

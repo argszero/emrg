@@ -69,7 +69,7 @@ def _no_ambient_switch(monkeypatch):
 def _instantiate() -> EmrgServer:
     """Build a server the way the daemon does, then keep its logs out of the host."""
     server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
-    server._projects_log = Path(tempfile.mkdtemp()) / "agents.yml"
+    server._agents_log = Path(tempfile.mkdtemp()) / "agents.yml"
     return server
 
 
