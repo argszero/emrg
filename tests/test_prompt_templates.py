@@ -2197,7 +2197,7 @@ def test_the_inbound_pin_answers_both_ways():
 #
 # The layout is not decoration: §3's inception step and §4's attribution rule both assume it.
 # An app that is submitted, attributed and possibly handed over has to be a repository of its
-# own, and §0.6 used to open with `<agent root>/apps/<slug>/` — a child of a shared
+# own, and §0.6 used to open with `<project root>/apps/<slug>/` — a child of a shared
 # container, which is not a repository root and is exactly the one-shared-agent-for-several-
 # apps shape the placement forbids. These pin the layout the section must state, and refuse the
 # container by name.
@@ -2247,8 +2247,8 @@ def test_the_ios_layout_pin_answers_both_ways():
             f"removing {phrase!r} did not make exactly that phrase read as missing, so this pin "
             "would not notice its own rule being deleted"
         )
-    container = "<agent root>/apps/<slug>/"
-    seeded = text.replace("`<agent root>/<repo>/`", f"`{container}`", 1)
+    container = "<project root>/apps/<slug>/"
+    seeded = text.replace("`<project root>/<repo>/`", f"`{container}`", 1)
     assert seeded != text, "the layout line this test names is not a line the template carries"
     assert container in _ios_layout_section(seeded), (
         "the container refusal did not see a container written into the section it reads, so it "
@@ -2259,7 +2259,7 @@ def test_the_ios_layout_pin_answers_both_ways():
 # ── the ios-app template's repository identity ──────────────────────────────────────────────
 #
 # §0.6 owns the app's repository, so it owns what that repository *is*. "its own repository …
-# named after it — `<agent root>/<repo>/`" constrains the directory's position and says nothing
+# named after it — `<project root>/<repo>/`" constrains the directory's position and says nothing
 # about visibility or the name's form, so a public repository and a codename both satisfy it, and
 # §3 cites this section for *creating* the repository. A section cited as the authority for a
 # step has to carry the step; these pin the two properties it was not carrying.

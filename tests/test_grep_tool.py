@@ -59,7 +59,7 @@ def test_grep_glob_filter(temp_cwd):
 def test_grep_case_insensitive(temp_cwd):
     tool = GrepTool()
     result = _run(tool.execute({
-        "pattern": "PROJECT", "path": str(temp_cwd), "ignore_case": True,
+        "pattern": "AGENT", "path": str(temp_cwd), "ignore_case": True,
     }))
     assert "README.md" in result.content
 

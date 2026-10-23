@@ -120,16 +120,16 @@ Durable lessons (a direction that proved barren, a policy reading the journal se
 
 #### 0.5 Rant scan (host development instructions)
 
-**Rants are the host's work orders.** A rant whose `project` field equals this task's `config.project` (tasks.yml) is an instruction for THIS journal.
+**Rants are the host's work orders.** A rant whose `agent` field equals this task's `config.agent` (tasks.yml) is an instruction for THIS journal.
 
 ```bash
 cat ~/.emrg/rants.jsonl 2>/dev/null || echo "[no rants.jsonl — skip rant scan]"
 ```
 
 Filter rules (same as open-source tasks):
-- Match rant's `project` against exactly `{{ task.agent }}` — equal counts, anything else does not
-- Ignore rants without a `project` field; only `pending` / `in_progress` count
-- **Irrelevant-rant exclusion (HARD)**: any rant that does NOT match `project` exactly, or whose content is not about THIS journal, must be **ignored entirely** — do NOT read it into your thinking, do NOT adopt it as a research direction, do NOT cite it. **An irrelevant rant must never become a topic anchor.** Only a rant with `project` = `{{ task.agent }}` AND content actually directed at this journal enters the candidate pool / Phase Ops.
+- Match rant's `agent` against exactly `{{ task.agent }}` — equal counts, anything else does not
+- Ignore rants without a `agent` field; only `pending` / `in_progress` count
+- **Irrelevant-rant exclusion (HARD)**: any rant that does NOT match `agent` exactly, or whose content is not about THIS journal, must be **ignored entirely** — do NOT read it into your thinking, do NOT adopt it as a research direction, do NOT cite it. **An irrelevant rant must never become a topic anchor.** Only a rant with `agent` = `{{ task.agent }}` AND content actually directed at this journal enters the candidate pool / Phase Ops.
 - **Dedup check** before treating any rant as actionable: search the journal repo commit log for the rant's timestamp/keywords — a commit referencing the rant only counts as handled when ALL acceptance items are satisfied AND related PRs merged
 - **Rant status machine**: `pending → in_progress → completed` (never jump pending → completed). When starting work on a rant: set `in_progress` + progress note. When all its PRs merged + self-verification passes: set `completed` + ISO timestamp. Host feedback that a fix is insufficient → revert to `in_progress` with reason.
 - Rant-driven journal ops (e.g. "adjust CfP", "revise review policy") are processed in Phase Ops with highest priority.
@@ -370,7 +370,7 @@ Nothing pending?                                      → Phase Research (new di
      - Read the 2–3 most relevant recent abstracts (last 6 months), record their limitations → this forms your gap. If browser-harness is available, prefer it for reading full texts.
    - **The editor's CfP / journal themes**: README, CfP issue, editorial comments — topics the journal explicitly wants.
    - **Your own papers' future work**: Discussion / Future-Work paragraphs of your published or in-review manuscripts. **Own-work relevance is NOT by itself a topic reason** — it is only one candidate among many.
-   - **Host rants with `project` = {{ task.agent }}**: directional feedback, not just bug reports. (Per §0.5, irrelevant rants are excluded entirely.)
+   - **Host rants with `agent` = {{ task.agent }}**: directional feedback, not just bug reports. (Per §0.5, irrelevant rants are excluded entirely.)
    - **Uncovered gaps in the journal**: open issues / published papers that raise questions nobody has answered yet.
    - **Data-source debias**: having data for a particular project on hand is NOT a topic reason. Prefer directions backed by external data sources (public datasets, open-source repositories, simulations) or where data can be obtained/created during the research.
 2. **Research-hotspot identification** (using the current-time anchor; run in parallel with the candidate pool):
@@ -544,7 +544,7 @@ cd {{ source_dir }} && gh issue list -R {{ owner }}/{{ repo }} --label in-review
 
 1. **Never touch host dirt**: never stash/reset/clean host work — the daemon converges the tree itself before the prompt, so a tree still dirty here is a convergence that failed (and the round is then read-only); `papers/*/research/` being present is normal
 2. **git add exact path**: submission/revision commits use `git add papers/issue-<N>/` — never `-A` / `.`
-3. **Rant handling**: follow 0.5 — project must equal `{{ task.agent }}`; pending → in_progress → completed
+3. **Rant handling**: follow 0.5 — agent must equal `{{ task.agent }}`; pending → in_progress → completed
 4. **Language policy**: external journal-facing text (issues/PRs/reviews/decisions) in English; internal records (session history, memory entries, the closing summary) in the author's language
 5. **One thing at a time**: advance exactly one phase per cycle; don't aim for completeness, just for progress
 6. **Never claim/review your own submission** (author)

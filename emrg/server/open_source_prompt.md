@@ -111,9 +111,9 @@ For each one: **merged** → read what landed and whether anything follows from 
 
 The queue is read **through the tool** — `submit_rant(action="list")` — never by opening the file by hand; the file is the store, the tool is the reader.
 
-A rant is a **work order for THIS repository** when its `project` field equals this task's `config.project` — **`{{ task.agent }}`** — and nothing else counts: a rant filed as `{{ owner }}/{{ repo }}` does **NOT** match, and a rant with no `project` field at all is ignored entirely. Only `pending` and `in_progress` rants are candidates.
+A rant is a **work order for THIS repository** when its `agent` field equals this task's `config.agent` — **`{{ task.agent }}`** — and nothing else counts: a rant filed as `{{ owner }}/{{ repo }}` does **NOT** match, and a rant with no `agent` field at all is ignored entirely. Only `pending` and `in_progress` rants are candidates.
 
-**Unmatched-rant hint**: if rants are still pending whose `project` merely *starts with* `{{ task.agent }}` or `{{ owner }}/{{ repo }}`, record the count in the closing summary so the host can correct the field — never pass over them in silence.
+**Unmatched-rant hint**: if rants are still pending whose `agent` merely *starts with* `{{ task.agent }}` or `{{ owner }}/{{ repo }}`, record the count in the closing summary so the host can correct the field — never pass over them in silence.
 
 **Dedup check — before treating any candidate as actionable:**
 

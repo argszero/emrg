@@ -728,7 +728,7 @@ def test_journal_template_renders_with_context():
     assert "2026-08-24 18:29" in out, "human-readable time must render"
     # De-EMRG-ified scope (rant 18:15:31) — external scan first, no concrete examples
     assert "External scan (MUST do, first priority)" in out
-    assert "NOT from any specific agent or system name" in out
+    assert "NOT from any specific project or system name" in out
     assert "self-evolving agents" not in out, "EMRG-specific arXiv example removed"
     assert "agent self-improvement" not in out, "EMRG-specific arXiv example removed"
     # Adversarial checks (rant 18:09:13)
@@ -1317,7 +1317,7 @@ def test_open_source_template_full_code_study_b2b():
 
 
 def test_open_source_template_measures_the_shipped_artifact():
-    """open_source_prompt.md §3.1.3 measures a defect on what the agent ships.
+    """open_source_prompt.md §3.1.3 measures a defect on what the project ships.
 
     A defect is a claim about the released artifact, not about the checkout: a report
     of an already-fixed defect, or a patch built on behaviour the release does not
@@ -1339,21 +1339,21 @@ def test_open_source_template_measures_the_shipped_artifact():
         agent={}, git_path="git", gh_path="gh",
     )
     # 1) a defect is measured on the shipped artifact, not only on the checkout
-    assert "A defect is a claim about what the agent ships, so measure it there." in out, "shipped 产物节应渲染"
+    assert "A defect is a claim about what the project ships, so measure it there." in out, "shipped 产物节应渲染"
     # 2) the report names which artifact the reading came from
     assert "a report says which artifact its reading came from" in out, "应要求说明读的是哪个产物"
     # 2b) it does not contradict the sentence above it: latest code for design
     # intent, what ships for the defect — and a agent that publishes nothing
     # still has an artifact in the branch or tag its users run
     assert "The latest code is still what you read for design intent" in out, "应与「读最新代码」并存而非互斥"
-    assert "where the agent publishes neither" in out, "应覆盖不发布产物的项目"
+    assert "where the project publishes neither" in out, "应覆盖不发布产物的项目"
     # 3) the fix-released check is spelled, with the command that answers it
     assert "git merge-base --is-ancestor <fix-commit> <release-tag-commit>" in out, "应给出发布线是否已含修复的判定命令"
     assert "already-fixed defect" in out, "应点明误报已修复缺陷的代价"
     # 4) one reader is a hypothesis until a second, independent one agrees
     assert "one reader is a hypothesis until a second, independent one agrees" in out, "应要求第二个独立读数"
     # 5) the rule lives in the section that owns establishing ground truth, not at the file's end
-    assert out.index("A defect is a claim about what the agent ships") < out.index("##### 3.1.4 Fork, clone and branch"), "规则应落在 §3.1.3 内"
+    assert out.index("A defect is a claim about what the project ships") < out.index("##### 3.1.4 Fork, clone and branch"), "规则应落在 §3.1.3 内"
 
 
 def test_open_source_template_distinguishes_an_unrunnable_toolchain():
@@ -1395,7 +1395,7 @@ def test_open_source_template_distinguishes_an_unrunnable_toolchain():
     # 4) an unrunnable suite is a skip, and both misreadings are named
     assert "A suite that could not be run is not a suite that failed." in out, "应区分跑不了与跑失败"
     assert "state that the suite did not run" in out, "应要求写明套件未运行"
-    assert "invents a defect the agent does not have" in out, "应点明误报失败的代价"
+    assert "invents a defect the project does not have" in out, "应点明误报失败的代价"
     assert "claims a run that never happened" in out, "应点明误报通过的代价"
     # 5) the rule lives in §3.1.6, the section that owns running the suite
     assert out.index("A suite that could not be run is not a suite that failed.") < out.index("##### 3.1.7"), \
@@ -1518,11 +1518,11 @@ def test_open_source_template_empty_recon_names_the_extension_surface():
         task={"role": "committer", "agent": "aitokenpool"},
         agent={}, git_path="git", gh_path="gh",
     )
-    assert "no gap inside the agent's extension surface" in out, "空 Recon 结论须含扩展面阅读"
+    assert "no gap inside the project's extension surface" in out, "空 Recon 结论须含扩展面阅读"
 
 
 def test_open_source_template_reads_the_extension_surface():
-    """open_source_prompt.md §1.6 makes the agent's extension surface a candidate source
+    """open_source_prompt.md §1.6 makes the project's extension surface a candidate source
     (issue #2365): a contribution need not pass through the upstream, so a cycle reading
     only §1.1's issue list can report "no candidate" while a whole channel sits one layer
     over — which is exactly what a host had to write into a task's `extra_prompt` to get.
@@ -1550,7 +1550,7 @@ def test_open_source_template_reads_the_extension_surface():
         agent={}, git_path="git", gh_path="gh",
     )
     # 1) the section exists and says what a contribution through that layer even is
-    assert "The agent's extension surface" in out, "§1.6 扩展面阅读应渲染"
+    assert "The project's extension surface" in out, "§1.6 扩展面阅读应渲染"
     assert "A contribution need not pass through the upstream" in out, "贡献不必经过上游应写明"
     assert "need no maintainer to merge anything" in out, "扩展独立发布、无需维护者合并应写明"
     # 2) a candidate's layer must be named: core-only is a reading too, "no candidate" alone
@@ -1584,16 +1584,16 @@ def test_promote_template_learn_latest_state_04():
         git_path="git", gh_path="gh",
     )
     # 1) the new section exists (positive discrimination: absent section → red)
-    assert "0.4 Learn the agent's latest state" in out, "0.4 节应渲染"
+    assert "0.4 Learn the project's latest state" in out, "0.4 节应渲染"
     # 2) MUST every round
-    assert "re-learn the agent's latest state before every promotion round" in out, "每轮 MUST 前提应渲染"
+    assert "re-learn the project's latest state before every promotion round" in out, "每轮 MUST 前提应渲染"
     # 3) latest commit inspection command with agent.path
     assert "git fetch -q origin" in out, "git fetch 最新代码应渲染"
     assert "git log --oneline -10 origin/HEAD" in out, "最近 commit 检视应渲染"
     # 4) claims must come from just-verified state, not stale memory
     assert "no fabrication, no relying on stale version knowledge" in out, "不得沿用旧认知应渲染"
     # 5) Step 2 feature descriptions must come from §0.4 verification
-    assert "MUST come from the agent's latest state verified in §0.4" in out, "Step 2 功能描述来源应渲染"
+    assert "MUST come from the project's latest state verified in §0.4" in out, "Step 2 功能描述来源应渲染"
     # 6) state file records knowledge freshness
     assert "last learned" in out, "状态文件 last learned 字段应渲染"
     # 7) reflection Q3 records what was learned (commit range / modules)
@@ -1626,7 +1626,7 @@ def test_promote_template_homework_first_dehardening():
     assert "skip that discussion" in out, "做不好功课宁可跳过应渲染"
     # B. red line 4 disclosure default OFF
     assert "disclosure default OFF" in out, "红线 4 披露默认关闭应渲染"
-    assert "NO disclosure, NO agent mention" in out, "普通参与不披露应渲染"
+    assert "NO disclosure, NO project mention" in out, "普通参与不披露应渲染"
     assert "one sentence at the END" in out, "披露一句话后置应渲染"
     assert "fixed-formula disclosure as the first sentence" in out, "禁止固定句式开头披露应渲染"
     # B. mention density ≥70/≤30 + de-template + flagged cool-down

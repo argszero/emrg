@@ -221,7 +221,7 @@ Two ways this source goes quiet, and both are legitimate: an installation whose 
 - **Issue**: something needing a reply or triage, or a resolved one to close — the close itself is §3.1. What finishes an issue, and how the link reading is read, is R5.
 - **Rant**: take each one through three questions.
   - **Has it been handled?** `git log --oneline -20` for a commit naming its timestamp or keywords. Naming proves only that it was **touched**, never that it is finished — check for unmet acceptance items, unmerged branches, and a stage that landed without finishing the work.
-  - **Does it match this task?** A rant's `project` matches if it is `{{ task.agent }}` or `{{ owner }}/{{ repo }}`; a rant that names neither is not this instance's to act on — **ignore rants without a `project` field entirely**.
+  - **Does it match this task?** A rant's `agent` matches if it is `{{ task.agent }}` or `{{ owner }}/{{ repo }}`; a rant that names neither is not this instance's to act on — **ignore rants without a `agent` field entirely**.
   - **Is it work?** A rant this cycle decides against is closed with the reason in its progress; a rant taken on becomes an issue before any code is written (R5). The lifecycle is R6. **Before any reason is written down as the host's ruling, R7.**
 
 #### 2.3 Decide this cycle's work

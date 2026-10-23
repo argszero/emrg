@@ -58,7 +58,7 @@ TEMPLATE = REPO_ROOT / "emrg" / "server" / "evolution_prompt.md"
 #: The section that must gain the funnel, its neighbours (for the order pin), and the
 #: short phrases it must carry. Phrases rather than sentences: a re-wrap of the paragraph
 #: must not fail the guard, while a deletion of the rule must.
-FUNNEL = "#### 1.5 Memory and conversations across agents"
+FUNNEL = "#### 1.5 Memory and conversations across projects"
 FUNNEL_AFTER = "#### 1.4 master"
 FUNNEL_BEFORE = "#### 1.6 Comparable tools"
 FUNNEL_TERMS: tuple[str, ...] = (
@@ -67,9 +67,9 @@ FUNNEL_TERMS: tuple[str, ...] = (
     "Read indices, not bodies",                       # depth decided by evidence
     "exempt from the rotation",                       # R8 item 1 is not scheduled
     "Read conversation by location, never whole",     # a history is not read end to end
-    "One memory entry at agent scope",              # the bookmark, as one entry
+    "One memory entry at project scope",              # the bookmark, as one entry
     "never append a second entry",                    # ... or it becomes the file it avoids
-    "Other agents' memory is read-only for this cycle",
+    "Other projects' memory is read-only for this cycle",
     # The reading that answers "is this index too big", and the one this file exists for:
     # the guard, not a byte-measuring count.
     "scripts/check-memory-index.py",
@@ -368,7 +368,7 @@ def test_the_step_zero_line_finds_a_file_that_changed(tmp_path: Path) -> None:
     script = "\n".join(
         line for line in block.splitlines() if not line.strip().startswith("cat ")
     )
-    script = script.replace("<agent>", str(tmp_path / "proj")).replace(
+    script = script.replace("<project>", str(tmp_path / "proj")).replace(
         "<bookmark-time>", bookmark
     )
 

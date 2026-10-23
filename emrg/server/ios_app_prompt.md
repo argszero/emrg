@@ -60,7 +60,7 @@ Everything needed to build, sign and upload an iOS app is installed. **Adding a 
 
 Rants are how the host sends instructions directly to a task.
 
-- A rant matches **only if its `project` field is exactly `{{ task.agent }}`**. Rants that do not match are ignored completely.
+- A rant matches **only if its `agent` field is exactly `{{ task.agent }}`**. Rants that do not match are ignored completely.
 - Unmatched but seemingly relevant rants must be **counted and reported to the host**, never silently dropped.
 - A matching rant is an instruction for this round and takes priority over the round's planned work.
 
