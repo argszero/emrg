@@ -2254,3 +2254,60 @@ def test_the_ios_layout_pin_answers_both_ways():
         "the container refusal did not see a container written into the section it reads, so it "
         "would pass on any section at all"
     )
+
+
+# ── the ios-app template's repository identity ──────────────────────────────────────────────
+#
+# §0.6 owns the app's repository, so it owns what that repository *is*. "its own repository …
+# named after it — `<project root>/<repo>/`" constrains the directory's position and says nothing
+# about visibility or the name's form, so a public repository and a codename both satisfy it, and
+# §3 cites this section for *creating* the repository. A section cited as the authority for a
+# step has to carry the step; these pin the two properties it was not carrying.
+
+IOS_REPOSITORY_IDENTITY_PHRASES = (
+    "The repository is private",
+    "lower-case and hyphen-separated",
+    "the account `extra_prompt` names",
+)
+
+
+def test_the_ios_app_template_fixes_what_the_app_repository_is():
+    """§0.6 must say the repository is private, and what its name has to be."""
+    body = _ios_layout_section(_IOS_TEMPLATE.read_text(encoding="utf-8"))
+    missing = _missing_phrases(body, IOS_REPOSITORY_IDENTITY_PHRASES)
+    assert not missing, (
+        "the ios-app template's workspace section no longer fixes the app's repository: "
+        f"{missing}. 'its own repository, named after it' admits a public repository and any "
+        "spelling of the name, so a round can publish an app that has not passed review, and a "
+        "later round holding only the name cannot tell two apps' repositories apart."
+    )
+    assert "`--private`" in body, (
+        "the section says the repository is private but names no mechanism for it, so a round "
+        "reading only this section has to guess how privacy is obtained"
+    )
+
+
+def test_the_ios_repository_identity_pin_answers_both_ways():
+    """The control: each phrase is really in §0.6, and the opposite claim is refused.
+
+    Without it, a section emptied of the rule and a reader pointed at the wrong region would
+    read the same as a section that still carries it.
+    """
+    text = _IOS_TEMPLATE.read_text(encoding="utf-8")
+    for phrase in IOS_REPOSITORY_IDENTITY_PHRASES:
+        stripped = text.replace(phrase, "")
+        assert stripped != text, f"{phrase!r} is pinned but absent, so this arm measured nothing"
+        assert _missing_phrases(_ios_layout_section(stripped), IOS_REPOSITORY_IDENTITY_PHRASES) == [
+            phrase
+        ], (
+            f"removing {phrase!r} did not make exactly that phrase read as missing, so this pin "
+            "would not notice its own rule being deleted"
+        )
+    public = text.replace("The repository is private", "The repository is public", 1)
+    assert public != text, "the privacy rule this test names is not a rule the template carries"
+    assert _missing_phrases(_ios_layout_section(public), IOS_REPOSITORY_IDENTITY_PHRASES) == [
+        "The repository is private"
+    ], (
+        "flipping 'private' to 'public' did not make the privacy rule read as missing, so the pin "
+        "asserts a word rather than the requirement"
+    )
