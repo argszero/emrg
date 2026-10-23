@@ -142,7 +142,7 @@ class GrepTool(ToolExecutor):
                         "type": "string",
                         "description": (
                             "File or directory to search. If a directory, searches "
-                            "recursively. Default: current project root. `glob` names "
+                            "recursively. Default: current agent root. `glob` names "
                             "this same parameter `workdir`; this tool reads that "
                             "spelling too, so a call naming either one searches the "
                             "tree it named."
@@ -312,7 +312,7 @@ class GrepTool(ToolExecutor):
         # returned `No matches … (searched 0 files)` with `error=False`, while the
         # sibling `glob` refused the same path (`Error: workdir not found or not a
         # directory`). The subject is reachable the way the rest of this family is —
-        # `mkfifo` succeeds inside a tracked project's workspace, which is the agent's
+        # `mkfifo` succeeds inside a tracked agent's workspace, which is the agent's
         # own write surface — and the path is one the caller names in the call itself.
         # So the kind is asked, and a subject that is neither is refused by name.
         kind = special_file_kind(info.st_mode)

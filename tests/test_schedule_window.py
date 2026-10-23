@@ -49,7 +49,7 @@ def _record(**overrides) -> dict:
     record = {
         "name": "windowed",
         "type": "evolution",
-        "config": {"project": "emrg"},
+        "config": {"agent": "emrg"},
         "interval": 10800,
         "enabled": True,
         "schedule": [
@@ -249,7 +249,7 @@ def sched(tmp_path, monkeypatch):
     """A TaskScheduler over a tasks.yml in `tmp_path`, with config_dir redirected."""
     original = mod.config_dir
     monkeypatch.setattr(mod, "config_dir", lambda: tmp_path)
-    # A registered project, so `task_create` has something to be valid against.
+    # A registered agent, so `task_create` has something to be valid against.
     (tmp_path / "agents.yml").write_text(
         yaml.safe_dump([{"name": "emrg", "path": str(tmp_path)}])
     )
@@ -271,7 +271,7 @@ def _row(tasks_yml, name: str) -> dict:
 
 def test_create_and_update_carry_the_windows_through_the_file(sched):
     ok, created = sched.task_create(
-        name="windowed", task_type="evolution", project="emrg",
+        name="windowed", task_type="evolution", agent="emrg",
         interval=10800, schedule=WINDOW,
     )
     assert ok, created
@@ -292,12 +292,12 @@ def test_create_and_update_carry_the_windows_through_the_file(sched):
 def test_a_bad_window_is_refused_on_both_write_paths(sched):
     bad = [{"days": "mon", "from": "18:00", "to": "09:00", "interval": 900}]
     ok, error = sched.task_create(
-        name="bad", task_type="evolution", project="emrg", interval=10800, schedule=bad,
+        name="bad", task_type="evolution", agent="emrg", interval=10800, schedule=bad,
     )
     assert not ok and "does not move forward" in error, error
 
     assert sched.task_create(
-        name="good", task_type="evolution", project="emrg", interval=10800,
+        name="good", task_type="evolution", agent="emrg", interval=10800,
     )[0]
     ok, error = sched.task_update("good", schedule=bad)
     assert not ok and "does not move forward" in error, error
@@ -310,7 +310,7 @@ def test_list_tasks_reports_the_effective_interval_and_the_next_edge(sched):
     """A record with no handler reports the same cadence keys a live one does."""
     all_day = [{"days": None, "from": "00:00", "to": "24:00", "interval": 900}]
     sched._tasks_file.write_text(yaml.safe_dump([
-        {"name": "always", "type": "evolution", "config": {"project": "emrg"},
+        {"name": "always", "type": "evolution", "config": {"agent": "emrg"},
          "interval": 10800, "enabled": True, "schedule": all_day},
     ]))
     row = sched.list_tasks()[0]

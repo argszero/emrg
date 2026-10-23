@@ -92,7 +92,7 @@ def file_refusal(file_path: str, policy: SandboxPolicy) -> str | None:
         return f"{policy.mode} sandbox: blocked write to protected daemon file {file_path!r}"
     try:
         # The enforcement question is asked here rather than left to
-        # ``writable_roots``, which projects paths and so has no answer for a
+        # ``writable_roots``, which agents paths and so has no answer for a
         # kind that contributes none. Asking it through the projection made it
         # refuse an *enforceability* problem, and the two became inseparable the
         # moment Windows began enforcing a key (PR #2498): the raise stopped, and

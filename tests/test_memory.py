@@ -14,7 +14,7 @@ from emrg.memory import (
     MemoryFile,
     MemoryIndex,
     NotARegularFile,
-    ProjectMemoryStore,
+    AgentMemoryStore,
     SessionMemoryStore,
     generate_id,
 )
@@ -29,8 +29,8 @@ def temp_cwd():
 
 
 @pytest.fixture
-def project_store(temp_cwd):
-    return ProjectMemoryStore(temp_cwd)
+def agent_store(temp_cwd):
+    return AgentMemoryStore(temp_cwd)
 
 
 @pytest.fixture
@@ -64,7 +64,7 @@ event_at: "2026-07-10T09:00:00Z"
 created_at: "2026-07-14T15:30:42Z"
 updated_at: "2026-07-14T15:30:42Z"
 type: "decision"
-scope: "project"
+scope: "agent"
 status: "active"
 ---
 
@@ -75,7 +75,7 @@ status: "active"
         assert mem.id == "a1b2c3d4"
         assert mem.event_at == "2026-07-10T09:00:00Z"
         assert mem.type == "decision"
-        assert mem.scope == "project"
+        assert mem.scope == "agent"
         assert mem.title == "Use httpx"
 
     def test_from_text_no_frontmatter(self):
@@ -86,7 +86,7 @@ status: "active"
         mem = MemoryFile(
             id="deadbeef",
             type="feedback",
-            scope="project",
+            scope="agent",
             title="Test title",
             body="Test body",
         )
@@ -102,7 +102,7 @@ status: "active"
         assert mem2.type == mem.type
 
     def test_to_markdown_adds_title_heading(self):
-        mem = MemoryFile(title="API Key Config", body="Use env vars", type="project")
+        mem = MemoryFile(title="API Key Config", body="Use env vars", type="agent")
         md = mem.to_markdown()
         assert "# API Key Config" in md
 
@@ -207,57 +207,57 @@ class TestMemoryIndex:
 
 
 class TestProjectMemoryStore:
-    def test_create_creates_file_and_index(self, project_store):
-        mem = project_store.create("decision", "Use httpx", "**What**: ...")
+    def test_create_creates_file_and_index(self, agent_store):
+        mem = agent_store.create("decision", "Use httpx", "**What**: ...")
         assert mem.id is not None
-        assert mem.scope == "project"
-        file_path = project_store.directory / mem.filename
+        assert mem.scope == "agent"
+        file_path = agent_store.directory / mem.filename
         assert file_path.exists()
-        index_path = project_store.index_path
+        index_path = agent_store.index_path
         assert index_path.exists()
         assert mem.filename in index_path.read_text(encoding="utf-8")
 
-    def test_list_returns_all_active(self, project_store):
-        project_store.create("task", "Task 1", "body1")
-        project_store.create("task", "Task 2", "body2")
-        all_mems = project_store.list()
+    def test_list_returns_all_active(self, agent_store):
+        agent_store.create("task", "Task 1", "body1")
+        agent_store.create("task", "Task 2", "body2")
+        all_mems = agent_store.list()
         assert len(all_mems) == 2
 
-    def test_list_with_type_filter(self, project_store):
-        project_store.create("decision", "D1", "body")
-        project_store.create("task", "T1", "body")
-        decisions = project_store.list(type_filter="decision")
+    def test_list_with_type_filter(self, agent_store):
+        agent_store.create("decision", "D1", "body")
+        agent_store.create("task", "T1", "body")
+        decisions = agent_store.list(type_filter="decision")
         assert len(decisions) == 1
         assert decisions[0].type == "decision"
 
-    def test_get_by_id(self, project_store):
-        mem = project_store.create("reference", "API docs", "url")
-        retrieved = project_store.get(mem.id)
+    def test_get_by_id(self, agent_store):
+        mem = agent_store.create("reference", "API docs", "url")
+        retrieved = agent_store.get(mem.id)
         assert retrieved is not None
         assert retrieved.id == mem.id
 
-    def test_get_nonexistent(self, project_store):
-        assert project_store.get("nonexistent") is None
+    def test_get_nonexistent(self, agent_store):
+        assert agent_store.get("nonexistent") is None
 
-    def test_update_modifies_file(self, project_store):
-        mem = project_store.create("project", "Original", "old body")
-        updated = project_store.update(mem.id, body="new body", title="Updated title")
+    def test_update_modifies_file(self, agent_store):
+        mem = agent_store.create("agent", "Original", "old body")
+        updated = agent_store.update(mem.id, body="new body", title="Updated title")
         assert updated is not None
         assert updated.body != mem.body
         assert "new body" in updated.body
         assert updated.title == "Updated title"
 
-    def test_soft_delete(self, project_store):
-        mem = project_store.create("task", "To delete", "body")
-        assert project_store.delete(mem.id)
-        deleted = project_store.get(mem.id)
+    def test_soft_delete(self, agent_store):
+        mem = agent_store.create("task", "To delete", "body")
+        assert agent_store.delete(mem.id)
+        deleted = agent_store.get(mem.id)
         assert deleted.status == "superseded"
 
-    def test_merge(self, project_store):
-        m1 = project_store.create("reference", "Source A", "body")
-        m2 = project_store.create("reference", "Source B", "body")
-        assert project_store.merge(m1.id, m2.id)
-        merged = project_store.get(m1.id)
+    def test_merge(self, agent_store):
+        m1 = agent_store.create("reference", "Source A", "body")
+        m2 = agent_store.create("reference", "Source B", "body")
+        assert agent_store.merge(m1.id, m2.id)
+        merged = agent_store.get(m1.id)
         assert merged.status == "merged"
 
 
@@ -267,12 +267,12 @@ class TestSessionMemoryStore:
         assert mem.scope == "session"
         assert (session_store.directory / mem.filename).exists()
 
-    def test_promote_to_project(self, session_store, temp_cwd):
-        pstore = ProjectMemoryStore(temp_cwd)
+    def test_promote_to_agent(self, session_store, temp_cwd):
+        pstore = AgentMemoryStore(temp_cwd)
         mem = session_store.create("decision", "Important decision", "Use X over Y")
-        promoted = session_store.promote_to_project(mem.id, pstore)
+        promoted = session_store.promote_to_agent(mem.id, pstore)
         assert promoted is not None
-        assert promoted.scope == "project"
+        assert promoted.scope == "agent"
         # Original is merged
         original = session_store.get(mem.id)
         assert original.status == "merged"
@@ -336,7 +336,7 @@ event_at: 2026-08-27T11:30:45Z
 created_at: 2026-08-27T11:48:00Z
 updated_at: 2026-08-27T11:48:00Z
 type: task
-scope: project
+scope: agent
 status: active
 tags: merge-gate
 ---
@@ -691,88 +691,88 @@ class TestTwoMemoriesWithTheSameTitle:
     def _files(self, store):
         return sorted(p.name for p in store.directory.glob("*.md") if p.name != "MEMORY.md")
 
-    def test_create_gives_each_memory_its_own_row(self, project_store):
-        first = project_store.create("project", "Same title", "first")
-        second = project_store.create("project", "Same title", "second")
+    def test_create_gives_each_memory_its_own_row(self, agent_store):
+        first = agent_store.create("agent", "Same title", "first")
+        second = agent_store.create("agent", "Same title", "second")
 
-        assert self._files(project_store) == ["project-same-title-2.md", "project-same-title.md"]
+        assert self._files(agent_store) == ["agent-same-title-2.md", "agent-same-title.md"]
         assert first.filename != second.filename, "both memories claim the same file"
         for mem in (first, second):
-            assert (project_store.directory / mem.filename).exists(), mem.filename
+            assert (agent_store.directory / mem.filename).exists(), mem.filename
 
-        entries = self._rows(project_store)
+        entries = self._rows(agent_store)
         assert sorted(e.filename for e in entries) == [
-            "project-same-title-2.md",
-            "project-same-title.md",
+            "agent-same-title-2.md",
+            "agent-same-title.md",
         ], "each file needs a row of its own; neither may be orphaned"
 
-    def test_each_row_opens_the_memory_that_wrote_it(self, project_store):
-        first = project_store.create("project", "Same title", "first body")
-        second = project_store.create("project", "Same title", "second body")
+    def test_each_row_opens_the_memory_that_wrote_it(self, agent_store):
+        first = agent_store.create("agent", "Same title", "first body")
+        second = agent_store.create("agent", "Same title", "second body")
 
         assert first.id != second.id
         for mem in (first, second):
-            back = project_store.get_by_filename(mem.filename)
+            back = agent_store.get_by_filename(mem.filename)
             assert back is not None and back.id == mem.id, (
                 f"{mem.filename} does not open the memory that wrote it"
             )
 
-    def test_a_memory_read_from_disk_reports_its_own_file(self, project_store):
-        project_store.create("project", "Same title", "first")
-        second = project_store.create("project", "Same title", "second")
+    def test_a_memory_read_from_disk_reports_its_own_file(self, agent_store):
+        agent_store.create("agent", "Same title", "first")
+        second = agent_store.create("agent", "Same title", "second")
 
-        loaded = {m.id: m for m in project_store.list()}
+        loaded = {m.id: m for m in agent_store.list()}
         assert loaded[second.id].filename == second.filename, (
             "a reload re-derived the name from the title, so two memories "
             "report one file"
         )
 
-    def test_rebuild_index_keeps_the_counter_suffixed_memory(self, project_store):
-        project_store.create("project", "Same title", "first")
-        project_store.create("project", "Same title", "second")
+    def test_rebuild_index_keeps_the_counter_suffixed_memory(self, agent_store):
+        agent_store.create("agent", "Same title", "first")
+        agent_store.create("agent", "Same title", "second")
 
-        project_store.rebuild_index()
+        agent_store.rebuild_index()
 
-        assert sorted(e.filename for e in self._rows(project_store)) == [
-            "project-same-title-2.md",
-            "project-same-title.md",
+        assert sorted(e.filename for e in self._rows(agent_store)) == [
+            "agent-same-title-2.md",
+            "agent-same-title.md",
         ], "a rebuild re-derived the name and dropped the suffixed memory again"
 
-    def test_update_of_the_suffixed_memory_keeps_its_row(self, project_store):
-        project_store.create("project", "Same title", "first")
-        second = project_store.create("project", "Same title", "second")
+    def test_update_of_the_suffixed_memory_keeps_its_row(self, agent_store):
+        agent_store.create("agent", "Same title", "first")
+        second = agent_store.create("agent", "Same title", "second")
 
-        updated = project_store.update(second.id, body="second, edited")
+        updated = agent_store.update(second.id, body="second, edited")
 
         assert updated.filename == second.filename
-        assert sorted(e.filename for e in self._rows(project_store)) == [
-            "project-same-title-2.md",
-            "project-same-title.md",
+        assert sorted(e.filename for e in self._rows(agent_store)) == [
+            "agent-same-title-2.md",
+            "agent-same-title.md",
         ]
 
     def test_promote_with_a_colliding_title_keeps_its_row(self, session_store, temp_cwd):
-        project = ProjectMemoryStore(temp_cwd)
-        project.create("project", "Collide", "already resident")
-        mem = session_store.create("project", "Collide", "from the session")
+        agent = AgentMemoryStore(temp_cwd)
+        agent.create("agent", "Collide", "already resident")
+        mem = session_store.create("agent", "Collide", "from the session")
 
-        promoted = session_store.promote_to_project(mem.id, project)
+        promoted = session_store.promote_to_agent(mem.id, agent)
 
         assert promoted is not None
         assert promoted.filename != mem.filename, "the copy claims the resident memory's file"
         assert promoted.filename.endswith("-collide-1.md"), promoted.filename
-        assert (project.directory / promoted.filename).exists()
-        assert sorted(e.filename for e in self._rows(project)) == sorted(
-            ["project-collide-1.md", "project-collide.md"]
+        assert (agent.directory / promoted.filename).exists()
+        assert sorted(e.filename for e in self._rows(agent)) == sorted(
+            ["agent-collide-1.md", "agent-collide.md"]
         ), "the promoted copy's row must name the file it was written to"
 
-    def test_the_filename_field_stays_out_of_the_file_format(self, project_store):
-        mem = project_store.create("project", "Same title", "first")
-        project_store.create("project", "Same title", "second")
+    def test_the_filename_field_stays_out_of_the_file_format(self, agent_store):
+        mem = agent_store.create("agent", "Same title", "first")
+        agent_store.create("agent", "Same title", "second")
 
-        text = (project_store.directory / mem.filename).read_text(encoding="utf-8")
+        text = (agent_store.directory / mem.filename).read_text(encoding="utf-8")
         assert "_filename" not in text, "the override leaked into the serialized memory"
 
-        reloaded = MemoryFile.from_file(project_store.directory / mem.filename)
+        reloaded = MemoryFile.from_file(agent_store.directory / mem.filename)
         assert reloaded._filename == mem.filename
         assert reloaded.to_markdown() == text, "a load → save rewrote the file"
 
@@ -818,7 +818,7 @@ def test_the_reader_still_reads_a_regular_file_beside_a_pipe(tmp_path):
     os.mkfifo(tmp_path / "pipe.md")
     regular = tmp_path / "notes.md"
     regular.write_text(
-        "---\nid: aaaa1111\ntype: reference\nscope: project\nstatus: active\n"
+        "---\nid: aaaa1111\ntype: reference\nscope: agent\nstatus: active\n"
         "title: A note\n---\n\nbody\n",
         encoding="utf-8",
     )
@@ -831,7 +831,7 @@ def test_the_store_lists_the_memories_beside_a_pipe(temp_cwd):
     """The measured route: `list_memories` walks every `*.md`, so a pipe in the
     directory is a client frame that never gets its answer.
 
-    Asserted through `ProjectMemoryStore.list()` rather than through `from_file`,
+    Asserted through `AgentMemoryStore.list()` rather than through `from_file`,
     because the walk's `except (OSError, ValueError)` is what turns the refusal into a
     skipped file — a width the reader alone does not decide.
     """
@@ -839,7 +839,7 @@ def test_the_store_lists_the_memories_beside_a_pipe(temp_cwd):
     directory.mkdir(parents=True)
     (directory / "MEMORY.md").write_text("# Memory Index\n", encoding="utf-8")
     os.mkfifo(directory / "pipe.md")
-    store = ProjectMemoryStore(temp_cwd)
+    store = AgentMemoryStore(temp_cwd)
     store.create("reference", "A note", "body")
 
     assert [m.title for m in store.list()] == ["A note"], (
@@ -858,7 +858,7 @@ def test_the_scan_names_the_pipe_as_a_reason_rather_than_never_answering(temp_cw
     directory = temp_cwd / ".emrg" / "memory"
     directory.mkdir(parents=True)
     os.mkfifo(directory / "pipe.md")
-    store = ProjectMemoryStore(temp_cwd)
+    store = AgentMemoryStore(temp_cwd)
 
     mem, reason = store.get_with_reason("aaaa1111")
 
@@ -949,7 +949,7 @@ def test_the_store_route_refuses_rather_than_never_answering(temp_cwd):
     directory = temp_cwd / ".emrg" / "memory"
     directory.mkdir(parents=True)
     os.mkfifo(directory / "MEMORY.md")
-    store = ProjectMemoryStore(temp_cwd)
+    store = AgentMemoryStore(temp_cwd)
 
     with pytest.raises(NotARegularFile) as excinfo:
         store.create("reference", "A note", "body")
@@ -959,13 +959,13 @@ def test_the_store_route_refuses_rather_than_never_answering(temp_cwd):
 
 # ── The promotion's marker is an open, so its kind is asked first ─────────────
 #
-# `promote_to_project` writes `<memory>.promoted` beside the memory it has just marked
+# `promote_to_agent` writes `<memory>.promoted` beside the memory it has just marked
 # `merged`, in the store's own directory — inside the agent's workspace, so anything
 # running there can plant a subject at that name. A write is an open too: `write_text` on
 # a FIFO waits for a reader and raises nothing, so the call never returns and the daemon,
 # whose event loop reaches this store, never answers again. A *directory* is the same
 # defect one kind over, and there it is worse than a hang's quiet cousin: today it raises
-# `IsADirectoryError` **after** the project copy and the index row are written, so an
+# `IsADirectoryError` **after** the agent copy and the index row are written, so an
 # exception reports the promotion as failed while most of it happened.
 #
 # Measured 2026-10-12 (`cyc20261012-043725`) on master `f4fe92c3`, one child per arm under
@@ -986,16 +986,16 @@ def _the_memory_path(store) -> Path:
 @_needs_mkfifo
 def test_a_named_pipe_marker_does_not_hold_the_promotion(session_store, temp_cwd):
     """Bounded, and the promotion completes: the marker is a record, not the work."""
-    pstore = ProjectMemoryStore(temp_cwd)
+    pstore = AgentMemoryStore(temp_cwd)
     mem = session_store.create("decision", "Important decision", "Use X over Y")
     marker = _the_memory_path(session_store).with_suffix(".promoted")
     os.mkfifo(marker)
 
-    promoted = within(DEADLINE_SECONDS, lambda: session_store.promote_to_project(mem.id, pstore))
+    promoted = within(DEADLINE_SECONDS, lambda: session_store.promote_to_agent(mem.id, pstore))
 
     assert promoted is not None, "the promotion itself must still complete"
     assert stat.S_ISFIFO(os.stat(marker).st_mode), "the marker was written into the pipe"
-    assert (pstore.directory / promoted.filename).exists(), "the project copy is what the marker records"
+    assert (pstore.directory / promoted.filename).exists(), "the agent copy is what the marker records"
     assert session_store.get(mem.id).status == "merged"
 
 
@@ -1008,13 +1008,13 @@ def test_a_directory_marker_is_skipped_by_kind_and_the_promotion_still_completes
     copy and the index row, so the promotion is reported as failed having mostly happened.
     Guarded, the call returns, the promotion is whole, and the warning names the kind.
     """
-    pstore = ProjectMemoryStore(temp_cwd)
+    pstore = AgentMemoryStore(temp_cwd)
     mem = session_store.create("decision", "Important decision", "Use X over Y")
     marker = _the_memory_path(session_store).with_suffix(".promoted")
     marker.mkdir()
 
     with caplog.at_level(logging.WARNING):
-        promoted = session_store.promote_to_project(mem.id, pstore)
+        promoted = session_store.promote_to_agent(mem.id, pstore)
 
     assert promoted is not None, "a marker that cannot be written must not fail the promotion"
     assert "a directory" in caplog.text, caplog.text
@@ -1025,11 +1025,11 @@ def test_a_directory_marker_is_skipped_by_kind_and_the_promotion_still_completes
 
 def test_a_regular_marker_is_still_written(session_store, temp_cwd):
     """The control the guard must not narrow: a marker that can be written still is."""
-    pstore = ProjectMemoryStore(temp_cwd)
+    pstore = AgentMemoryStore(temp_cwd)
     mem = session_store.create("decision", "Important decision", "Use X over Y")
     marker = _the_memory_path(session_store).with_suffix(".promoted")
 
-    promoted = session_store.promote_to_project(mem.id, pstore)
+    promoted = session_store.promote_to_agent(mem.id, pstore)
 
     assert promoted is not None
     assert marker.is_file(), "the marker is this call's own record of the promotion"
@@ -1043,7 +1043,7 @@ def test_a_regular_marker_is_still_written(session_store, temp_cwd):
 # reached is this one: `MemoryFile.save` opens the same path the guarded reader refuses,
 # and **a write is an open too** — to a FIFO it waits for a reader, to a socket for a
 # connection — so the call never returns, and neither do the store methods above it
-# (`create`, `update`, `merge`, `promote_to_project`). The sibling one path over
+# (`create`, `update`, `merge`, `promote_to_agent`). The sibling one path over
 # (`MemoryIndex.save`) is the shape copied here.
 #
 # Each test is written so that removing the guard makes it **hang** rather than pass, the
@@ -1060,7 +1060,7 @@ _MEMORY_FILE_TEXT = (
     "created_at: 2026-01-01T00:00:00\n"
     "updated_at: 2026-01-01T00:00:00\n"
     "type: reference\n"
-    "scope: project\n"
+    "scope: agent\n"
     "status: active\n"
     "title: A note\n"
     "---\n"

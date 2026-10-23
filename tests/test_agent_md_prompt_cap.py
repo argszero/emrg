@@ -4,7 +4,7 @@ Rant 2026-09-14T07:20:11 ("Agent.md 内容不应该包含演化的历史。Agent
 原则") reported the drift; the measurement here is what let it happen unnoticed.
 
 Measured on master `e644cf6` (2026-09-14, this cycle):
-`EmrgServer._collect_project_context` reads each file in `PROJECT_CONTEXT_FILES`
+`EmrgServer._collect_agent_context` reads each file in `PROJECT_CONTEXT_FILES`
 out of the session cwd and
 keeps at most `PROJECT_CONTEXT_MAX_CHARS` of it, appending a truncation notice —
 so an over-long file still parses, and what it loses is the **tail**. `Agent.md`
@@ -37,7 +37,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _make_server() -> EmrgServer:
-    """A minimal server; its project log is redirected off the real `~/.emrg`."""
+    """A minimal server; its agent log is redirected off the real `~/.emrg`."""
     server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
     server._agents_log = Path(tempfile.mkdtemp()) / "agents.yml"
     return server
@@ -57,7 +57,7 @@ def test_this_repos_agent_md_reaches_the_prompt_whole() -> None:
     text = (REPO_ROOT / "Agent.md").read_text(encoding="utf-8")
     assert len(text) <= PROJECT_CONTEXT_MAX_CHARS, (
         f"Agent.md is {len(text)} chars, and the daemon keeps at most "
-        f"{PROJECT_CONTEXT_MAX_CHARS} of each project-context file — so its last "
+        f"{PROJECT_CONTEXT_MAX_CHARS} of each agent-context file — so its last "
         f"{len(text) - PROJECT_CONTEXT_MAX_CHARS} chars never reach the model. "
         "Keep the file a brief (principles and conventions); move measurements, "
         "PR numbers and cycle ids to the memory records and the scripts' own "
@@ -79,7 +79,7 @@ def test_one_char_over_the_cap_is_cut(tmp_path: Path) -> None:
     (tmp_path / "Agent.md").write_text(body, encoding="utf-8")
     session = Session.create_with_id("agent-md-cap-over", tmp_path)
 
-    content = server._collect_project_context(session)[0]["content"]
+    content = server._collect_agent_context(session)[0]["content"]
     assert content.startswith(body[:PROJECT_CONTEXT_MAX_CHARS])
     assert len(content) > PROJECT_CONTEXT_MAX_CHARS  # the notice is added, not swallowed
     assert "truncated 1 chars" in content
@@ -100,14 +100,14 @@ def test_the_cut_lands_on_a_line_boundary(tmp_path: Path) -> None:
     contains no fragment of the line the cut fell in.
     """
     server = _make_server()
-    whole_line = project_line = "a" * 7000
+    whole_line = agent_line = "a" * 7000
     next_line_marker = "SECOND-LINE-MARKER"
-    body = project_line + "\n" + (next_line_marker * 500)
+    body = agent_line + "\n" + (next_line_marker * 500)
     assert len(body) > PROJECT_CONTEXT_MAX_CHARS
     (tmp_path / "Agent.md").write_text(body, encoding="utf-8")
     session = Session.create_with_id("agent-md-line-cut", tmp_path)
 
-    content = server._collect_project_context(session)[0]["content"]
+    content = server._collect_agent_context(session)[0]["content"]
     head = content.split("\n\n... [truncated", 1)[0]
     assert head == whole_line, f"head is not the complete first line: {head[-40:]!r}"
     assert next_line_marker not in head, "a fragment of the cut line reached the prompt"
@@ -121,6 +121,6 @@ def test_a_file_at_the_cap_is_not_cut(tmp_path: Path) -> None:
     (tmp_path / "Agent.md").write_text(body, encoding="utf-8")
     session = Session.create_with_id("agent-md-cap-at", tmp_path)
 
-    content = server._collect_project_context(session)[0]["content"]
+    content = server._collect_agent_context(session)[0]["content"]
     assert content == body
     assert "truncated" not in content

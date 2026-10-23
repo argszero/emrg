@@ -884,7 +884,7 @@ def test_the_note_names_a_main_checkout_that_exists(mod) -> None:
     which is the main worktree on every invocation (measured: the same first line from
     the main tree and from a linked one). Asserted against this repository - the tests
     run in it - so the pinned fact is "the lookup answers with a checkout that has this
-    project in it", not a spelling.
+    agent in it", not a spelling.
     """
     found = mod._main_worktree()
     assert found is not None, "git could not name the main worktree"
@@ -988,7 +988,7 @@ def test_the_run_does_not_hand_the_suite_the_callers_dirty_tree_override(
 
     `EMRG_TASK_DIRTY_OVERRIDE` is the evolution cycle's own escape hatch: a cycle
     whose tree is dirty exports it to keep working, and `scheduler.py` reads it from
-    the environment. The suite observes it through the *real* project, not through
+    the environment. The suite observes it through the *real* agent, not through
     the worktree, so four `tests/test_scheduler.py` dirty-tree tests assert the
     unoverridden verdict and fail when the variable is present. Measured 2026-09-17
     (`cyc20260917-142057`): a plan run from a dirty caller tree with the override
@@ -1424,7 +1424,7 @@ def test_an_interpreter_without_pytest_is_not_a_red_tree(
     assert "suite FAILED" not in captured.out
     assert "could not measure" in captured.err
     # The remedy names an invocation, and it is the one the docstring's Usage block
-    # gives: a reader who is told "use the project interpreter" without being told
+    # gives: a reader who is told "use the agent interpreter" without being told
     # which command is no better off than before.
     assert "uv run --no-sync" in captured.err
 
@@ -1442,7 +1442,7 @@ def test_a_pytest_missing_from_the_interpreter_names_both_causes(
 
     Measured in `check-doc-count.py` (cyc20260913-122923): a fresh worktree's `.venv`
     is empty, so the documented invocation fails with this same text. Advising only
-    "use the project interpreter" there sends the reader in a circle, so the message
+    "use the agent interpreter" there sends the reader in a circle, so the message
     has to carry the second cause as well.
     """
     repo, origin = queue
@@ -1617,7 +1617,7 @@ def test_a_caller_without_pytest_still_gets_a_verdict(
     very test's interpreter left the gate resolving to itself, printing no `suite
     interpreter:` line and passing `suite OK`: the arm then failed on the note, not on
     the reading. `sys._base_executable` is what a bare host `python3` amounts to here -
-    the interpreter this checkout's `.venv` was built from, carrying no project packages
+    the interpreter this checkout's `.venv` was built from, carrying no agent packages
     (measured 2026-09-28: rc 1, `No module named pytest`). Entered through it, the gate
     must find this checkout's own `.venv` - and say so, because which interpreter judged
     a tree is part of the reading.
@@ -1641,7 +1641,7 @@ def test_a_caller_without_pytest_still_gets_a_verdict(
     # search path). Measured 2026-09-28 in CI: that comparison failed here and proved
     # nothing about the search, which is the probe's job, not a path comparison's.
     #
-    # The project environment reaches this interpreter through the `.venv` beside its
+    # The agent environment reaches this interpreter through the `.venv` beside its
     # path or not at all: whatever `PYTHONPATH` the harness was launched with is an
     # artifact of the harness, and a host `python3` is not launched with it. Stripped
     # for both runs so the premise is a property of the interpreter, not of how this

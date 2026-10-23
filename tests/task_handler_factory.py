@@ -1,7 +1,7 @@
 """Build a TaskHandler the way the scheduler does — from its record.
 
 A handler holds a name and nothing else (rant 2026-09-28T09:54:10): at every wake it
-reads its own record out of tasks.yml and derives type / interval / config / project /
+reads its own record out of tasks.yml and derives type / interval / config / agent /
 sandbox from that, rather than from a snapshot taken at construction. So a test that
 needs a handler with a particular configuration hands the record it wants to
 `make_handler`, and the production derivation runs unchanged.

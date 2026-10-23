@@ -1,8 +1,8 @@
-"""Global cross-project session index (rant 2026-08-13T16:42:22).
+"""Global cross-agent session index (rant 2026-08-13T16:42:22).
 
 Maintains a single JSON map ``session_id -> absolute session directory`` at
 ``~/.emrg/sessions_index.json`` so that any session (or the agent in any
-session) can locate and read another project's conversation records.
+session) can locate and read another agent's conversation records.
 
 Design (host-finalized, minimal index):
 - The index stores ONLY the session_id → directory mapping. Everything else
@@ -11,7 +11,7 @@ Design (host-finalized, minimal index):
 - Write hooks live in ``Session._save_meta_with_title`` (create/append/compact/
   rename/clear all funnel through it) and ``Session.delete``.
 - A startup scan in the daemon (``rebuild_sessions_index``) backfills sessions
-  that predate this feature, including unregistered projects under ~/.emrg.
+  that predate this feature, including unregistered agents under ~/.emrg.
 """
 
 from __future__ import annotations
@@ -159,8 +159,8 @@ def _read_meta_session_id(meta_path: Path) -> str | None:
     whether this call returns at all: `read_text` on a FIFO blocks at the *open* until a
     writer appears, so the `except OSError` below cannot bound the consequence — nothing is
     raised and the walk simply never ends. Measured 2026-10-11 (`cyc20261011-070311`): a
-    `mkfifo` at `<project>/.emrg/sessions/s1/meta.json` made `_iter_project_sessions` **not
-    return in 8 s**. Both walkers call through here (`_iter_project_sessions`,
+    `mkfifo` at `<agent>/.emrg/sessions/s1/meta.json` made `_iter_agent_sessions` **not
+    return in 8 s**. Both walkers call through here (`_iter_agent_sessions`,
     `_iter_nested_sessions`), and the path is under the *workspace*, which is the agent's
     own write surface — the argument `#2076` made for `.emrg/memory/`.
 
@@ -184,9 +184,9 @@ def _read_meta_session_id(meta_path: Path) -> str | None:
     return str(sid) if sid else None
 
 
-def _iter_project_sessions(project_path: Path):
-    """Yield (session_id, session_dir) from <project>/.emrg/sessions/*/meta.json."""
-    sessions_dir = as_agent(project_path).sessions_dir
+def _iter_agent_sessions(agent_path: Path):
+    """Yield (session_id, session_dir) from <agent>/.emrg/sessions/*/meta.json."""
+    sessions_dir = as_agent(agent_path).sessions_dir
     if not sessions_dir.is_dir():
         return
     for entry in sorted(sessions_dir.iterdir()):
@@ -204,7 +204,7 @@ def _iter_nested_sessions(root: Path):
     """Yield (session_id, session_dir) for every <x>/.emrg/sessions under root.
 
     Recursively walks ``root`` (pruning heavy subtrees) so unregistered
-    projects under ~/.emrg (e.g. ~/.emrg itself, ~/.emrg/source) are covered,
+    agents under ~/.emrg (e.g. ~/.emrg itself, ~/.emrg/source) are covered,
     not just paths listed in agents.yml.
     """
     for dirpath, dirnames, _ in os.walk(root, followlinks=False):
@@ -225,12 +225,12 @@ def _iter_nested_sessions(root: Path):
 
 
 def rebuild_sessions_index(
-    config_root: Path, project_paths: list[str] | None = None
+    config_root: Path, agent_paths: list[str] | None = None
 ) -> int:
     """Backfill the index from on-disk sessions (daemon startup scan).
 
     Scans ``config_root`` recursively (covers ~/.emrg and anything nested under
-    it) plus each explicit project path (covers projects outside ~/.emrg), and
+    it) plus each explicit agent path (covers agents outside ~/.emrg), and
     upserts every discovered session into ``config_root/sessions_index.json``.
     Entries whose session directory no longer exists on disk are pruned (e.g.
     sessions deleted out-of-band); entries pointing to live directories are
@@ -243,11 +243,11 @@ def rebuild_sessions_index(
     found: dict[str, str] = {}
     for sid, sdir in _iter_nested_sessions(config_root):
         found[sid] = sdir
-    for p in project_paths or []:
+    for p in agent_paths or []:
         if not p:
             continue
         try:
-            for sid, sdir in _iter_project_sessions(Path(p)):
+            for sid, sdir in _iter_agent_sessions(Path(p)):
                 found[sid] = sdir
         except OSError:
             continue

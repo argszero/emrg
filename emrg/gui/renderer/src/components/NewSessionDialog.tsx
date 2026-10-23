@@ -1,32 +1,32 @@
 import { useI18n } from "../lib/i18n";
-import { projectRowView, type ProjectRow } from "../lib/openSession";
+import { agentRowView, type AgentRow } from "../lib/openSession";
 import { Dialog } from "./Dialog";
 import { DialogActions } from "./HelpDialog";
 
 /**
  * NewSessionDialog — 新建会话对话框（Batch 4 slice 3）。
  * 镜像 vanilla `showNewSessionDialog()`：
- * - loading（projects=null）/ empty（noProjects）/ error（loadFailed）四态
- * - 项目行（name/path/最近活跃）→ 点击 onPickProject(p)（vanilla: newSession({projectPath})）
- * - 底部 "＋ 新建项目…" → onNewProject（vanilla: pickProjectDir → registerProject → newSession）
- * 数据注入式：projects 与回调由调用方（Batch 5 接线 window.emrg.listProjects/pickProjectDir）提供。
+ * - loading（agents=null）/ empty（noAgents）/ error（loadFailed）四态
+ * - 项目行（name/path/最近活跃）→ 点击 onPickAgent(p)（vanilla: newSession({projectPath})）
+ * - 底部 "＋ 新建项目…" → onNewAgent（vanilla: pickAgentDir → registerAgent → newSession）
+ * 数据注入式：agents 与回调由调用方（Batch 5 接线 window.emrg.listAgents/pickAgentDir）提供。
  */
 export interface NewSessionDialogProps {
   open: boolean;
   /** null = loading；[] = 空；有值 = 列表 */
-  projects?: ProjectRow[] | null;
+  agents?: AgentRow[] | null;
   error?: string | null;
-  onPickProject?: (p: ProjectRow) => void;
-  onNewProject?: () => void;
+  onPickAgent?: (p: AgentRow) => void;
+  onNewAgent?: () => void;
   onDismiss?: () => void;
 }
 
 export function NewSessionDialog({
   open,
-  projects = null,
+  agents = null,
   error = null,
-  onPickProject,
-  onNewProject,
+  onPickAgent,
+  onNewAgent,
   onDismiss,
 }: NewSessionDialogProps) {
   const { t } = useI18n();
@@ -39,29 +39,29 @@ export function NewSessionDialog({
         </div>
       );
     }
-    if (projects === null) {
+    if (agents === null) {
       return (
         <div className="help-row" data-testid="new-session-loading">
           <span className="help-hint">{t("dlg.loading")}</span>
         </div>
       );
     }
-    if (projects.length === 0) {
+    if (agents.length === 0) {
       return (
         <div className="help-row" data-testid="new-session-empty">
-          <span className="help-hint">{t("openSession.noProjects")}</span>
+          <span className="help-hint">{t("openSession.noAgents")}</span>
         </div>
       );
     }
-    return projects.map((p) => {
-      const v = projectRowView(p, t);
+    return agents.map((p) => {
+      const v = agentRowView(p, t);
       return (
         <button
           type="button"
           className="help-row"
           key={p.path || p.name || ""}
-          data-testid="new-session-project"
-          onClick={() => onPickProject?.(p)}
+          data-testid="new-session-agent"
+          onClick={() => onPickAgent?.(p)}
           style={{ width: "100%", textAlign: "left", cursor: "pointer", background: "none", border: "none" }}
         >
           <span className="help-cmd">{v.label}</span>
@@ -82,8 +82,8 @@ export function NewSessionDialog({
         {renderList()}
       </div>
       <div className="dialog-actions">
-        <button type="button" className="btn btn-ghost" data-testid="new-session-new-project" onClick={onNewProject}>
-          {t("newSession.newProject")}
+        <button type="button" className="btn btn-ghost" data-testid="new-session-new-agent" onClick={onNewAgent}>
+          {t("newSession.newAgent")}
         </button>
       </div>
       <DialogActions onDismiss={onDismiss} />

@@ -106,17 +106,17 @@ ROW_BOUND = re.compile(r"`INDEX_TITLE_MAX_CHARS`\s*\(\*\*(\d+)\*\*")
 def rendered(tmp_path_factory) -> str:
     """The real template, rendered through the real builder with the real context."""
     tmp_path = tmp_path_factory.mktemp("index-rule")
-    project_dir = tmp_path / "demoproj"
-    project_dir.mkdir(exist_ok=True)
+    agent_dir = tmp_path / "demoproj"
+    agent_dir.mkdir(exist_ok=True)
     (tmp_path / "agents.yml").write_text(
-        yaml.safe_dump([{"name": "demoproj", "path": str(project_dir)}]), encoding="utf-8"
+        yaml.safe_dump([{"name": "demoproj", "path": str(agent_dir)}]), encoding="utf-8"
     )
     original = mod.config_dir
     mod.config_dir = lambda: tmp_path
     try:
         handler = make_handler(
             name="demo-task",
-            config={"project": "demoproj"},
+            config={"agent": "demoproj"},
             interval=300,
             identity=InstanceIdentity(),
             template_path=PROMPTS_DIR / "evolution_prompt.md",

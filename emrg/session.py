@@ -261,8 +261,8 @@ def _refuse_a_non_regular_subject(path: Path) -> None:
     """Raise when ``path`` is not a regular file — an open on it would never return.
 
     Every file this module opens lives in the session's own directory
-    (``<cwd>/.emrg/sessions/<id>/``), and that directory is **inside the project the
-    agent works in**: the workspace fence grants the project root, so the subject of
+    (``<cwd>/.emrg/sessions/<id>/``), and that directory is **inside the agent the
+    agent works in**: the workspace fence grants the agent root, so the subject of
     these opens can be any kind of thing. Measured 2026-10-11 (``cyc20261011-071202``) on
     master ``3386f239``, one call per child process under this parent's 8 s cap, with only
     the file that call reads made non-regular:
@@ -323,7 +323,7 @@ def is_safe_session_id(session_id: object) -> bool:
     `Path(cwd) / ".emrg" / "sessions" / session_id` hands `..` and an absolute id to the
     kernel, which resolves them, and the caller then removes what it resolved to. Measured
     2026-10-21: `Session.delete("../..", cwd)` walked `cwd/.emrg/sessions/../..` — the
-    project tree — and left it empty, `victim/` and `.emrg/` alike, then raised from
+    agent tree — and left it empty, `victim/` and `.emrg/` alike, then raised from
     `shutil.rmtree`'s final `os.rmdir`.
 
     So the id is checked before a path is built: non-empty, no NUL, not `.` or `..`, no
@@ -1197,8 +1197,8 @@ class Session:
                     pass
         _refuse_a_non_regular_subject(self._meta_path)
         self._meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
-        # Global cross-project index (rant 2026-08-13T16:42:22): record this
-        # session so other projects can locate it. Idempotent (no-op when the
+        # Global cross-agent index (rant 2026-08-13T16:42:22): record this
+        # session so other agents can locate it. Idempotent (no-op when the
         # path is unchanged) and never raises — a failed index write must not
         # break session creation or message persistence.
         upsert_session_index(self.session_id, self._dir)

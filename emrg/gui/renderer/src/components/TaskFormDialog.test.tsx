@@ -2,12 +2,12 @@ import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { I18nProvider } from "../lib/i18n";
 import { TaskFormDialog, type TaskFormPayload } from "./TaskFormDialog";
-import type { ProjectRec, ScheduleWindow, TaskRec } from "../lib/workspaceView";
+import type { AgentRec, ScheduleWindow, TaskRec } from "../lib/workspaceView";
 
 /**
  * TaskFormDialog.test.tsx — Batch 5 slice 8：任务表单（新建/编辑）。
  * 镜像 vanilla openTaskForm/saveTaskForm 语义：预填、name 编辑只读、间隔下限校验、
- * 提交 payload 形状（name/type/project/interval/enabled/repo/sandbox/schedule）。
+ * 提交 payload 形状（name/type/agent/interval/enabled/repo/sandbox/schedule）。
  *
  * issue #2490：下限不再写死 —— 每处断言都传一个**不是 60** 的 `minInterval`，
  * 于是组件里若有人再藏一份 `60`，下面「低于下限被拒 / 等于下限被收」两条必然红。
@@ -18,7 +18,7 @@ function wrapper(node: React.ReactNode) {
 }
 
 const TYPES = ["evolution", "journal"];
-const PROJECTS: ProjectRec[] = [
+const AGENTS: AgentRec[] = [
   { name: "emrg", path: "/p/emrg" },
   { name: "sci", path: "/p/sci" },
 ];
@@ -37,7 +37,7 @@ function taskWith(overrides: Partial<TaskRec> = {}): TaskRec {
     type: "evolution",
     interval: 10800,
     enabled: true,
-    config: { project: "emrg" },
+    config: { agent: "emrg" },
     ...overrides,
   };
 }
@@ -52,7 +52,7 @@ function renderForm(
       <TaskFormDialog
         request={{ task }}
         types={TYPES}
-        projects={PROJECTS}
+        agents={AGENTS}
         minInterval={FLOOR}
         onDismiss={vi.fn()}
         {...props}
@@ -74,7 +74,7 @@ describe("TaskFormDialog", () => {
         <TaskFormDialog
           request={{ task: null }}
           types={TYPES}
-          projects={PROJECTS}
+          agents={AGENTS}
           minInterval={FLOOR}
           onDismiss={vi.fn()}
         />,
@@ -84,21 +84,21 @@ describe("TaskFormDialog", () => {
     expect((screen.getByTestId("task-form-name") as HTMLInputElement).value).toBe("");
     expect((screen.getByTestId("task-form-name") as HTMLInputElement).disabled).toBe(false);
     expect((screen.getByTestId("task-form-type") as HTMLSelectElement).value).toBe("evolution");
-    expect((screen.getByTestId("task-form-project") as HTMLSelectElement).value).toBe("emrg");
+    expect((screen.getByTestId("task-form-agent") as HTMLSelectElement).value).toBe("emrg");
     expect((screen.getByTestId("task-form-interval") as HTMLInputElement).value).toBe("1800");
     expect((screen.getByTestId("task-form-enabled") as HTMLInputElement).checked).toBe(true);
     expect((screen.getByTestId("task-form-sandbox") as HTMLSelectElement).value).toBe("workspace-write");
   });
 
   it("编辑：预填任务字段，name 只读不可改名", () => {
-    const task = taskWith({ type: "journal", interval: 3600, enabled: false, config: { project: "sci" } });
+    const task = taskWith({ type: "journal", interval: 3600, enabled: false, config: { agent: "sci" } });
     (task as TaskRec & { sandbox?: string }).sandbox = "read-only";
     render(
       wrapper(
         <TaskFormDialog
           request={{ task }}
           types={TYPES}
-          projects={PROJECTS}
+          agents={AGENTS}
           minInterval={FLOOR}
           onDismiss={vi.fn()}
         />,
@@ -108,7 +108,7 @@ describe("TaskFormDialog", () => {
     expect(name.value).toBe("windowed");
     expect(name.disabled).toBe(true);
     expect((screen.getByTestId("task-form-type") as HTMLSelectElement).value).toBe("journal");
-    expect((screen.getByTestId("task-form-project") as HTMLSelectElement).value).toBe("sci");
+    expect((screen.getByTestId("task-form-agent") as HTMLSelectElement).value).toBe("sci");
     expect((screen.getByTestId("task-form-interval") as HTMLInputElement).value).toBe("3600");
     expect((screen.getByTestId("task-form-enabled") as HTMLInputElement).checked).toBe(false);
     expect((screen.getByTestId("task-form-sandbox") as HTMLSelectElement).value).toBe("read-only");
@@ -151,7 +151,7 @@ describe("TaskFormDialog", () => {
     const { onSubmit } = renderForm(null);
     fireEvent.change(screen.getByTestId("task-form-name"), { target: { value: "t1" } });
     fireEvent.change(screen.getByTestId("task-form-type"), { target: { value: "journal" } });
-    fireEvent.change(screen.getByTestId("task-form-project"), { target: { value: "sci" } });
+    fireEvent.change(screen.getByTestId("task-form-agent"), { target: { value: "sci" } });
     fireEvent.change(screen.getByTestId("task-form-interval"), { target: { value: "300" } });
     fireEvent.change(screen.getByTestId("task-form-sandbox"), { target: { value: "read-only" } });
     fireEvent.click(screen.getByTestId("task-form-enabled"));
@@ -161,7 +161,7 @@ describe("TaskFormDialog", () => {
     expect(payload).toEqual({
       name: "t1",
       type: "journal",
-      project: "sci",
+      agent: "sci",
       interval: 300,
       enabled: false,
       repo: undefined,
@@ -286,7 +286,7 @@ describe("TaskFormDialog", () => {
         <TaskFormDialog
           request={{ task: null }}
           types={TYPES}
-          projects={PROJECTS}
+          agents={AGENTS}
           onSubmit={onSubmit}
           onDismiss={vi.fn()}
         />,

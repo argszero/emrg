@@ -202,7 +202,7 @@ class TestCatalogAsSkill:
         (skills_dir / "skill-catalog.md").write_text(BASELINE_CATALOG_MD, encoding="utf-8")
         real = skills_dir / "real-skill.md"
         real.write_text(VALID_SKILL_MD.replace("browser-harness", "real-skill"), encoding="utf-8")
-        skills = load_skills(project_dir=tmp_home)
+        skills = load_skills(agent_dir=tmp_home)
         names = [s.name for s in skills]
         assert "skill-catalog" in names
         assert "real-skill" in names
@@ -214,7 +214,7 @@ class TestCatalogAsSkill:
         (skills_dir / "recommended.md").write_text(
             "---\nskills:\n  - name: browser-harness\n---\nbody", encoding="utf-8"
         )
-        skills = load_skills(project_dir=tmp_home)
+        skills = load_skills(agent_dir=tmp_home)
         assert [s.name for s in skills] == []
 
     def test_system_j2_untouched(self):

@@ -930,8 +930,8 @@ dialog::backdrop {
 .rant-row .rant-col-time {
   flex: 0 0 150px;
 }
-.rant-head .rant-col-project,
-.rant-row .rant-col-project {
+.rant-head .rant-col-agent,
+.rant-row .rant-col-agent {
   flex: 0 0 90px;
 }
 .rant-head .rant-col-status,
@@ -950,7 +950,7 @@ dialog::backdrop {
 }
 .rant-head span,
 .rant-row .rant-col-time,
-.rant-row .rant-col-project,
+.rant-row .rant-col-agent,
 .rant-row .rant-col-progress,
 .rant-row .rant-col-content {
   overflow: hidden;
@@ -958,7 +958,7 @@ dialog::backdrop {
   white-space: nowrap;
 }
 .rant-row .rant-col-time,
-.rant-row .rant-col-project,
+.rant-row .rant-col-agent,
 .rant-row .rant-col-progress,
 .rant-row .rant-col-content {
   font-size: var(--fs-aux);

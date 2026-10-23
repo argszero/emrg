@@ -47,12 +47,12 @@ Which interpreter runs the suite
 A freshly added worktree has no populated `.venv` - `uv run` inside one creates an
 empty environment, measured repeatedly in this repo - so the suite is run with an
 interpreter resolved once by `_suite_interpreter`: `sys.executable` when it can
-import pytest, else the project's own `.venv` beside this checkout, else
+import pytest, else the agent's own `.venv` beside this checkout, else
 `sys.executable` again so the refusal that follows names an interpreter that was
 really tried. The worktree is still the cwd; only the interpreter is chosen.
 
 The fallback is not decoration. The invocation these gates document,
-`uv run --no-sync python3 scripts/<gate>.py`, reaches the project environment on
+`uv run --no-sync python3 scripts/<gate>.py`, reaches the agent environment on
 POSIX but a bare host `python3` on a machine whose `python3` is a shim - measured
 2026-09-28 on Windows, where it resolved to `~/.emrg/install/bin/python3.exe` (no
 pytest) while `uv run --no-sync python` reached this checkout's `.venv`, and the
@@ -346,7 +346,7 @@ def _checkout_root() -> Path:
     """The checkout this gate lives in - the directory that owns `scripts/`.
 
     One definition, because two readers need the same answer: the interpreter search
-    looks for the project environment under it, and the refusal names the candidates
+    looks for the agent environment under it, and the refusal names the candidates
     it looked at. A second spelling of `parent.parent` is how the two drift apart.
     """
     return Path(__file__).resolve().parent.parent
@@ -375,7 +375,7 @@ def _can_import_pytest(python: str) -> bool:
 def _suite_interpreter(
     own: str | None = None, repo_root: Path | None = None
 ) -> str:
-    """The interpreter the suite runs with: this tool's own, or the project's `.venv`.
+    """The interpreter the suite runs with: this tool's own, or the agent's `.venv`.
 
     `own` and `repo_root` exist so a test can ask about a layout it owns instead of
     about this machine's (the same shape `_suite_env`'s caller and `augment_path`'s
@@ -762,7 +762,7 @@ def _no_suite_verdict(out: str) -> str:
 
     Two causes, and the obvious one is not the only one: a bare host `python3` has
     no pytest, while an unsynced worktree's `.venv` is empty - so the invocation
-    this tool documents fails byte-identically there, and answering "use the project
+    this tool documents fails byte-identically there, and answering "use the agent
     interpreter" sends the reader in a circle (`check-doc-count.py` measured exactly
     that, cyc20260913-122923). Both causes are named, and so is the command to run:
     a remedy that names no invocation leaves the reader where they were. This is
@@ -772,7 +772,7 @@ def _no_suite_verdict(out: str) -> str:
     Every interpreter that was tried is named, and the remedy is spelled `python`
     rather than `python3`: on a machine whose `python3` is a host shim the two reach
     different interpreters (measured 2026-09-28 on Windows - see the header), while
-    `uv run` maps `python` to the project environment on every platform it supports.
+    `uv run` maps `python` to the agent environment on every platform it supports.
     """
     tried = ", ".join(
         [sys.executable]
@@ -785,7 +785,7 @@ def _no_suite_verdict(out: str) -> str:
             "the suite could not be run: pytest is not installed in any interpreter "
             f"this gate can use, so nothing judged the tree. Tried: {tried}.\n"
             + tail
-            + "\n\nRun it with the project environment instead:\n"
+            + "\n\nRun it with the agent environment instead:\n"
             f"    {invocation} <PR> [<PR> ...]\n"
             "A fresh worktree or clone gets an empty `.venv`, where that same command "
             "fails identically - there, `uv sync` first."
@@ -794,7 +794,7 @@ def _no_suite_verdict(out: str) -> str:
         "the suite exited 1 without a failure line in its own output, so this is not "
         "a verdict about the tree:\n" + tail + "\n\nCheck the invocation with "
         f"`{_suite_interpreter()} -m pytest --version`, then run this tool with the "
-        f"project environment:\n    {invocation} <PR> [<PR> ...]"
+        f"agent environment:\n    {invocation} <PR> [<PR> ...]"
     )
 
 
@@ -1022,7 +1022,7 @@ def _suite_env(worktree: Path) -> dict[str, str]:
     `EMRG_TASK_DIRTY_OVERRIDE`. It is the evolution cycle's own escape hatch - a
     cycle whose tree is dirty exports it to keep working, and `scheduler.py` reads
     it from the environment - while `tests/test_scheduler.py` has four tests that
-    assert the *unoverridden* verdict for a dirty tree, reaching the real project
+    assert the *unoverridden* verdict for a dirty tree, reaching the real agent
     rather than the worktree. Measured 2026-09-17 (`cyc20260917-142057`): with a
     dirty caller tree and the override exported, those four fail and the run reports
     `suite FAILED` for a plan whose tree is green; with the override unset they pass,

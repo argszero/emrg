@@ -102,7 +102,7 @@ class TestParseSkillFile:
             "---\n"
             "# Body\n"
         )
-        result = _parse_skill_file(md, "project")
+        result = _parse_skill_file(md, "agent")
         assert result is not None
         assert result.name == "fallback-skill"
 
@@ -146,7 +146,7 @@ class TestParseSkillFile:
         assert result is None
 
     def test_source_flag(self, tmp_path):
-        """Source is correctly propagated ('user' or 'project')."""
+        """Source is correctly propagated ('user' or 'agent')."""
         md = tmp_path / "src-test.md"
         md.write_text(
             "---\n"
@@ -156,7 +156,7 @@ class TestParseSkillFile:
             "# Body\n"
         )
         assert _parse_skill_file(md, "user").source == "user"
-        assert _parse_skill_file(md, "project").source == "project"
+        assert _parse_skill_file(md, "agent").source == "agent"
 
     def test_body_stripped(self, tmp_path):
         """Leading/trailing whitespace in body is stripped."""
@@ -214,7 +214,7 @@ class TestBuildSkillsContext:
         )
         b = Skill(
             name="skill-b", description="Desc B",
-            path=Path("/tmp/b.md"), body="body", source="project",
+            path=Path("/tmp/b.md"), body="body", source="agent",
         )
         result = build_skills_context([a, b])
         assert "skill-a" in result
@@ -241,17 +241,17 @@ class TestASkillDirectoryWalkedByKind:
     never returns. Every caller of `load_skills` runs on the daemon's event loop — the
     `skills_install` branch, the auto-update loop, and startup — so the block is the whole
     server. Measured 2026-07-11-style on master `3386f239` (`cyc20261011-070311`): a `mkfifo`
-    named `wedged.md` beside a usable skill made `load_skills(project_dir)` **not return in
+    named `wedged.md` beside a usable skill made `load_skills(agent_dir)` **not return in
     8 s**, where the same fixture without it returned in 0.00 s.
 
-    The project skills directory is under the *workspace*, the agent's own write surface,
+    The agent skills directory is under the *workspace*, the agent's own write surface,
     which is what makes it reachable rather than theoretical.
     """
 
     GOOD = "---\nname: good\ndescription: a usable skill\n---\n\nbody\n"
 
     @staticmethod
-    def _project(tmp_path, fifo: bool):
+    def _agent(tmp_path, fifo: bool):
         skills = tmp_path / ".emrg" / "skills"
         skills.mkdir(parents=True)
         (skills / "good.md").write_text(TestASkillDirectoryWalkedByKind.GOOD)
@@ -267,16 +267,16 @@ class TestASkillDirectoryWalkedByKind:
         "returns" while losing every skill in the directory, which is the same loss the
         hang caused one step earlier.
         """
-        project = self._project(tmp_path, fifo=True)
-        skills = within(DEADLINE_SECONDS, lambda: load_skills(project_dir=project))
+        agent = self._agent(tmp_path, fifo=True)
+        skills = within(DEADLINE_SECONDS, lambda: load_skills(agent_dir=agent))
         names = [s.name for s in skills]
         assert "good" in names, f"the usable skill was lost: {names}"
         assert "wedged" not in names, f"a FIFO was loaded as a skill: {names}"
 
     def test_the_control_without_the_fifo(self, tmp_path):
         """Same fixture, no pipe: the same reading, so the pipe is what was measured."""
-        project = self._project(tmp_path, fifo=False)
-        names = [s.name for s in load_skills(project_dir=project)]
+        agent = self._agent(tmp_path, fifo=False)
+        names = [s.name for s in load_skills(agent_dir=agent)]
         assert "good" in names, names
         assert "wedged" not in names, names
 
@@ -290,4 +290,4 @@ class TestASkillDirectoryWalkedByKind:
         """
         fifo = tmp_path / "wedged.md"
         os.mkfifo(fifo)
-        assert within(DEADLINE_SECONDS, lambda: _parse_skill_file(fifo, "project")) is None
+        assert within(DEADLINE_SECONDS, lambda: _parse_skill_file(fifo, "agent")) is None

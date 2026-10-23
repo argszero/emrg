@@ -108,7 +108,7 @@ async def _boot_server(tmp: Path):
 
     # Isolate config dir to tmp (port file, tasks.yml, agents.yml, etc.)
     daemon_mod.config_dir = lambda: tmp
-    sched_mod.config_dir = lambda: tmp  # scheduler builds its own projects_file (#738)
+    sched_mod.config_dir = lambda: tmp  # scheduler builds its own agents_file (#738)
     connect_mod.config_dir = lambda: tmp
 
     # ⛔ Red line (host 2026-08-21T10:35:57): tests must never run the real
@@ -1327,7 +1327,7 @@ class TestWSBroadcast:
 
         The GUI's homedir-fallback connection subscribed to the same session
         id as the real TUI connection; without cwd scoping every broadcast
-        leaked across projects. Now broadcasts are filtered by the running
+        leaked across agents. Now broadcasts are filtered by the running
         task's cwd: A's task (cwd_a) reaches only A, and B's later task
         (cwd_b) reaches only B — proving the filter is symmetric and B is
         alive, not simply disconnected.
@@ -1637,7 +1637,7 @@ class TestWSGhostSessionGuard:
     root cause 2).
 
     Before the fix, a client hitting the wrong cwd (GUI homedir fallback)
-    caused a 0-message ghost session dir at the wrong project; resume_session
+    caused a 0-message ghost session dir at the wrong agent; resume_session
     then reported success (0 messages), masking the real session. Now:
       - missing session dir / meta.json → not found
       - a 0-message session whose cwd differs from the canonical session cwd
@@ -1649,8 +1649,8 @@ class TestWSGhostSessionGuard:
         async def _test():
             with tempfile.TemporaryDirectory() as tmp:
                 tmp = Path(tmp)
-                cwd_a = tmp / "proj_a"  # canonical project of the real session
-                cwd_b = tmp / "proj_b"  # wrong project (ghost dir present)
+                cwd_a = tmp / "proj_a"  # canonical agent of the real session
+                cwd_b = tmp / "proj_b"  # wrong agent (ghost dir present)
                 sid = "s_ghost_test"
 
                 # Real session at proj_a: dir + meta.json with 2 messages
@@ -1667,7 +1667,7 @@ class TestWSGhostSessionGuard:
                     '{"type":"message","role":"assistant","content":"hello"}\n',
                     encoding="utf-8",
                 )
-                # Ghost dir at the wrong project: 0 messages (pre-fix failure)
+                # Ghost dir at the wrong agent: 0 messages (pre-fix failure)
                 ghost_dir = cwd_b / ".emrg" / "sessions" / sid
                 ghost_dir.mkdir(parents=True, exist_ok=True)
                 (ghost_dir / "meta.json").write_text(json.dumps({
@@ -2998,7 +2998,7 @@ class TestWSHistoryRecords:
         """Issue #2351: a system note and a compaction boundary are rows too.
 
         `history.jsonl` holds two record kinds that are neither a message from a role
-        the display path projects nor a tool result: the `role: "system"` message
+        the display path agents nor a tool result: the `role: "system"` message
         `Session.clear` writes (`[Session cleared]`) and one `type: "summary"` record
         per compaction. The live stream announced both — a system note after `/clear`,
         a `compact_result` on compaction — so a records mode that dropped them made a
@@ -3036,7 +3036,7 @@ class TestWSHistoryRecords:
                             (0, "message", "system"),
                             (1, "summary", None),
                             (2, "message", "user"),
-                        ], f"records mode did not project them: {items}"
+                        ], f"records mode did not agent them: {items}"
                         assert items[0]["content"] == "[Session cleared]"
                         assert items[0]["timestamp"] == "2026-09-20T00:00:10"
                         assert items[1]["compacted_message_count"] == 7
@@ -3170,8 +3170,8 @@ class TestWSTaskWire:
                 try:
                     calls = {}
 
-                    def fake_create(name, task_type, project, interval=None, enabled=True, repo=None, description=None, sandbox=None, schedule=None):
-                        calls.update(name=name, task_type=task_type, project=project)
+                    def fake_create(name, task_type, agent, interval=None, enabled=True, repo=None, description=None, sandbox=None, schedule=None):
+                        calls.update(name=name, task_type=task_type, agent=agent)
                         return True, {"name": name, "type": task_type}
 
                     server._scheduler = self._mock_scheduler(create_side_effect=fake_create)
@@ -3179,12 +3179,12 @@ class TestWSTaskWire:
                     try:
                         resp = await self._cmd(ws, {
                             "type": "task_create", "name": "daily",
-                            "task_type": "evolution", "project": "emrg",
+                            "task_type": "evolution", "agent": "emrg",
                         })
                         assert resp["type"] == "task_result"
                         assert resp.get("ok") is True
                         assert calls["task_type"] == "evolution", "daemon must read task_type"
-                        assert calls["project"] == "emrg"
+                        assert calls["agent"] == "emrg"
                     finally:
                         await ws.close()
                 finally:
@@ -3200,15 +3200,15 @@ class TestWSTaskWire:
                 try:
                     calls = {}
 
-                    def fake_create(name, task_type, project, interval=None, enabled=True, repo=None, description=None, sandbox=None, schedule=None):
-                        calls.update(name=name, task_type=task_type, project=project)
+                    def fake_create(name, task_type, agent, interval=None, enabled=True, repo=None, description=None, sandbox=None, schedule=None):
+                        calls.update(name=name, task_type=task_type, agent=agent)
                         return True, {"name": name, "type": task_type}
 
                     server._scheduler = self._mock_scheduler(create_side_effect=fake_create)
                     ws = await connect_to_server()
                     try:
                         resp = await self._cmd(ws, {
-                            "type": "task_create", "name": "daily", "project": "emrg",
+                            "type": "task_create", "name": "daily", "agent": "emrg",
                         })
                         assert resp["type"] == "task_result"
                         assert calls["task_type"] == "", "must not fall back to wire type 'task_create'"
@@ -3231,7 +3231,7 @@ class TestWSTaskWire:
                 try:
                     calls = {}
 
-                    def fake_create(name, task_type, project, interval=None, enabled=True,
+                    def fake_create(name, task_type, agent, interval=None, enabled=True,
                                     repo=None, description=None, sandbox=None, schedule=None):
                         calls.update(interval=interval, schedule=schedule)
                         return True, {"name": name, "type": task_type}
@@ -3244,7 +3244,7 @@ class TestWSTaskWire:
                     try:
                         resp = await self._cmd(ws, {
                             "type": "task_create", "name": "daily",
-                            "task_type": "evolution", "project": "emrg",
+                            "task_type": "evolution", "agent": "emrg",
                             "interval": 10800, "schedule": window,
                         })
                         assert resp["type"] == "task_result"
@@ -3293,13 +3293,13 @@ class TestWSResolveSessionCwd:
     """The daemon answers where a session lives, so a client need not guess.
 
     Rant 2026-09-29T15:52:49, requirement 6 (the client half). The TUI sent its
-    own cwd with every `resume_session`, so a session in another project — a
+    own cwd with every `resume_session`, so a session in another agent — a
     scheduled task's cycle above all — could not be opened from `/resume <id>`,
     and one that did open received no live frames, because `_broadcast` filters by
     (session, cwd). The daemon has held the fact all along; this command exposes it.
 
     Both states are asserted apart on purpose: `index` (the daemon can vouch for
-    the project) and `unknown` (it cannot). Collapsing them would make "the index
+    the agent) and `unknown` (it cannot). Collapsing them would make "the index
     has not seen this session yet" read the same as "this session lives at the cwd
     you asked about", and a client's fallback is only safe for the second.
 
@@ -3325,7 +3325,7 @@ class TestWSResolveSessionCwd:
                 ws = await connect_to_server()
                 try:
                     # Asked from somewhere else entirely: the answer must be the
-                    # session's own project, not the cwd the asker stands in.
+                    # session's own agent, not the cwd the asker stands in.
                     await ws.send(json.dumps({
                         "type": "resolve_session_cwd",
                         "session_id": "s_resolve",
@@ -3336,7 +3336,7 @@ class TestWSResolveSessionCwd:
                     assert resp.get("source") == "index", resp
                     assert resp["cwd"] == str(tmp_path / "proj_a"), (
                         "the daemon answered with something other than the indexed "
-                        f"project: {resp!r}"
+                        f"agent: {resp!r}"
                     )
                 finally:
                     await ws.close()
@@ -3392,15 +3392,15 @@ class TestWSResolveSessionCwd:
                 await cleanup()
         asyncio.run(_test())
 
-    def test_a_session_opened_from_another_project_receives_its_live_frames(self, tmp_path):
+    def test_a_session_opened_from_another_agent_receives_its_live_frames(self, tmp_path):
         """The second half of requirement 6: the frames, not only the answer.
 
         The three tests above guard the *answer*. This one guards the delivery,
         which is what the requirement is actually about — and it was the half
         that stayed broken: PR #1748 made the TUI ask first, but the ask carries
         the *asker's* cwd (app.py says so at its own call site), so the
-        subscription record written from it named project A. The two messages
-        that follow — `resume_session`, then `task` — name project B, the
+        subscription record written from it named agent A. The two messages
+        that follow — `resume_session`, then `task` — name agent B, the
         session's real home, and the read loop ignored them: it writes the
         record only when the session id **changes**, which it did not.
 
@@ -3408,7 +3408,7 @@ class TestWSResolveSessionCwd:
         subscriber in the dict and was no target on the wire — measured
         2026-10-08 (`cyc20261008-170402`): with the ask carrying the asker's
         cwd, frames NONE and approval frames NONE; with the ask carrying the
-        project's cwd (that is, with the record correct), `turn_start`, the
+        agent's cwd (that is, with the record correct), `turn_start`, the
         stream, `turn_end`, and `approval_request` + `approval_resolved`. Only
         the ask's cwd differed. A TUI in that state never finishes its turn,
         and `request_approval` asks its question to nobody while its own
@@ -3419,11 +3419,11 @@ class TestWSResolveSessionCwd:
         async def _test():
             import emrg.session as session_mod
 
-            project_a = tmp_path / "project_a"
-            project_b = tmp_path / "project_b"
+            agent_a = tmp_path / "agent_a"
+            agent_b = tmp_path / "agent_b"
             for root, sid, text in (
-                (project_a, "s_own", "hello from a"),
-                (project_b, "s_cross", "a scheduled task's cycle"),
+                (agent_a, "s_own", "hello from a"),
+                (agent_b, "s_cross", "a scheduled task's cycle"),
             ):
                 root.mkdir(parents=True, exist_ok=True)
                 sess = session_mod.Session.create_with_id(sid, root)
@@ -3433,7 +3433,7 @@ class TestWSResolveSessionCwd:
             server, _, cleanup = await _boot_server(tmp_path)
             try:
                 self._write_index(
-                    {"s_cross": str(project_b / ".emrg" / "sessions" / "s_cross")}
+                    {"s_cross": str(agent_b / ".emrg" / "sessions" / "s_cross")}
                 )
                 ws = await connect_to_server()
                 try:
@@ -3441,28 +3441,28 @@ class TestWSResolveSessionCwd:
                     #    is not s_cross when the ask below arrives.
                     await ws.send(json.dumps({"type": "list_history",
                                               "session_id": "s_own",
-                                              "cwd": str(project_a)}))
+                                              "cwd": str(agent_a)}))
                     await _recv_until(ws, lambda f: f.get("type") == "history_list",
                                       what="history_list for s_own")
 
                     # 2. the ask — carrying the ASKER's cwd, as the TUI sends it.
                     await ws.send(json.dumps({"type": "resolve_session_cwd",
                                               "session_id": "s_cross",
-                                              "cwd": str(project_a)}))
+                                              "cwd": str(agent_a)}))
                     answered = await _recv_until(
                         ws, lambda f: f.get("type") == "session_cwd_result",
                         what="session_cwd_result")
-                    assert answered["cwd"] == str(project_b), answered
+                    assert answered["cwd"] == str(agent_b), answered
 
                     # 3./4. resume, then type a prompt — both naming s_cross's
                     #       real home, and both re-naming a session the connection
                     #       is already subscribed to.
                     await ws.send(json.dumps({"type": "resume_session",
                                               "session_id": "s_cross",
-                                              "cwd": str(project_b)}))
+                                              "cwd": str(agent_b)}))
                     await ws.send(json.dumps({"type": "task", "id": "r1",
                                               "session_id": "s_cross",
-                                              "cwd": str(project_b), "prompt": "hi",
+                                              "cwd": str(agent_b), "prompt": "hi",
                                               "timestamp": "2026-10-08T00:00:00Z",
                                               "images": None,
                                               "sandbox": "workspace-write"}))
@@ -3473,7 +3473,7 @@ class TestWSResolveSessionCwd:
 
                     recorded = sorted({cwd for cwd in
                                        server._session_subscribers.get("s_cross", {}).values()})
-                    assert recorded == [str(project_b)], (
+                    assert recorded == [str(agent_b)], (
                         "the subscription record still names the asker's cwd, so the "
                         "next broadcast will be addressed to nobody again: "
                         f"{recorded}"

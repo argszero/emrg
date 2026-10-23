@@ -262,8 +262,8 @@ test("issue #2484: emrg:switchSession asks the daemon before it opens a session"
   assert.match(
     region,
     /asked \|\| projectPath \|\| resolveSessionCwd\(sessionId\)/,
-    "precedence must be daemon answer > the caller's project > the local index guess, so a " +
-      "session from another project opens where it really lives rather than where we guessed.",
+    "precedence must be daemon answer > the caller's agent > the local index guess, so a " +
+      "session from another agent opens where it really lives rather than where we guessed.",
   );
 });
 

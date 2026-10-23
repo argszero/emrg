@@ -4,7 +4,7 @@ Why this exists (issues #1157 / #1159)
 --------------------------------------
 `uv.lock` records the index each package was resolved from. A machine-level
 `~/.config/uv/uv.toml` - a common accelerator config, e.g. a regional PyPI
-mirror - overrides the project for *every* command, so a bare `uv run` /
+mirror - overrides the agent for *every* command, so a bare `uv run` /
 `uv lock` rewrites all 20 registry entries in place. Measured on this repo:
 0 -> 277 rewritten lines, and the rewrite happens even when uv exits non-zero.
 
@@ -16,7 +16,7 @@ repair is a git write that the same sandbox blocks - seven consecutive cycles
 could not write anything.
 
 These tests pin the fix rather than the symptom. The first is the invariant the
-project actually wants; the second is what makes it true on a machine whose uv
+agent actually wants; the second is what makes it true on a machine whose uv
 config points elsewhere.
 
 Both are pure text checks on files in the repo - no network, no `uv` binary, no
@@ -64,14 +64,14 @@ def test_lock_records_the_canonical_index_only() -> None:
     assert not unexpected, (
         f"uv.lock resolves from non-canonical index(es): {unexpected}. "
         f"Every entry must be {CANONICAL_INDEX}. A mirror URL in the lock is "
-        "machine-specific environment noise; regenerate with the project's "
+        "machine-specific environment noise; regenerate with the agent's "
         "uv.toml in effect (or set UV_INDEX_URL only for the command you run, "
         "never for the lock you commit)."
     )
 
 
-def test_project_uv_config_pins_the_canonical_index() -> None:
-    """A project-level `uv.toml` must pin the index, defeating a host mirror.
+def test_agent_uv_config_pins_the_canonical_index() -> None:
+    """A agent-level `uv.toml` must pin the index, defeating a host mirror.
 
     Without this file, the host's `~/.config/uv/uv.toml` wins and a bare
     `uv run` rewrites the lock - which is how the read-only deadlock started.

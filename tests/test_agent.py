@@ -14,9 +14,9 @@ Two properties these tests exist for:
 from __future__ import annotations
 
 from emrg.agent import Agent, as_agent
-from emrg.memory import ProjectMemoryStore
+from emrg.memory import AgentMemoryStore
 from emrg.session import Session, generate_session_id, session_dir
-from emrg.sessions_index import _iter_project_sessions
+from emrg.sessions_index import _iter_agent_sessions
 
 
 class TestBaseDirIsStoredAsGiven:
@@ -31,7 +31,7 @@ class TestBaseDirIsStoredAsGiven:
 
     def test_a_home_placeholder_is_not_expanded(self):
         """`expanduser()` would answer a real home directory; the `~` must survive."""
-        assert Agent("~/project").base_dir == "~/project"
+        assert Agent("~/agent").base_dir == "~/agent"
 
     def test_the_type_is_part_of_the_value(self, tmp_path):
         """A str stays a str and a Path stays a Path: two spellings are two values."""
@@ -116,8 +116,8 @@ class TestTheCallersAskTheAgent:
         assert from_agent == Session.list_sessions(tmp_path)
         assert [row["session_id"] for row in from_agent] == ["s1"]
 
-    def test_the_project_memory_store_is_the_agents_memory_dir(self, tmp_path):
-        store = ProjectMemoryStore(tmp_path)
+    def test_the_agent_memory_store_is_the_agents_memory_dir(self, tmp_path):
+        store = AgentMemoryStore(tmp_path)
         assert store.directory == Agent(tmp_path).memory_dir
         assert store.directory == tmp_path / ".emrg" / "memory"
 
@@ -128,4 +128,4 @@ class TestTheCallersAskTheAgent:
             '{"session_id": "s1"}', encoding="utf-8"
         )
 
-        assert list(_iter_project_sessions(tmp_path)) == [("s1", str(session_dir_path))]
+        assert list(_iter_agent_sessions(tmp_path)) == [("s1", str(session_dir_path))]

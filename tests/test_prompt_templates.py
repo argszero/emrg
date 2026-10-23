@@ -24,7 +24,7 @@ These tests close that hole from both ends:
 
 Named limit: this pins the wiring, not the prose. It cannot show that an agent
 follows the procedure, that optional fields (``{% if task.extra_prompt %}``,
-``{% if project.description %}``) are set in the host's config, or that the prompt's
+``{% if agent.description %}``) are set in the host's config, or that the prompt's
 content is any good.
 
 A second hole is closed further down and is about *references* rather than
@@ -59,10 +59,10 @@ PROMPTS_DIR = REPO_ROOT / "emrg" / "server"
 # A reference to a variable or a block tag that survived rendering.
 LEFTOVER_TAG = re.compile(r"\{\{|\{%")
 
-# Optional task/project fields the prompts guard on. Populated only by the strict
+# Optional task/agent fields the prompts guard on. Populated only by the strict
 # render, so that a "missing" name there is a typo rather than a design choice.
 FULL_TASK_CONFIG: dict = {
-    "project": "demoproj",
+    "agent": "demoproj",
     "role": "committer",
     "author_id": "argszero",
     "keywords": "demo, wiring",
@@ -75,15 +75,15 @@ FULL_PROJECT_ENTRY: dict = {
 }
 
 
-def _write_projects_yml(tmp_path: Path, name: str, entry: dict) -> Path:
-    project_dir = tmp_path / name
-    project_dir.mkdir(exist_ok=True)
-    row = {"path": str(project_dir)}
+def _write_agents_yml(tmp_path: Path, name: str, entry: dict) -> Path:
+    agent_dir = tmp_path / name
+    agent_dir.mkdir(exist_ok=True)
+    row = {"path": str(agent_dir)}
     row.update(entry)
     (tmp_path / "agents.yml").write_text(
         yaml.safe_dump([row]), encoding="utf-8"
     )
-    return project_dir
+    return agent_dir
 
 
 def _make_handler(
@@ -91,12 +91,12 @@ def _make_handler(
     monkeypatch,
     template_name: str,
     config: dict,
-    project_entry: dict | None = None,
+    agent_entry: dict | None = None,
 ) -> TaskHandler:
     """A real handler, from a hermetic config dir, pointed at a real template."""
     monkeypatch.setattr(mod, "config_dir", lambda: tmp_path)
-    name = config.get("project", "demoproj")
-    _write_projects_yml(tmp_path, name, project_entry or {"name": name})
+    name = config.get("agent", "demoproj")
+    _write_agents_yml(tmp_path, name, agent_entry or {"name": name})
     return make_handler(
         name="demo-task",
         config=config,
@@ -112,7 +112,7 @@ def _builtin_templates() -> list[tuple[str, str]]:
 
 def test_every_prompt_template_renders_through_the_real_builder(tmp_path, monkeypatch) -> None:
     """Each built-in task type renders, with the optional sections unset."""
-    minimal = {"project": "demoproj"}
+    minimal = {"agent": "demoproj"}
     for task_type, filename in _builtin_templates():
         handler = _make_handler(tmp_path, monkeypatch, filename, minimal)
         rendered = handler._build_evolution_prompt()
@@ -168,12 +168,12 @@ def test_no_prompt_names_a_placeholder_the_builder_does_not_provide(
     # render below would pass for the wrong reason (nothing to check).
     # Self-test of the device: the capture must hold keys the templates really use, or
     # the strict render below would pass for the wrong reason (nothing to check).
-    missing = {"instance_id", "source_dir", "timestamp", "task", "project"} - set(captured)
+    missing = {"instance_id", "source_dir", "timestamp", "task", "agent"} - set(captured)
     assert not missing, (
         f"the recording environment captured no {sorted(missing)} — it is not in the "
         f"render path, so this test would prove nothing"
     )
-    assert "task" in captured and "project" in captured
+    assert "task" in captured and "agent" in captured
 
     strict = real_env(undefined=jinja2.StrictUndefined)
     with_typo = strict.from_string("{{ evolution_cwd_typo }}")
@@ -286,7 +286,7 @@ def test_the_journal_prompt_takes_its_identity_from_the_task_config(
         tmp_path,
         monkeypatch,
         "journal_prompt.md",
-        {"project": "demoproj", "role": "author", "author_id": JOURNAL_ID},
+        {"agent": "demoproj", "role": "author", "author_id": JOURNAL_ID},
     )._build_evolution_prompt()
 
     assert _journal_id_line(configured) == (
@@ -312,7 +312,7 @@ def test_the_journal_prompt_takes_its_identity_from_the_task_config(
         tmp_path,
         monkeypatch,
         "journal_prompt.md",
-        {"project": "demoproj", "role": "author"},
+        {"agent": "demoproj", "role": "author"},
     )._build_evolution_prompt()
 
     assert _journal_id_line(bare) == "- Instance id: **** (from tasks.yml)", (
@@ -457,7 +457,7 @@ def test_every_context_key_has_a_consumer(tmp_path, monkeypatch) -> None:
     deliberate exception named here.
     """
     captured = _captured_context(tmp_path, monkeypatch)
-    missing = {"instance_id", "source_dir", "timestamp", "task", "project"} - set(captured)
+    missing = {"instance_id", "source_dir", "timestamp", "task", "agent"} - set(captured)
     assert not missing, (
         f"the recording environment captured no {sorted(missing)} — it is not in the "
         f"render path, so this test would compare against nothing"
@@ -511,7 +511,7 @@ def test_no_template_names_a_retired_placeholder() -> None:
 
 
 # The memory roots a template may name, in the spelling a template writes them: the
-# session's *project* memory (`<session.cwd>/.emrg/memory/`) and its *session* memory
+# session's *agent* memory (`<session.cwd>/.emrg/memory/`) and its *session* memory
 # (`<session.cwd>/.emrg/sessions/<id>/memory/`). After D9 (design §6 D9, host decision
 # 2026-09-21 16:25) every memory path in every template is written against one root —
 # `{{ source_dir }}`, the session workspace — because it is both the directory the sandbox
@@ -593,7 +593,7 @@ def test_prompt_memory_writes_land_where_the_daemon_loads_them(tmp_path, monkeyp
     wrong session) is not a shape this test can tell apart.
     """
     handler = _make_handler(
-        tmp_path, monkeypatch, "evolution_prompt.md", {"project": "demoproj"}
+        tmp_path, monkeypatch, "evolution_prompt.md", {"agent": "demoproj"}
     )
     source_dir = Path(handler._source_dir)
     source_dir_str = str(handler._source_dir)
@@ -616,10 +616,10 @@ def test_prompt_memory_writes_land_where_the_daemon_loads_them(tmp_path, monkeyp
         f"`{{{{ source_dir }}}}` is not resolving to the session workspace"
     )
 
-    # (3) That workspace's `.emrg/memory` is what the daemon embeds as project memory.
+    # (3) That workspace's `.emrg/memory` is what the daemon embeds as agent memory.
     memory_root.mkdir(parents=True, exist_ok=True)
     (memory_root / "MEMORY.md").write_text("# Index\n", encoding="utf-8")
-    # `_collect_memory_data` reads the session's Agent (for the project half) and
+    # `_collect_memory_data` reads the session's Agent (for the agent half) and
     # `session.memory_dir` (for the session half), and reaches the module-level
     # `INDEX_SIZE_WARN` through a method — so an uninitialised instance is enough, and no
     # daemon, socket or event loop is started to measure this. The stand-in carries an
@@ -634,12 +634,12 @@ def test_prompt_memory_writes_land_where_the_daemon_loads_them(tmp_path, monkeyp
         )
     )
     assert data, (
-        "the daemon embedded no project index for a session whose cwd carries one — "
+        "the daemon embedded no agent index for a session whose cwd carries one — "
         "the comparison below would be against nothing"
     )
-    assert data["project_memory_dir"] == str(memory_root), (
+    assert data["agent_memory_dir"] == str(memory_root), (
         f"the templates tell the agent to write under {memory_root}, but the daemon "
-        f"embeds {data['project_memory_dir']} as project memory — the write root and "
+        f"embeds {data['agent_memory_dir']} as agent memory — the write root and "
         f"the loaded root have split apart again"
     )
 
@@ -712,11 +712,11 @@ def test_a_prompt_may_only_call_an_embedded_index_its_own() -> None:
     Measured 2026-09-14 (cyc20260914-175549), before the fix: three of the paragraphs
     re-based onto memory entries under `{{ evolution_cwd }}/.emrg/memory/` also called
     that directory's index "part of this prompt". It never was. `_collect_memory_data`
-    embeds `session.cwd/.emrg/memory/MEMORY.md` — the *task project's* index — and the
+    embeds `session.cwd/.emrg/memory/MEMORY.md` — the *task agent's* index — and the
     session index, and never `{{ evolution_cwd }}/.emrg/memory/MEMORY.md`; measured by
     pointing `EVOLUTION_CWD` at a directory whose memory index carries a marker and
     rendering the system prompt through the real builder: the marker stayed out while
-    the project's appeared.
+    the agent's appeared.
 
     The pairing was what was false, not the path: naming that root is fine, and claiming
     "the memory index is embedded in this prompt" without naming a path is fine. Naming a
@@ -744,7 +744,7 @@ def test_a_prompt_may_only_call_an_embedded_index_its_own() -> None:
     assert not _embedded_index_claims(
         "Record findings under `{{ source_dir }}/.emrg/memory/`, whose index is part of "
         "this prompt."
-    ), "the project-memory root IS the embedded one; flagging it is a false positive"
+    ), "the agent-memory root IS the embedded one; flagging it is a false positive"
     assert not _embedded_index_claims(
         "Durable facts belong in **memory entries under `{{ source_dir }}/.emrg/sessions/"
         "{{ session_id }}/memory/`**, whose index this prompt embeds."
@@ -797,7 +797,7 @@ PENDING_STATE_SWEEP: set[str] = set()
 #
 # ⚠️ Three more spellings, measured 2026-09-15 (cyc20260915-100310). The pattern
 # above matched an underscore-prefixed file name, so it was blind to the name
-# *without* its project prefix — and `promote_prompt.md` writes it that way:
+# *without* its agent prefix — and `promote_prompt.md` writes it that way:
 # line 38 is `- Reflection log: \u2026/reflections.md`, which the old pattern did not
 # see. Same for the section heading `### 5. Reflection Log` and for "diary", the
 # third name the rant lists. Measured on master `e6eaaee4`: 5 of that template's
@@ -832,7 +832,7 @@ def test_retired_state_file_mechanism_is_gone_or_being_swept() -> None:
     """A prompt outside `PENDING_STATE_SWEEP` must not teach the retired mechanism.
 
     Measured 2026-09-14 (rant 2026-09-14T14:35:47): each task prompt carried a
-    per-project `*_state.md` file and an append-only `*_reflections.md` diary, and
+    per-agent `*_state.md` file and an append-only `*_reflections.md` diary, and
     every phase hand-off was a line written into one of them. The host retired both
     — the daemon already replays the task's session history into every round, so the
     session is the state and the memory index is the durable layer. Nothing reads
@@ -958,7 +958,7 @@ def test_widened_fingerprint_is_measured_on_the_real_templates() -> None:
 
     # The 5 lines of `promote_prompt.md` that the widening added (38, 329, 331,
     # 363, 376), verbatim. Each is a spelling of the retired mechanism that names
-    # neither file with its project prefix — the blind spot the widening closed.
+    # neither file with its agent prefix — the blind spot the widening closed.
     gained_by_the_widening = (
         "- Reflection log: `{{ source_dir }}/reflections.md`",
         "### 5. Reflection Log (mandatory every round)",
@@ -1052,9 +1052,9 @@ def test_every_memory_root_a_template_names_is_writable() -> None:
     roots = writable_roots(policy)
     assert roots, "the policy derived no writable root — this check would pass vacuously"
 
-    project_root = REPO_ROOT / ".emrg" / "memory"
-    assert any(_inside(project_root, root) for root in roots), (
-        f"{project_root} is outside every writable root the sandbox derives "
+    agent_root = REPO_ROOT / ".emrg" / "memory"
+    assert any(_inside(agent_root, root) for root in roots), (
+        f"{agent_root} is outside every writable root the sandbox derives "
         f"({roots}) — the memory root the templates name is one the tool layer refuses"
     )
 
@@ -1093,7 +1093,7 @@ def test_no_template_names_a_memory_root_other_than_the_two() -> None:
     """Every memory path in every template is rooted at the session workspace.
 
     After D9 exactly two roots are legal, and both are the session workspace's own
-    (`LEGAL_MEMORY_ROOTS` — the project and session memory the daemon embeds, which are
+    (`LEGAL_MEMORY_ROOTS` — the agent and session memory the daemon embeds, which are
     the same two directories the sandbox allows because ``{{ source_dir }}`` IS
     ``session.cwd``). Everything else is a defect of one of two kinds: rooted at another
     variable (the D9 shape), or hardcoded as an absolute path (which no render-context
@@ -1126,7 +1126,7 @@ def test_no_template_names_a_memory_root_other_than_the_two() -> None:
     # A floor **per file**, not over the set (#1557): a floor summed over the six templates
     # is masked by any gain elsewhere, and cannot name the file that is short. These are
     # minimums, measured when the floor was made per-file (1, 3, 2, 3, 1, 3 — 13 across the
-    # six templates: 10 project-memory + 3 session-memory); a removal is allowed, but it has
+    # six templates: 10 agent-memory + 3 session-memory); a removal is allowed, but it has
     # to be deliberate and it has to be this line that is edited. A template absent from the
     # map is still covered by the scan; a *renamed* one lands here as 0 and cannot shed its
     # floor silently.
@@ -1159,7 +1159,7 @@ def test_no_template_names_a_memory_root_other_than_the_two() -> None:
     )
     assert not offenders, (
         f"these templates name a memory root that is neither the session workspace's "
-        f"project memory nor its session memory: {offenders}"
+        f"agent memory nor its session memory: {offenders}"
     )
 
 
@@ -1185,7 +1185,7 @@ def test_the_memory_root_scan_answers_both_ways() -> None:
     # templates actually use (both halves of the session root's two placeholders included).
     assert not _memory_root_offenders(
         "memory entries under `{{ source_dir }}/.emrg/memory/`"
-    )[1], "the project-memory root is where D9 sends every hand-off"
+    )[1], "the agent-memory root is where D9 sends every hand-off"
     assert not _memory_root_offenders(
         "`{{ source_dir }}/.emrg/sessions/{{ session_id }}/memory/`"
     )[1], "the session-memory root is the second legal one (promote_prompt.md)"
@@ -1368,10 +1368,10 @@ def test_the_host_tree_write_scan_answers_both_ways() -> None:
     retired = """```bash
 cd {{ source_dir }}
 gh repo fork {{ owner }}/{{ repo }} --clone=false 2>&1
-git checkout -b <branch name per project convention> 2>&1
+git checkout -b <branch name per agent convention> 2>&1
 ```"""
     assert _host_tree_git_writes(retired) == [
-        "git checkout -b <branch name per project convention> 2>&1"
+        "git checkout -b <branch name per agent convention> 2>&1"
     ], "the retired B.3 shape is exactly what this guard exists for"
 
     shipped = """```bash
@@ -1683,7 +1683,7 @@ def test_a_dirty_tree_no_longer_costs_a_cycle_its_tier_in_either_prompt() -> Non
 # Scope: the four top-level directories a template can only mean as *this* repository's. `.github/`
 # is out on purpose, and the measurement is why — the templates' only `.github/` citation is
 # `open_source_prompt.md`'s `cat .github/pull_request_template.md`, read in the flow that contributes
-# to *another* project; this repository's own `.github/` holds nothing but `workflows/`, so a scan
+# to *another* agent; this repository's own `.github/` holds nothing but `workflows/`, so a scan
 # that required that path would fail a citation that is correct.
 #
 # What the scan does not read, and why: a path written after a slash, or inside a longer path — an
@@ -1771,7 +1771,7 @@ def test_the_prompt_path_scan_answers_both_ways() -> None:
         )
 
     # The `.github/` exclusion is a decision rather than an oversight — the open-source flow reads the
-    # *target* project's conventions. Pinned here so widening the scope is a visible change.
+    # *target* agent's conventions. Pinned here so widening the scope is a visible change.
     assert _repo_paths_named_in("cat .github/pull_request_template.md 2>/dev/null") == []
 
 
@@ -1804,9 +1804,9 @@ def _handler_for_record(tmp_path, monkeypatch, *, top=None, under_config=None, t
     `make_handler` cannot express this case: it puts everything it is given under `config`.
     """
     monkeypatch.setattr(mod, "config_dir", lambda: tmp_path)
-    _write_projects_yml(tmp_path, "demoproj", {"name": "demoproj"})
+    _write_agents_yml(tmp_path, "demoproj", {"name": "demoproj"})
     handler = TaskHandler(name="demo-task", identity=InstanceIdentity())
-    config: dict = {"project": "demoproj"}
+    config: dict = {"agent": "demoproj"}
     if under_config is not None:
         config["extra_prompt"] = under_config
     record: dict = {
@@ -1947,11 +1947,11 @@ def test_a_top_level_copy_that_cannot_render_is_named(tmp_path, monkeypatch, cap
 # What the test below pins is the **wording that was vetoed**, not the class of sentence
 # it belonged to: it fails if `no mention at all` comes back into a template that still
 # allows a share of mentions, and it says nothing about a rewording of the same ban
-# ("never mention the project there" passes, and the control below measures that).
+# ("never mention the agent there" passes, and the control below measures that).
 # The boundary is deliberate. A matcher broad enough to catch a paraphrase also flags the
 # two lines that must keep saying no — red line 4's normal-participation class ("NO
-# disclosure, NO project mention") and the density rule itself ("≥70% are pure value with
-# NO project mention") — so widening it trades a real regression pin for two false alarms
+# disclosure, NO agent mention") and the density rule itself ("≥70% are pure value with
+# NO agent mention") — so widening it trades a real regression pin for two false alarms
 # on rules that must stay. Whether the prose has drifted back is a reading of the bullet
 # at Mission & Values, which is what a reviewer of a change to that section does.
 
@@ -1967,7 +1967,7 @@ def _vetoed_mention_ban_lines(text: str) -> list[str]:
     Scope, stated so the docstring cannot be read wider than the code: this is a literal
     phrase match on the wording that was vetoed. A paraphrase of the same ban is not
     caught (the control below measures that), because every matcher wide enough to catch
-    one also matches the two lines whose "NO project mention" is correct as written.
+    one also matches the two lines whose "NO agent mention" is correct as written.
 
     Empty when the two agree *and* when the template carries no density allowance at
     all — a template that stopped promising the rule cannot be contradicted by it.
@@ -2059,19 +2059,19 @@ def test_the_one_topic_one_channel_rule_keeps_its_distinguishing_mark() -> None:
     # becoming a promise the code does not keep.
     paraphrase = (
         "**Mention density**: only a few (≤30%) mention it naturally.\n"
-        "- in someone else's space, carry value and never mention the project there.\n"
+        "- in someone else's space, carry value and never mention the agent there.\n"
     )
     assert _vetoed_mention_ban_lines(paraphrase) == [], (
         "a paraphrase of the ban is not what this scanner reads — that is the limit recorded "
         "in its docstring, and widening past it flags two lines that must keep saying "
-        "'NO project mention'"
+        "'NO agent mention'"
     )
 
 
 # --------------------------------------------------------------------------- published, not merged
 #
 # The open-source flow is written for a contribution that becomes a pull request, and that is
-# not the only channel a project offers. A project whose extension surface is *distributable* —
+# not the only channel a agent offers. A agent whose extension surface is *distributable* —
 # a plugin, a package, a standalone tool — takes contributions that never touch an upstream
 # branch, and publishing one of those is where the old prompt stopped saying anything. Measured
 # on this installation's own tasks: a block in one task's `extra_prompt` states the duty in full
@@ -2141,7 +2141,7 @@ def test_the_published_contribution_pin_answers_both_ways():
 # therefore a list of what it sent out, and nothing in the template answered the opposite
 # question — what has someone else asked this account to do, and is it still waiting.
 #
-# Measured cost, on a pull request this account had opened in another project: a maintainer
+# Measured cost, on a pull request this account had opened in another agent: a maintainer
 # asked for a rebase in a comment, no round read it, and the request sat unanswered for nine
 # days while later rounds opened new threads instead. Carrying it out took minutes.
 #
@@ -2197,8 +2197,8 @@ def test_the_inbound_pin_answers_both_ways():
 #
 # The layout is not decoration: §3's inception step and §4's attribution rule both assume it.
 # An app that is submitted, attributed and possibly handed over has to be a repository of its
-# own, and §0.6 used to open with `<project root>/apps/<slug>/` — a child of a shared
-# container, which is not a repository root and is exactly the one-shared-project-for-several-
+# own, and §0.6 used to open with `<agent root>/apps/<slug>/` — a child of a shared
+# container, which is not a repository root and is exactly the one-shared-agent-for-several-
 # apps shape the placement forbids. These pin the layout the section must state, and refuse the
 # container by name.
 
@@ -2247,8 +2247,8 @@ def test_the_ios_layout_pin_answers_both_ways():
             f"removing {phrase!r} did not make exactly that phrase read as missing, so this pin "
             "would not notice its own rule being deleted"
         )
-    container = "<project root>/apps/<slug>/"
-    seeded = text.replace("`<project root>/<repo>/`", f"`{container}`", 1)
+    container = "<agent root>/apps/<slug>/"
+    seeded = text.replace("`<agent root>/<repo>/`", f"`{container}`", 1)
     assert seeded != text, "the layout line this test names is not a line the template carries"
     assert container in _ios_layout_section(seeded), (
         "the container refusal did not see a container written into the section it reads, so it "
@@ -2259,7 +2259,7 @@ def test_the_ios_layout_pin_answers_both_ways():
 # ── the ios-app template's repository identity ──────────────────────────────────────────────
 #
 # §0.6 owns the app's repository, so it owns what that repository *is*. "its own repository …
-# named after it — `<project root>/<repo>/`" constrains the directory's position and says nothing
+# named after it — `<agent root>/<repo>/`" constrains the directory's position and says nothing
 # about visibility or the name's form, so a public repository and a codename both satisfy it, and
 # §3 cites this section for *creating* the repository. A section cited as the authority for a
 # step has to carry the step; these pin the two properties it was not carrying.

@@ -2,7 +2,7 @@
 
 Why this file exists
 --------------------
-Host rant 2026-10-17T11:18:41.769853+08:00 (`submit_rant`, project `emrg`), taken on as
+Host rant 2026-10-17T11:18:41.769853+08:00 (`submit_rant`, agent `emrg`), taken on as
 issue #2342. Two gaps, both in the one place a cycle never looked:
 
 * `~/.emrg/tasks.yml` appeared in the template only as the `extra_prompt` injection heading.
@@ -10,7 +10,7 @@ issue #2342. Two gaps, both in the one place a cycle never looked:
   say — a defect report about the prompt, filed by the session least able to act on it.
   Measured on the host that filed the rant: two of four tasks carry a non-empty
   `config.extra_prompt` (4,325 and 6,990 chars), mixing instance facts with general method.
-* §1.5 told the cycle to read every project's `.emrg/memory/` and `.emrg/sessions/`, with
+* §1.5 told the cycle to read every agent's `.emrg/memory/` and `.emrg/sessions/`, with
   nothing saying what counts as a finding, so the next cycle read it all again.
 
 Both are prompt items, so both are pinned here rather than left as prose a later edit can
@@ -21,14 +21,14 @@ The second pin is the one that had to be measured
 -------------------------------------------------
 The new §1.5 answers "is this index far larger than its content justifies?" by counting.
 Written first as `awk 'length($0)>512' MEMORY.md | wc -l`, that reading is **wrong on this
-project's own host**: macOS `awk` measures *bytes*, while R9's 512 bound is *characters*, so
-every CJK row past ~170 characters is reported as over. Measured over the eight project
+agent's own host**: macOS `awk` measures *bytes*, while R9's 512 bound is *characters*, so
+every CJK row past ~170 characters is reported as over. Measured over the eight agent
 indexes here, the awk form reports 66, 33 and 3 over-long rows for `emrg`, `competition` and
 `pku-paper-3d`, and the true count is **0** in all three (longest rows 512, 511 and 418
-characters). A cycle obeying that sentence would open 102 bodies on three projects that have
+characters). A cycle obeying that sentence would open 102 bodies on three agents that have
 none to open — the funnel inverted. The reading now names `scripts/check-memory-index.py`,
 the producer R9's own compaction uses, and the prohibition is pinned beside it because this
-trap has already been recorded four times in this project's memory (`8e4b2a17` §7 among them).
+trap has already been recorded four times in this agent's memory (`8e4b2a17` §7 among them).
 
 Named limits
 ------------
@@ -58,7 +58,7 @@ TEMPLATE = REPO_ROOT / "emrg" / "server" / "evolution_prompt.md"
 #: The section that must gain the funnel, its neighbours (for the order pin), and the
 #: short phrases it must carry. Phrases rather than sentences: a re-wrap of the paragraph
 #: must not fail the guard, while a deletion of the rule must.
-FUNNEL = "#### 1.5 Memory and conversations across projects"
+FUNNEL = "#### 1.5 Memory and conversations across agents"
 FUNNEL_AFTER = "#### 1.4 master"
 FUNNEL_BEFORE = "#### 1.6 Comparable tools"
 FUNNEL_TERMS: tuple[str, ...] = (
@@ -67,9 +67,9 @@ FUNNEL_TERMS: tuple[str, ...] = (
     "Read indices, not bodies",                       # depth decided by evidence
     "exempt from the rotation",                       # R8 item 1 is not scheduled
     "Read conversation by location, never whole",     # a history is not read end to end
-    "One memory entry at project scope",              # the bookmark, as one entry
+    "One memory entry at agent scope",              # the bookmark, as one entry
     "never append a second entry",                    # ... or it becomes the file it avoids
-    "Other projects' memory is read-only for this cycle",
+    "Other agents' memory is read-only for this cycle",
     # The reading that answers "is this index too big", and the one this file exists for:
     # the guard, not a byte-measuring count.
     "scripts/check-memory-index.py",
@@ -165,7 +165,7 @@ def test_no_line_in_the_funnel_instructs_a_byte_measuring_count() -> None:
     """The one wrong reading this section shipped, and every line that could reintroduce it.
 
     The template may *mention* `awk` only to forbid it. Measured: the instruction form reports
-    66/33/3 over-long rows for three project indexes whose true count is 0.
+    66/33/3 over-long rows for three agent indexes whose true count is 0.
     """
     section = _section(_template(), FUNNEL)
     assert section, f"{FUNNEL!r} is missing from the template"
@@ -277,7 +277,7 @@ _needs_a_shell = pytest.mark.skipif(
 
 
 def test_no_placeholder_carries_a_quote() -> None:
-    """Measured 2026-10-17: the step-0 block shipped a placeholder reading `<that project's
+    """Measured 2026-10-17: the step-0 block shipped a placeholder reading `<that agent's
     bookmark time>`. The apostrophe closed the single quote around it, and `bash -n` on the
     block exited 2 — so the one line §1.5 calls "the step that is never skipped" was the one
     line that could not run as printed. A whole value is substituted for a placeholder, never
@@ -297,8 +297,8 @@ def test_no_placeholder_carries_a_quote() -> None:
 
 def test_the_placeholder_rule_discriminates() -> None:
     """Both directions: the quoted form must be reported, the fixed form must not be."""
-    broken = "find <project>/.emrg -newermt '<that project's bookmark time>' -print"
-    fixed = "find <project>/.emrg -newermt '<bookmark-time>' -print"
+    broken = "find <agent>/.emrg -newermt '<that agent's bookmark time>' -print"
+    fixed = "find <agent>/.emrg -newermt '<bookmark-time>' -print"
     assert [m for m in _PLACEHOLDER.findall(broken) if "'" in m], (
         "the shipped defect must be recognised as a quoted placeholder"
     )
@@ -348,9 +348,9 @@ def test_the_step_zero_line_finds_a_file_that_changed(tmp_path: Path) -> None:
     Named limits, both of them the reason this is not the whole guard:
     * the **format** is pinned by the text term in `FUNNEL_TERMS`, not here - this arm always
       supplies a space-separated value, so it cannot fail because a cycle was told to use
-      the `T` form. What that costs was measured 2026-10-17 on this host: over one project's
+      the `T` form. What that costs was measured 2026-10-17 on this host: over one agent's
       memory, `-newermt '2026-10-17T16:00:00'` answered 0 files where the space form answered
-      9, a step 0 that reports nothing changed for every project for ever.
+      9, a step 0 that reports nothing changed for every agent for ever.
     * it proves the shipped line answers on the host that runs it. A BSD `find` mis-parses
       the `T` form and a GNU one may not, so no single arm fixes the format everywhere.
     """
@@ -363,12 +363,12 @@ def test_the_step_zero_line_finds_a_file_that_changed(tmp_path: Path) -> None:
     saved.write_text("# an index\n", encoding="utf-8")
 
     bookmark = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 3600))
-    # The block's first line cats the host's project list; that is a reading of this host,
+    # The block's first line cats the host's agent list; that is a reading of this host,
     # not part of the question this arm asks, so it stays out of the script.
     script = "\n".join(
         line for line in block.splitlines() if not line.strip().startswith("cat ")
     )
-    script = script.replace("<project>", str(tmp_path / "proj")).replace(
+    script = script.replace("<agent>", str(tmp_path / "proj")).replace(
         "<bookmark-time>", bookmark
     )
 

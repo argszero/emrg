@@ -49,7 +49,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--init-auto-evolve",
         action="store_true",
-        help="Enable auto-evolution for the current project on connect.",
+        help="Enable auto-evolution for the current agent on connect.",
     )
 
     sub = parser.add_subparsers(dest="command", metavar="[command]")
@@ -99,7 +99,7 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Update emrg by pulling latest source and reinstalling.",
     )
 
-    # emrg rant [--project <name>] <message>
+    # emrg rant [--agent <name>] <message>
     rant_parser = sub.add_parser(
         "rant",
         help="Send feedback/complaint to EMRG for evolution analysis",
@@ -107,8 +107,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "evolution system will use to discover improvement opportunities.",
     )
     rant_parser.add_argument(
-        "-p", "--project",
-        help="Target project (from agents.yml). Omit for emrg itself.",
+        "-p", "--agent",
+        help="Target agent (from agents.yml). Omit for emrg itself.",
         default=None,
     )
     rant_parser.add_argument(
@@ -160,7 +160,7 @@ def main() -> None:
         else:
             _run_daemon()
     elif parsed.command == "rant":
-        _send_rant(" ".join(parsed.message), project=parsed.project)
+        _send_rant(" ".join(parsed.message), agent=parsed.agent)
     elif parsed.command == "stop":
         # Windows installer pre-stop depends on the non-zero exit code when
         # residual processes remain (emrg/_stop_all.py owns the full logic).
@@ -417,13 +417,13 @@ def _run_daemon() -> None:
 
 # ── Rant ──────────────────────────────────────────────────────
 
-def _send_rant(message: str, project: str | None = None) -> None:
+def _send_rant(message: str, agent: str | None = None) -> None:
     """Send a rant/feedback message to the daemon for evolution analysis."""
-    # Parse @project from message if -p/--project not explicitly set
-    # (matching TUI /rant @project behavior — app.py:1365-1369)
-    if project is None and message.startswith("@"):
+    # Parse @agent from message if -p/--agent not explicitly set
+    # (matching TUI /rant @agent behavior — app.py:1365-1369)
+    if agent is None and message.startswith("@"):
         parts = message.split(None, 1)
-        project = parts[0][1:]  # strip @
+        agent = parts[0][1:]  # strip @
         message = parts[1] if len(parts) > 1 else ""
 
     async def _do() -> None:
@@ -444,8 +444,8 @@ def _send_rant(message: str, project: str | None = None) -> None:
             "message": message,
             "timestamp": datetime.now().isoformat(),
         }
-        if project:
-            payload["project"] = project
+        if agent:
+            payload["agent"] = agent
 
         await ws.send(json.dumps(payload, ensure_ascii=False))
 

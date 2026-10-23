@@ -45,7 +45,7 @@ def _normalize_rant(raw) -> dict | None:
     The array form maps by **position**, and the rename left that position where it was:
     the second slot still holds the target's name, so a row written before the rename
     converts to ``agent`` with no move of its own. Nothing here reads a dict row's
-    ``project`` key — a table still carrying it is moved by
+    ``agent`` key — a table still carrying it is moved by
     :func:`migrate_rant_agent_field` before any reader sees it, and a fallback here
     would keep both spellings alive, which is what the move exists to end.
     """

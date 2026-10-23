@@ -318,7 +318,7 @@ def test_one_unreadable_subject_makes_the_whole_reading_incomplete(
 
 
 def test_the_default_subject_is_both_levels_the_tree_carries(mod) -> None:
-    """The project's index and one per session, and nothing else."""
+    """The agent's index and one per session, and nothing else."""
     import tempfile
 
     with tempfile.TemporaryDirectory() as raw:

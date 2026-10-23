@@ -10,18 +10,18 @@ import userEvent from "@testing-library/user-event";
 import { I18nProvider } from "../lib/i18n";
 import { WorkspaceView, type WorkspaceViewProps } from "./WorkspaceView";
 import type { MarkdownRenderer } from "../lib/markdown";
-import type { ProjectRec, RantRec, TaskRec } from "../lib/workspaceView";
+import type { AgentRec, RantRec, TaskRec } from "../lib/workspaceView";
 
 function setup(props: Partial<WorkspaceViewProps> = {}) {
   const utils = render(
     <I18nProvider lang="zh">
-      <WorkspaceView activeView="projects" projects={[]} tasks={[]} rants={[]} {...props} />
+      <WorkspaceView activeView="agents" agents={[]} tasks={[]} rants={[]} {...props} />
     </I18nProvider>,
   );
   return { ...utils };
 }
 
-const project = (name: string, path?: string): ProjectRec => ({
+const agent = (name: string, path?: string): AgentRec => ({
   name,
   path: path || `/proj/${name}`,
 });
@@ -50,10 +50,10 @@ const fakeMd: MarkdownRenderer = {
 };
 
 describe("WorkspaceView", () => {
-  it("面板切换：projects/tasks/rants/settings 各自渲染", async () => {
+  it("面板切换：agents/tasks/rants/settings 各自渲染", async () => {
     const onSwitch = vi.fn();
     const { rerender } = setup({ onSwitch });
-    expect(screen.getByTestId("panel-projects")).toBeInTheDocument();
+    expect(screen.getByTestId("panel-agents")).toBeInTheDocument();
 
     rerender(
       <I18nProvider lang="zh">
@@ -78,36 +78,36 @@ describe("WorkspaceView", () => {
   });
 
   it("项目列表：空态 → empty 提示；有数据 → 行 + auto_evolve 徽标", async () => {
-    setup({ projects: [] });
-    expect(screen.getByTestId("projects-empty")).toBeInTheDocument();
+    setup({ agents: [] });
+    expect(screen.getByTestId("agents-empty")).toBeInTheDocument();
 
-    const projects = [project("emrg"), project("aitokenpool", "/scm/aitokenpool")];
-    const tasks = [{ name: "emrg-task", config: { project: "emrg" } }] as TaskRec[];
-    const { rerender } = setup({ projects, tasks });
-    expect(screen.getAllByTestId("project-row")).toHaveLength(2);
+    const agents = [agent("emrg"), agent("aitokenpool", "/scm/aitokenpool")];
+    const tasks = [{ name: "emrg-task", config: { agent: "emrg" } }] as TaskRec[];
+    const { rerender } = setup({ agents, tasks });
+    expect(screen.getAllByTestId("agent-row")).toHaveLength(2);
     // emrg 有演化任务 → ⚡ 徽标；aitokenpool 无
-    const badges = screen.getAllByTestId("project-evolve-badge");
+    const badges = screen.getAllByTestId("agent-evolve-badge");
     expect(badges).toHaveLength(1);
     expect(badges[0]).toHaveTextContent("演化");
 
     rerender(
       <I18nProvider lang="zh">
-        <WorkspaceView activeView="projects" projects={[project("emrg")]} tasks={tasks} />
+        <WorkspaceView activeView="agents" agents={[agent("emrg")]} tasks={tasks} />
       </I18nProvider>,
     );
   });
 
   it("项目查看会话 → 子视图；返回 → 回列表", async () => {
-    const p = project("emrg");
+    const p = agent("emrg");
     const onViewSessions = vi.fn();
-    setup({ projects: [p], onViewProjectSessions: onViewSessions });
+    setup({ agents: [p], onViewAgentSessions: onViewSessions });
     await userEvent.click(screen.getByText("查看会话"));
     expect(onViewSessions).toHaveBeenCalledWith(p);
-    expect(screen.getByTestId("project-sessions")).toBeInTheDocument();
+    expect(screen.getByTestId("agent-sessions")).toBeInTheDocument();
     expect(screen.getByText("emrg 的会话")).toBeInTheDocument();
     // 返回
     await userEvent.click(screen.getByText("← 返回项目列表"));
-    expect(screen.getByTestId("project-list")).toBeInTheDocument();
+    expect(screen.getByTestId("agent-list")).toBeInTheDocument();
   });
 
   it("任务列表：状态徽标 + 倒计时 + meta + 操作回调", async () => {
@@ -118,7 +118,7 @@ describe("WorkspaceView", () => {
     const startedAt = Math.floor(Date.now() / 1000) - 100; // 100s 前启动
     const tasks = [
       task("daily-report", { running: true, started_at: startedAt }),
-      task("evolve", { next_run_in_seconds: 83, session_id: "evolve", project_path: "/proj/evolve" }),
+      task("evolve", { next_run_in_seconds: 83, session_id: "evolve", agent_path: "/proj/evolve" }),
       task("idle", {}),
     ];
     setup({ activeView: "tasks", tasks, onTriggerTask: onTrigger, onOpenSessionTask: onOpenSession, onEditTask: onEdit, onDeleteTask: onDelete });
@@ -247,39 +247,39 @@ describe("WorkspaceView", () => {
     expect(screen.getByTestId("rant-progress")).toHaveTextContent("（无进度说明）");
   });
 
-  // ── 项目会话子视图（Batch 5 接线：真实 listProjectSessions 数据） ──
+  // ── 项目会话子视图（Batch 5 接线：真实 listAgentSessions 数据） ──
 
   it("项目会话：loading → 会话行（title||id + 当前标记）→ 点击选择", async () => {
     const onSelect = vi.fn();
     const { rerender } = render(
       <I18nProvider lang="zh">
         <WorkspaceView
-          activeView="projects"
-          projects={[project("p1")]}
+          activeView="agents"
+          agents={[agent("p1")]}
           projectSessions={null}
-          onSelectProjectSession={onSelect}
+          onSelectAgentSession={onSelect}
         />
       </I18nProvider>,
     );
     await userEvent.click(screen.getByTitle("查看会话"));
     // loading 态
-    expect(screen.getByTestId("project-sessions-loading")).toBeTruthy();
+    expect(screen.getByTestId("agent-sessions-loading")).toBeTruthy();
     // 数据到达 → 会话行
     rerender(
       <I18nProvider lang="zh">
         <WorkspaceView
-          activeView="projects"
-          projects={[project("p1")]}
+          activeView="agents"
+          agents={[agent("p1")]}
           projectSessions={[
             { session_id: "s1", title: "会话甲", updated_at: "2026-08-26T10:00:00+08:00" },
             { session_id: "s2", updated_at: null },
           ]}
           currentSid="s1"
-          onSelectProjectSession={onSelect}
+          onSelectAgentSession={onSelect}
         />
       </I18nProvider>,
     );
-    const rows = screen.getAllByTestId("project-session-row");
+    const rows = screen.getAllByTestId("agent-session-row");
     expect(rows.length).toBe(2);
     expect(rows[0]).toHaveTextContent("会话甲"); // title 优先
     expect(rows[0]).toHaveTextContent("当前"); // currentSid 标记
@@ -294,24 +294,24 @@ describe("WorkspaceView", () => {
     const { rerender } = render(
       <I18nProvider lang="zh">
         <WorkspaceView
-          activeView="projects"
-          projects={[project("p1")]}
+          activeView="agents"
+          agents={[agent("p1")]}
           projectSessions={[]}
         />
       </I18nProvider>,
     );
     await userEvent.click(screen.getByTitle("查看会话"));
-    expect(screen.getByTestId("project-sessions-empty")).toHaveTextContent("暂无会话");
+    expect(screen.getByTestId("agent-sessions-empty")).toHaveTextContent("暂无会话");
     rerender(
       <I18nProvider lang="zh">
         <WorkspaceView
-          activeView="projects"
-          projects={[project("p1")]}
+          activeView="agents"
+          agents={[agent("p1")]}
           projectSessions={null}
           projectSessionsError="boom"
         />
       </I18nProvider>,
     );
-    expect(screen.getByTestId("project-sessions-error")).toHaveTextContent("boom");
+    expect(screen.getByTestId("agent-sessions-error")).toHaveTextContent("boom");
   });
 });

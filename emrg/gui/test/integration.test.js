@@ -6,7 +6,7 @@
  *
  * 范围（全部只读或隔离内操作）：
  * - ensureConnected → ping → pong（ServerPong 结构）
- * - list_sessions / list_models / list_projects
+ * - list_sessions / list_models / list_agents
  * - resume_session（不存在）→ 错误帧（无破坏性）
  * - delete_session（不存在）→ 错误帧
  * - daemon 被杀 → ensureConnected 重连（G43 stale port 流程）
@@ -205,10 +205,10 @@ test("list_models → models_list", { skip: SKIP }, async () => {
     `models contain test-model: ${JSON.stringify(frame.models)}`);
 });
 
-test("list_projects → projects_list（空）", { skip: SKIP }, async () => {
-  const frame = await client.sendCommandAndWait("list_projects", { cwd: tmp }, 5000);
-  assert.strictEqual(frame.type, "projects_list");
-  assert.ok(Array.isArray(frame.projects));
+test("list_agents → agents_list（空）", { skip: SKIP }, async () => {
+  const frame = await client.sendCommandAndWait("list_agents", { cwd: tmp }, 5000);
+  assert.strictEqual(frame.type, "agents_list");
+  assert.ok(Array.isArray(frame.agents));
 });
 
 test("resume_session（不存在）→ 错误帧（无破坏性）", { skip: SKIP }, async () => {

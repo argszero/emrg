@@ -44,7 +44,7 @@ describe("Sidebar", () => {
     expect(screen.queryAllByTestId("open-session-item")).toHaveLength(0);
   });
 
-  it("条目格式：有标题 → project/title；无标题 → project/sid", () => {
+  it("条目格式：有标题 → agent/title；无标题 → agent/sid", () => {
     setup();
     const items = screen.getAllByTestId("open-session-item");
     expect(items[0].querySelector(".conv-title")).toHaveTextContent("emrg/聊天 A");
@@ -52,7 +52,7 @@ describe("Sidebar", () => {
     expect(items[1].querySelector(".conv-title")).toHaveTextContent("aitokenpool/本地会话 B");
   });
 
-  it("无标题且本地未知 → project/sid 降级格式", () => {
+  it("无标题且本地未知 → agent/sid 降级格式", () => {
     setup({ knownSessions: [] });
     const items = screen.getAllByTestId("open-session-item");
     expect(items[0].querySelector(".conv-title")).toHaveTextContent("emrg/聊天 A");
@@ -150,7 +150,7 @@ describe("Sidebar", () => {
 
   it("渲染五个导航按钮（data-view + i18n title，vanilla side-nav-item）", () => {
     setup();
-    for (const view of ["sessions", "projects", "tasks", "rants", "settings"]) {
+    for (const view of ["sessions", "agents", "tasks", "rants", "settings"]) {
       const btn = screen.getByTestId(`nav-${view}`);
       expect(btn).toHaveClass("side-nav-item");
       expect(btn).toHaveAttribute("data-view", view);
@@ -162,21 +162,21 @@ describe("Sidebar", () => {
     setup({ activeView: "tasks" });
     expect(screen.getByTestId("nav-tasks")).toHaveClass("active");
     expect(screen.getByTestId("nav-sessions")).not.toHaveClass("active");
-    expect(screen.getByTestId("nav-projects")).not.toHaveClass("active");
+    expect(screen.getByTestId("nav-agents")).not.toHaveClass("active");
   });
 
   it("无打开会话时 nav rail 仍渲染（空态入口）", () => {
     setup({ openSessions: [] });
     expect(screen.getByTestId("side-nav")).toBeInTheDocument();
-    expect(screen.getByTestId("nav-projects")).toBeInTheDocument();
+    expect(screen.getByTestId("nav-agents")).toBeInTheDocument();
     expect(screen.queryByTestId("open-session-item")).not.toBeInTheDocument();
   });
 
   it("点击 nav 按钮 → onSwitchView(view)", async () => {
     const onSwitchView = vi.fn();
     setup({ onSwitchView });
-    await userEvent.click(screen.getByTestId("nav-projects"));
-    expect(onSwitchView).toHaveBeenCalledWith("projects");
+    await userEvent.click(screen.getByTestId("nav-agents"));
+    expect(onSwitchView).toHaveBeenCalledWith("agents");
     await userEvent.click(screen.getByTestId("nav-settings"));
     expect(onSwitchView).toHaveBeenCalledWith("settings");
   });

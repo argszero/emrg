@@ -23,7 +23,7 @@ SCRIPT = REPO_ROOT / "scripts" / "check_unbound_reads.py"
 
 
 def _tree(tmp_path: Path, **files: str) -> Path:
-    """A directory shaped like this project, so the script scans it.
+    """A directory shaped like this agent, so the script scans it.
 
     `emrg/` and `scripts/` are the two markers `_resolve_root` keys on, and
     `emrg/` is also a scanned directory, so one file there is enough. Module

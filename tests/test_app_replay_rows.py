@@ -30,7 +30,7 @@ from emrg.client.app import _replay_rows
 
 
 def test_a_message_record_becomes_its_own_role_row():
-    """The roles the records mode projects map through with their content intact.
+    """The roles the records mode agents map through with their content intact.
 
     The old disk path truncated nothing for a message either, and the reason it matters
     is the same defect that made `preview` unacceptable in the daemon's records mode: a
@@ -49,8 +49,8 @@ def test_a_message_record_becomes_its_own_role_row():
 def test_a_system_note_and_a_compaction_boundary_are_rows():
     """Issue #2351: the two record kinds the live stream announced, replayed as asked.
 
-    This client renders exactly what the daemon's records mode projects, and nothing it
-    does not — that is the drift requirement 4 removes. The mode now projects a
+    This client renders exactly what the daemon's records mode agents, and nothing it
+    does not — that is the drift requirement 4 removes. The mode now agents a
     `role: "system"` message and a `kind: "summary"` record, so both are rows here:
 
     * the system note takes the **record's own text** (that is all the live note for
@@ -75,8 +75,8 @@ def test_a_system_note_and_a_compaction_boundary_are_rows():
          "Summary: the earlier turns...",
          "2026-09-20T00:00:20"),
         ("user", "kept", ""),
-    ], "a role the mode does not project must still be skipped, and the two it now "
-    "projects must arrive with their own text and moment"
+    ], "a role the mode does not agent must still be skipped, and the two it now "
+    "agents must arrive with their own text and moment"
 
 
 def test_a_summary_without_a_count_still_renders_as_a_boundary():

@@ -3,7 +3,7 @@
 Why this file exists
 --------------------
 The host's rule — never start a background process — was measured on 2026-09-28 (cycle
-`cyc20260928-070538`, master `e07aa3da`) and found to be carried by **one project's
+`cyc20260928-070538`, master `e07aa3da`) and found to be carried by **one agent's
 memory and by no shipped prompt at all**:
 
 | carrier | statements |
@@ -11,9 +11,9 @@ memory and by no shipped prompt at all**:
 | `emrg/server/prompts/system.j2` | 0 |
 | `emrg/server/evolution_prompt.md` | 0 |
 | every other root under `~/.emrg/evolution/*/.emrg/` (memory + session memory) | 0 |
-| this project's own memory | 2 project + 3 session hits |
+| this agent's own memory | 2 agent + 3 session hits |
 
-Memory is per-project and per-session, so an instance running another project's task, on
+Memory is per-agent and per-session, so an instance running another agent's task, on
 another machine, is not reachable by a file in this one's `.emrg/memory/`. The rule has to
 sit where every render passes, and `system.j2` is that place: `daemon._build_system_prompt`
 is its single render site — for a host conversation exactly as for a scheduled task. The
@@ -136,7 +136,7 @@ def test_the_shared_prompt_states_the_no_background_red_line() -> None:
     assert block, (
         "emrg/server/prompts/system.j2 must carry the no-background-process red line — it "
         "is the only prompt every session is rendered under, and the rule lived in one "
-        "project's memory only"
+        "agent's memory only"
     )
     missing = _missing_terms(block, RED_LINE_TERMS)
     assert not missing, f"the red-line section must name every shape; missing: {missing}"

@@ -87,14 +87,14 @@ The rant half of the report prints this task's rows by default and **counts** th
 `open_rant_rows` returns every open rant — the reading stays whole, and the JSON below keeps
 every row too, each labelled `rendered` — but the prose renders only the rows this repo can
 act on, and says how many it withheld. The rule is `rendered_here`: this task's own rants
-(by either spelling), plus the ones naming **no** project. Withheld are the rows naming
-another project, which is the whole of the bulk and none of the work: measured 2026-10-04 on
+(by either spelling), plus the ones naming **no** agent. Withheld are the rows naming
+another agent, which is the whole of the bulk and none of the work: measured 2026-10-04 on
 this host, 40 open rants of which 39 were `silicon-science-cs`, ~8.7KB of the report's
 ~9.7KB, printed every cycle for a reader the template has already told those rows are not
 its own. `--all-rants` prints every row.
 
-A row naming no project is deliberately still printed, though no issue here can declare it:
-undeclared is not another project's work, and the rows this section exists for were added
+A row naming no agent is deliberately still printed, though no issue here can declare it:
+undeclared is not another agent's work, and the rows this section exists for were added
 after a cycle read "nothing to review" while pending rants without issues sat in the ledger
 (measured 2026-09-29) — so hiding an undeclared one would restore that defect for the row
 most likely to be this task's.
@@ -164,39 +164,39 @@ from pathlib import Path
 REPO = "argszero/emrg"
 
 
-def could_declare_here(project: str, repo: str = REPO) -> bool:
+def could_declare_here(agent: str, repo: str = REPO) -> bool:
     """Whether an issue in `repo` could carry the handle that pairs a rant with it.
 
-    A rant's declaring issue is filed by its own project's task, in that project's
-    repository, so the pairing is the project name (`emrg`) or its `owner/repo` form
+    A rant's declaring issue is filed by its own agent's task, in that agent's
+    repository, so the pairing is the agent name (`emrg`) or its `owner/repo` form
     (`argszero/emrg`) — the two spellings the template matches a rant to a task by. A rant
-    naming no project belongs to nobody, and one naming another project is another
+    naming no agent belongs to nobody, and one naming another agent is another
     repository's issue list: this repo can no more declare it than it can read it.
 
     This is the one place the pairing is code rather than prose, and it exists to bound a
     *reading*: see `open_rant_rows`, where the difference is 48.8s of `gh` against 5.8s.
     """
-    return bool(project) and project in (repo, repo.rsplit("/", 1)[-1])
+    return bool(agent) and agent in (repo, repo.rsplit("/", 1)[-1])
 
 
-def rendered_here(project: str, repo: str = REPO) -> bool:
+def rendered_here(agent: str, repo: str = REPO) -> bool:
     """Whether this rant gets a row in the report **by default**.
 
-    This task's own rants, and the ones naming **no** project at all. The withheld case is
-    the one the prompt decides for us in as many words — a rant naming another project is
+    This task's own rants, and the ones naming **no** agent at all. The withheld case is
+    the one the prompt decides for us in as many words — a rant naming another agent is
     not this instance's to act on — and on this host that is also the whole of the bulk
     (measured 2026-10-04: 40 open rants, 39 of them `silicon-science-cs`, ~8.7KB of the
     report's ~9.7KB, paid by every cycle).
 
-    A row naming **no** project is deliberately *not* withheld, even though
+    A row naming **no** agent is deliberately *not* withheld, even though
     `could_declare_here` is false for it: that predicate is about whether an issue **in this
-    repo** could carry the pairing, and a project-less row is not another
-    project's work — it is undeclared, which is a thing the cycle has to look at. The rows
+    repo** could carry the pairing, and a agent-less row is not another
+    agent's work — it is undeclared, which is a thing the cycle has to look at. The rows
     this table prints exist because a cycle reading the queue *alone* concluded "nothing to
     review" while three pending rants had no issue (measured 2026-09-29), so hiding an
     undeclared rant would restore that defect for the rows most likely to be this task's.
     """
-    return could_declare_here(project, repo) or not project
+    return could_declare_here(agent, repo) or not agent
 
 #: How the family's tools are invoked (`Agent.md`, "Test Commands"). Printed
 #: commands carry the runner the docstrings and the docs prescribe — a bare
@@ -500,8 +500,8 @@ class Rant:
     several issues claim one rant, a fault `check-issue-links.py` reports as a duplicate
     rather than something to merge here, so this row names them all and picks none.
 
-    `project` is the ledger row's own field, carried because it is what §2.2 decides on:
-    a rant belongs to this cycle when it names this task's project or its `owner/repo`,
+    `agent` is the ledger row's own field, carried because it is what §2.2 decides on:
+    a rant belongs to this cycle when it names this task's agent or its `owner/repo`,
     and to somebody else when it names another one. Measured 2026-10-01 on this host, the
     queue rendered **39** open rants — every one of them `silicon-science-cs` — as work
     the emrg cycle owed an issue and a PR, while the emrg rows in that ledger were all
@@ -516,7 +516,7 @@ class Rant:
     issues: list[int] = field(default_factory=list)
     closed_issues: list[int] = field(default_factory=list)
     unread_issues: list[int] = field(default_factory=list)
-    project: str = ""
+    agent: str = ""
 
 
 #: The handle R5 writes into a rant's `progress`: the word `issue` and the number. Anchored
@@ -613,7 +613,7 @@ def open_rant_rows(rants: str | None = None, repo: str = REPO) -> list[Rant]:
     # filed in.
     #
     # "Those rants" is this repo's rants, not the whole ledger. The bound below is the
-    # oldest instant that can *place* a row, and another project's rants cannot be placed
+    # oldest instant that can *place* a row, and another agent's rants cannot be placed
     # here at any bound — so letting them set the window buys nothing and costs the whole
     # ledger's history. Measured 2026-10-02 on this host: 40 open rants, of which 39 were
     # `silicon-science-cs` with the oldest reaching back to 2026-09-11,
@@ -682,8 +682,8 @@ def open_rant_rows(rants: str | None = None, repo: str = REPO) -> list[Rant]:
                 unread_issues=sorted(unread_here),
                 # The ledger's own key is `agent` (the record's target); the name
                 # this model keeps for the concept is its own, and the output rows below
-                # still label it `project`.
-                project=str(row.get("agent", "") or ""),
+                # still label it `agent`.
+                agent=str(row.get("agent", "") or ""),
             )
         )
     return sorted(out, key=lambda rant: rant.timestamp, reverse=True)
@@ -1308,15 +1308,15 @@ def render(reading: Reading, action: Action) -> str:
 
 
 def render_rant(rant: Rant) -> str:
-    """One rant's row: its handle, its state, the issue it was paired with, and its project.
+    """One rant's row: its handle, its state, the issue it was paired with, and its agent.
 
     The excerpt is flattened to a single line and capped, because a rant body is prose
     with headings and newlines and this row's job is to be *recognisable* in a list —
     `submit_rant(action="list")` is the reading that shows it whole.
 
-    The project is last and keyed rather than bare, so it cannot be read as part of the
+    The agent is last and keyed rather than bare, so it cannot be read as part of the
     status or as an issue number, and so a row without one is visible as such: §2.2 makes
-    a rant that names no project *(nor this task's)* one to ignore entirely.
+    a rant that names no agent *(nor this task's)* one to ignore entirely.
 
     `no issue yet` means what it says: the entry names no issue and no issue in **either**
     state declares this rant. An issue that was closed — normally by the merge of its own
@@ -1337,7 +1337,7 @@ def render_rant(rant: Rant) -> str:
         excerpt = excerpt[:109] + "…"
     lines = [
         f"rant {rant.timestamp}  {rant.status}  {where}  "
-        f"project={rant.project or '(none)'}"
+        f"agent={rant.agent or '(none)'}"
     ]
     if excerpt:
         lines.append(f"    {excerpt}")
@@ -1449,14 +1449,14 @@ def _as_json(
             "closed_issues": rant.closed_issues,
             "unread_issues": rant.unread_issues,
             "message": rant.message,
-            "project": rant.project,
-            # The prose rendering withholds another project's rows (a cycle's report is
+            "agent": rant.agent,
+            # The prose rendering withholds another agent's rows (a cycle's report is
             # the surface whose size is paid, and the prompt says those rows are not its
             # work), but the **document keeps every row** and labels it here instead: a
             # consumer that lost rows silently would be reading a short list as a whole
             # one, which is this family's "never a pass" defect in its JSON form. The
             # field is the prose's own predicate, spelled once - `rendered_here`.
-            "rendered": rendered_here(rant.project, repo),
+            "rendered": rendered_here(rant.agent, repo),
         }
         for rant in (rants or [])
     )
@@ -1520,10 +1520,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--all-rants",
         action="store_true",
-        help="print every open rant's row, including other projects' - the default "
+        help="print every open rant's row, including other agents' - the default "
              "renders the rows `rendered_here` accepts (this repo's, and the rows "
-             "naming no project: naming no project is still printed, because "
-             "undeclared is not another project's work) and counts the rest",
+             "naming no agent: naming no agent is still printed, because "
+             "undeclared is not another agent's work) and counts the rest",
     )
     parser.add_argument(
         "--json", action="store_true", help="emit the readings as JSON instead of prose"
@@ -1639,43 +1639,43 @@ def main(argv: list[str] | None = None) -> int:
             print()
             counts: dict[str, int] = {}
             for rant in rants:
-                name = rant.project or "(no project)"
+                name = rant.agent or "(no agent)"
                 counts[name] = counts.get(name, 0) + 1
             across = ", ".join(
                 f"{name} {count}"
                 for name, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
             )
             print(
-                f"{len(rants)} open rant(s) across {len(counts)} project(s) - {across} - "
+                f"{len(rants)} open rant(s) across {len(counts)} agent(s) - {across} - "
                 "each needs an issue and its PR (R5) once it is this task's; the prompt's "
-                "rant section matches a rant to a task by `project` (this task's project, "
-                "or its owner/repo), so a row naming another project is not this cycle's "
-                "work and is withheld by default - one naming no project is undeclared "
-                "rather than another project's, and is rendered (`rendered_here` decides "
+                "rant section matches a rant to a task by `agent` (this task's agent, "
+                "or its owner/repo), so a row naming another agent is not this cycle's "
+                "work and is withheld by default - one naming no agent is undeclared "
+                "rather than another agent's, and is rendered (`rendered_here` decides "
                 "both):"
             )
             # Rendered by default: the rows `rendered_here` accepts - this repo's, and the
-            # ones naming no project (a second predicate, `could_declare_here`, is **not**
-            # the rendering rule: it is false for a project-less row too, so it separates
-            # nothing here). Another project's rows are **counted above and not printed** —
+            # ones naming no agent (a second predicate, `could_declare_here`, is **not**
+            # the rendering rule: it is false for a agent-less row too, so it separates
+            # nothing here). Another agent's rows are **counted above and not printed** —
             # the header keeps the ledger whole, so nothing is hidden, and their bodies are
             # what this section's cost was made of (measured 2026-10-04 on this host: 40 open
             # rants, 39 of them `silicon-science-cs`, ~8.7KB of a ~9.7KB report, paid by a
             # cycle for whom the prompt itself says they are not its work). `--all-rants`
             # prints them all.
             rendered = rants if args.all_rants else [
-                rant for rant in rants if rendered_here(rant.project, args.repo)
+                rant for rant in rants if rendered_here(rant.agent, args.repo)
             ]
             withheld = len(rants) - len(rendered)
             if withheld:
                 print(
                     f"{withheld} of them "
                     + ("names" if withheld == 1 else "name")
-                    + " another project, so "
+                    + " another agent, so "
                     + ("its row is" if withheld == 1 else "their rows are")
                     + " counted above and not printed here: `rendered_here` withholds "
-                    "another project's rows and only those - a row naming no project is "
-                    "undeclared, not another project's, so it is not withheld either. "
+                    "another agent's rows and only those - a row naming no agent is "
+                    "undeclared, not another agent's, so it is not withheld either. "
                     f"`{RUNNER} scripts/review-queue.py --all-rants` prints every row."
                 )
             print()

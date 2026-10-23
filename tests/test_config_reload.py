@@ -5,7 +5,7 @@ daemon; the only path was a client SIGKILLing it, which drops every connection
 and rebuilds every scheduled handler. These tests pin the replacement — a
 daemon-side fingerprint + in-place apply, with `model` riding the `/model` path.
 
-Two rules these tests obey, both from the project's own safety lines:
+Two rules these tests obey, both from the agent's own safety lines:
 
 * **They never read or write the host's real `~/.emrg/config.toml`.** Every
   case builds its own file under `tmp_path` and hands it to

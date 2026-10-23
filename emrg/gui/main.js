@@ -576,8 +576,8 @@ vision = false
       }
       // P6（rant 15:07:19 边界）：projectPath 校验（跨项目打开时传项目路径）
       if (projectPath !== undefined && (typeof projectPath !== "string" || !projectPath.trim())) {
-        logger.warn(`[gui:switch] REJECT invalid project path=${projectPath}`);
-        throw new Error("invalid project path");
+        logger.warn(`[gui:switch] REJECT invalid agent path=${projectPath}`);
+        throw new Error("invalid agent path");
       }
       // P6（rant 15:07:19 上限 20）：显式打开新会话超限 → 提示不自动关（已打开 sid 复用不拦）
       if (openSessions.size >= DEFAULT_CAP && !openSessions.has(sessionId)) {
@@ -669,7 +669,7 @@ vision = false
     ipcMain.handle("emrg:newSession", async (_e, { projectPath } = {}) => {
       // P6（rant 15:07:19 边界）：projectPath 校验（新建会话指定项目时）
       if (projectPath !== undefined && (typeof projectPath !== "string" || !projectPath.trim())) {
-        throw new Error("invalid project path");
+        throw new Error("invalid agent path");
       }
       // G14/G81：本地生成 session_id（无 new_session 消息）
       const sid = generateSessionId();
@@ -747,7 +747,7 @@ vision = false
       //
       // `cwd` resolves from the session exactly as `emrg:listHistory` does (rant
       // 2026-08-25T17:38:56): a hardcoded DEFAULT_CWD reads every session from the
-      // wrong project and answers an empty list that looks like "nothing typed yet".
+      // wrong agent and answers an empty list that looks like "nothing typed yet".
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
       const payload = { session_id: sessionId, cwd: resolveSessionCwd(sessionId) || DEFAULT_CWD };
       const frame = await requireConn().sendCommandAndWait("list_input_history", payload, 5000);
@@ -782,9 +782,9 @@ vision = false
       return { ok: true, removedCount: frame.removed_count ?? 0 };
     });
 
-    ipcMain.handle("emrg:listMemories", async (_e, { scope = "project", sessionId } = {}) => {
+    ipcMain.handle("emrg:listMemories", async (_e, { scope = "agent", sessionId } = {}) => {
       // GUI / 指令 P3：/memory — 列出记忆（daemon list_memories → memories_list）
-      // 记忆命令同样按会话真实项目取 cwd（scope=session 时用该会话，project 时用当前会话）
+      // 记忆命令同样按会话真实项目取 cwd（scope=session 时用该会话，agent 时用当前会话）
       const memCwd = resolveSessionCwd(sessionId || currentSessionId) || DEFAULT_CWD;
       const params = { scope, cwd: memCwd };
       if (scope === "session") {
@@ -795,7 +795,7 @@ vision = false
       return frame.memories || [];
     });
 
-    ipcMain.handle("emrg:readMemory", async (_e, { memoryId, scope = "project", sessionId } = {}) => {
+    ipcMain.handle("emrg:readMemory", async (_e, { memoryId, scope = "agent", sessionId } = {}) => {
       // GUI / 指令 P3：/memory <id> — 读取单条记忆（daemon read_memory → memory_content）
       if (typeof memoryId !== "string" || !memoryId.trim()) throw new Error("invalid memory_id");
       const params = { scope, memory_id: memoryId.trim(), cwd: resolveSessionCwd(sessionId || currentSessionId) || DEFAULT_CWD };
@@ -860,11 +860,11 @@ vision = false
 
     ipcMain.handle("emrg:listSkills", async () => {
       // GUI / 指令 P3：/skills — 读取技能列表（TUI 本地 load_skills 等价物，daemon 无协议）
-      // 技能在 ~/.emrg/skills/*.md（user）与 <projectDir>/.emrg/skills/*.md（project）
+      // 技能在 ~/.emrg/skills/*.md（user）与 <projectDir>/.emrg/skills/*.md（agent）
       const skills = [];
       const dirs = [
         { dir: path.join(os.homedir(), ".emrg", "skills"), source: "user" },
-        { dir: path.join(DEFAULT_CWD, ".emrg", "skills"), source: "project" },
+        { dir: path.join(DEFAULT_CWD, ".emrg", "skills"), source: "agent" },
       ];
       for (const { dir, source } of dirs) {
         let files = [];
@@ -883,40 +883,40 @@ vision = false
       return skills;
     });
 
-    ipcMain.handle("emrg:listProjects", async () => {
-      // GUI / 指令 P4：/rant 项目下拉 — daemon list_projects → projects_list
-      const frame = await requireConn().sendCommandAndWait("list_projects", {}, 5000);
-      return frame.projects || [];
+    ipcMain.handle("emrg:listAgents", async () => {
+      // GUI / 指令 P4：/rant 项目下拉 — daemon list_agents → agents_list
+      const frame = await requireConn().sendCommandAndWait("list_agents", {}, 5000);
+      return frame.agents || [];
     });
 
     // P5（rant 15:07:19）：某项目的会话列表（list_sessions(cwd=projectPath)）
-    ipcMain.handle("emrg:listProjectSessions", async (_e, { projectPath }) => {
-      if (typeof projectPath !== "string" || !projectPath) throw new Error("invalid project path");
+    ipcMain.handle("emrg:listAgentSessions", async (_e, { projectPath }) => {
+      if (typeof projectPath !== "string" || !projectPath) throw new Error("invalid agent path");
       const frame = await requireConn().sendCommandAndWait("list_sessions", { cwd: projectPath }, 5000);
       return { sessions: frame.sessions || [] };
     });
 
-    // P5：新建项目 = 轻量命令带 cwd → daemon 隐式 _touch_project 注册（零改动）
-    ipcMain.handle("emrg:registerProject", async (_e, { path: p }) => {
-      if (typeof p !== "string" || !p) throw new Error("invalid project path");
+    // P5：新建项目 = 轻量命令带 cwd → daemon 隐式 _touch_agent 注册（零改动）
+    ipcMain.handle("emrg:registerAgent", async (_e, { path: p }) => {
+      if (typeof p !== "string" || !p) throw new Error("invalid agent path");
       try {
         fs.accessSync(p, fs.constants.W_OK); // 目录可写校验（G121）
       } catch {
-        throw new Error("project directory not writable");
+        throw new Error("agent directory not writable");
       }
       await requireConn().sendCommandAndWait("list_sessions", { cwd: p }, 5000); // 隐式注册
       return { ok: true, path: p };
     });
 
     // P5 slice 2：删除项目 = 只删 agents.yml 条目（保留磁盘数据）+ 关闭该项目已打开会话
-    // 受保护项目不可删除（内置 project emrg / 内置 task emrg-task → 演化依赖，删了悬空）；
-    // `.emrg` 是 _touch_project 历史记录**非内置 → 可删**（再次访问重新注册）。
+    // 受保护项目不可删除（内置 agent emrg / 内置 task emrg-task → 演化依赖，删了悬空）；
+    // `.emrg` 是 _touch_agent 历史记录**非内置 → 可删**（再次访问重新注册）。
     // 返回 { ok, removed, closed: [sids] }；renderer 收到后负责切换激活会话。
-    ipcMain.handle("emrg:removeProject", async (_e, { name, path: p } = {}) => {
-      if (typeof name !== "string" || !name.trim()) throw new Error("invalid project name");
-      // 受保护项目：内置 project `emrg` + 内置 task `emrg-task`
+    ipcMain.handle("emrg:removeAgent", async (_e, { name, path: p } = {}) => {
+      if (typeof name !== "string" || !name.trim()) throw new Error("invalid agent name");
+      // 受保护项目：内置 agent `emrg` + 内置 task `emrg-task`
       if (name === "emrg" || name === "emrg-task") {
-        return { ok: false, protected: true, error: "protected system project" };
+        return { ok: false, protected: true, error: "protected system agent" };
       }
       // 该项目已打开的会话 → 关闭连接 + 移除 + 写盘（激活中先切相邻由 renderer 处理）
       const closed = [];
@@ -930,7 +930,7 @@ vision = false
       if (currentSessionId && closed.includes(currentSessionId)) {
         currentSessionId = null; // 激活会话被关 → 无激活（renderer 切相邻）
       }
-      const frame = await requireConn().sendCommandAndWait("remove_project", { name: name.trim() }, 5000);
+      const frame = await requireConn().sendCommandAndWait("remove_agent", { name: name.trim() }, 5000);
       schedulePersistGuiState();
       broadcastOpenSessions();
       return { ok: true, removed: Boolean(frame.removed), closed, name };
@@ -968,15 +968,15 @@ vision = false
 
     // ── Task/template CRUD IPC (rant 2026-08-12T18:23:15 P3) ──────────
     ipcMain.handle("emrg:taskCreate", async (_e, payload) => {
-      const { name, type, project, interval, enabled, repo, description, sandbox, schedule } = payload || {};
+      const { name, type, agent, interval, enabled, repo, description, sandbox, schedule } = payload || {};
       if (typeof name !== "string" || !name.trim()) throw new Error("invalid task name");
       if (typeof type !== "string" || !type.trim()) throw new Error("invalid task type");
-      if (typeof project !== "string" || !project.trim()) throw new Error("invalid project");
+      if (typeof agent !== "string" || !agent.trim()) throw new Error("invalid agent");
       // `schedule` 必须原样转发：这张固定字段表此前把它丢掉，于是 GUI 永远只能建
       // 单一频次的任务，daemon 收了也白收（issue #2490）。只有 payload 真的带了这个
       // 键才发，缺席＝不声明，与 task_update 的「缺省不动该字段」一致。
       const fields = {
-        name: name.trim(), task_type: type.trim(), project: project.trim(),
+        name: name.trim(), task_type: type.trim(), agent: agent.trim(),
         interval, enabled, repo, description, sandbox,
       };
       if ("schedule" in (payload || {})) fields.schedule = schedule;
@@ -1037,12 +1037,12 @@ vision = false
       return frame.rants || [];
     });
 
-    ipcMain.handle("emrg:sendRant", async (_e, { message, project = "" } = {}) => {
+    ipcMain.handle("emrg:sendRant", async (_e, { message, agent = "" } = {}) => {
       // GUI / 指令 P4：/rant — 提交反馈到演化系统（daemon rant 协议，字段序与 rants.jsonl 一致）
       if (typeof message !== "string" || !message.trim()) throw new Error("invalid rant message");
       const frame = await requireConn().sendCommandAndWait("rant", {
         message: message.trim().slice(0, 10000),
-        project: String(project || "").trim(),
+        agent: String(agent || "").trim(),
         // timestamp deliberately NOT sent: daemon stamps rants with local time
         // (rant 2026-08-07T13:34Z — GUI previously sent new Date().toISOString(),
         // which is UTC and 8h behind on UTC+8 hosts)
@@ -1259,7 +1259,7 @@ vision = false
       return { ok: true };
     });
 
-    ipcMain.handle("emrg:pickProjectDir", async () => {
+    ipcMain.handle("emrg:pickAgentDir", async () => {
       // G70/G115：只选不写盘（保存才落盘）
       const res = await dialog.showOpenDialog(win, { properties: ["openDirectory"] });
       return res.canceled ? null : res.filePaths[0];

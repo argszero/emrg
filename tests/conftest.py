@@ -6,11 +6,11 @@ feedback loop — once a stale entry lands in the file (seeded by the
 workspace self-heal family), subsequent tests re-read it and re-write
 it, advancing the pytest-N counter on every full run. The daemon's
 per-cycle repair (#734) eventually cleans it, but until then the host's
-GUI project picker shows a dead path.
+GUI agent picker shows a dead path.
 
 CI finding (PR #738): test_ws_e2e._boot_server only patched
 daemon/connect config_dir, but EmrgServer.serve() builds a real
-TaskScheduler whose load_and_start() → _ensure_emrg_project_entry()
+TaskScheduler whose load_and_start() → _ensure_emrg_agent_entry()
 writes config_dir()/agents.yml, and whose reader/writer (`read_table`,
 `write_table`) touch tasks.yml — all through scheduler.py's own
 (unpatched) config_dir → on a fresh runner this hits the real ~/.emrg/

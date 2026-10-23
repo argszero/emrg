@@ -3,7 +3,7 @@
 
 The defect this pins: every `resume_session` the TUI sent carried the client's
 **own** cwd. That is only right by accident. A session belonging to another
-project — a scheduled task's cycle above all — lives under a different
+agent — a scheduled task's cycle above all — lives under a different
 `.emrg/sessions/`, and the daemon's broadcast filter is keyed by `(session, cwd)`,
 so the wrong cwd both fails to open it and, where it does open, leaves the live
 frames addressed to nobody. The daemon held the fact all along
@@ -56,7 +56,7 @@ def test_an_unknown_answer_keeps_the_cwd_the_client_has():
 
     The daemon does not vouch for a session the global index has never seen. The
     client's own cwd is then the only candidate and is the right one for a session
-    in the current project — so it is used, but as a fallback rather than being
+    in the current agent — so it is used, but as a fallback rather than being
     written down as if the daemon had said it.
     """
     target = _resume_target_from_resolution(
@@ -87,7 +87,7 @@ def test_an_answer_about_another_session_moves_nobody():
     The answer names its session for exactly this check — the same discipline
     `_task_open_switch` applies at the other end of the round trip. Without it, a
     `/resume A` whose answer never came would let a later `/resume B` drag the
-    host into A's project.
+    host into A's agent.
     """
     assert _resume_target_from_resolution(
         {"session_id": "other", "cwd": "/proj/a"}, "s1", "/host/cwd"

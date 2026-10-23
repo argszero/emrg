@@ -1,43 +1,43 @@
 import { describe, expect, it } from "vitest";
-import { isProtectedProject, projectRowView, sessionRowView } from "./openSession";
-import type { ProjectRow } from "./openSession";
+import { isProtectedAgent, agentRowView, sessionRowView } from "./openSession";
+import type { AgentRow } from "./openSession";
 
 /**
  * openSession.test.ts — 打开/新建会话行格式化测试（Batch 4 slice 3）。
- * 镜像 vanilla showOpenSessionDialog / showProjectSessions / isProtectedProject。
+ * 镜像 vanilla showOpenSessionDialog / showAgentSessions / isProtectedAgent。
  */
 
 const t = (key: string) => key; // 透传 i18n key（relTime 缺省即回退 key）
 
-describe("projectRowView", () => {
+describe("agentRowView", () => {
   it("label = name；hint = path；active = relTime", () => {
-    const v = projectRowView({ name: "emrg", path: "/x/emrg", latest_session_at: new Date().toISOString() }, t);
+    const v = agentRowView({ name: "emrg", path: "/x/emrg", latest_session_at: new Date().toISOString() }, t);
     expect(v.label).toBe("emrg");
     expect(v.hint).toBe("/x/emrg");
     expect(v.active).not.toBe("");
   });
 
   it("无 name → path 兜底；无 path → 空串", () => {
-    expect(projectRowView({ path: "/only/path" }).label).toBe("/only/path");
-    expect(projectRowView({ name: "n" }).hint).toBe("");
-    expect(projectRowView({}).label).toBe("");
+    expect(agentRowView({ path: "/only/path" }).label).toBe("/only/path");
+    expect(agentRowView({ name: "n" }).hint).toBe("");
+    expect(agentRowView({}).label).toBe("");
   });
 
   it("无 latest_session_at → active 空串", () => {
-    expect(projectRowView({ name: "a" }).active).toBe("");
+    expect(agentRowView({ name: "a" }).active).toBe("");
   });
 });
 
-describe("isProtectedProject", () => {
+describe("isProtectedAgent", () => {
   it("内置 emrg / emrg-task 受保护", () => {
-    expect(isProtectedProject({ name: "emrg" })).toBe(true);
-    expect(isProtectedProject({ name: "emrg-task" })).toBe(true);
+    expect(isProtectedAgent({ name: "emrg" })).toBe(true);
+    expect(isProtectedAgent({ name: "emrg-task" })).toBe(true);
   });
 
   it("其他项目不保护", () => {
-    expect(isProtectedProject({ name: "aitokenpool" })).toBe(false);
-    expect(isProtectedProject({})).toBe(false);
-    expect(isProtectedProject(undefined as unknown as ProjectRow)).toBe(false);
+    expect(isProtectedAgent({ name: "aitokenpool" })).toBe(false);
+    expect(isProtectedAgent({})).toBe(false);
+    expect(isProtectedAgent(undefined as unknown as AgentRow)).toBe(false);
   });
 });
 

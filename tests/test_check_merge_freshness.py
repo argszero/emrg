@@ -1186,7 +1186,7 @@ def test_no_function_has_an_unused_parameter() -> None:
 # rebase it)" - and the second half cannot be done: a rebase of a branch whose
 # head is already on the remote rewrites the commits the remote holds, so
 # `git push` is refused as non-fast-forward and the only way to publish one is a
-# force-push, which this project forbids ("NEVER force-push over an existing
+# force-push, which this agent forbids ("NEVER force-push over an existing
 # remote branch", `emrg/server/evolution_prompt.md`). Measured 2026-09-19
 # (`cyc20260919-065231`) on `#1404`: the rebase was rejected exactly so, while
 # merging master in and pushing the same tree moved the head cleanly; every
@@ -1259,7 +1259,7 @@ def test_no_carrier_offers_a_rebase_as_the_refresh_route(mod, monkeypatch, capsy
     assert "nothing to void" in err, "the verdict under test is the one that names the route"
     assert _rebase_offers(err) == [], (
         "the refresh must be published by pushing a merge: a rebase of a pushed branch "
-        "cannot be pushed back without a force-push, which this project forbids"
+        "cannot be pushed back without a force-push, which this agent forbids"
     )
     assert "git push" in err, "the route named must carry the step that moves the head"
 

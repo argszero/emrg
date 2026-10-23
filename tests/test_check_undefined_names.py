@@ -23,7 +23,7 @@ SCRIPT = REPO_ROOT / "scripts" / "check-undefined-names.py"
 
 
 def _tree(tmp_path: Path, **files: str) -> Path:
-    """A directory shaped like this project, so the script scans it.
+    """A directory shaped like this agent, so the script scans it.
 
     `emrg/` and `scripts/` are the two markers the guard's own-checkout resolution keys
     on, and `emrg/` is also a scanned root, so one file there is enough. Module names are

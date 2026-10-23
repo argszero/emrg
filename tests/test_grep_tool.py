@@ -26,7 +26,7 @@ def temp_cwd():
         (root / "tests" / "test_main.py").write_text(
             "import pytest\nfrom src.main import main\n\ndef test_main():\n    main()\n"
         )
-        (root / "README.md").write_text("# Project\n\nA test project.\n")
+        (root / "README.md").write_text("# Agent\n\nA test agent.\n")
         (root / "__pycache__").mkdir()
         (root / "__pycache__" / "compiled.pyc").write_text("binary")
         yield root
@@ -817,7 +817,7 @@ def test_every_glob_example_the_description_advertises_selects_files(tmp_path):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "main.py").write_text("import os\n")
     (tmp_path / "src" / "app.ts").write_text("import x\n")
-    (tmp_path / "README.md").write_text("# Project\n")
+    (tmp_path / "README.md").write_text("# Agent\n")
 
     for glob_example in globs:
         result = _run(GrepTool().execute({

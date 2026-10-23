@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../lib/i18n";
-import type { ProjectRec } from "../lib/workspaceView";
+import type { AgentRec } from "../lib/workspaceView";
 import { Dialog } from "./Dialog";
 
 /**
@@ -8,19 +8,19 @@ import { Dialog } from "./Dialog";
  * 镜像 vanilla `openRantForm()` / `submitRantForm()`（renderer/js/dialogs.js）：
  *
  * - 打开即清空消息、聚焦输入；
- * - 项目下拉 = 已注册项目（选填，value=name||path，与 daemon rant 协议 project 字段一致）；
+ * - 项目下拉 = 已注册项目（选填，value=name||path，与 daemon rant 协议 agent 字段一致）；
  * - 消息必填（空 → 内联错误；vanilla 用 showConfirm 提示）；
- * - 提交 → onSubmit({message, project})（调用方接线 sendRant + 刷新列表 + 反馈）。
+ * - 提交 → onSubmit({message, agent})（调用方接线 sendRant + 刷新列表 + 反馈）。
  */
 export interface RantDialogProps {
   open: boolean;
   /** 项目下拉选项（仅已注册项目；选填） */
-  projects?: ProjectRec[];
-  onSubmit?: (payload: { message: string; project: string }) => void | Promise<void>;
+  agents?: AgentRec[];
+  onSubmit?: (payload: { message: string; agent: string }) => void | Promise<void>;
   onDismiss?: () => void;
 }
 
-export function RantDialog({ open, projects = [], onSubmit, onDismiss }: RantDialogProps) {
+export function RantDialog({ open, agents = [], onSubmit, onDismiss }: RantDialogProps) {
   const { t } = useI18n();
   const [err, setErr] = useState<string | null>(null);
   const msgRef = useRef<HTMLTextAreaElement>(null);
@@ -41,7 +41,7 @@ export function RantDialog({ open, projects = [], onSubmit, onDismiss }: RantDia
       return;
     }
     try {
-      await onSubmit?.({ message: msg, project: projectRef.current?.value ?? "" });
+      await onSubmit?.({ message: msg, agent: projectRef.current?.value ?? "" });
     } finally {
       onDismiss?.();
     }
@@ -76,10 +76,10 @@ export function RantDialog({ open, projects = [], onSubmit, onDismiss }: RantDia
           <textarea ref={msgRef} data-testid="rant-message" rows={5} placeholder={t("rants.placeholder")} />
         </label>
         <label className="form-row">
-          <span>{t("rants.project")}</span>
-          <select ref={projectRef} data-testid="rant-project">
+          <span>{t("rants.agent")}</span>
+          <select ref={projectRef} data-testid="rant-agent">
             <option value="">—</option>
-            {projects.map((p) => {
+            {agents.map((p) => {
               const v = p.name || p.path || "";
               return (
                 <option key={v} value={v}>

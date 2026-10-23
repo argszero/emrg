@@ -1,10 +1,10 @@
 """The daemon's life is classified, not only stated (issue #1324).
 
-Never stopping or restarting the emrg server is the project's highest-priority
+Never stopping or restarting the emrg server is the agent's highest-priority
 rule (host 2026-08-18T22:58, `MANIFESTO.md` 第四条附则二). Until `_stops_or_restarts_the_daemon`
 it was enforced in **one** place and stated in **two** — and classified nowhere a
 shell command passes through, which is the shape the host actually hit: on
-2026-08-21T09:41 a session in another project ran a "measurement" whose
+2026-08-21T09:41 a session in another agent ran a "measurement" whose
 subprocess signalled the daemon, the TUI answered `server connection lost`, and
 the host asked *"你怎么验证的，怎么把 emrg server重启了？"*.
 
@@ -347,7 +347,7 @@ def test_a_data_only_shell_word_is_read_by_the_payload_walk_not_by_this_rule():
 # `tests/conftest.py` classifies the act on an **argv** (a spawned child), and
 # the product classifies it on a **command line** (the bash tool). They are
 # different inputs to one rule, and the defect this guards against is the one
-# this project has paid for repeatedly: two readers of one rule that must change
+# this agent has paid for repeatedly: two readers of one rule that must change
 # together, where the second silently stops firing. The assertion is deliberately
 # one-way — argv side refuses ⇒ the command-line side refuses — because the
 # command-line side reaches further (unresolved wrappers, a signaller's operand).

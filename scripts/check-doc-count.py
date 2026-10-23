@@ -72,7 +72,7 @@ Exit codes
     2  `could not measure` - no file was read at all, the file listing failed, or
        `--measure` could not collect a count (a missing pytest counts here)
 
-Run it with the project interpreter: `--measure` shells out to pytest, so a bare
+Run it with the agent interpreter: `--measure` shells out to pytest, so a bare
 `python3` that cannot import pytest fails loud with that reason rather than
 reporting a bogus count.
 """
@@ -284,7 +284,7 @@ def measured_count() -> int:
         raise DocCountError(
             f"pytest --collect-only failed (rc={proc.returncode}):\n"
             + detail
-            + "\n\nhint: run this with the project interpreter, e.g."
+            + "\n\nhint: run this with the agent interpreter, e.g."
             f" `{INVOCATION} --measure`"
         )
     match = COLLECTED.search(proc.stdout)

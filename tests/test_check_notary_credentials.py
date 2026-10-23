@@ -654,7 +654,7 @@ def test_a_windows_path_survives_being_handed_to_a_shell() -> None:
     windows = "D:\\a\\emrg\\emrg\\.venv\\Scripts\\python.exe"
     # A space, so the *quoting* half is load-bearing too: unquoted, the shell splits this into
     # two words and the path that arrives is truncated at the space.
-    posix = "/home/runner/work/my project/emrg/.venv/bin/python"
+    posix = "/home/runner/work/my agent/emrg/.venv/bin/python"
 
     for path, nt, expected in (
         (windows, True, "D:/a/emrg/emrg/.venv/Scripts/python.exe"),

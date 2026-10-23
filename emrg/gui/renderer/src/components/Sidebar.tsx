@@ -23,12 +23,12 @@ import {
  */
 
 /** 工作区视图 id（vanilla VIEWS 子集；sessions 为会话视图） */
-export type SidebarViewId = "sessions" | "projects" | "tasks" | "rants" | "settings";
+export type SidebarViewId = "sessions" | "agents" | "tasks" | "rants" | "settings";
 
 /** 导航按钮定义（vanilla index.html #side-nav 五个按钮，图标 + i18n title） */
 const NAV_ITEMS: { view: SidebarViewId; icon: string; labelKey: string }[] = [
   { view: "sessions", icon: "💬", labelKey: "nav.sessions" },
-  { view: "projects", icon: "📁", labelKey: "nav.projects" },
+  { view: "agents", icon: "📁", labelKey: "nav.agents" },
   { view: "tasks", icon: "⏱️", labelKey: "nav.tasks" },
   { view: "rants", icon: "📣", labelKey: "nav.rants" },
   { view: "settings", icon: "⚙️", labelKey: "nav.settings" },
@@ -41,7 +41,7 @@ export interface SidebarProps {
   onSelect?: (sid: string) => void;
   onContextMenu?: (entry: OpenSessionEntry, event: React.MouseEvent) => void;
   /** 可注入的标题格式化函数（测试用；默认 sessionLabel） */
-  labelFn?: (project: string, title: string, sid: string) => string;
+  labelFn?: (agent: string, title: string, sid: string) => string;
   /** 每会话 turn 开始时刻（epoch ms；rant 2026-09-02T10:36:26 — busy 会话显示 [m:ss] 计时） */
   turnStartBySid?: Record<string, number>;
   /** 新对话按钮 → NewSessionDialog（Batch 5 slice 4） */
@@ -71,7 +71,7 @@ export function Sidebar({
   const entries = sortOpenSessions(openSessions);
   const nowMs = Date.now();
 
-  // vanilla #side-nav：五个导航按钮（sessions/projects/tasks/rants/settings）
+  // vanilla #side-nav：五个导航按钮（sessions/agents/tasks/rants/settings）
   const navRail = (
     <nav className="side-nav" aria-label="Navigation" data-testid="side-nav">
       {NAV_ITEMS.map(({ view, icon, labelKey }) => (

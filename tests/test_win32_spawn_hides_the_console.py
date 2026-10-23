@@ -1,6 +1,6 @@
 """The confined child is created with its window hidden.
 
-Rant 2026-09-28T14:48:39 (project ``emrg``): on Windows, a scheduled task's cycle
+Rant 2026-09-28T14:48:39 (agent ``emrg``): on Windows, a scheduled task's cycle
 flashed a console window once per confined command. The tool layer is not the
 cause — every process it starts carries ``CREATE_NO_WINDOW`` (``emrg/_win.py``) —
 the sandbox chain is: the runner is started without a console, and

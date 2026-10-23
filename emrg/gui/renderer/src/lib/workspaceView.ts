@@ -17,7 +17,7 @@ export interface RantRec {
   message?: string;
 }
 
-export interface ProjectRec {
+export interface AgentRec {
   name?: string;
   path?: string;
   latest_session_at?: string | null;
@@ -44,13 +44,13 @@ export interface TaskRec {
   interval?: number | null;
   last_run_at?: string | null;
   saturation?: { heartbeat_active?: boolean; heartbeat_interval?: number } | null;
-  config?: { project?: string; repo?: string; sandbox?: string } | null;
+  config?: { agent?: string; repo?: string; sandbox?: string } | null;
   /** 分时段频次窗口；缺省＝全天单一 `interval`（`list_tasks()` 逐字回报） */
   schedule?: ScheduleWindow[] | null;
   /** 任务面板「打开会话」所需字段（daemon TaskHandler.status() 返回，vanilla #924 迁移时丢失） */
   session_id?: string;
-  project?: string;
-  project_path?: string;
+  agent?: string;
+  agent_path?: string;
 }
 
 export type TFunc = (key: string, vars?: Record<string, unknown>) => string;
@@ -142,18 +142,18 @@ export function preprocessRantMarkdown(text?: string | null): string {
 
 /* ── 项目面板工具 ────────────────────────────────────────── */
 
-/** auto_evolve 徽标集合：tasks.yml 中 config.project 与项目名相同（含 evolution 类型） */
-export function buildEvolveProjects(tasks: TaskRec[] | null | undefined): Set<string> {
+/** auto_evolve 徽标集合：tasks.yml 中 config.agent 与项目名相同（含 evolution 类型） */
+export function buildEvolveAgents(tasks: TaskRec[] | null | undefined): Set<string> {
   const set = new Set<string>();
   for (const t of tasks || []) {
-    const proj = t?.config?.project;
+    const proj = t?.config?.agent;
     if (proj) set.add(proj);
   }
   return set;
 }
 
 /** 项目行 hint：路径 + 相对活跃时间（join " · "） */
-export function projectHint(p: ProjectRec, t?: TFunc): string {
+export function projectHint(p: AgentRec, t?: TFunc): string {
   const parts: string[] = [];
   if (p.path) parts.push(p.path);
   const act = relTime(p.latest_session_at, t);
@@ -202,7 +202,7 @@ export function taskStatusBadge(t: TaskRec, tFn?: TFunc, now: number = Date.now(
 export function taskHint(t: TaskRec, tFn?: TFunc): string {
   const tr = tFn || ((k: string) => k);
   const parts: string[] = [];
-  if (t.config?.project) parts.push(t.config.project);
+  if (t.config?.agent) parts.push(t.config.agent);
   if (t.interval != null) parts.push(tr("app.taskInterval", { n: t.interval }));
   if (t.enabled === false) parts.push(tr("app.taskDisabled"));
   return parts.join(" · ");

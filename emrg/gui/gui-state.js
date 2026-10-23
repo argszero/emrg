@@ -8,7 +8,7 @@
 // path (restore on boot + sidebar UI) lands in P4 slice 2.
 //
 // Design notes (from the rant):
-// - Open sessions = cross-project tabs (aligned with the TUI multi-open model).
+// - Open sessions = cross-agent tabs (aligned with the TUI multi-open model).
 // - Cap 20: never persist more than the cap; restore (slice 2) takes the most
 //   recent 20 by lastActive.
 // - Write is atomic (.tmp + rename) so a crash mid-write never corrupts state.

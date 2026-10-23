@@ -50,7 +50,7 @@ measurement layer is now driven for real, in both directions, below.
 Why the real thing is affordable: `check-doc-count.py` collects through
 `sys.executable -m pytest --collect-only`, so a two-line tree gives a real verdict
 in a fraction of a second, with no `uv`, no network and no dependency on the
-project's own suite. The child guard is the repository's real file (copied
+agent's own suite. The child guard is the repository's real file (copied
 byte-for-byte), because a stub of the guard would only re-test this suite's belief
 about it - the exact failure the mutant above demonstrates.
 """

@@ -224,7 +224,7 @@ def logs_dir() -> Path:
 #: The register's name before an Agent became the record of the directory a
 #: session runs in (#2521). Spelled here and nowhere else in the package: the
 #: move below is what retires it.
-_LEGACY_AGENTS_NAME = "projects.yml"
+_LEGACY_AGENTS_NAME = "agents.yml"
 
 
 def agents_file(base: Path | None = None) -> Path:

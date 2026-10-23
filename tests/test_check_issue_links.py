@@ -1648,7 +1648,7 @@ def _ledger(tmp_path, *timestamps: str):
             json.dumps(
                 {
                     "timestamp": ts,
-                    "project": "emrg",
+                    "agent": "emrg",
                     "status": "pending",
                     "progress": "",
                     "completed": None,
@@ -1786,7 +1786,7 @@ def _completed_row(ts: str, completed: str) -> str:
     return json.dumps(
         {
             "timestamp": ts,
-            "project": "emrg",
+            "agent": "emrg",
             "status": "completed",
             "progress": "",
             "completed": completed,
@@ -1890,7 +1890,7 @@ def test_an_origin_that_cannot_be_ordered_against_the_ledger_says_so(
     rows = [
         {
             "timestamp": RANT_TS,
-            "project": "emrg",
+            "agent": "emrg",
             "status": "completed",
             "progress": "",
             "completed": "2026-09-30T00:00:00+08:00",
@@ -1946,7 +1946,7 @@ def _reversed_order_ledger(tmp_path, count: int = 12):
     rows = [
         {
             "timestamp": f"2026-01-{i + 1:02d}T00:00:00+08:00",
-            "project": "emrg",
+            "agent": "emrg",
             "status": "completed",
             "progress": "",
             "completed": f"2026-12-{count - i:02d}T00:00:00+08:00",
@@ -1991,7 +1991,7 @@ def test_the_premise_the_count_rests_on_is_enforced_by_the_writer(
         json.dumps(
             {
                 "timestamp": "2026-05-01T00:00:00+00:00",
-                "project": "emrg",
+                "agent": "emrg",
                 "status": "in_progress",
                 "progress": "",
                 "completed": None,
@@ -2014,7 +2014,7 @@ def test_the_premise_the_count_rests_on_is_enforced_by_the_writer(
     # *first* — the newest submission and the lowest rank.
     violation = {
         "timestamp": "2026-12-31T00:00:00+00:00",
-        "project": "emrg",
+        "agent": "emrg",
         "status": "completed",
         "progress": "",
         "completed": "2025-01-01T00:00:00+00:00",
@@ -2023,7 +2023,7 @@ def test_the_premise_the_count_rests_on_is_enforced_by_the_writer(
     rows = [
         {
             "timestamp": f"2026-05-{i + 1:02d}T00:00:00+00:00",
-            "project": "emrg",
+            "agent": "emrg",
             "status": "completed",
             "progress": "",
             "completed": f"2026-06-{i + 1:02d}T00:00:00+00:00",
@@ -2123,7 +2123,7 @@ def test_a_completed_row_without_a_stamp_ranks_by_its_submission(
     rows = [
         {
             "timestamp": f"2026-01-{i + 1:02d}T00:00:00+08:00",
-            "project": "emrg",
+            "agent": "emrg",
             "status": "completed",
             "progress": "",
             "completed": None,
@@ -2161,7 +2161,7 @@ def test_a_record_completing_exactly_at_the_citation_counts(
     rows = [
         {
             "timestamp": f"2026-01-{i + 1:02d}T00:00:00+08:00",
-            "project": "emrg",
+            "agent": "emrg",
             "status": "completed",
             "progress": "",
             "completed": cited,

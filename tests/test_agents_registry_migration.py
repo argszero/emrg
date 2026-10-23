@@ -1,7 +1,7 @@
-"""The agent register's rename: `projects.yml` → `agents.yml` (#2521).
+"""The agent register's rename: `agents.yml` → `agents.yml` (#2521).
 
 Until an Agent became the record of the directory a session runs in, the
-installation's register of those directories was `~/.emrg/projects.yml`. The
+installation's register of those directories was `~/.emrg/agents.yml`. The
 content does not change with the name — the same entries, the same fields, the
 same `last_active` — so what these tests hold is the *transition*: one move,
 whole, once, and never from a reader that only asked where the file lives.
@@ -30,7 +30,7 @@ REGISTER = [
 def _legacy(directory: Path) -> Path:
     """Write the pre-rename register. The one place a test spells the old name."""
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / "projects.yml"
+    path = directory / "agents.yml"
     path.write_text(yaml.safe_dump(REGISTER, allow_unicode=True), encoding="utf-8")
     return path
 
@@ -167,7 +167,7 @@ def test_the_old_name_is_spelled_only_where_the_move_is():
     exemptions = ("scripts/check-memory-rotation.py",)
     for name in exemptions:
         text = (root / name).read_text(encoding="utf-8", errors="replace")
-        assert "projects.yml" in text, (
+        assert "agents.yml" in text, (
             f"{name} is exempted from the one-name rule but no longer names the old "
             f"name — drop it from `exemptions` rather than leaving a permission"
         )
@@ -178,7 +178,7 @@ def test_the_old_name_is_spelled_only_where_the_move_is():
             if path == root / "emrg" / "config.py" or relative in exemptions:
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
-            if "projects.yml" in text:
+            if "agents.yml" in text:
                 offenders.append(f"{relative}: old name")
             if "agents.yml" in text and "config_dir()" in text:
                 # A path built from the config directory again, rather than asked for.

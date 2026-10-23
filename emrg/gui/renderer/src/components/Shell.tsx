@@ -8,7 +8,7 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { ApprovalDialog } from "./ApprovalDialog";
 import { TaskFormDialog, type TaskFormPayload } from "./TaskFormDialog";
 import { RantDialog } from "./RantDialog";
-import type { ProjectRec, RantRec, TaskRec } from "../lib/workspaceView";
+import type { AgentRec, RantRec, TaskRec } from "../lib/workspaceView";
 import type { SessionRow } from "../lib/openSession";
 import { Sidebar, type SidebarViewId } from "./Sidebar";
 import { ResultPanel } from "./ResultPanel";
@@ -47,25 +47,25 @@ import { replayHistoryRecords, replayHistoryRecordsPrepend, type HistoryRecord }
  * - DialogHost 统一持有对话框状态 + window.emrg 数据加载（vanilla dialogs.js 语义）。
  *
  * Batch 5 slice 5：workspace 视图切换——
- * - activeView 状态（"sessions" | projects | tasks | rants | settings），vanilla
+ * - activeView 状态（"sessions" | agents | tasks | rants | settings），vanilla
  *   app.js switchView 语义：点当前面板再点一次 → toggle 回会话视图；点其他面板 →
  *   切换；点 💬 → 回会话视图；
  * - 面板视图激活时隐藏会话 chrome（transcript/composer/result-panel —— vanilla
  *   setWorkspaceChrome("panel")），sessions 视图显示完整会话区；
  * - Sidebar nav rail（#side-nav）高亮当前视图 + onSwitchView 接线；
- * - WorkspaceView 数据接线：面板激活加载 listProjects/listTasks/listRants，项目会话子视图
- *   listProjectSessions，动作 switch-session / add-project / delete-project / trigger-task。
+ * - WorkspaceView 数据接线：面板激活加载 listAgents/listTasks/listRants，项目会话子视图
+ *   listAgentSessions，动作 switch-session / add-agent / delete-agent / trigger-task。
  */
 /** Shell 用到的 workspace 数据桥方法（与 preload.js 通道对齐） */
 interface WorkspaceBridge {
-  listProjects(): Promise<ProjectRec[]>;
-  listProjectSessions(p: { projectPath: string }): Promise<{ sessions: SessionRow[] }>;
+  listAgents(): Promise<AgentRec[]>;
+  listAgentSessions(p: { projectPath: string }): Promise<{ sessions: SessionRow[] }>;
   listTasks(): Promise<TaskRec[]>;
   listRants(p: { status?: string }): Promise<RantRec[]>;
   switchSession(p: { sessionId: string; projectPath?: string }): Promise<unknown>;
-  pickProjectDir(): Promise<{ path?: string } | null>;
-  registerProject(p: { path: string }): Promise<{ ok?: boolean; path?: string }>;
-  removeProject(p: { name: string; path?: string }): Promise<{ ok?: boolean; error?: string; protected?: boolean }>;
+  pickAgentDir(): Promise<{ path?: string } | null>;
+  registerAgent(p: { path: string }): Promise<{ ok?: boolean; path?: string }>;
+  removeAgent(p: { name: string; path?: string }): Promise<{ ok?: boolean; error?: string; protected?: boolean }>;
   triggerTask(p: { name: string }): Promise<unknown>;
   taskCreate(p: TaskFormPayload): Promise<unknown>;
   taskUpdate(p: TaskFormPayload): Promise<unknown>;
@@ -125,11 +125,11 @@ export function Shell() {
   const [composerInsert, setComposerInsert] = useState<{ id: number; text: string } | null>(null);
   const composerInsertSeq = useRef(0);
   // workspace 面板数据（Batch 5 接线：项目/任务/Rant 真实列表 + 项目会话）
-  const [projects, setProjects] = useState<ProjectRec[]>([]);
+  const [agents, setAgents] = useState<AgentRec[]>([]);
   const [tasks, setTasks] = useState<TaskRec[]>([]);
   const [rants, setRants] = useState<RantRec[]>([]);
-  const [projectSessions, setProjectSessions] = useState<SessionRow[] | null>(null);
-  const [projectSessionsError, setProjectSessionsError] = useState<string | null>(null);
+  const [projectSessions, setAgentSessions] = useState<SessionRow[] | null>(null);
+  const [projectSessionsError, setAgentSessionsError] = useState<string | null>(null);
   const [dialogState, dispatch] = useReducer(dialogReducer, initialDialogState);
   // Batch 5 slice 8：任务表单 + Rant 对话框（vanilla openTaskForm/openRantForm 语义）
   const [taskForm, setTaskForm] = useState<{ task: TaskRec | null } | null>(null);
@@ -142,7 +142,7 @@ export function Shell() {
   // 同一版本，不重复弹）；restarting 防重复点击（relaunch 后进程即退出）。
   const [dismissedUpgrade, setDismissedUpgrade] = useState<string | null>(null);
   const [restarting, setRestarting] = useState(false);
-  // 会话信息行（rant 2026-09-01T20:16:55：对齐 TUI 状态栏——id/name/project/消息数/轮计时）
+  // 会话信息行（rant 2026-09-01T20:16:55：对齐 TUI 状态栏——id/name/agent/消息数/轮计时）
   //
   // 计时基准是 **daemon 的轮开始时刻**（`turnStartBySid`，由 `turn_start` 帧、或打开会话时的
   // `resume_result` 快照 `meta.turn` 写入），不是本客户端见到 busy 的那一刻（rant
@@ -164,7 +164,7 @@ export function Shell() {
   const activeSessionEntry = appState.openSessions.find((o) => o.sid === activeSid);
   const activeKnown = appState.sessions.find((s) => s.session_id === activeSid);
   const activeTitle = activeSessionEntry?.title || activeKnown?.title || t("app.unnamed");
-  const activeProject = activeSessionEntry?.projectName || "";
+  const activeAgent = activeSessionEntry?.projectName || "";
   const activeMsgCount = (activeKnown as { message_count?: number } | undefined)?.message_count ?? 0;
   const elapsed =
     activeTurnStart === undefined
@@ -221,13 +221,13 @@ export function Shell() {
   }, [activeSid]);
 
   // ── workspace 面板数据加载（vanilla loadTaskMeta/renderRantList 语义） ──
-  async function loadProjects() {
+  async function loadAgents() {
     const b = wsBridge();
-    if (!b?.listProjects) return;
+    if (!b?.listAgents) return;
     try {
-      setProjects(await b.listProjects());
+      setAgents(await b.listAgents());
     } catch {
-      setProjects([]);
+      setAgents([]);
     }
   }
 
@@ -251,22 +251,22 @@ export function Shell() {
     }
   }
 
-  async function loadProjectSessions(p: ProjectRec) {
+  async function loadProjectSessions(p: AgentRec) {
     const b = wsBridge();
-    if (!b?.listProjectSessions || !p.path) return;
-    setProjectSessions(null);
-    setProjectSessionsError(null);
+    if (!b?.listAgentSessions || !p.path) return;
+    setAgentSessions(null);
+    setAgentSessionsError(null);
     try {
-      const res = await b.listProjectSessions({ projectPath: p.path });
-      setProjectSessions(res.sessions ?? []);
+      const res = await b.listAgentSessions({ projectPath: p.path });
+      setAgentSessions(res.sessions ?? []);
     } catch (e) {
-      setProjectSessionsError((e as Error)?.message ?? String(e));
+      setAgentSessionsError((e as Error)?.message ?? String(e));
     }
   }
 
   // 面板激活 → 加载对应数据（每次进入刷新，vanilla 面板激活时拉取）
   useEffect(() => {
-    if (activeView === "projects") void loadProjects();
+    if (activeView === "agents") void loadAgents();
     else if (activeView === "tasks") void loadTasks();
     else if (activeView === "rants") void loadRants();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -287,40 +287,40 @@ export function Shell() {
   // ── workspace 面板动作（vanilla dialogs.js 语义） ──
   async function addProject() {
     const b = wsBridge();
-    if (!b?.pickProjectDir || !b?.registerProject) return;
+    if (!b?.pickAgentDir || !b?.registerAgent) return;
     try {
-      const res = await b.pickProjectDir();
+      const res = await b.pickAgentDir();
       if (!res?.path) return;
-      await b.registerProject({ path: res.path });
-      await loadProjects();
+      await b.registerAgent({ path: res.path });
+      await loadAgents();
     } catch (e) {
-      transcript.addSystemMessage(t("deleteProject.failed", { msg: (e as Error)?.message ?? String(e) }), activeSid);
+      transcript.addSystemMessage(t("deleteAgent.failed", { msg: (e as Error)?.message ?? String(e) }), activeSid);
     }
   }
 
-  function deleteProject(p: ProjectRec) {
+  function deleteAgent(p: AgentRec) {
     dispatch({
       type: "open-confirm",
       payload: {
-        title: t("deleteProject.title"),
-        message: t("deleteProject.body", { name: String(p.name || p.path || "") }),
+        title: t("deleteAgent.title"),
+        message: t("deleteAgent.body", { name: String(p.name || p.path || "") }),
         okText: "dlg.delete",
         danger: true,
         onOk: async () => {
           const b = wsBridge();
-          if (!b?.removeProject) return;
+          if (!b?.removeAgent) return;
           try {
-            await b.removeProject({ name: p.name || "", path: p.path || "" });
-            await loadProjects();
+            await b.removeAgent({ name: p.name || "", path: p.path || "" });
+            await loadAgents();
           } catch (e) {
-            transcript.addSystemMessage(t("deleteProject.failed", { msg: (e as Error)?.message ?? String(e) }), activeSid);
+            transcript.addSystemMessage(t("deleteAgent.failed", { msg: (e as Error)?.message ?? String(e) }), activeSid);
           }
         },
       },
     });
   }
 
-  async function selectProjectSession(p: ProjectRec, sid: string) {
+  async function selectProjectSession(p: AgentRec, sid: string) {
     const b = wsBridge();
     if (b?.switchSession) await b.switchSession({ sessionId: sid });
     setActiveSid(sid);
@@ -334,7 +334,7 @@ export function Shell() {
     const b = wsBridge();
     if (!b?.switchSession) return;
     try {
-      await b.switchSession({ sessionId: task.session_id, projectPath: task.project_path });
+      await b.switchSession({ sessionId: task.session_id, projectPath: task.agent_path });
       setActiveSid(task.session_id);
       setActiveView("sessions");
       void loadHistory(task.session_id);
@@ -378,7 +378,7 @@ export function Shell() {
       // 首次打开且模板加载失败 → 仍可用 evolution 内置类型
       setTaskTypes((prev) => (prev.length ? prev : ["evolution"]));
     }
-    if (!isEdit) await loadProjects(); // 新建需要项目下拉
+    if (!isEdit) await loadAgents(); // 新建需要项目下拉
     // 下限先问 daemon（issue #2490）：问不到保持 undefined，表单不预检
     if (b?.taskLimits) {
       try {
@@ -440,9 +440,9 @@ export function Shell() {
     }
   }
 
-  /** 打开 Rant 对话框：vanilla openRantForm 语义 —— 显式 listProjects 填充项目下拉 */
+  /** 打开 Rant 对话框：vanilla openRantForm 语义 —— 显式 listAgents 填充项目下拉 */
   async function newRant() {
-    if (projects.length === 0) await loadProjects();
+    if (agents.length === 0) await loadAgents();
     setRantOpen(true);
   }
 
@@ -756,7 +756,7 @@ export function Shell() {
         {activeSid ? (
           <span className="react-shell-session" data-testid="session-info" title={activeSid}>
             {activeTitle} ({activeSid})
-            {activeProject ? ` · ${activeProject}` : ""}
+            {activeAgent ? ` · ${activeAgent}` : ""}
             {" · "}
             {t("app.msgCount", { count: activeMsgCount })}
             {activeTurnStart !== undefined ? ` [${mmss}]` : ""}
@@ -798,7 +798,7 @@ export function Shell() {
             <WorkspaceView
               activeView={activeView}
               onSwitch={switchView}
-              projects={projects}
+              agents={agents}
               tasks={tasks}
               rants={rants}
               projectSessions={projectSessions}
@@ -806,10 +806,10 @@ export function Shell() {
               currentSid={activeSid}
               version={appState.currentVersion}
               evolutionCount={appState.evolutionCount}
-              onViewProjectSessions={(p) => void loadProjectSessions(p)}
-              onSelectProjectSession={(p, sid) => void selectProjectSession(p, sid)}
-              onAddProject={() => void addProject()}
-              onDeleteProject={deleteProject}
+              onViewAgentSessions={(p) => void loadProjectSessions(p)}
+              onSelectAgentSession={(p, sid) => void selectProjectSession(p, sid)}
+              onAddAgent={() => void addProject()}
+              onDeleteAgent={deleteAgent}
               onTriggerTask={(task) => void triggerTask(task)}
               onOpenSessionTask={(task) => void openTaskSession(task)}
               onEditTask={(task) => void openTaskForm(task)}
@@ -893,14 +893,14 @@ export function Shell() {
         <TaskFormDialog
           request={taskForm}
           types={taskTypes}
-          projects={projects}
+          agents={agents}
           minInterval={minInterval}
           onSubmit={(payload) => void saveTask(payload)}
           onDismiss={() => setTaskForm(null)}
         />
         <RantDialog
           open={rantOpen}
-          projects={projects}
+          agents={agents}
           onSubmit={(payload) => void submitRant(payload)}
           onDismiss={() => setRantOpen(false)}
         />

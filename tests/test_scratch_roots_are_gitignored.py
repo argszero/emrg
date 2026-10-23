@@ -550,7 +550,7 @@ from pathlib import Path
 def test_uses_the_fixture(tmp_path):
     pass
 def test_other():
-    tmp_path = Path("/abs/other-project/tests")
+    tmp_path = Path("/abs/other-agent/tests")
     d = tempfile.mkdtemp(dir=tmp_path, prefix="anything-")
 '''
     shadowed_name_composite = '''
@@ -559,7 +559,7 @@ from pathlib import Path
 def test_uses_the_fixture(tmp_path):
     pass
 def test_other():
-    tmp_path = Path("/abs/other-project/tests")
+    tmp_path = Path("/abs/other-agent/tests")
     d = tempfile.mkdtemp(dir=tmp_path / "sub", prefix="anything-")
 '''
     shadowed_in_its_own_scope = '''
@@ -594,7 +594,7 @@ def test_x():
         return tmp_path
 
     helper("x")
-    tmp_path = Path("/abs/other-project/tests")
+    tmp_path = Path("/abs/other-agent/tests")
     d = tempfile.mkdtemp(dir=tmp_path / "sub", prefix="anything-")
 '''
     fixture_in_a_nested_def = '''

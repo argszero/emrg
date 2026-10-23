@@ -1,13 +1,13 @@
 """Memory system for EMRG — persistent LLM knowledge across sessions.
 
 File-based YAML frontmatter + Markdown format, compatible with Claude Code.
-Two scopes: project (.emrg/memory/) and session (<session>/memory/).
+Two scopes: agent (.emrg/memory/) and session (<session>/memory/).
 
 Usage:
-    from emrg.memory import ProjectMemoryStore, SessionMemoryStore, MemoryFile
+    from emrg.memory import AgentMemoryStore, SessionMemoryStore, MemoryFile
 
-    # Project-level memories (shared across all sessions)
-    pstore = ProjectMemoryStore(cwd)
+    # Agent-level memories (shared across all sessions)
+    pstore = AgentMemoryStore(cwd)
 
     # Session-level memories (per-session)
     sstore = SessionMemoryStore(session_dir)
@@ -139,8 +139,8 @@ _OWNED_FIELDS = frozenset(
 
 # ── Constants ──────────────────────────────────────────────────────
 
-VALID_TYPES = {"user", "feedback", "project", "reference", "decision", "task"}
-VALID_SCOPES = {"session", "project"}
+VALID_TYPES = {"user", "feedback", "agent", "reference", "decision", "task"}
+VALID_SCOPES = {"session", "agent"}
 VALID_STATUSES = {"active", "superseded", "merged"}
 
 # Rant 2026-08-23T08:04:26 — memory index governance: keep MEMORY.md lines
@@ -163,13 +163,13 @@ INDEX_COUNT_WARN = 100       # >N memory files → consolidation recommended
 #
 # The direction that matters holds for **both** of the cap's subjects, and it holds
 # because the advisory sits on the base store, not on one of the two that inherit
-# from it: `MemoryStore._save_index` calls `_warn_index_thresholds`, so a project
+# from it: `MemoryStore._save_index` calls `_warn_index_thresholds`, so a agent
 # index and a session index are each flagged before the cap can see them. That is
 # structural rather than lucky — the cap can only truncate a file the advisory
 # already flagged, because UTF-8 never encodes a string in fewer bytes than
 # characters, so `chars > T` implies `bytes > T`. Until 2026-09-24 the advisory was a
-# `SessionMemoryStore` method and the project half went unwatched, measured on one
-# fixture: a 56,214-char project index was truncated with no advisory having looked
+# `SessionMemoryStore` method and the agent half went unwatched, measured on one
+# fixture: a 56,214-char agent index was truncated with no advisory having looked
 # at its size, while the same file as a session index fired the advisory first
 # (issue #1581, whose remedy is this wiring).
 #
@@ -202,7 +202,7 @@ INDEX_COUNT_WARN = 100       # >N memory files → consolidation recommended
 INDEX_SIZE_WARN = 51 * 1024
 
 # What makes a line a **row** of an index, by shape rather than by the store's entry
-# grammar. Two shapes, because the indexes this project carries are written in both: a
+# grammar. Two shapes, because the indexes this agent carries are written in both: a
 # `- ` list line (the store's own render, `MemoryIndex._render_entry`, and the pointer
 # lines an agent's compaction writes), and a **Markdown-table body row** — a line opening
 # with `|` that is not the table's delimiter row (`| --- | --- |`, punctuation rather than
@@ -248,7 +248,7 @@ def is_index_row(line: str) -> bool:
 # Order of the `## type` sections when the index has to be rendered from
 # entries alone (a rebuild, or entries the document never had). The parser
 # accepts any `## <valid type>` heading; this only decides where new rows file.
-INDEX_TYPE_ORDER = ("user", "feedback", "project", "reference", "decision", "task")
+INDEX_TYPE_ORDER = ("user", "feedback", "agent", "reference", "decision", "task")
 
 
 class NotARegularFile(OSError):
@@ -332,14 +332,14 @@ class MemoryFile:
         decides whether this call returns at all (`NotARegularFile`). Measured
         2026-10-11 on master `63ee3a54`, one fixture (a named pipe beside a regular
         memory), each call in its own process under a parent's 8 s cap:
-        ``ProjectMemoryStore.list()`` **did not return**, while the same fixture without
+        ``AgentMemoryStore.list()`` **did not return**, while the same fixture without
         the pipe returned in 0.00 s. Two client frames walk this reader — `list_memories`
         and `read_memory` — and the directory is the agent's own workspace, so anything
         running there can put a pipe in it.
 
         Every reader in this module comes through here, which is why the guard is one
         site rather than one per walker: `_scan`, `list`, `_rebuild_index`, `update`,
-        `merge`, `promote_to_project`, `get_by_filename`, `_resolve_filename`.
+        `merge`, `promote_to_agent`, `get_by_filename`, `_resolve_filename`.
         """
         if not path.exists():
             raise FileNotFoundError(f"Memory file not found: {path}")
@@ -583,7 +583,7 @@ class MemoryFile:
         the same path **written**. **An open is not a read, and a write is an open too** — a
         write to a FIFO waits for a reader, to a socket for a connection — so the call would
         never return, exactly as the reader would not have, and the store methods that reach
-        it (`create`, `update`, `merge`, `promote_to_project`) would not either.
+        it (`create`, `update`, `merge`, `promote_to_agent`) would not either.
 
         Measured 2026-10-12 (`cyc20261012-035249`) on master `f4fe92c3`, one child per arm
         under a parent's 10 s cap, the child printing `emrg.__file__` so the checkout is what
@@ -609,7 +609,7 @@ class MemoryFile:
                     f"directly, and opening this one blocks until a peer appears — a write "
                     f"to a FIFO waits for a reader, a socket for a connection, a device "
                     f"never ends — so the call would never return, and the store methods "
-                    f"that reach it (`create`, `update`, `merge`, `promote_to_project`) "
+                    f"that reach it (`create`, `update`, `merge`, `promote_to_agent`) "
                     f"would not either."
                 )
         path.write_text(self.to_markdown(), encoding="utf-8")
@@ -861,7 +861,7 @@ class MemoryIndex:
                     f"— a write to a FIFO waits for a reader, a socket for a connection, "
                     f"a device never ends — so the call would never return, and the store "
                     f"methods that reach it (`create`, `update`, `rebuild_index`, "
-                    f"`promote_to_project`) would not either."
+                    f"`promote_to_agent`) would not either."
                 )
         old_size = path.stat().st_size if path.exists() else 0
         content = self.to_markdown()
@@ -885,7 +885,7 @@ class MemoryIndex:
         is why this pair travels with `save` rather than alone (`#2075`'s "Not taken").
         Reachability is weaker than `MemoryFile`'s and is stated as such in issue `#2078`:
         no daemon frame reads the index today, so what reaches this is the store's own API
-        (`create`, `update`, `merge`, `rebuild_index`, `delete`, `promote_to_project`).
+        (`create`, `update`, `merge`, `rebuild_index`, `delete`, `promote_to_agent`).
         """
         if not path.exists():
             return cls()
@@ -975,7 +975,7 @@ def _normalize_date(d: str) -> str:
 class MemoryStore:
     """Manages memory files in a directory with a MEMORY.md index.
 
-    Base class — use :class:`ProjectMemoryStore` or :class:`SessionMemoryStore`.
+    Base class — use :class:`AgentMemoryStore` or :class:`SessionMemoryStore`.
     """
 
     def __init__(self, directory: Path, scope: str):
@@ -1006,10 +1006,10 @@ class MemoryStore:
     #
     # On the base class since 2026-09-24, because the embed cap truncates *both*
     # indexes a store writes and the advisory used to be wired to one of them: as a
-    # `SessionMemoryStore` method it left a project index to cross the cap with no
+    # `SessionMemoryStore` method it left a agent index to cross the cap with no
     # reader ever having measured its size, falsifying the ordering the cap's own
     # comment relied on (issue #1581; measured on one fixture — 56,214 chars, the
-    # project store silent, the same file as a session index flagged). Here it covers
+    # agent store silent, the same file as a session index flagged). Here it covers
     # whichever index the store owns, since it reads only `self.index_path` and
     # `self.count`.
     #
@@ -1128,7 +1128,7 @@ class MemoryStore:
         """Create a new memory and persist to disk.
 
         Args:
-            type: One of user, feedback, project, reference, decision, task.
+            type: One of user, feedback, agent, reference, decision, task.
             title: Short descriptive title.
             body: Markdown body (What / Why / How to apply for decision types).
             event_at: When the event happened (ISO 8601). Defaults to now.
@@ -1325,21 +1325,21 @@ class MemoryStore:
         """Number of .md memory files (excluding MEMORY.md)."""
         return len([p for p in self.directory.glob("*.md") if p.name != "MEMORY.md"])
 
-    def promote_to_project(
-        self, mem_id: str, project_store: MemoryStore
+    def promote_to_agent(
+        self, mem_id: str, agent_store: MemoryStore
     ) -> MemoryFile | None:
-        """Move a session-scoped memory to the project store.
+        """Move a session-scoped memory to the agent store.
 
         The original file is marked as ``merged`` with a .promoted marker.
-        The new project-level copy gets ``scope: project`` and is added
-        to the project MEMORY.md index.
+        The new agent-level copy gets ``scope: agent`` and is added
+        to the agent MEMORY.md index.
 
         Args:
             mem_id: The memory to promote.
-            project_store: A ProjectMemoryStore instance.
+            agent_store: A AgentMemoryStore instance.
 
         Returns:
-            The promoted MemoryFile (now in project store), or None if not found.
+            The promoted MemoryFile (now in agent store), or None if not found.
         """
         path = self._find_by_id(mem_id)
         if path is None:
@@ -1348,47 +1348,47 @@ class MemoryStore:
 
         mem = MemoryFile.from_file(path)
 
-        # Create project-level copy
-        mem.scope = "project"
+        # Create agent-level copy
+        mem.scope = "agent"
         mem.updated_at = now_iso()
 
-        new_path = project_store.directory / mem.filename
-        # Handle filename conflicts in project store
+        new_path = agent_store.directory / mem.filename
+        # Handle filename conflicts in agent store
         counter = 1
         while new_path.exists():
             stem = Path(mem.filename).stem
-            new_path = project_store.directory / f"{stem}-{counter}.md"
+            new_path = agent_store.directory / f"{stem}-{counter}.md"
             counter += 1
 
         # The copy lives at ``new_path``, not at the name its title derives —
-        # and on a collision those two differ. The project index keys its rows
+        # and on a collision those two differ. The agent index keys its rows
         # by filename, so a row added under the derived name would attach
         # itself to the resident memory of that title and leave this copy
         # referenced by nothing.
         mem._filename = new_path.name
         mem.save(new_path)
 
-        # Update project index
-        pindex = project_store._load_index()
+        # Update agent index
+        pindex = agent_store._load_index()
         pindex.add_entry(mem)
-        project_store._save_index(pindex, "promote_to_project")
+        agent_store._save_index(pindex, "promote_to_agent")
 
         # Mark original as merged + write marker
         mem_original = MemoryFile.from_file(path)
         mem_original.status = "merged"
         mem_original.updated_at = now_iso()
         mem_original.body += (
-            f"\n\n*Promoted to project memory: `{new_path}` on {now_iso()}.*\n"
+            f"\n\n*Promoted to agent memory: `{new_path}` on {now_iso()}.*\n"
         )
         mem_original.save(path)
 
         # Create .promoted marker
         #
         # Asked before it is opened, because a write is an open too: `write_text` on a FIFO
-        # waits for a reader and raises nothing, so it would hold `promote_to_project` — and
+        # waits for a reader and raises nothing, so it would hold `promote_to_agent` — and
         # the caller, which runs on the daemon's event loop — for ever. A *directory* is the
         # same defect one kind over: today it raises `IsADirectoryError` straight out of this
-        # method, **after** the copy and the project index row have already been written, so
+        # method, **after** the copy and the agent index row have already been written, so
         # the promotion is left half-reported by an exception. Measured 2026-10-12
         # (`cyc20261012-043725`) on master `f4fe92c3`, one child per arm under a 10 s cap: a
         # FIFO left this call **not returning**, a directory raised `IsADirectoryError`, and
@@ -1422,20 +1422,20 @@ class MemoryStore:
         # Update session index (remove the entry since it's now merged)
         sindex = self._load_index()
         sindex.remove_entry(path.name)
-        self._save_index(sindex, "promote_to_project_remove")
+        self._save_index(sindex, "promote_to_agent_remove")
 
-        logger.info("memory promoted to project: id=%s → %s", mem.id, new_path)
+        logger.info("memory promoted to agent: id=%s → %s", mem.id, new_path)
         return MemoryFile.from_file(new_path)
 
 
 # ── Concrete stores ─────────────────────────────────────────────
 
 
-class ProjectMemoryStore(MemoryStore):
-    """Project-level memory: ``<cwd>/.emrg/memory/`` — shared across all sessions."""
+class AgentMemoryStore(MemoryStore):
+    """Agent-level memory: ``<cwd>/.emrg/memory/`` — shared across all sessions."""
 
     def __init__(self, cwd: Path):
-        super().__init__(as_agent(cwd).memory_dir, scope="project")
+        super().__init__(as_agent(cwd).memory_dir, scope="agent")
 
 
 class SessionMemoryStore(MemoryStore):

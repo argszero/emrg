@@ -11,7 +11,7 @@ That is exactly the shape this file exists for. Two carriers of one rule, with a
 prove nothing about the **pair**: each arm is written against the carrier its author was looking
 at, so a level that drifts *within* the acceptable set on one side reddens nothing on the other,
 and the two can drift apart for a whole release without a single red row. This is the class the
-project has hit four times in two days (config file mode, argv redaction, the redaction rule, and
+agent has hit four times in two days (config file mode, argv redaction, the redaction rule, and
 this level), and the cure is a test that reads both carriers and **compares** them.
 
 Why the reading is taken the way it is

@@ -15,14 +15,14 @@ def test_task_request_to_dict():
     req = TaskRequest(
         id="abc-123",
         session_id="s_260718_1200_a3f9",
-        cwd="/home/user/project",
+        cwd="/home/user/agent",
         prompt="hello",
     )
     d = req.to_dict()
     assert d["type"] == "task"
     assert d["id"] == "abc-123"
     assert d["session_id"] == "s_260718_1200_a3f9"
-    assert d["cwd"] == "/home/user/project"
+    assert d["cwd"] == "/home/user/agent"
     assert d["prompt"] == "hello"
     assert "timestamp" in d
 

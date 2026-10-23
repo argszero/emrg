@@ -504,7 +504,7 @@ def test_the_rant_line_masks_a_credential_crossing_its_window(tmp_path, caplog):
     server._rants_log = tmp_path / "rants.jsonl"
 
     asyncio.run(server._process_message(
-        {"type": "rant", "message": "x" * 48 + SECRET + " tail of the rant", "project": "emrg"},
+        {"type": "rant", "message": "x" * 48 + SECRET + " tail of the rant", "agent": "emrg"},
         _FakeWriter(),
     ))
 

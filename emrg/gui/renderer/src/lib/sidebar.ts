@@ -22,14 +22,14 @@ export interface SessionInfo {
   [k: string]: unknown;
 }
 
-/** 会话条目统一格式：有标题显示 project/title，无标题显示 project/id（rant 2026-08-20T22:04:57）。 */
-export function sessionLabel(project: string, title: string, sid: string): string {
-  return title ? `${project}/${title}` : `${project}/${sid}`;
+/** 会话条目统一格式：有标题显示 agent/title，无标题显示 agent/id（rant 2026-08-20T22:04:57）。 */
+export function sessionLabel(agent: string, title: string, sid: string): string {
+  return title ? `${agent}/${title}` : `${agent}/${sid}`;
 }
 
 /**
  * 标题解析：entry.title 优先（跨项目自带），否则回退本地已知会话标题；
- * 两者皆无 → 空串（此时 label 降级为 project/sid）。
+ * 两者皆无 → 空串（此时 label 降级为 agent/sid）。
  * （sidebar.js renderOpenSessions: `entry.title || cur.title || ""`）
  */
 export function resolveEntryTitle(entry: OpenSessionEntry, knownSessions: SessionInfo[]): string {

@@ -1,4 +1,4 @@
-"""The host's plain-language rule must reach every session, not only one project's memory.
+"""The host's plain-language rule must reach every session, not only one agent's memory.
 
 Why this file exists
 --------------------
@@ -14,7 +14,7 @@ host through `scripts/find-host-message.py --pattern '<fragment>'` (rc 0):
 | 2026-10-12T13:02:02 | `s_260808_0857_387c852f` (host session) | 「…你不要使用自己造的词来和我对话，说人话，说清楚，说重点，这是基本原则」 |
 
 The last was triggered by the coinage 「私榜槽位」 — the host could not tell what it meant and had to
-ask. Every earlier answer lived in **one project's own memory** (the `competition` project's
+ask. Every earlier answer lived in **one agent's own memory** (the `competition` agent's
 `2f0e9d1a-say-it-plain-and-refute-yourself.md`, and the M88 method its hub added after the `-2`
 question), and the complaint came back in *host conversations* — three days later, and again on
 10-12 — which had read neither. Measured 2026-10-13 on master `8011295d`:
@@ -68,7 +68,7 @@ PLAIN_HEADING = "## Writing"
 #: its scope, and the repair it asks for — the semantics the four host messages asked for, in the
 #: wording the prompt states them in. The history (how often the host had to ask, and where each
 #: message was recorded) is not part of the artifact any more: it is in the charter, in the pull
-#: request that landed the rule and in this project's memory.
+#: request that landed the rule and in this agent's memory.
 PLAIN_TERMS = (
     "The host reads only your reply",                                # the rule itself
     "a term only your records use, or a shorthand you coined, resolves to nothing",  # the prohibition
@@ -117,7 +117,7 @@ def test_the_shared_prompt_states_the_plain_language_rule() -> None:
     block = _block_after(text, PLAIN_HEADING)
     assert block, (
         "emrg/server/prompts/system.j2 must carry the plain-language block — it is the only prompt "
-        "every session is rendered under, and the rule was carried by one project's memory while "
+        "every session is rendered under, and the rule was carried by one agent's memory while "
         "the host was asking for it in host conversations that never read that memory"
     )
     missing = _missing_terms(block, PLAIN_TERMS)

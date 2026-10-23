@@ -490,7 +490,7 @@ def test_guard_failure_names_the_tool_it_points_at(mod, capsys) -> None:
     assert "--measure" in capsys.readouterr().out
 
 
-def test_every_printed_invocation_uses_the_project_runner(mod) -> None:
+def test_every_printed_invocation_uses_the_agent_runner(mod) -> None:
     """A hint that cannot import pytest sends the reader into a second failure.
 
     Measured (cycle cyc20260910-191242, main clone): the canonical form exits 0
@@ -507,7 +507,7 @@ def test_every_printed_invocation_uses_the_project_runner(mod) -> None:
         prefix = source[max(0, hit.start() - len("uv run --no-sync ")) : hit.start()]
         assert prefix == "uv run --no-sync ", (
             "a hint in scripts/check-doc-count.py spells the invocation without the "
-            f"project runner: ...{source[max(0, hit.start() - 40) : hit.end() + 20]!r}"
+            f"agent runner: ...{source[max(0, hit.start() - 40) : hit.end() + 20]!r}"
         )
 
     doc = (REPO_ROOT / "Agent.md").read_text(encoding="utf-8")
@@ -535,7 +535,7 @@ def test_a_missing_pytest_is_diagnosed_as_an_unsynced_checkout(monkeypatch) -> N
     review worktree the tool printed its own `INVOCATION` as the fix, and running
     that spelling produced byte-identical output, rc 2 - `uv run --no-sync` had
     left an empty `.venv` there and both `python` and `python3` resolve to it, so
-    "use the project interpreter" is a circle. The message must name the
+    "use the agent interpreter" is a circle. The message must name the
     environment instead.
     """
     fresh = _load_module()

@@ -42,7 +42,7 @@ PROMPT = (
     / "competition_prompt.md"
 )
 
-#: The project the render fixture asks the builder for — a name that appears nowhere in
+#: The agent the render fixture asks the builder for — a name that appears nowhere in
 #: the template, so "the render carries it" proves a placeholder resolved rather than a
 #: string being copied through.
 PROMPT_PROJECT = "demoproj"
@@ -57,16 +57,16 @@ def rendered(tmp_path_factory) -> str:
     here could differ in `trim_blocks`, `lstrip_blocks` or the loader and the artifact
     under test would then be a prompt no round is ever sent.
 
-    The context is the one a real records-driven call produces (a project and nothing
+    The context is the one a real records-driven call produces (a agent and nothing
     else); `config_dir` is redirected at a tmp tree — the shape
     `tests/test_evolution_prompt_index_rule.py` uses — so the `agents.yml` read lands
     on a file this test made, never on the host's `~/.emrg`.
     """
     tmp_path = tmp_path_factory.mktemp("competition-prompt")
-    project_dir = tmp_path / PROMPT_PROJECT
-    project_dir.mkdir(exist_ok=True)
+    agent_dir = tmp_path / PROMPT_PROJECT
+    agent_dir.mkdir(exist_ok=True)
     (tmp_path / "agents.yml").write_text(
-        yaml.safe_dump([{"name": PROMPT_PROJECT, "path": str(project_dir)}]),
+        yaml.safe_dump([{"name": PROMPT_PROJECT, "path": str(agent_dir)}]),
         encoding="utf-8",
     )
     original = mod.config_dir
@@ -75,7 +75,7 @@ def rendered(tmp_path_factory) -> str:
         handler = make_handler(
             name="competition-task",
             type="competition",
-            config={"project": PROMPT_PROJECT},
+            config={"agent": PROMPT_PROJECT},
             identity=InstanceIdentity(),
             template_path=PROMPT,
         )
@@ -352,8 +352,8 @@ def test_preparation_and_closing_summary_are_mandatory():
     assert "closing summary in your final message" in text
     assert "a round that ends without a summary strands the next one" in text
     assert "Seven questions the closing summary must answer" in text
-    # Rant scan must match the project field exactly, like the other templates.
-    assert "exactly `{{ task.project }}`" in text
+    # Rant scan must match the agent field exactly, like the other templates.
+    assert "exactly `{{ task.agent }}`" in text
 
 
 def test_error_handling_and_forbidden_sections_exist():
@@ -985,7 +985,7 @@ def test_the_rendered_cadence_block_still_precedes_the_round_it_binds(rendered):
     """
     assert rendered.index("### 0.0 ") < rendered.index("### Current State"), (
         "the rendered cadence block drifted below the header block — the round meets its "
-        "project and time anchor before it meets the rule that governs the round"
+        "agent and time anchor before it meets the rule that governs the round"
     )
     assert rendered.index("### 0.0 ") < rendered.index("### 0. Preparation"), (
         "the rendered cadence block drifted below §0. Preparation, so a round that has "
@@ -998,7 +998,7 @@ def test_the_render_substitutes_values_and_carries_no_template_syntax(rendered):
 
     Two ways a render assertion goes vacuous, both closed here. If the block were read
     with its syntax intact — a `{% raw %}` wrapper, or the text copied out of a literal —
-    the round would be sent `{{ task.project }}` and would be told nothing; and if what
+    the round would be sent `{{ task.agent }}` and would be told nothing; and if what
     this test examined were the file, the same assertion catches it. Then the substituted
     value has to arrive, so "it rendered" is measured by what the round can read rather
     than by the absence of braces alone.
@@ -1008,10 +1008,10 @@ def test_the_render_substitutes_values_and_carries_no_template_syntax(rendered):
         "template source rather than the prompt it names"
     )
     assert PROMPT_PROJECT in rendered, (
-        "the render does not carry the project name "
+        "the render does not carry the agent name "
         f"{PROMPT_PROJECT!r}: "
-        "`{{ task.project }}` resolved to nothing (`jinja2.Undefined` renders empty), so "
-        "the round is told its project is blank"
+        "`{{ task.agent }}` resolved to nothing (`jinja2.Undefined` renders empty), so "
+        "the round is told its agent is blank"
     )
 
 

@@ -48,10 +48,10 @@ describe("memoryRowView", () => {
 
 describe("skillRowView", () => {
   it("label = name；hint = source · description(截50)", () => {
-    const s: SkillRow = { name: "browser-harness", source: "project", description: "D".repeat(60) };
+    const s: SkillRow = { name: "browser-harness", source: "agent", description: "D".repeat(60) };
     const v = skillRowView(s, "未命名");
     expect(v.label).toBe("browser-harness");
-    expect(v.hint).toBe(`project · ${"D".repeat(50)}`);
+    expect(v.hint).toBe(`agent · ${"D".repeat(50)}`);
   });
 
   it("无 name → unnamed；无 description → 仅 source", () => {

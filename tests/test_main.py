@@ -47,20 +47,20 @@ class TestBuildParser:
         args = parser.parse_args(["rant", "this", "is", "a", "test"])
         assert args.command == "rant"
         assert args.message == ["this", "is", "a", "test"]
-        assert args.project is None
+        assert args.agent is None
 
-    def test_rant_with_project(self):
+    def test_rant_with_agent(self):
         parser = _build_parser()
         args = parser.parse_args(["rant", "-p", "emrg", "hello", "world"])
         assert args.command == "rant"
-        assert args.project == "emrg"
+        assert args.agent == "emrg"
         assert args.message == ["hello", "world"]
 
-    def test_rant_with_long_project_flag(self):
+    def test_rant_with_long_agent_flag(self):
         parser = _build_parser()
-        args = parser.parse_args(["rant", "--project", "emrg", "hello"])
+        args = parser.parse_args(["rant", "--agent", "emrg", "hello"])
         assert args.command == "rant"
-        assert args.project == "emrg"
+        assert args.agent == "emrg"
         assert args.message == ["hello"]
 
     def test_stop_command(self):

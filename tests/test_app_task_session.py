@@ -4,7 +4,7 @@
 What is testable without a terminal, and why that is enough: the keystroke loop
 in `app.py` needs a TTY (raw mode, SIGWINCH), so a test cannot drive Enter and
 watch the cwd move. What it *can* pin is every decision that branch makes — the
-widget it reads its intent from, the row it reads `project_path`/`session_id`
+widget it reads its intent from, the row it reads `agent_path`/`session_id`
 from, and the predicate that decides whether a task has a session at all. The
 untestable remainder is the wiring between them, which is why the wiring is
 three straight-line statements and the decisions are not.
@@ -32,8 +32,8 @@ from emrg.client.widgets import TASK_SELECTOR_TITLES, TaskSelector, _COMMAND_HEL
 def make_task(name: str = "t", **extra) -> dict:
     row = {
         "name": name,
-        "project": "emrg",
-        "project_path": "/Users/x/projects/emrg",
+        "agent": "emrg",
+        "agent_path": "/Users/x/agents/emrg",
         "session_id": "emrg",
         "running": False,
         "interval": 300,
@@ -128,9 +128,9 @@ def test_selected_task_is_none_when_nothing_is_selected():
 # ── the predicate that decides whether a session can be opened ──
 
 
-def test_a_real_row_yields_the_tasks_project_and_session():
+def test_a_real_row_yields_the_tasks_agent_and_session():
     assert _task_session_target(make_task()) == (
-        "/Users/x/projects/emrg",
+        "/Users/x/agents/emrg",
         "emrg",
     )
 
@@ -142,12 +142,12 @@ def test_a_real_row_yields_the_tasks_project_and_session():
         {},
         # A task that has never run: the daemon's status carries no session.
         make_task(session_id=""),
-        make_task(project_path=""),
+        make_task(agent_path=""),
         make_task(session_id=None),
-        make_task(project_path=None),
+        make_task(agent_path=None),
         # Whitespace is not a path either — a cwd of " " would put the history
         # replay somewhere that does not exist.
-        make_task(project_path="   "),
+        make_task(agent_path="   "),
         # Not a dict at all: the row comes off the wire.
         "emrg",
     ],
@@ -163,8 +163,8 @@ def test_a_row_that_cannot_name_a_session_yields_nothing(row):
 
 
 def test_the_cwd_moves_only_for_the_session_the_open_requested():
-    pending = ("/Users/x/projects/emrg", "emrg")
-    assert _task_open_switch(pending, "emrg") == "/Users/x/projects/emrg"
+    pending = ("/Users/x/agents/emrg", "emrg")
+    assert _task_open_switch(pending, "emrg") == "/Users/x/agents/emrg"
 
 
 def test_no_open_means_no_switch():
@@ -175,9 +175,9 @@ def test_no_open_means_no_switch():
 def test_a_stale_open_does_not_ride_along_on_an_unrelated_resume():
     """The case a truthiness check gets wrong: an open whose verdict never arrived
     (connection dropped) is still pending when a different session resumes, and
-    moving the host into that stale project would put every later message and the
+    moving the host into that stale agent would put every later message and the
     history replay in the wrong directory."""
-    stale = ("/Users/x/projects/other", "other")
+    stale = ("/Users/x/agents/other", "other")
     assert _task_open_switch(stale, "s_260917_1200_abcd") is None
 
 

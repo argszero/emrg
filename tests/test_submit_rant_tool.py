@@ -106,8 +106,8 @@ def test_submit_rant_tool_requires_message():
     assert "requires a message" in result.content
 
 
-def test_submit_rant_tool_requires_project():
-    """Missing project → error telling the agent to ask the user (rant 12:03:13)."""
+def test_submit_rant_tool_requires_agent():
+    """Missing agent → error telling the agent to ask the user (rant 12:03:13)."""
     tool = SubmitRantTool()
     result = __import__("asyncio").run(tool.execute({"message": "some complaint"}))
     assert result.error is True
@@ -115,8 +115,8 @@ def test_submit_rant_tool_requires_project():
     assert "ask the user" in result.content
 
 
-def test_submit_rant_warns_on_unregistered_project(tmp_path, monkeypatch):
-    """Rant 2026-08-24T10:54:04: project must be a agents.yml short name —
+def test_submit_rant_warns_on_unregistered_agent(tmp_path, monkeypatch):
+    """Rant 2026-08-24T10:54:04: agent must be a agents.yml short name —
     an owner/repo-style name is recorded but flagged with registered
     candidates so the mistake is visible at submit time."""
     monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
@@ -141,7 +141,7 @@ def test_submit_rant_warns_on_unregistered_project(tmp_path, monkeypatch):
     assert json.loads(lines[0])["agent"] == "argszero/aitokenpool"
 
 
-def test_submit_rant_clean_on_registered_project(tmp_path, monkeypatch):
+def test_submit_rant_clean_on_registered_agent(tmp_path, monkeypatch):
     """A registered short name submits without the warning."""
     monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
     (tmp_path / "agents.yml").write_text(
@@ -205,7 +205,7 @@ def _write_rant_lines(tmp_path, entries: list[dict]):
 
 
 def test_read_tolerates_legacy_array_rows(tmp_path):
-    """Legacy array rows ([ts, project, status, progress, completed, message])
+    """Legacy array rows ([ts, agent, status, progress, completed, message])
     are converted back to dicts; corrupt rows skipped (rant 16:42:52)."""
     # Relative timestamps — CI runs on UTC, so hardcoded +08:00 strings would
     # mis-sort against the now()-generated append timestamp (existing lesson
@@ -238,7 +238,7 @@ def test_read_tolerates_legacy_array_rows(tmp_path):
     assert entries[1]["message"] == "dict rant"
 
 
-def test_list_rants_filters_by_status_and_project(tmp_path):
+def test_list_rants_filters_by_status_and_agent(tmp_path):
     f = _write_rant_lines(tmp_path, [
         {"timestamp": "2026-08-18T10:00:00+08:00", "agent": "emrg",
          "status": "pending", "progress": None, "completed": None,
@@ -747,7 +747,7 @@ def test_an_unfiltered_list_is_the_scan_view_and_names_the_call_that_returns_the
     assert len(full) > len(scan), "asking for the text costs more than scanning does"
 
 
-def test_project_alone_does_not_unlock_the_text(tmp_path, monkeypatch):
+def test_agent_alone_does_not_unlock_the_text(tmp_path, monkeypatch):
     """A filter that narrows nothing on the cost's axis is not a request for the body.
 
     The unlock is named precisely: the text comes when the caller filters by **status** or asks
@@ -760,21 +760,21 @@ def test_project_alone_does_not_unlock_the_text(tmp_path, monkeypatch):
     for it would reintroduce the default-read cost on the one filter a template really passes.
     """
     monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
-    body = "a pending rant in the project the caller named" + " tail-" + "t" * 400
+    body = "a pending rant in the agent the caller named" + " tail-" + "t" * 400
     _write_rant_lines(tmp_path, [
         {"timestamp": "2026-10-15T09:00:00+08:00", "agent": "emrg",
          "status": "pending", "progress": None, "completed": None, "message": body},
         {"timestamp": "2026-10-15T09:01:00+08:00", "agent": "other",
          "status": "pending", "progress": None, "completed": None,
-         "message": "another project's rant"},
+         "message": "another agent's rant"},
     ])
     tool = SubmitRantTool()
     out = __import__("asyncio").run(
         tool.execute({"action": "list", "agent": "emrg"})).content
     assert "2026-10-15T09:00:00" in out, "the filter still selects the row"
-    assert "another project" not in out, "…and excludes the other project's"
+    assert "another agent" not in out, "…and excludes the other agent's"
     assert "tail-" + "t" * 400 not in out, (
-        "a project filter selects rows, not bodies: it must stay a scan view"
+        "a agent filter selects rows, not bodies: it must stay a scan view"
     )
     assert "scan view — 1 row(s)" in out
     assert 'status="pending"' in out, "the note names the call that returns the text"
@@ -1040,7 +1040,7 @@ def test_tool_definition_exposes_actions():
     assert set(d.parameters["properties"]["action"]["enum"]) == {
         "submit", "list", "update", "cleanup",
     }
-    # submit contract (project/message) still documented
+    # submit contract (agent/message) still documented
     assert "message" in d.parameters["properties"]
     assert "agent" in d.parameters["properties"]
     assert "consent" in d.description.lower() or "confirm" in d.description.lower()
@@ -1143,10 +1143,10 @@ def test_the_list_action_on_a_named_pipe_is_a_tool_error_not_a_hang(tmp_path, mo
 
 
 @_needs_mkfifo
-def test_a_named_pipe_projects_yml_yields_no_candidates(tmp_path, monkeypatch):
+def test_a_named_pipe_agents_yml_yields_no_candidates(tmp_path, monkeypatch):
     """The advisory read degrades instead of refusing, as it already did for a missing file.
 
-    `agents.yml` only feeds a warning about a mis-spelled project name, so turning its
+    `agents.yml` only feeds a warning about a mis-spelled agent name, so turning its
     unreadability into a hard failure would break `submit` for a reason unrelated to the
     rant. The control in the same test is a real file: the read still works.
     """
@@ -1187,7 +1187,7 @@ def test_an_absent_rant_log_reads_empty_and_the_writer_creates_it(tmp_path):
     assert [r["message"] for r in _read_rants(write)] == ["host feedback"]
 
 
-def test_projects_yml_absent_or_malformed_yields_no_candidates(tmp_path, monkeypatch):
+def test_agents_yml_absent_or_malformed_yields_no_candidates(tmp_path, monkeypatch):
     """The pipe-free control for the advisory read: absent, malformed, and well-formed."""
     monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
     tool = SubmitRantTool()

@@ -130,7 +130,7 @@ A stale verdict has two remedies and their prices are not interchangeable:
 
   The merge, not a rebase: a rebase rewrites commits the remote already holds, so
   `git push` refuses it as non-fast-forward and the only way to publish one is the
-  force-push this project forbids, an overwritten remote commit being often
+  force-push this agent forbids, an overwritten remote commit being often
   unrecoverable - measured 2026-09-19 (`cyc20260919-065231`) on `#1404`, whose
   rebase was rejected exactly that way while merging master in and pushing the
   same tree moved the head cleanly. Every refresh in this repo's history is that
@@ -919,7 +919,7 @@ def _remedy(pr: int, kind: str, price: Price, run_id: str = "") -> str:
                 "and push the merge (`git fetch origin master`, `git merge FETCH_HEAD`, "
                 "`git push origin <branch>`) so CI judges the real merged tree - the merge, "
                 "not a rebase: a rebase of a pushed branch is refused as non-fast-forward, "
-                "and publishing one needs the force-push this project forbids. Nothing to "
+                "and publishing one needs the force-push this agent forbids. Nothing to "
                 "*void* is not nothing to *lose*: the push puts the head inside the "
                 "abstention window of the cycle that makes it - a cycle neither votes on "
                 "nor merges a head it pushed, and that window is the cycle's own run - so "
@@ -939,7 +939,7 @@ def _remedy(pr: int, kind: str, price: Price, run_id: str = "") -> str:
                 "gone (`git fetch origin master`, `git merge FETCH_HEAD`, "
                 "`git push origin <branch>`) - the merge, not a rebase: a rebase of a "
                 "pushed branch is refused as non-fast-forward, and publishing one needs "
-                "the force-push this project forbids"
+                "the force-push this agent forbids"
             )
         beside = f" (and the {price.veto_clause} standing there)" if price.vetoes else ""
         return (
@@ -1092,7 +1092,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "\nA stale verdict has no free remedy: refreshing a branch (re-merge master "
             "in, then push it - a rebase cannot be published without the force-push this "
-            "project forbids) moves its head, and `check-vote-count.py` voids every vote "
+            "agent forbids) moves its head, and `check-vote-count.py` voids every vote "
             "predating a head push. Per stale PR:",
             file=sys.stderr,
         )

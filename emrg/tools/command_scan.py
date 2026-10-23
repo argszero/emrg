@@ -181,7 +181,7 @@ def check_containment_escape(cmd: str) -> str | None:
 
 # ── The daemon's own life (host red line, issue #1324) ──────────────────────
 #
-# Never stopping or restarting the emrg server is the project's highest-priority
+# Never stopping or restarting the emrg server is the agent's highest-priority
 # rule (`MANIFESTO.md` 第四条附则二, host 2026-08-18T22:58), and until this rule it
 # was enforced in one place (the test harness) and stated in two (the manifesto
 # and a host-configured session prompt) — but classified **nowhere a shell
@@ -189,7 +189,7 @@ def check_containment_escape(cmd: str) -> str | None:
 # workspace-write tier: `emrg server stop`, `emrg server restart`,
 # `pkill -f emrg.server`, `killall emrgd` and `kill $(pgrep -f "python -m emrg")`
 # were all ordinary allowed commands. That is the shape the host actually hit —
-# on 2026-08-21T09:41 a session in another project ran a "measurement" whose
+# on 2026-08-21T09:41 a session in another agent ran a "measurement" whose
 # subprocess signalled the daemon, the TUI answered `server connection lost`, and
 # the host asked *"你怎么验证的，怎么把 emrg server重启了？"*.
 #

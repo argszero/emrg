@@ -177,7 +177,7 @@ def test_every_carrier_states_a_mode():
     lost every entry cannot read as agreement.
     """
     carriers = _existing_carriers()
-    assert len(carriers) >= 3, f"only {sorted(carriers)} were read — that is not this project's tree"
+    assert len(carriers) >= 3, f"only {sorted(carriers)} were read — that is not this agent's tree"
     for rel in sorted(carriers):
         assert _modes(rel), f"{rel} states no mode for the config file"
 

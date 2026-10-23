@@ -9,7 +9,7 @@ Three defects, measured on `5c9ed63b` before this file existed (rant
    written at 09:13 and a later prompt carried **0** occurrences of it while
    `skill-catalog`, loaded from the same directory by the same loader, was there.
 2. `load_skills()` fell back to `Path.cwd()` — the **daemon's** directory, `~/.emrg` —
-   so every session's "project" skills were `~/.emrg/.emrg/skills/` whatever project
+   so every session's "agent" skills were `~/.emrg/.emrg/skills/` whatever agent
    the session was in.
 3. Both roots were walked with `glob("*.md")`, so a skill written as the spec's
    `<name>/SKILL.md` was invisible: `~/.emrg/skills/browser-harness/SKILL.md`
@@ -31,7 +31,7 @@ from emrg.server.daemon import EmrgServer
 from emrg.session import Session
 from emrg.skills import loader as loader_mod
 from emrg.skills import registry as registry_mod
-from emrg.skills.loader import _project_root, load_skills
+from emrg.skills.loader import _agent_root, load_skills
 
 SKILL_TEXT = "---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n\n{body}\n"
 
@@ -42,16 +42,16 @@ def _skill(name: str, description: str = "a skill", body: str = "Body.") -> str:
 
 @pytest.fixture
 def roots(tmp_path, monkeypatch):
-    """A user root and a project root, both off the real home (and both empty)."""
+    """A user root and a agent root, both off the real home (and both empty)."""
     data = tmp_path / "home" / ".emrg"
     (data / "skills").mkdir(parents=True)
     monkeypatch.setattr(loader_mod, "config_dir", lambda: data)
     monkeypatch.setattr(registry_mod, "config_dir", lambda: data)
 
-    project = tmp_path / "project"
-    (project / ".git").mkdir(parents=True)
-    (project / ".emrg" / "skills").mkdir(parents=True)
-    return data / "skills", project
+    agent = tmp_path / "agent"
+    (agent / ".git").mkdir(parents=True)
+    (agent / ".emrg" / "skills").mkdir(parents=True)
+    return data / "skills", agent
 
 
 # ── the two layouts ────────────────────────────────────────────────
@@ -66,7 +66,7 @@ def test_a_flat_file_and_a_directory_bundle_both_load(roots):
         _skill("bundle-skill", "a bundled skill"), encoding="utf-8"
     )
 
-    names = [s.name for s in load_skills(project_dir=user_root)]
+    names = [s.name for s in load_skills(agent_dir=user_root)]
     assert names == ["bundle-skill", "flat-skill"], names
 
 
@@ -83,7 +83,7 @@ def test_a_bundle_carries_the_directory_its_references_sit_in(roots):
     (bundle / "SKILL.md").write_text(_skill("with-files"), encoding="utf-8")
     (bundle / "references" / "install.md").write_text("details\n", encoding="utf-8")
 
-    skill = next(s for s in load_skills(project_dir=user_root) if s.name == "with-files")
+    skill = next(s for s in load_skills(agent_dir=user_root) if s.name == "with-files")
     assert skill.path.name == "SKILL.md"
     assert skill.path.parent == bundle
     assert (skill.path.parent / "references" / "install.md").is_file()
@@ -100,53 +100,53 @@ def test_one_name_in_both_layouts_loads_once_and_the_bundle_wins(roots):
         _skill("both", "the bundle"), encoding="utf-8"
     )
 
-    skills = [s for s in load_skills(project_dir=user_root) if s.name == "both"]
+    skills = [s for s in load_skills(agent_dir=user_root) if s.name == "both"]
     assert len(skills) == 1
     assert skills[0].description == "the bundle"
     assert skills[0].path.name == "SKILL.md"
 
 
-# ── the project root ───────────────────────────────────────────────
+# ── the agent root ───────────────────────────────────────────────
 
 
-def test_the_project_root_is_the_nearest_git_ancestor(roots):
-    """A session opened deep inside a project still sees that project's skills."""
-    _, project = roots
-    (project / ".emrg" / "skills" / "project-skill.md").write_text(
-        _skill("project-skill"), encoding="utf-8"
+def test_the_agent_root_is_the_nearest_git_ancestor(roots):
+    """A session opened deep inside a agent still sees that agent's skills."""
+    _, agent = roots
+    (agent / ".emrg" / "skills" / "agent-skill.md").write_text(
+        _skill("agent-skill"), encoding="utf-8"
     )
-    deep = project / "src" / "nested"
+    deep = agent / "src" / "nested"
     deep.mkdir(parents=True)
 
-    assert _project_root(deep) == project
-    names = [s.name for s in load_skills(project_dir=deep)]
-    assert "project-skill" in names, names
+    assert _agent_root(deep) == agent
+    names = [s.name for s in load_skills(agent_dir=deep)]
+    assert "agent-skill" in names, names
 
 
 def test_a_directory_with_no_repository_above_it_is_its_own_root(tmp_path):
-    """Scratch and temp directories are projects of their own, not somebody's child."""
+    """Scratch and temp directories are agents of their own, not somebody's child."""
     scratch = tmp_path / "scratch"
     (scratch / ".emrg" / "skills").mkdir(parents=True)
     (scratch / ".emrg" / "skills" / "here.md").write_text(
         _skill("here"), encoding="utf-8"
     )
 
-    assert _project_root(scratch) == scratch
+    assert _agent_root(scratch) == scratch
 
 
-def test_the_project_beats_the_user_root_on_a_shared_name(roots):
-    """Same name in both roots: the project's copy is the one loaded."""
-    user_root, project = roots
+def test_the_agent_beats_the_user_root_on_a_shared_name(roots):
+    """Same name in both roots: the agent's copy is the one loaded."""
+    user_root, agent = roots
     (user_root / "shared.md").write_text(
         _skill("shared", "the user copy"), encoding="utf-8"
     )
-    (project / ".emrg" / "skills" / "shared.md").write_text(
-        _skill("shared", "the project copy"), encoding="utf-8"
+    (agent / ".emrg" / "skills" / "shared.md").write_text(
+        _skill("shared", "the agent copy"), encoding="utf-8"
     )
 
-    shared = next(s for s in load_skills(project_dir=project) if s.name == "shared")
-    assert shared.description == "the project copy"
-    assert shared.source == "project"
+    shared = next(s for s in load_skills(agent_dir=agent) if s.name == "shared")
+    assert shared.description == "the agent copy"
+    assert shared.source == "agent"
 
 
 # ── nothing is cached ──────────────────────────────────────────────
@@ -155,17 +155,17 @@ def test_the_project_beats_the_user_root_on_a_shared_name(roots):
 def test_a_skill_written_after_a_load_is_seen_by_the_next_one(roots):
     """Install, edit and delete all reach the next call without any reload step."""
     user_root, _ = roots
-    assert [s.name for s in load_skills(project_dir=user_root)] == []
+    assert [s.name for s in load_skills(agent_dir=user_root)] == []
 
     (user_root / "later.md").write_text(_skill("later", body="first body"), encoding="utf-8")
-    assert "later" in [s.name for s in load_skills(project_dir=user_root)]
+    assert "later" in [s.name for s in load_skills(agent_dir=user_root)]
 
     (user_root / "later.md").write_text(_skill("later", body="second body"), encoding="utf-8")
-    later = next(s for s in load_skills(project_dir=user_root) if s.name == "later")
+    later = next(s for s in load_skills(agent_dir=user_root) if s.name == "later")
     assert later.body.endswith("second body"), later.body
 
     (user_root / "later.md").unlink()
-    assert [s.name for s in load_skills(project_dir=user_root)] == []
+    assert [s.name for s in load_skills(agent_dir=user_root)] == []
 
 
 # ── the daemon reads with the session's directory ──────────────────
@@ -180,32 +180,32 @@ def _server(tmp_path: Path) -> EmrgServer:
     return server
 
 
-def test_the_prompt_carries_the_sessions_project_skills(roots, tmp_path):
-    """The skills in a prompt come from the session's project, not the daemon's cwd."""
-    _, project = roots
-    (project / ".emrg" / "skills" / "session-skill.md").write_text(
-        _skill("session-skill", "only this project has it"), encoding="utf-8"
+def test_the_prompt_carries_the_sessions_agent_skills(roots, tmp_path):
+    """The skills in a prompt come from the session's agent, not the daemon's cwd."""
+    _, agent = roots
+    (agent / ".emrg" / "skills" / "session-skill.md").write_text(
+        _skill("session-skill", "only this agent has it"), encoding="utf-8"
     )
     server = _server(tmp_path)
-    session = Session.create_with_id("skills-live", project / "src")
+    session = Session.create_with_id("skills-live", agent / "src")
 
     rendered = server._build_system_prompt(session)
-    assert "session-skill" in rendered, "the session's own project skill did not reach the prompt"
+    assert "session-skill" in rendered, "the session's own agent skill did not reach the prompt"
 
 
 def test_a_skill_installed_after_the_daemon_started_reaches_the_next_prompt(roots, tmp_path):
     """The defect itself: a snapshot taken at start could never see this skill."""
-    _, project = roots
+    _, agent = roots
     server = _server(tmp_path)
 
-    before = server._build_system_prompt(Session.create_with_id("skills-late-a", project))
+    before = server._build_system_prompt(Session.create_with_id("skills-late-a", agent))
     assert "late-skill" not in before
 
-    (project / ".emrg" / "skills" / "late-skill.md").write_text(
+    (agent / ".emrg" / "skills" / "late-skill.md").write_text(
         _skill("late-skill", "written after the daemon started"), encoding="utf-8"
     )
 
-    after = server._build_system_prompt(Session.create_with_id("skills-late-b", project))
+    after = server._build_system_prompt(Session.create_with_id("skills-late-b", agent))
     assert "late-skill" in after, "a skill on disk did not reach the next prompt"
 
 

@@ -41,7 +41,7 @@ class _FakeWs:
 
 def _server() -> EmrgServer:
     server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
-    # Nothing here touches the projects log, but pointing it at a temporary path
+    # Nothing here touches the agents log, but pointing it at a temporary path
     # is free and keeps a mistaken future edit from writing the host's real
     # ~/.emrg/agents.yml (the 2026-08-13 leak).
     import tempfile  # noqa: PLC0415 — local to the fixture helper

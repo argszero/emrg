@@ -6,7 +6,7 @@ key in it. Two shapes are masked, and the second exists because the first is not
 
 * a **key-name/value pair** (``api_key=...``, ``token: ...``) — masked by pattern;
 * a credential with no label at all (``sk-``, ``ghp_``, ``xox``, ``AKIA``, a JWT, a
-  ``Bearer`` header) — the cross-project lesson was that a base64-wrapped ``access_token``
+  ``Bearer`` header) — the cross-agent lesson was that a base64-wrapped ``access_token``
   body carries no plaintext label for a pattern to catch, so a long base64 run that *decodes*
   into one is masked whole.
 

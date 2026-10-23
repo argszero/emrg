@@ -32,7 +32,7 @@ def test_guard_is_installed_in_every_module_that_writes_a_config_file():
     assert wrapped.__name__ == "guarded"
 
 
-def test_guard_allows_tmp_projects_yml(tmp_path):
+def test_guard_allows_tmp_agents_yml(tmp_path):
     """Writes to a tmp agents.yml pass through to the original writer."""
     import emrg.server.scheduler as sched_mod
 
@@ -40,20 +40,20 @@ def test_guard_allows_tmp_projects_yml(tmp_path):
     sched_mod.atomic_write_yaml(
         [{"name": "x", "path": "p", "last_active": "t"}],
         target,
-        prefix=".projects_",
+        prefix=".agents_",
     )
     assert target.exists()
     data = target.read_text(encoding="utf-8")
     assert "name: x" in data
 
 
-def test_guard_rejects_real_projects_yml():
+def test_guard_rejects_real_agents_yml():
     """Writing the real ~/.emrg/agents.yml is a hard error."""
     import emrg.server.scheduler as sched_mod
 
     real = (Path.home() / ".emrg" / "agents.yml").resolve()
     with pytest.raises(AssertionError, match="hermetic"):
-        sched_mod.atomic_write_yaml([], real, prefix=".projects_")
+        sched_mod.atomic_write_yaml([], real, prefix=".agents_")
 
 
 def test_guard_rejects_real_tasks_yml():

@@ -43,8 +43,8 @@ def test_session_dir_names_the_directory_a_session_actually_fills(tmp_path):
 
 def test_session_dir_keeps_the_workspace_it_was_given(tmp_path):
     """A relative workspace stays relative, so the caller's cwd still decides."""
-    assert str(session_dir("project", "s_260101_0000_abcd")) == str(
-        Path("project") / ".emrg" / "sessions" / "s_260101_0000_abcd"
+    assert str(session_dir("agent", "s_260101_0000_abcd")) == str(
+        Path("agent") / ".emrg" / "sessions" / "s_260101_0000_abcd"
     )
 
 
@@ -283,7 +283,7 @@ def test_every_builder_of_the_layout_is_found(expression):
     "expression",
     [
         # A prompt that tells a reader where memory lives is prose, not a producer.
-        'f"Project: `{cwd}/.emrg/memory/` (project-scope, cross-session)"',
+        'f"Agent: `{cwd}/.emrg/memory/` (agent-scope, cross-session)"',
         # The host's install root is a different fact from a directory's layout.
         'Path.home() / ".emrg" / "install"',
         'cwd / ".emrg" / "config.toml"',
@@ -333,7 +333,7 @@ def _javascript_without_comments(source: str) -> str:
 def test_the_electron_client_builds_the_same_path_in_one_place():
     """The rule's other language: the GUI main process is its own single producer.
 
-    `main.js` writes a pasted image into `<project>/.emrg/sessions/<id>/images` so
+    `main.js` writes a pasted image into `<agent>/.emrg/sessions/<id>/images` so
     the daemon can find it, and it cannot call the Python producer — the two
     processes share a filesystem, not a runtime. So delegation is not available on
     this half; what is available is that the copy stays **one** copy, and that is
@@ -357,7 +357,7 @@ def test_the_electron_client_builds_the_same_path_in_one_place():
 
     assert len(sites) == 1, (
         "expected exactly one place in the Electron client to build "
-        f"<project>/.emrg/sessions/<id>, found {sites} — the Python package gets "
+        f"<agent>/.emrg/sessions/<id>, found {sites} — the Python package gets "
         "this from one producer; this half of the rule has to stay one copy, "
         "because nothing compares them at runtime"
     )
@@ -1305,7 +1305,7 @@ class TestSessionFilesAskTheKindBeforeOpening:
     """A session file of a non-regular kind is answered, not opened (issue #2085).
 
     Every file `Session` opens lives in `<cwd>/.emrg/sessions/<id>/`, which is inside the
-    project the agent works in — the workspace fence grants the project root — so a
+    agent the agent works in — the workspace fence grants the agent root — so a
     `mkfifo` there is the agent's own doing. Measured 2026-10-11 (`cyc20261011-071202`) on
     master `3386f239`: `load`, `title`, `_read_history` and `append_message` each **did not
     return** within 15 s against a pipe at `meta.json`/`history.jsonl`, where the same

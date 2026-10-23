@@ -26,7 +26,7 @@ class GlobTool(ToolExecutor):
             description=(
                 "Find files matching a glob pattern. "
                 "Supports standard glob patterns: *, ?, [seq], ** for recursive. "
-                "Use this to discover files in a project by name pattern — e.g., "
+                "Use this to discover files in a agent by name pattern — e.g., "
                 "'**/*.py' for all Python files, 'src/**/*.ts' for TypeScript, "
                 "'**/*test*' for test files. "
                 "Results are capped at 500 matches, sorted by path. "
@@ -42,7 +42,7 @@ class GlobTool(ToolExecutor):
                     "pattern": {
                         "type": "string",
                         "description": (
-                            "Glob pattern relative to the project root. "
+                            "Glob pattern relative to the agent root. "
                             "Examples: '**/*.py', 'src/**/*.rs', '**/*test*.py', "
                             "'*.md', 'emrg/tools/*.py'. The walk does not expand "
                             "`{a,b}` brace alternation, and a pattern that carries one "
@@ -55,7 +55,7 @@ class GlobTool(ToolExecutor):
                     "workdir": {
                         "type": "string",
                         "description": (
-                            "Working directory for the pattern (default: project root). "
+                            "Working directory for the pattern (default: agent root). "
                             "The hidden/noise skipping is relative to it, so point it at "
                             "the directory you mean to search — that is how to read "
                             "inside a skipped one. `grep` names this same parameter "

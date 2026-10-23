@@ -1,6 +1,6 @@
 """The agent register: one directory, one row, one name — and no normalisation.
 
-What these pin is the whole of the rule the daemon's older ``_touch_project`` did not
+What these pin is the whole of the rule the daemon's older ``_touch_agent`` did not
 follow: ``path`` is the string the session holds, a directory under another Agent's
 ``.emrg/`` is that Agent's bookkeeping rather than a workspace, and a name is unique
 because a task resolves its directory by name.

@@ -11,7 +11,7 @@ import type { SkillRow } from "../lib/dialogLists";
  */
 
 const skills: SkillRow[] = [
-  { name: "browser-harness", source: "project", description: "Web automation" },
+  { name: "browser-harness", source: "agent", description: "Web automation" },
   { name: "skill-catalog", source: "user" },
 ];
 
@@ -48,7 +48,7 @@ describe("SkillsDialog", () => {
     const rows = screen.getAllByTestId("skill-row");
     expect(rows).toHaveLength(2);
     expect(rows[0]).toHaveTextContent("browser-harness");
-    expect(rows[0]).toHaveTextContent("project · Web automation");
+    expect(rows[0]).toHaveTextContent("agent · Web automation");
     expect(rows[1]).toHaveTextContent("skill-catalog");
     expect(rows[1]).toHaveTextContent("user");
   });
