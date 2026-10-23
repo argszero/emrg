@@ -62,8 +62,11 @@ REVIEW_BLOCK_START = "# approve"
 REVIEW_BLOCK_END = "# merge (conditions in R3)"
 FOLLOW_UP_ANCHOR = "If you are a Committer on this repo and there are currently <3"
 
-#: The id the same render tells the cycle to write its record with (§4 Record).
-RECORD_ID = re.compile(r"`id`: `(?P<id>cyc\d{8}-\d{6})`")
+#: The id the same render tells the cycle to name this run by (§4 Record). Anchored on the
+#: declaration rather than on a bare ``cyc…`` token: the vote examples below are cycle ids
+#: too, and they come before it in the file, so a token scan would read an example as the
+#: declaration and check the examples against themselves.
+CYCLE_ID = re.compile(r"The cycle id — `(?P<id>cyc\d{8}-\d{6})` —")
 
 
 def _load_counter():
@@ -119,11 +122,12 @@ def _instructed_examples(text: str) -> list[str]:
     return [m.group("body") for region in regions for m in VOTE_EXAMPLE.finditer(region)]
 
 
-def _record_id(text: str) -> str:
-    match = RECORD_ID.search(text)
+def _declared_cycle_id(text: str) -> str:
+    match = CYCLE_ID.search(text)
     assert match is not None, (
-        "the rendered prompt no longer states the cycle record's id (``id``: ``cyc…``) — "
-        "without it the examples below have nothing to be checked against"
+        "the rendered prompt no longer declares this run's cycle id "
+        "(``The cycle id — `cyc…` —``) — without it the examples below have nothing to be "
+        "checked against"
     )
     return match.group("id")
 
@@ -132,7 +136,7 @@ def test_the_instructed_vote_examples_name_exactly_one_cycle_id(rendered, counte
     """Each example body attributes the vote to exactly one cycle — this cycle."""
     examples = _instructed_examples(rendered)
     assert len(examples) == 3, f"expected 3 instructed examples, found {len(examples)}"
-    cycle_id = _record_id(rendered)
+    cycle_id = _declared_cycle_id(rendered)
     for body in examples:
         ids = counter.distinct_cycle_ids(body)
         assert ids == [cycle_id], (

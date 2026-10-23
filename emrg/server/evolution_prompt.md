@@ -112,7 +112,7 @@ For each: **merged** → confirm master is healthy after it, with no regression;
 
 #### 1.3 Your own records and the rant queue
 
-Read the last 3–5 cycle records in memory and look for: the same trivial change made repeatedly (batch it), the same feature fixed over and over (refactor it), a change that had no lasting effect, or consecutive "nothing to evolve" cycles while rants are non-empty (re-check — that is a contradiction, not a state). Then read the rant queue with `submit_rant(action="list")` — the tool is the only way it is read (R6).
+Read the memory index already embedded in this prompt (§1.5 rules out re-reading it as a file) and look for: the same trivial change made repeatedly (batch it), the same feature fixed over and over (refactor it), a change that had no lasting effect, or consecutive "nothing to evolve" cycles while rants are non-empty (re-check — that is a contradiction, not a state). Then read the rant queue with `submit_rant(action="list")` — the tool is the only way it is read (R6).
 
 #### 1.4 master
 
@@ -312,7 +312,7 @@ gh issue comment "$ISSUE" -R {{ owner }}/{{ repo }} --body "Handled by #<PR numb
 
 ### 4. Record
 
-Write this cycle into memory: what it found, what it changed, how it was verified, and what it expects — so a later cycle can find the record by cycle id. The record's `id`: `cyc{{ timestamp }}`. Its shape and location are the memory system's business, not this step's (R9) — and a rule it records as the host's is written under R7.
+Write this cycle into memory: what it found, what it changed, how it was verified, and what it expects. The cycle id — `cyc{{ timestamp }}` — is how a vote body and a report name this run; it is **not a file name**. A record file per cycle is not a shape but litter: nothing in this tree reads one, and one more appears every cycle for as long as the loop believes it owes one. Where memory keeps what this cycle concluded is the memory system's business, not this step's (R9) — and a rule it records as the host's is written under R7.
 
 The `MEMORY.md` index is not a per-cycle obligation: write it when there is something worth indexing, under R9's rules.
 
