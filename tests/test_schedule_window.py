@@ -249,7 +249,7 @@ def sched(tmp_path, monkeypatch):
     """A TaskScheduler over a tasks.yml in `tmp_path`, with config_dir redirected."""
     original = mod.config_dir
     monkeypatch.setattr(mod, "config_dir", lambda: tmp_path)
-    # A registered project, so `task_create` has something to be valid against.
+    # A registered agent, so `task_create` has something to be valid against.
     (tmp_path / "agents.yml").write_text(
         yaml.safe_dump([{"name": "emrg", "path": str(tmp_path)}])
     )

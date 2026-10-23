@@ -1,6 +1,6 @@
 """The daemon's tool reachability must not depend on what launched it.
 
-Rant 2026-09-27T19:45:54 (project ``emrg``), defect B — measured on this host.
+Rant 2026-09-27T19:45:54 (agent ``emrg``), defect B — measured on this host.
 The host restarted the daemon from the GUI, and the new daemon's parent was
 ``EMRG.app/Contents/MacOS/EMRG`` (ppid 1): a GUI started from the Dock, which
 inherits launchd's minimal environment. Its ``PATH`` was
@@ -92,7 +92,7 @@ POSIX_TOOL_DIRS: tuple[str, ...] = (
 VERSION_KEYED_TOOL_DIRS: tuple[str, ...] = ("~/.nvm/versions/node/<version>/bin",)
 
 #: The same convention on Windows: ``~/.local/bin`` is still the user-script
-#: directory this project's own tooling names (``emrg/gui/main.js``). The
+#: directory this agent's own tooling names (``emrg/gui/main.js``). The
 #: bundled ``git``/``gh`` directories need no entry — ``bin/emrgd.cmd`` already
 #: prepends them, and this module runs after it, in the same child process.
 WINDOWS_TOOL_DIRS: tuple[str, ...] = ("~/.local/bin",)

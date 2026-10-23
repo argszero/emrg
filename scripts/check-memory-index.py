@@ -17,7 +17,7 @@ The index rule EMRG's cycles obey is two numbers and one place to act:
 (`emrg/server/evolution_prompt.md` §6, in this checkout.) Nothing reads those
 numbers off an index. The two mechanisms that do look at one are both elsewhere,
 and each covers a different file: the reflection round's compaction note counts
-the session cwd's project index and the session's own index
+the session cwd's agent index and the session's own index
 (`EmrgServer._maybe_reflect_memory`), while the store's write-time advisory fires
 only on a **store write** - its own comment in `emrg/memory.py` names what that
 leaves out, "an index the agent edits with `write`/`edit`, which is how the memory
@@ -34,7 +34,7 @@ index within its rule" is a command instead of a hand-rolled probe.
 
 What a row is, and why by shape
 -------------------------------
-A row is a line in one of **two** shapes, because this project's indexes are
+A row is a line in one of **two** shapes, because this agent's indexes are
 written in both:
 
 * a ``- `` list line - the store's own render (`MemoryIndex._render_entry`) and
@@ -109,14 +109,14 @@ Scope, named rather than implied
   issue #1606's measured divergence - so the path form is not a convenience but
   the way to reach it.
 * A row's target file **is** checked, and this is the third reading: a row link
-  that resolves to no file beside the index. The rule is the one this project
-  already asserts in three other carriers - `tests/test_project_context_paths.py`
+  that resolves to no file beside the index. The rule is the one this agent
+  already asserts in three other carriers - `tests/test_agent_context_paths.py`
   for the paths `Agent.md`/`MANIFESTO.md` name, `check-citation-resolves.py` for
   test node ids, `check-rant-citations.py` for the files a rant names - and the
   index's own rows are the carrier none of them reads. Measured 2026-09-26 before
   it was added: 245 links across this host's three live indexes, **0** unresolved,
   so the value is the next rename, not a repair (the shape
-  `test_project_context_paths.py` was written in).
+  `test_agent_context_paths.py` was written in).
 * The character bound applies to **rows**. A title, a `>` note or a paragraph past
   512 chars is not a row and is not reported - the rule's subject is rows, which is
   what `100 x 512` bounds, and the renderer that writes them bounds the same thing.
@@ -222,7 +222,7 @@ REPO_ROOT = _resolve_root()
 # holds that: a number that resolves *outside* the named tree is reported as
 # unmeasurable rather than printed as the tree's own.
 #
-# The import is also the one thing here that needs the project interpreter, so its
+# The import is also the one thing here that needs the agent interpreter, so its
 # failure is carried to `main()` as data instead of raised at import time: a bare
 # `python3` that cannot import the package must still print its `tree:` line and
 # say what is missing, not die before naming the tree or a reason. The same shape
@@ -400,11 +400,11 @@ def measure(path: Path) -> Reading:
 def default_indexes(root: Path) -> list[Path]:
     """The indexes the tree at `root` carries, in a stable order.
 
-    Both levels the memory instructions name for a tree: the project's index and
+    Both levels the memory instructions name for a tree: the agent's index and
     one per session under it. Derived by *globbing the filesystem*, never by
     constructing a store - `MemoryStore.__init__` mkdirs the directory it is
     handed, and a reading with a side effect is how a count comes to create the
-    thing it counts (the reason `_maybe_reflect_memory` spells its project path
+    thing it counts (the reason `_maybe_reflect_memory` spells its agent path
     out rather than asking a store for it).
 
     :param root: the tree to look in.
@@ -522,7 +522,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if THRESHOLD_ERROR:
         print(
             "could not measure: the rule's two numbers could not be imported from "
-            f"this checkout ({THRESHOLD_ERROR}) - run this with the project "
+            f"this checkout ({THRESHOLD_ERROR}) - run this with the agent "
             f"interpreter ({RUNNER} scripts/check-memory-index.py)",
             file=sys.stderr,
         )

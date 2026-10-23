@@ -41,7 +41,7 @@ def test_append_rant_writes_sorted_entry(tmp_path):
     rants_file.write_text(
         json.dumps({
             "timestamp": older_ts,
-            "project": "emrg",
+            "agent": "emrg",
             "status": "completed",
             "progress": None,
             "completed": "2026-08-17T08:30:00+08:00",
@@ -49,7 +49,7 @@ def test_append_rant_writes_sorted_entry(tmp_path):
         }, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-    count = append_rant(rants_file, "new feedback", project="argszero/aitokenpool")
+    count = append_rant(rants_file, "new feedback", agent="argszero/aitokenpool")
     assert count == 2
 
     lines = rants_file.read_text(encoding="utf-8").strip().splitlines()
@@ -58,11 +58,11 @@ def test_append_rant_writes_sorted_entry(tmp_path):
     # sorted by timestamp: older first, new last
     assert entries[0]["message"] == "older rant"
     assert entries[1]["message"] == "new feedback"
-    # field order: timestamp → project → status → progress → completed → message
+    # field order: timestamp → agent → status → progress → completed → message
     assert list(entries[1].keys()) == [
-        "timestamp", "project", "status", "progress", "completed", "message",
+        "timestamp", "agent", "status", "progress", "completed", "message",
     ]
-    assert entries[1]["project"] == "argszero/aitokenpool"
+    assert entries[1]["agent"] == "argszero/aitokenpool"
     assert entries[1]["status"] == "pending"
     assert entries[1]["completed"] is None
     # daemon-authoritative tz-aware timestamp
@@ -80,7 +80,7 @@ def test_append_rant_missing_file_and_corrupt_lines(tmp_path):
     entries = [json.loads(l) for l in
                rants_file.read_text(encoding="utf-8").strip().splitlines()]
     assert entries[0]["message"] == "hello"
-    assert entries[0]["project"] == ""
+    assert entries[0]["agent"] == ""
 
 
 def test_submit_rant_tool_writes_and_reports_count(tmp_path, monkeypatch):
@@ -89,7 +89,7 @@ def test_submit_rant_tool_writes_and_reports_count(tmp_path, monkeypatch):
     tool = SubmitRantTool()
 
     result = __import__("asyncio").run(tool.execute(
-        {"message": "this feature is broken", "project": "argszero/aitokenpool"}
+        {"message": "this feature is broken", "agent": "argszero/aitokenpool"}
     ))
     assert result.error is False
     assert "Total rants: 1" in result.content
@@ -106,17 +106,17 @@ def test_submit_rant_tool_requires_message():
     assert "requires a message" in result.content
 
 
-def test_submit_rant_tool_requires_project():
-    """Missing project → error telling the agent to ask the user (rant 12:03:13)."""
+def test_submit_rant_tool_requires_agent():
+    """Missing agent → error telling the agent to ask the user (rant 12:03:13)."""
     tool = SubmitRantTool()
     result = __import__("asyncio").run(tool.execute({"message": "some complaint"}))
     assert result.error is True
-    assert "project is required" in result.content
+    assert "agent is required" in result.content
     assert "ask the user" in result.content
 
 
-def test_submit_rant_warns_on_unregistered_project(tmp_path, monkeypatch):
-    """Rant 2026-08-24T10:54:04: project must be a agents.yml short name —
+def test_submit_rant_warns_on_unregistered_agent(tmp_path, monkeypatch):
+    """Rant 2026-08-24T10:54:04: agent must be a agents.yml short name —
     an owner/repo-style name is recorded but flagged with registered
     candidates so the mistake is visible at submit time."""
     monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
@@ -127,7 +127,7 @@ def test_submit_rant_warns_on_unregistered_project(tmp_path, monkeypatch):
     )
     tool = SubmitRantTool()
     result = __import__("asyncio").run(tool.execute(
-        {"message": "something is broken", "project": "argszero/aitokenpool"}
+        {"message": "something is broken", "agent": "argszero/aitokenpool"}
     ))
     assert result.error is False
     assert "Total rants: 1" in result.content
@@ -138,10 +138,10 @@ def test_submit_rant_warns_on_unregistered_project(tmp_path, monkeypatch):
     # the rant still lands (non-blocking warning)
     lines = (tmp_path / "rants.jsonl").read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 1
-    assert json.loads(lines[0])["project"] == "argszero/aitokenpool"
+    assert json.loads(lines[0])["agent"] == "argszero/aitokenpool"
 
 
-def test_submit_rant_clean_on_registered_project(tmp_path, monkeypatch):
+def test_submit_rant_clean_on_registered_agent(tmp_path, monkeypatch):
     """A registered short name submits without the warning."""
     monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
     (tmp_path / "agents.yml").write_text(
@@ -150,7 +150,7 @@ def test_submit_rant_clean_on_registered_project(tmp_path, monkeypatch):
     )
     tool = SubmitRantTool()
     result = __import__("asyncio").run(tool.execute(
-        {"message": "still broken", "project": "emrg"}
+        {"message": "still broken", "agent": "emrg"}
     ))
     assert result.error is False
     assert "Total rants: 1" in result.content
@@ -163,11 +163,11 @@ def test_submit_rant_definition_exposes_consent_contract():
     d = tool.definition()
     assert d.name == "submit_rant"
     assert "consent" in d.description.lower() or "confirm" in d.description.lower()
-    # action is the only statically-required param; submit's project/message
+    # action is the only statically-required param; submit's agent/message
     # are enforced in execute() (see test_submit_rant_tool_requires_*)
     assert "action" in d.parameters["required"]
     assert "message" in d.parameters["properties"]  # documented
-    assert "project" in d.parameters["properties"]  # documented since rant 12:03:13
+    assert "agent" in d.parameters["properties"]  # documented since rant 12:03:13
     # rant 2026-08-19T10:35:24: static purpose removed → per-call intent required
     assert not hasattr(d, "purpose")
     assert "intent" in d.parameters["required"]
@@ -205,7 +205,7 @@ def _write_rant_lines(tmp_path, entries: list[dict]):
 
 
 def test_read_tolerates_legacy_array_rows(tmp_path):
-    """Legacy array rows ([ts, project, status, progress, completed, message])
+    """Legacy array rows ([ts, agent, status, progress, completed, message])
     are converted back to dicts; corrupt rows skipped (rant 16:42:52)."""
     # Relative timestamps — CI runs on UTC, so hardcoded +08:00 strings would
     # mis-sort against the now()-generated append timestamp (existing lesson
@@ -218,49 +218,49 @@ def test_read_tolerates_legacy_array_rows(tmp_path):
     f.write_text(
         f'["{older}", "emrg", "pending", null, null, "array rant"]\n'
         "not-json\n"
-        f'{{"timestamp": "{newer}", "project": "emrg", '
+        f'{{"timestamp": "{newer}", "agent": "emrg", '
         '"status": "completed", "progress": null, '
         f'"completed": "{newer}", "message": "dict rant", '
         '"unknown": "ignored"}\n',
         encoding="utf-8",
     )
     # append_rant must not crash on the mixed file and must normalize rows
-    count = append_rant(f, "new rant", project="emrg")
+    count = append_rant(f, "new rant", agent="emrg")
     assert count == 3
     entries = [json.loads(l) for l in
                f.read_text(encoding="utf-8").strip().splitlines()]
     assert entries[0]["message"] == "array rant"
-    assert entries[0]["project"] == "emrg"
+    assert entries[0]["agent"] == "emrg"
     # dict rows keep the 6 canonical fields, unknown fields dropped
     assert list(entries[1].keys()) == [
-        "timestamp", "project", "status", "progress", "completed", "message",
+        "timestamp", "agent", "status", "progress", "completed", "message",
     ]
     assert entries[1]["message"] == "dict rant"
 
 
-def test_list_rants_filters_by_status_and_project(tmp_path):
+def test_list_rants_filters_by_status_and_agent(tmp_path):
     f = _write_rant_lines(tmp_path, [
-        {"timestamp": "2026-08-18T10:00:00+08:00", "project": "emrg",
+        {"timestamp": "2026-08-18T10:00:00+08:00", "agent": "emrg",
          "status": "pending", "progress": None, "completed": None,
          "message": "emrg pending"},
-        {"timestamp": "2026-08-18T11:00:00+08:00", "project": "emrg",
+        {"timestamp": "2026-08-18T11:00:00+08:00", "agent": "emrg",
          "status": "completed", "progress": None,
          "completed": "2026-08-18T10:30:00+08:00", "message": "emrg done"},
-        {"timestamp": "2026-08-18T12:00:00+08:00", "project": "aitokenpool",
+        {"timestamp": "2026-08-18T12:00:00+08:00", "agent": "aitokenpool",
          "status": "pending", "progress": None, "completed": None,
          "message": "atp pending"},
     ])
     assert len(list_rants(f)) == 3
     assert len(list_rants(f, status="pending")) == 2
     assert len(list_rants(f, status="completed")) == 1
-    assert len(list_rants(f, project="emrg")) == 2
-    assert len(list_rants(f, status="pending", project="emrg")) == 1
-    assert len(list_rants(f, status="completed", project="aitokenpool")) == 0
+    assert len(list_rants(f, agent="emrg")) == 2
+    assert len(list_rants(f, status="pending", agent="emrg")) == 1
+    assert len(list_rants(f, status="completed", agent="aitokenpool")) == 0
 
 
 def test_update_rant_state_machine(tmp_path):
     f = _write_rant_lines(tmp_path, [
-        {"timestamp": "2026-08-18T10:00:00+08:00", "project": "emrg",
+        {"timestamp": "2026-08-18T10:00:00+08:00", "agent": "emrg",
          "status": "pending", "progress": None, "completed": None,
          "message": "test rant"},
     ])
@@ -283,7 +283,7 @@ def test_update_rant_state_machine(tmp_path):
     assert "invalid transition" in msg
     # pending → completed directly: invalid (no skipping)
     f2 = _write_rant_lines(tmp_path, [
-        {"timestamp": "2026-08-18T10:00:00+08:00", "project": "emrg",
+        {"timestamp": "2026-08-18T10:00:00+08:00", "agent": "emrg",
          "status": "pending", "progress": None, "completed": None,
          "message": "test rant 2"},
     ])
@@ -294,7 +294,7 @@ def test_update_rant_state_machine(tmp_path):
 
 def test_update_rant_unknown_timestamp_and_bad_status(tmp_path):
     f = _write_rant_lines(tmp_path, [
-        {"timestamp": "2026-08-18T10:00:00+08:00", "project": "emrg",
+        {"timestamp": "2026-08-18T10:00:00+08:00", "agent": "emrg",
          "status": "pending", "progress": None, "completed": None,
          "message": "test rant"},
     ])
@@ -319,7 +319,7 @@ def test_update_rant_refuses_a_completion_before_the_submission(tmp_path):
     later and equal are accepted.
     """
     f = _write_rant_lines(tmp_path, [
-        {"timestamp": "2026-08-18T10:00:00+08:00", "project": "emrg",
+        {"timestamp": "2026-08-18T10:00:00+08:00", "agent": "emrg",
          "status": "in_progress", "progress": None, "completed": None,
          "message": "test rant"},
     ])
@@ -357,7 +357,7 @@ def test_update_rant_refuses_a_completion_it_cannot_order(tmp_path):
     is naive against naive — an unorderable pair whose premise nothing has checked.
     """
     stamp = "2026-08-18T10:00:00+08:00"
-    row = {"timestamp": stamp, "project": "emrg", "status": "in_progress",
+    row = {"timestamp": stamp, "agent": "emrg", "status": "in_progress",
            "progress": None, "completed": None, "message": "test rant"}
 
     f = _write_rant_lines(tmp_path, [dict(row)])
@@ -383,7 +383,7 @@ def test_the_auto_written_stamp_is_checked_too(tmp_path):
     "an explicit stamp is checked".
     """
     f = _write_rant_lines(tmp_path, [
-        {"timestamp": "2099-01-01T00:00:00+08:00", "project": "emrg",
+        {"timestamp": "2099-01-01T00:00:00+08:00", "agent": "emrg",
          "status": "in_progress", "progress": None, "completed": None,
          "message": "a row dated in the future"},
     ])
@@ -413,7 +413,7 @@ def test_a_completion_stamp_is_written_only_with_the_completed_status(tmp_path):
     explicit stamp would pass the assertions above and break that one.
     """
     stamp = "2026-08-18T10:00:00+08:00"
-    row = {"timestamp": stamp, "project": "emrg", "status": "in_progress",
+    row = {"timestamp": stamp, "agent": "emrg", "status": "in_progress",
            "progress": None, "completed": None, "message": "test rant"}
 
     # An allowed transition into a non-completed status, while handing over a completion stamp.
@@ -451,14 +451,14 @@ def test_cleanup_rants_keeps_pending_plus_10_completed(tmp_path):
         ("2026-08-18T02:00:00+08:00", "in_progress"),
         ("2026-08-18T03:00:00+08:00", "pending"),
     ]):
-        entries.append({"timestamp": ts, "project": "emrg", "status": status,
+        entries.append({"timestamp": ts, "agent": "emrg", "status": status,
                         "progress": None, "completed": None,
                         "message": f"active {i}"})
     # 12 completed rants
     for i in range(12):
         entries.append({
             "timestamp": f"2026-08-18T{i + 4:02d}:00:00+08:00",
-            "project": "emrg", "status": "completed", "progress": None,
+            "agent": "emrg", "status": "completed", "progress": None,
             "completed": f"2026-08-18T{i + 4:02d}:30:00+08:00",
             "message": f"done {i}",
         })
@@ -544,7 +544,7 @@ def test_full_is_read_by_the_shared_reader_so_a_bad_spelling_is_refused(tmp_path
     # them apart. What only the full read has is the end of the body — and what only the scan
     # has is its own line saying it withheld something.
     _write_rant_lines(tmp_path, [
-        {"timestamp": "2026-10-15T09:00:00+08:00", "project": "emrg",
+        {"timestamp": "2026-10-15T09:00:00+08:00", "agent": "emrg",
          "status": "pending", "progress": None, "completed": None,
          "message": "head-excerpt " + "a" * 120 + " tail-marker-" + "z" * 300},
     ])
@@ -624,10 +624,10 @@ def test_the_list_action_returns_the_whole_message_when_the_caller_asks(tmp_path
         + " tail-marker-" + "z" * 300
     )
     _write_rant_lines(tmp_path, [
-        {"timestamp": "2026-09-17T09:00:00+08:00", "project": "emrg",
+        {"timestamp": "2026-09-17T09:00:00+08:00", "agent": "emrg",
          "status": "pending", "progress": None, "completed": None,
          "message": message},
-        {"timestamp": "2026-09-17T09:01:00+08:00", "project": "emrg",
+        {"timestamp": "2026-09-17T09:01:00+08:00", "agent": "emrg",
          "status": "pending", "progress": None, "completed": None,
          "message": "short rant"},
     ])
@@ -693,10 +693,10 @@ def test_an_unfiltered_list_is_the_scan_view_and_names_the_call_that_returns_the
     history = ("a completed rant's body, written when it was filed"
                + " history-tail-" + "h" * 400)
     _write_rant_lines(tmp_path, [
-        {"timestamp": "2026-10-15T09:00:00+08:00", "project": "emrg",
+        {"timestamp": "2026-10-15T09:00:00+08:00", "agent": "emrg",
          "status": "in_progress", "progress": "Stage 1 landed (PR #1)",
          "completed": None, "message": work},
-        {"timestamp": "2026-10-15T09:01:00+08:00", "project": "emrg",
+        {"timestamp": "2026-10-15T09:01:00+08:00", "agent": "emrg",
          "status": "completed", "progress": "done",
          "completed": "2026-10-15T10:00:00+08:00", "message": history},
     ])
@@ -747,34 +747,34 @@ def test_an_unfiltered_list_is_the_scan_view_and_names_the_call_that_returns_the
     assert len(full) > len(scan), "asking for the text costs more than scanning does"
 
 
-def test_project_alone_does_not_unlock_the_text(tmp_path, monkeypatch):
+def test_agent_alone_does_not_unlock_the_text(tmp_path, monkeypatch):
     """A filter that narrows nothing on the cost's axis is not a request for the body.
 
     The unlock is named precisely: the text comes when the caller filters by **status** or asks
     explicitly. That sentence is the wording of rant 2026-10-15T12:35:03 item (b)
     (「正文只在按 status 过滤或显式要求时给」), which writes out the host's decision of the same
-    day, 2026-10-15T12:34:24: 「就定 a + b（c 去掉）」. `project=` is the odd one out, and
+    day, 2026-10-15T12:34:24: 「就定 a + b（c 去掉）」. `agent=` is the odd one out, and
     deliberately so: it is the dedup filter `promote_prompt.md` uses, and on the queue measured
-    2026-10-15 it selects **48 of 50** rows — `list(project="emrg")` cost 24,539 characters
+    2026-10-15 it selects **48 of 50** rows — `list(agent="emrg")` cost 24,539 characters
     against an unfiltered 26,208, i.e. it narrowed the *subject*, not the cost. Printing bodies
     for it would reintroduce the default-read cost on the one filter a template really passes.
     """
     monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
-    body = "a pending rant in the project the caller named" + " tail-" + "t" * 400
+    body = "a pending rant in the agent the caller named" + " tail-" + "t" * 400
     _write_rant_lines(tmp_path, [
-        {"timestamp": "2026-10-15T09:00:00+08:00", "project": "emrg",
+        {"timestamp": "2026-10-15T09:00:00+08:00", "agent": "emrg",
          "status": "pending", "progress": None, "completed": None, "message": body},
-        {"timestamp": "2026-10-15T09:01:00+08:00", "project": "other",
+        {"timestamp": "2026-10-15T09:01:00+08:00", "agent": "other",
          "status": "pending", "progress": None, "completed": None,
-         "message": "another project's rant"},
+         "message": "another agent's rant"},
     ])
     tool = SubmitRantTool()
     out = __import__("asyncio").run(
-        tool.execute({"action": "list", "project": "emrg"})).content
+        tool.execute({"action": "list", "agent": "emrg"})).content
     assert "2026-10-15T09:00:00" in out, "the filter still selects the row"
-    assert "another project" not in out, "…and excludes the other project's"
+    assert "another agent" not in out, "…and excludes the other agent's"
     assert "tail-" + "t" * 400 not in out, (
-        "a project filter selects rows, not bodies: it must stay a scan view"
+        "a agent filter selects rows, not bodies: it must stay a scan view"
     )
     assert "scan view — 1 row(s)" in out
     assert 'status="pending"' in out, "the note names the call that returns the text"
@@ -806,10 +806,10 @@ def test_the_list_header_is_bounded_and_the_full_progress_follows_it(tmp_path, m
     message = ("a short message, then enough filler that the marker below sits past the "
                "excerpt's " + "f" * 80 + " message-tail-" + "m" * 300)
     _write_rant_lines(tmp_path, [
-        {"timestamp": "2026-09-17T09:00:00+08:00", "project": "emrg",
+        {"timestamp": "2026-09-17T09:00:00+08:00", "agent": "emrg",
          "status": "in_progress", "progress": progress, "completed": None,
          "message": message},
-        {"timestamp": "2026-09-17T09:01:00+08:00", "project": "emrg",
+        {"timestamp": "2026-09-17T09:01:00+08:00", "agent": "emrg",
          "status": "pending", "progress": "PR #1 submitted", "completed": None,
          "message": "short rant"},
     ])
@@ -883,10 +883,10 @@ def test_a_completed_body_is_withheld_and_one_call_returns_it(tmp_path, monkeypa
     progress = ("Stage 1 landed; Stage 2 is the remaining half."
                 + " progress-tail-" + "p" * 300)
     _write_rant_lines(tmp_path, [
-        {"timestamp": "2026-09-20T09:00:00+08:00", "project": "emrg",
+        {"timestamp": "2026-09-20T09:00:00+08:00", "agent": "emrg",
          "status": "completed", "progress": progress,
          "completed": "2026-09-20T18:00:00+08:00", "message": body},
-        {"timestamp": "2026-09-21T09:00:00+08:00", "project": "emrg",
+        {"timestamp": "2026-09-21T09:00:00+08:00", "agent": "emrg",
          "status": "pending", "progress": None, "completed": None,
          "message": "the work actually in flight"},
     ])
@@ -951,7 +951,7 @@ def test_tool_list_action(tmp_path, monkeypatch):
     tool = SubmitRantTool()
     f = tmp_path / "rants.jsonl"
     _write_rant_lines(tmp_path, [
-        {"timestamp": "2026-08-18T10:00:00+08:00", "project": "emrg",
+        {"timestamp": "2026-08-18T10:00:00+08:00", "agent": "emrg",
          "status": "pending", "progress": None, "completed": None,
          "message": "some pending rant"},
     ])
@@ -969,7 +969,7 @@ def test_tool_update_action(tmp_path, monkeypatch):
     monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
     tool = SubmitRantTool()
     _write_rant_lines(tmp_path, [
-        {"timestamp": "2026-08-18T10:00:00+08:00", "project": "emrg",
+        {"timestamp": "2026-08-18T10:00:00+08:00", "agent": "emrg",
          "status": "pending", "progress": None, "completed": None,
          "message": "test rant"},
     ])
@@ -1000,7 +1000,7 @@ def test_tool_update_action(tmp_path, monkeypatch):
     assert entry["completed"]
     # pending → completed (no skipping) → error, no crash
     _write_rant_lines(tmp_path, [
-        {"timestamp": "2026-08-18T09:00:00+08:00", "project": "emrg",
+        {"timestamp": "2026-08-18T09:00:00+08:00", "agent": "emrg",
          "status": "pending", "progress": None, "completed": None,
          "message": "fresh pending rant"},
     ])
@@ -1015,7 +1015,7 @@ def test_tool_cleanup_action(tmp_path, monkeypatch):
     monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
     tool = SubmitRantTool()
     _write_rant_lines(tmp_path, [
-        {"timestamp": "2026-08-18T10:00:00+08:00", "project": "emrg",
+        {"timestamp": "2026-08-18T10:00:00+08:00", "agent": "emrg",
          "status": "pending", "progress": None, "completed": None,
          "message": "active rant"},
     ])
@@ -1040,9 +1040,9 @@ def test_tool_definition_exposes_actions():
     assert set(d.parameters["properties"]["action"]["enum"]) == {
         "submit", "list", "update", "cleanup",
     }
-    # submit contract (project/message) still documented
+    # submit contract (agent/message) still documented
     assert "message" in d.parameters["properties"]
-    assert "project" in d.parameters["properties"]
+    assert "agent" in d.parameters["properties"]
     assert "consent" in d.description.lower() or "confirm" in d.description.lower()
 
 
@@ -1098,7 +1098,7 @@ def test_write_rants_refuses_a_named_pipe_too(tmp_path):
     os.mkfifo(fifo)
     row = {
         "timestamp": "2026-10-11T11:00:00+08:00",
-        "project": "emrg",
+        "agent": "emrg",
         "status": "pending",
         "progress": None,
         "completed": None,
@@ -1143,10 +1143,10 @@ def test_the_list_action_on_a_named_pipe_is_a_tool_error_not_a_hang(tmp_path, mo
 
 
 @_needs_mkfifo
-def test_a_named_pipe_projects_yml_yields_no_candidates(tmp_path, monkeypatch):
+def test_a_named_pipe_agents_yml_yields_no_candidates(tmp_path, monkeypatch):
     """The advisory read degrades instead of refusing, as it already did for a missing file.
 
-    `agents.yml` only feeds a warning about a mis-spelled project name, so turning its
+    `agents.yml` only feeds a warning about a mis-spelled agent name, so turning its
     unreadability into a hard failure would break `submit` for a reason unrelated to the
     rant. The control in the same test is a real file: the read still works.
     """
@@ -1154,13 +1154,13 @@ def test_a_named_pipe_projects_yml_yields_no_candidates(tmp_path, monkeypatch):
     tool = SubmitRantTool()
     os.mkfifo(tmp_path / "agents.yml")
 
-    assert within(DEADLINE_SECONDS, tool._registered_project_names) == []
+    assert within(DEADLINE_SECONDS, tool._registered_agent_names) == []
 
     (tmp_path / "agents.yml").unlink()
     (tmp_path / "agents.yml").write_text(
         "- name: emrg\n- name: aitokenpool\n", encoding="utf-8")
 
-    assert sorted(within(DEADLINE_SECONDS, tool._registered_project_names)) == [
+    assert sorted(within(DEADLINE_SECONDS, tool._registered_agent_names)) == [
         "aitokenpool", "emrg"]
 
 
@@ -1187,16 +1187,16 @@ def test_an_absent_rant_log_reads_empty_and_the_writer_creates_it(tmp_path):
     assert [r["message"] for r in _read_rants(write)] == ["host feedback"]
 
 
-def test_projects_yml_absent_or_malformed_yields_no_candidates(tmp_path, monkeypatch):
+def test_agents_yml_absent_or_malformed_yields_no_candidates(tmp_path, monkeypatch):
     """The pipe-free control for the advisory read: absent, malformed, and well-formed."""
     monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
     tool = SubmitRantTool()
 
-    assert tool._registered_project_names() == []       # absent
+    assert tool._registered_agent_names() == []       # absent
     (tmp_path / "agents.yml").write_text("just a string\n", encoding="utf-8")
-    assert tool._registered_project_names() == []       # not a list
+    assert tool._registered_agent_names() == []       # not a list
     (tmp_path / "agents.yml").write_text(": :\n", encoding="utf-8")
-    assert tool._registered_project_names() == []       # unparseable
+    assert tool._registered_agent_names() == []       # unparseable
     (tmp_path / "agents.yml").write_text(
         "- name: emrg\n- notadict\n- name: ''\n", encoding="utf-8")
-    assert tool._registered_project_names() == ["emrg"]
+    assert tool._registered_agent_names() == ["emrg"]

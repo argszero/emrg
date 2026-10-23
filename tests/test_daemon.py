@@ -1,4 +1,4 @@
-"""Unit tests for daemon internals — prompt building and project discovery.
+"""Unit tests for daemon internals — prompt building and agent discovery.
 
 These test the methods that were broken by squash-merge conflict markers
 in cycles #6-#8. Having test coverage here ensures that critical
@@ -22,7 +22,7 @@ import pytest
 import yaml
 
 from emrg.config import LlmConfig
-from emrg.memory import INDEX_SIZE_WARN, ProjectMemoryStore
+from emrg.memory import INDEX_SIZE_WARN, AgentMemoryStore
 from emrg.protocol import InstanceIdentity, TaskRequest
 from emrg.server import abort_runs as mod_abort_runs
 from emrg.server import daemon as daemon_mod
@@ -64,8 +64,8 @@ def test_build_prompt_emrg_self():
     assert ">>>>>>>" not in prompt
 
 
-def test_build_prompt_with_project():
-    """Builds prompt for a custom project — owner/repo come from the record's config.
+def test_build_prompt_with_agent():
+    """Builds prompt for a custom agent — owner/repo come from the record's config.
 
     They used to be assigned after construction (`handler._owner = ...`); the handler
     now derives them from the record it is handed (design §2), so the test states them
@@ -159,13 +159,13 @@ def test_read_table_returns_records_as_written(tmp_path):
     assert result[1]["enabled"] is False
 
 
-# ── _collect_project_context ───────────────────────────────
+# ── _collect_agent_context ───────────────────────────────
 
 
 def _make_server() -> EmrgServer:
     """Create a minimal EmrgServer for testing."""
     server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
-    # Point the project log at a tmp file by default so context/message tests
+    # Point the agent log at a tmp file by default so context/message tests
     # can never write the real ~/.emrg/agents.yml (2026-08-13 leak). Tests
     # that exercise _agents_log override it explicitly afterwards.
     server._agents_log = Path(tempfile.mkdtemp()) / "agents.yml"
@@ -176,7 +176,7 @@ def test_context_section_no_files(tmp_path):
     """No context files found → returns empty list."""
     server = _make_server()
     session = Session.create_with_id("ctx-test", tmp_path)
-    result = server._collect_project_context(session)
+    result = server._collect_agent_context(session)
     assert result == []
 
 
@@ -248,7 +248,7 @@ def test_system_prompt_says_a_task_cannot_write_its_own_prompt():
     that matters cannot.
 
     The ruling's citation (its timestamp, the pull request beside it, the command that re-finds
-    the message) is recorded in this project's memory and in the pull request that landed it;
+    the message) is recorded in this agent's memory and in the pull request that landed it;
     the session prompt states the rule, the reason and the channel, and spends no prefix on the
     provenance — which is the property the compacted prompt is built on and
     `tests/test_system_prompt_structure.py::test_neither_the_file_nor_the_render_carries_provenance`
@@ -278,7 +278,7 @@ def test_system_prompt_says_a_task_cannot_write_its_own_prompt():
 
 def test_system_prompt_temp_file_rules_section(tmp_path):
     """The temp-file rule renders with the session tmp dir (rant 2026-08-25T18:10:57):
-    throwaway scripts go under the session directory's tmp/ subdir, not the project root /
+    throwaway scripts go under the session directory's tmp/ subdir, not the agent root /
     workdir / ~/.emrg root.
 
     The rule is a bullet of `## Session and history` in the compacted prompt rather than a
@@ -294,7 +294,7 @@ def test_system_prompt_temp_file_rules_section(tmp_path):
     assert "tmp/" in rendered
     # the rendered path must point into the session directory
     assert str(session.dir_path) in rendered
-    assert "project root" in rendered
+    assert "agent root" in rendered
     assert "the config root" in rendered
 
 
@@ -317,13 +317,13 @@ def test_submit_rant_tool_registered():
 def test_context_section_single_file(tmp_path):
     """When CLAUDE.md exists, it's returned as a dict entry."""
     server = _make_server()
-    (tmp_path / "CLAUDE.md").write_text("# Project Rules\n- Use tabs\n")
+    (tmp_path / "CLAUDE.md").write_text("# Agent Rules\n- Use tabs\n")
     session = Session.create_with_id("ctx-test", tmp_path)
-    result = server._collect_project_context(session)
+    result = server._collect_agent_context(session)
     assert len(result) == 1
     assert result[0]["name"] == "CLAUDE.md"
     assert "- Use tabs" in result[0]["content"]
-    assert "# Project Rules" in result[0]["content"]
+    assert "# Agent Rules" in result[0]["content"]
 
 
 def test_context_section_multiple_files(tmp_path):
@@ -332,7 +332,7 @@ def test_context_section_multiple_files(tmp_path):
     (tmp_path / "CLAUDE.md").write_text("claude content")
     (tmp_path / "AGENTS.md").write_text("agents content")
     session = Session.create_with_id("ctx-test", tmp_path)
-    result = server._collect_project_context(session)
+    result = server._collect_agent_context(session)
     names = {r["name"] for r in result}
     assert names == {"CLAUDE.md", "AGENTS.md"}
     assert any("claude content" in r["content"] for r in result)
@@ -351,7 +351,7 @@ def test_context_section_truncation(tmp_path):
     big = "x" * (daemon_mod.PROJECT_CONTEXT_MAX_CHARS + over)
     (tmp_path / "CLAUDE.md").write_text(big)
     session = Session.create_with_id("ctx-test", tmp_path)
-    result = server._collect_project_context(session)
+    result = server._collect_agent_context(session)
     assert "truncated" in result[0]["content"]
     assert f"{over} chars" in result[0]["content"]
 
@@ -361,7 +361,7 @@ def test_context_section_manifesto(tmp_path):
     server = _make_server()
     (tmp_path / "MANIFESTO.md").write_text("# Design\nKeep it simple.\n")
     session = Session.create_with_id("ctx-test", tmp_path)
-    result = server._collect_project_context(session)
+    result = server._collect_agent_context(session)
     assert result[0]["name"] == "MANIFESTO.md"
     assert "Keep it simple" in result[0]["content"]
 
@@ -450,7 +450,7 @@ def test_the_truncation_notice_names_which_parts_it_kept(tmp_path):
     The two mechanisms had never been read against each other: an index appends
     newest-last while the cap kept the **head** — so the rows a reader lost were the
     newest ones, the rows that exist to stop it re-doing work, and the notice said only
-    how much was cut and where the text is. Measured 2026-09-25 on a project index the
+    how much was cut and where the text is. Measured 2026-09-25 on a agent index the
     cap really truncates: 73,484 chars, 24 of its 163 rows kept out of the prompt (issue
     #1554 holds that reading and its numbers). Which part *should* survive was that
     issue's open decision; issue #1676 takes it — the head **and** the tail are kept and
@@ -550,8 +550,8 @@ def test_collect_memory_data_caps_index(tmp_path):
     session = Session.create_with_id("mem-cap", tmp_path)
     data = server._collect_memory_data(session)
     assert data["has_memories"] is True
-    assert data["project_memory_index_path"] == str(idx)
-    assert "truncated" in data["project_memory_index"]
+    assert data["agent_memory_index_path"] == str(idx)
+    assert "truncated" in data["agent_memory_index"]
     # The head is what the cap bounds, measured rather than approximated. This read
     # `len(...) <= INDEX_SIZE_WARN + 200` — a magic allowance standing in for a notice
     # length the assertion cannot know, so it passed for any notice up to 200 chars
@@ -559,7 +559,7 @@ def test_collect_memory_data_caps_index(tmp_path):
     # to this shape first; this one kept the allowance until a longer notice pushed
     # it past it (2026-09-25, the end-naming sentence). The cap's claim is the head;
     # the notice's own length is not a number this test should hold.
-    head, sep, _ = data["project_memory_index"].partition("\n… [truncated")
+    head, sep, _ = data["agent_memory_index"].partition("\n… [truncated")
     assert sep, "an over-cap index must carry a truncation notice"
     assert len(head) <= INDEX_SIZE_WARN
 
@@ -600,7 +600,7 @@ def test_an_unreadable_index_costs_the_section_not_the_turn(tmp_path):
     server = _make_server()
     session = Session.create_with_id("mem-unreadable", tmp_path)
     for directory, key in (
-        (tmp_path / ".emrg" / "memory", "project_memory_index"),
+        (tmp_path / ".emrg" / "memory", "agent_memory_index"),
         (session.memory_dir, "session_memory_index"),
     ):
         directory.mkdir(parents=True, exist_ok=True)
@@ -667,10 +667,10 @@ def test_a_readable_index_still_reaches_the_prompt_verbatim(tmp_path):
 
     data = server._collect_memory_data(session)
 
-    assert data["project_memory_index"] == index_text, (
+    assert data["agent_memory_index"] == index_text, (
         "a readable, under-cap index must reach the prompt byte for byte"
     )
-    assert "could not be read" not in data["project_memory_index"]
+    assert "could not be read" not in data["agent_memory_index"]
 
 
 # ── the same condition on the client path ─────────────────────────
@@ -686,13 +686,13 @@ def test_a_readable_index_still_reaches_the_prompt_verbatim(tmp_path):
 #
 # The same undecodable byte as `UNDECODABLE_INDEX`, in a memory file reached by id.
 UNDECODABLE_MEMORY = (
-    b"---\nid: aaaa1111\ntype: reference\nscope: project\nstatus: active\n"
+    b"---\nid: aaaa1111\ntype: reference\nscope: agent\nstatus: active\n"
     b"title: A note \xe9\n---\n\nbody\n"
 )
 
 
-def _memory_project(tmp_path, index_bytes: bytes, note_bytes: bytes | None = None):
-    """A project whose memory directory holds `index_bytes` as MEMORY.md."""
+def _memory_agent(tmp_path, index_bytes: bytes, note_bytes: bytes | None = None):
+    """A agent whose memory directory holds `index_bytes` as MEMORY.md."""
     directory = tmp_path / ".emrg" / "memory"
     directory.mkdir(parents=True)
     (directory / "MEMORY.md").write_bytes(index_bytes)
@@ -719,11 +719,11 @@ def test_an_unreadable_index_costs_the_listing_not_the_connection(tmp_path):
     make everything below vacuous rather than the guard proven.
     """
     server = _make_server()
-    directory = _memory_project(
+    directory = _memory_agent(
         tmp_path,
         UNDECODABLE_INDEX,
         note_bytes=(
-            b"---\nid: aaaa1111\ntype: reference\nscope: project\nstatus: active\n"
+            b"---\nid: aaaa1111\ntype: reference\nscope: agent\nstatus: active\n"
             b"title: A note\n---\n\nbody\n"
         ),
     )
@@ -733,7 +733,7 @@ def test_an_unreadable_index_costs_the_listing_not_the_connection(tmp_path):
     # Driving the dispatch is the point: a handler-level catch would still leave
     # the message loop's `except Exception` as the only thing between this file
     # and a dropped connection.
-    frames = _drive(server, {"type": "list_memories", "scope": "project", "cwd": str(tmp_path)})
+    frames = _drive(server, {"type": "list_memories", "scope": "agent", "cwd": str(tmp_path)})
 
     assert len(frames) == 1, f"expected one frame, got {frames!r}"
     frame = frames[0]
@@ -756,9 +756,9 @@ def test_a_readable_index_reaches_the_listing_verbatim(tmp_path):
     """The negative half: the ordinary path gains nothing but the same text."""
     server = _make_server()
     index_text = "# Memory Index\n\n- [row](x.md) — readable\n"
-    _memory_project(tmp_path, index_text.encode("utf-8"))
+    _memory_agent(tmp_path, index_text.encode("utf-8"))
 
-    frame = _drive(server, {"type": "list_memories", "scope": "project", "cwd": str(tmp_path)})[0]
+    frame = _drive(server, {"type": "list_memories", "scope": "agent", "cwd": str(tmp_path)})[0]
 
     assert frame["index"] == index_text
     assert "could not be read" not in frame["index"]
@@ -774,7 +774,7 @@ def test_a_memory_that_cannot_be_read_is_not_reported_as_absent(tmp_path):
     on the same race.
     """
     server = _make_server()
-    directory = _memory_project(tmp_path, b"# Memory Index\n", note_bytes=UNDECODABLE_MEMORY)
+    directory = _memory_agent(tmp_path, b"# Memory Index\n", note_bytes=UNDECODABLE_MEMORY)
     with pytest.raises(UnicodeDecodeError):
         (directory / "note.md").read_text(encoding="utf-8")
 
@@ -784,7 +784,7 @@ def test_a_memory_that_cannot_be_read_is_not_reported_as_absent(tmp_path):
         server,
         {
             "type": "read_memory",
-            "scope": "project",
+            "scope": "agent",
             "memory_id": "aaaa1111",
             "cwd": str(tmp_path),
         },
@@ -807,9 +807,9 @@ def test_a_missing_memory_is_still_a_plain_absence(tmp_path):
     while making every real absence look like a read error.
     """
     server = _make_server()
-    _memory_project(tmp_path, b"# Memory Index\n", note_bytes=b"---\nid: bbbb2222\n---\n\nbody\n")
+    _memory_agent(tmp_path, b"# Memory Index\n", note_bytes=b"---\nid: bbbb2222\n---\n\nbody\n")
 
-    store = ProjectMemoryStore(tmp_path)
+    store = AgentMemoryStore(tmp_path)
     assert store.get_with_reason("nope") == (None, ""), (
         "an id no file carries, with every file readable, is a plain absence"
     )
@@ -819,7 +819,7 @@ def test_a_missing_memory_is_still_a_plain_absence(tmp_path):
         server,
         {
             "type": "read_memory",
-            "scope": "project",
+            "scope": "agent",
             "memory_id": "nope",
             "cwd": str(tmp_path),
         },
@@ -829,12 +829,12 @@ def test_a_missing_memory_is_still_a_plain_absence(tmp_path):
 
 def test_get_returns_the_memory_and_no_reason_when_readable(tmp_path):
     """`get()` keeps its old answer for the ordinary case, and gains no raise."""
-    _memory_project(
+    _memory_agent(
         tmp_path,
         b"# Memory Index\n",
         note_bytes=b"---\nid: cccc3333\ntitle: Readable\n---\n\n# Readable\n\nbody\n",
     )
-    store = ProjectMemoryStore(tmp_path)
+    store = AgentMemoryStore(tmp_path)
 
     mem, why = store.get_with_reason("cccc3333")
     assert mem is not None and why == ""
@@ -901,7 +901,7 @@ def test_usage_anchor_projection_underestimation_trigger():
 
     Scenario from the rant: local estimate says 148K but the API reported
     222K. With an anchor of (222000, 148000), a small growth (+2K estimated)
-    must project to ~224K — well above a pure-estimate view — so auto-compact
+    must agent to ~224K — well above a pure-estimate view — so auto-compact
     fires even though the raw estimate alone looks under threshold.
     """
     server = _make_server()
@@ -1444,7 +1444,7 @@ def test_switch_round_does_not_warn_false_positive(caplog):
 
 def test_handle_set_model_invalidates_usage_anchors():
     """set_model with a REAL api-model change must invalidate usage anchors —
-    a mid-session switch must not project the old provider's base with the
+    a mid-session switch must not agent the old provider's base with the
     new estimate delta (Dev.to comment 3dh3g)."""
     import asyncio
     server = _make_server()
@@ -2564,7 +2564,7 @@ class _FakeWriter:
 
 def test_rant_field_order(tmp_path, monkeypatch):
     """Rant entries are written with field order:
-    timestamp → project → status → progress → completed → message (message last)."""
+    timestamp → agent → status → progress → completed → message (message last)."""
     monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
     server = _make_server()
     writer = _FakeWriter()
@@ -2573,7 +2573,7 @@ def test_rant_field_order(tmp_path, monkeypatch):
     asyncio.run(server._process_message({
         "type": "rant",
         "message": "test rant message",
-        "project": "emrg",
+        "agent": "emrg",
         # Client-supplied timestamp must be IGNORED — the daemon stamps rants
         # with tz-aware local time (rant 2026-08-07T13:34Z: GUI sent UTC Z,
         # 8h behind on UTC+8 hosts). A stale UTC value here must not leak through.
@@ -2584,10 +2584,10 @@ def test_rant_field_order(tmp_path, monkeypatch):
     assert len(lines) == 1
     entry = json.loads(lines[0])
     assert list(entry.keys()) == [
-        "timestamp", "project", "status", "progress", "completed", "message",
+        "timestamp", "agent", "status", "progress", "completed", "message",
     ]
     assert entry["completed"] is None  # new rants default to null completed
-    assert entry["project"] == "emrg"
+    assert entry["agent"] == "emrg"
     assert entry["status"] == "pending"
     assert entry["message"] == "test rant message"
     # Daemon-authoritative local timestamp: tz-aware, NOT UTC (no Z suffix),
@@ -2616,9 +2616,9 @@ def test_list_rants_filter_and_order(tmp_path, monkeypatch):
 
     # 写入 3 条（乱序），覆盖三状态
     entries = [
-        {"timestamp": "2026-08-13T10:00:00+08:00", "project": "", "status": "pending", "progress": None, "completed": None, "message": "new idea"},
-        {"timestamp": "2026-08-13T14:10:14+08:00", "project": "emrg", "status": "in_progress", "progress": "P1 done", "completed": None, "message": "GUI redesign"},
-        {"timestamp": "2026-08-12T09:00:00+08:00", "project": "", "status": "completed", "progress": None, "completed": "2026-08-12T12:00:00+08:00", "message": "old rant"},
+        {"timestamp": "2026-08-13T10:00:00+08:00", "agent": "", "status": "pending", "progress": None, "completed": None, "message": "new idea"},
+        {"timestamp": "2026-08-13T14:10:14+08:00", "agent": "emrg", "status": "in_progress", "progress": "P1 done", "completed": None, "message": "GUI redesign"},
+        {"timestamp": "2026-08-12T09:00:00+08:00", "agent": "", "status": "completed", "progress": None, "completed": "2026-08-12T12:00:00+08:00", "message": "old rant"},
     ]
     with open(tmp_path / "rants.jsonl", "w", encoding="utf-8") as f:
         for e in entries:
@@ -3171,15 +3171,15 @@ def _async_value(v):
     return _wrap()
 
 
-# ── /rant project list shows evolution-workspace entries (rant 10:48:00) ──
+# ── /rant agent list shows evolution-workspace entries (rant 10:48:00) ──
 
 
-def test_list_projects_includes_evolution_workspace(tmp_path, monkeypatch):
-    """A registered project under the evolution workspace IS listed from /rant.
+def test_list_agents_includes_evolution_workspace(tmp_path, monkeypatch):
+    """A registered agent under the evolution workspace IS listed from /rant.
 
     The filter that used to exclude it was deleted with the `EVOLUTION_CWD`
     constant (rant 2026-09-29T10:06:33 item 4): what /rant lists is
-    agents.yml, and a path under `~/.emrg/evolution/` is a project like any
+    agents.yml, and a path under `~/.emrg/evolution/` is a agent like any
     other. The entry is written in the real evolution-root spelling on purpose —
     re-adding a workspace filter would drop it and fail the assertion, which is
     the only reason this test exists.
@@ -3188,125 +3188,125 @@ def test_list_projects_includes_evolution_workspace(tmp_path, monkeypatch):
 
     server = _make_server()
     emrg_path = str(Path.home() / ".emrg" / "evolution" / "emrg")
-    projects_file = tmp_path / "agents.yml"
-    projects_file.write_text(
+    agents_file = tmp_path / "agents.yml"
+    agents_file.write_text(
         f"- name: emrg\n  path: {emrg_path}\n"
         "- name: other\n  path: /home/u/work/other\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(server, "_agents_log", projects_file)
+    monkeypatch.setattr(server, "_agents_log", agents_file)
 
     writer = _FakeWriter()
-    asyncio.run(server._handle_list_projects(writer))
+    asyncio.run(server._handle_list_agents(writer))
 
     assert len(writer._frames) == 1
     reply = json.loads(writer._frames[0])
-    assert reply["type"] == "projects_list"
-    paths = [p["path"] for p in reply["projects"]]
-    assert emrg_path in paths  # a project under the evolution root is still a project
+    assert reply["type"] == "agents_list"
+    paths = [p["path"] for p in reply["agents"]]
+    assert emrg_path in paths  # a agent under the evolution root is still a agent
     assert "/home/u/work/other" in paths
 
 
-# ── remove_project (P1 GUI multi-session, rant 2026-08-10T15:07:19) ──
+# ── remove_agent (P1 GUI multi-session, rant 2026-08-10T15:07:19) ──
 
 
-def _server_with_projects(tmp_path: Path, entries: list[dict]) -> tuple[EmrgServer, Path]:
+def _server_with_agents(tmp_path: Path, entries: list[dict]) -> tuple[EmrgServer, Path]:
     """Server whose _agents_log points at a tmp agents.yml with entries."""
     server = _make_server()
-    projects_file = tmp_path / "agents.yml"
-    projects_file.write_text(
+    agents_file = tmp_path / "agents.yml"
+    agents_file.write_text(
         yaml.safe_dump(entries, allow_unicode=True), encoding="utf-8"
     )
-    server._agents_log = projects_file
-    return server, projects_file
+    server._agents_log = agents_file
+    return server, agents_file
 
 
 def _decode_frames(writer: _FakeWriter) -> list[dict]:
     return [json.loads(f) for f in writer._frames]
 
 
-def test_remove_project_removes_matching_entry(tmp_path):
-    """Removing an existing project drops only its agents.yml entry."""
-    server, projects_file = _server_with_projects(tmp_path, [
+def test_remove_agent_removes_matching_entry(tmp_path):
+    """Removing an existing agent drops only its agents.yml entry."""
+    server, agents_file = _server_with_agents(tmp_path, [
         {"name": "alpha", "path": "/home/u/a", "last_active": "2026-08-10T10:00:00"},
         {"name": "beta", "path": "/home/u/b", "last_active": "2026-08-10T10:05:00"},
     ])
     writer = _FakeWriter()
-    asyncio.run(server._handle_remove_project("alpha", writer))
+    asyncio.run(server._handle_remove_agent("alpha", writer))
 
     replies = _decode_frames(writer)
     assert len(replies) == 1
-    assert replies[0] == {"type": "project_removed", "removed": True, "name": "alpha"}
+    assert replies[0] == {"type": "agent_removed", "removed": True, "name": "alpha"}
 
-    remaining = yaml.safe_load(projects_file.read_text(encoding="utf-8"))
+    remaining = yaml.safe_load(agents_file.read_text(encoding="utf-8"))
     assert [e["name"] for e in remaining] == ["beta"]
 
 
-def test_remove_project_unknown_name_leaves_file_unchanged(tmp_path):
+def test_remove_agent_unknown_name_leaves_file_unchanged(tmp_path):
     """Removing a non-existent name reports removed=False and keeps the file."""
     entries = [
         {"name": "alpha", "path": "/home/u/a", "last_active": "2026-08-10T10:00:00"},
     ]
-    server, projects_file = _server_with_projects(tmp_path, entries)
+    server, agents_file = _server_with_agents(tmp_path, entries)
     writer = _FakeWriter()
-    asyncio.run(server._handle_remove_project("nope", writer))
+    asyncio.run(server._handle_remove_agent("nope", writer))
 
     replies = _decode_frames(writer)
     assert len(replies) == 1
     assert replies[0]["removed"] is False
     assert replies[0]["name"] == "nope"
-    assert yaml.safe_load(projects_file.read_text(encoding="utf-8")) == entries
+    assert yaml.safe_load(agents_file.read_text(encoding="utf-8")) == entries
 
 
-def test_remove_project_preserves_disk_session_data(tmp_path):
-    """Deleting the project entry must NOT touch <path>/.emrg/sessions/ data."""
-    project_dir = tmp_path / "u" / "a"
-    sessions_dir = project_dir / ".emrg" / "sessions" / "sess-1"
+def test_remove_agent_preserves_disk_session_data(tmp_path):
+    """Deleting the agent entry must NOT touch <path>/.emrg/sessions/ data."""
+    agent_dir = tmp_path / "u" / "a"
+    sessions_dir = agent_dir / ".emrg" / "sessions" / "sess-1"
     sessions_dir.mkdir(parents=True)
     (sessions_dir / "history.jsonl").write_text('{"role":"user"}\n', encoding="utf-8")
 
-    server, _ = _server_with_projects(tmp_path, [
-        {"name": "alpha", "path": str(project_dir), "last_active": "2026-08-10T10:00:00"},
+    server, _ = _server_with_agents(tmp_path, [
+        {"name": "alpha", "path": str(agent_dir), "last_active": "2026-08-10T10:00:00"},
     ])
     writer = _FakeWriter()
-    asyncio.run(server._handle_remove_project("alpha", writer))
+    asyncio.run(server._handle_remove_agent("alpha", writer))
     assert _decode_frames(writer)[0]["removed"] is True
-    # on-disk session data survives the project removal
+    # on-disk session data survives the agent removal
     assert (sessions_dir / "history.jsonl").read_text(encoding="utf-8") == '{"role":"user"}\n'
 
 
-def test_remove_project_no_projects_file(tmp_path):
+def test_remove_agent_no_agents_file(tmp_path):
     """No agents.yml → removed=False without raising."""
     server = _make_server()
     server._agents_log = tmp_path / "agents.yml"  # never created
     writer = _FakeWriter()
-    asyncio.run(server._handle_remove_project("alpha", writer))
+    asyncio.run(server._handle_remove_agent("alpha", writer))
     assert _decode_frames(writer)[0] == {
-        "type": "project_removed", "removed": False, "name": "alpha",
+        "type": "agent_removed", "removed": False, "name": "alpha",
     }
 
 
-def test_remove_project_corrupt_yaml_reports_error(tmp_path):
+def test_remove_agent_corrupt_yaml_reports_error(tmp_path):
     """Corrupt agents.yml → removed=False + error, no crash."""
     server = _make_server()
-    projects_file = tmp_path / "agents.yml"
-    projects_file.write_text("a: [unclosed", encoding="utf-8")
-    server._agents_log = projects_file
+    agents_file = tmp_path / "agents.yml"
+    agents_file.write_text("a: [unclosed", encoding="utf-8")
+    server._agents_log = agents_file
     writer = _FakeWriter()
-    asyncio.run(server._handle_remove_project("alpha", writer))
+    asyncio.run(server._handle_remove_agent("alpha", writer))
     replies = _decode_frames(writer)
     assert replies[0]["removed"] is False
     assert replies[0]["error"]
 
 
-# ── list_projects ordering by latest session activity (P6, rant 15:07:19) ──
+# ── list_agents ordering by latest session activity (P6, rant 15:07:19) ──
 
 
-def test_list_projects_ordered_by_latest_session_activity(tmp_path, monkeypatch):
-    """Projects come back sorted by their newest session's created_at (desc).
+def test_list_agents_ordered_by_latest_session_activity(tmp_path, monkeypatch):
+    """Agents come back sorted by their newest session's created_at (desc).
 
     P6 acceptance ("选项目按该项目最新会话活跃倒序"): the daemon aggregates
-    each project's sessions dir (parallel scan) because the GUI cannot issue
+    each agent's sessions dir (parallel scan) because the GUI cannot issue
     concurrent list_sessions on one connection (pending map keys by respType).
     """
     import asyncio
@@ -3331,24 +3331,24 @@ def test_list_projects_ordered_by_latest_session_activity(tmp_path, monkeypatch)
         json.dumps({"session_id": "s-new", "created_at": "2026-08-10T12:00:00"}), encoding="utf-8"
     )
     # 无会话项目 → 排最后（无 latest_session_at）
-    projects_file = tmp_path / "agents.yml"
-    projects_file.write_text(
+    agents_file = tmp_path / "agents.yml"
+    agents_file.write_text(
         f"- name: old\n  path: {p_old}\n"
         f"- name: new\n  path: {p_new}\n"
         f"- name: nosess\n  path: {p_none}\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(server, "_agents_log", projects_file)
+    monkeypatch.setattr(server, "_agents_log", agents_file)
 
     writer = _FakeWriter()
-    asyncio.run(server._handle_list_projects(writer))
+    asyncio.run(server._handle_list_agents(writer))
 
     reply = json.loads(writer._frames[0])
-    names = [p["name"] for p in reply["projects"]]
+    names = [p["name"] for p in reply["agents"]]
     assert names == ["new", "old", "nosess"], f"ordered by latest session activity: {names}"
-    new_proj = next(p for p in reply["projects"] if p["name"] == "new")
+    new_proj = next(p for p in reply["agents"] if p["name"] == "new")
     assert new_proj["latest_session_at"] == "2026-08-10T12:00:00"
-    none_proj = next(p for p in reply["projects"] if p["name"] == "nosess")
+    none_proj = next(p for p in reply["agents"] if p["name"] == "nosess")
     assert none_proj["latest_session_at"] == ""
 
 
@@ -4444,14 +4444,14 @@ def test_a_named_pipe_index_in_the_listing_is_a_notice_too(tmp_path):
 
 
 @_needs_mkfifo
-def test_collect_project_context_skips_a_named_pipe_beside_a_real_file(tmp_path):
+def test_collect_agent_context_skips_a_named_pipe_beside_a_real_file(tmp_path):
     """A subject with no end to read carries no context — and its neighbour still does."""
     server = _make_server()
     session = Session.create_with_id("ctx-fifo", tmp_path)
     os.mkfifo(tmp_path / "CLAUDE.md")
     (tmp_path / "Agent.md").write_text("Keep it simple\n", encoding="utf-8")
 
-    result = server._collect_project_context(session)
+    result = server._collect_agent_context(session)
 
     assert [r["name"] for r in result] == ["Agent.md"], result
     assert "Keep it simple" in result[0]["content"]
@@ -4685,15 +4685,15 @@ def test_the_daemons_kind_rule_is_the_layers_rule(tmp_path, monkeypatch):
 def test_a_memory_that_is_a_named_pipe_costs_the_row_not_the_listing(tmp_path):
     """A pipe in the memory directory is skipped; the readable rows still arrive."""
     server = _make_server()
-    directory = _memory_project(tmp_path, b"# Memory Index\n")
+    directory = _memory_agent(tmp_path, b"# Memory Index\n")
     os.mkfifo(directory / "pipe.md")
     (directory / "note.md").write_text(
-        "---\nid: aaaa1111\ntype: reference\nscope: project\nstatus: active\n"
+        "---\nid: aaaa1111\ntype: reference\nscope: agent\nstatus: active\n"
         "title: A note\n---\n\nbody\n",
         encoding="utf-8",
     )
 
-    frames = _drive(server, {"type": "list_memories", "scope": "project", "cwd": str(tmp_path)})
+    frames = _drive(server, {"type": "list_memories", "scope": "agent", "cwd": str(tmp_path)})
 
     assert len(frames) == 1, f"expected one frame, got {frames!r}"
     frame = frames[0]
@@ -4711,12 +4711,12 @@ def test_a_read_memory_through_a_pipe_directory_answers_rather_than_hangs(tmp_pa
     this walk never measured — the pipe is a file the walk could not finish looking at.
     """
     server = _make_server()
-    directory = _memory_project(tmp_path, b"# Memory Index\n")
+    directory = _memory_agent(tmp_path, b"# Memory Index\n")
     os.mkfifo(directory / "pipe.md")
 
     frames = _drive(
         server,
-        {"type": "read_memory", "scope": "project", "memory_id": "aaaa1111", "cwd": str(tmp_path)},
+        {"type": "read_memory", "scope": "agent", "memory_id": "aaaa1111", "cwd": str(tmp_path)},
     )
 
     assert len(frames) == 1, f"expected one frame, got {frames!r}"
@@ -4934,9 +4934,9 @@ def test_the_rant_panel_at_a_regular_file_still_answers_the_rows(tmp_path):
     server = _make_server()
     log = tmp_path / "rants.jsonl"
     rows = [
-        {"timestamp": "2026-10-11T09:00:00+08:00", "project": "emrg", "status": "pending",
+        {"timestamp": "2026-10-11T09:00:00+08:00", "agent": "emrg", "status": "pending",
          "progress": None, "completed": None, "message": "older"},
-        {"timestamp": "2026-10-11T10:00:00+08:00", "project": "emrg", "status": "completed",
+        {"timestamp": "2026-10-11T10:00:00+08:00", "agent": "emrg", "status": "completed",
          "progress": None, "completed": "2026-10-11T10:00:00+08:00", "message": "newer"},
     ]
     log.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
@@ -4981,15 +4981,15 @@ def test_the_rant_panel_survives_a_legacy_array_row_and_a_bare_scalar(tmp_path):
     assert len(frames) == 1, f"expected one frame, got {frames!r}"
     assert frames[0]["type"] == "rants_list", frames[0]
     assert [r["message"] for r in frames[0]["rants"]] == ["legacy"], frames[0]
-    assert frames[0]["rants"][0]["project"] == "emrg", frames[0]
+    assert frames[0]["rants"][0]["agent"] == "emrg", frames[0]
 
 
 # ── agents.yml: the registry every client reads first ─────────────
 #
 # These are the daemon's four readers of one file, `~/.emrg/agents.yml`, and each of
 # them runs on the daemon's **event loop**: the startup backfill, the register write that
-# opening a session makes, `list_projects` — which every client sends on connect, so it is
-# the first frame a GUI or TUI ever gets an answer to — and `remove_project`. A FIFO at
+# opening a session makes, `list_agents` — which every client sends on connect, so it is
+# the first frame a GUI or TUI ever gets an answer to — and `remove_agent`. A FIFO at
 # that path therefore does not fail a request, it stops the daemon answering anyone again,
 # which is the condition issue #2062 named for the three file tools and #2073 for the
 # daemon's own readers. Measured 2026-10-11 (`cyc20261011-173122`) on master `60541e39`:
@@ -5001,7 +5001,7 @@ def test_the_rant_panel_survives_a_legacy_array_row_and_a_bare_scalar(tmp_path):
 # added), while `AgentRegistry.for_dir` — which reads the registry and then **rewrites** it —
 # skips the registration instead of falling through to its "rebuilding" branch, because
 # that branch would answer a host file it could not read with an *empty* registry and
-# delete every project the host had registered.
+# delete every agent the host had registered.
 #
 # Every arm is bounded by `within`, so a removed guard is a **5 s failure** rather than a
 # wedged pytest run (the `no_verdict` trap `tests/bounded_read.py` states). The FIFO arms
@@ -5012,7 +5012,7 @@ def test_the_rant_panel_survives_a_legacy_array_row_and_a_bare_scalar(tmp_path):
 
 
 @_needs_mkfifo
-def test_a_named_pipe_registry_does_not_stop_the_project_listing(tmp_path, monkeypatch):
+def test_a_named_pipe_registry_does_not_stop_the_agent_listing(tmp_path, monkeypatch):
     """The first frame every client sends: answered, not blocked on the open."""
     server = _make_server()
     fifo = tmp_path / "agents.yml"
@@ -5020,11 +5020,11 @@ def test_a_named_pipe_registry_does_not_stop_the_project_listing(tmp_path, monke
     monkeypatch.setattr(server, "_agents_log", fifo)
     writer = _FakeWriter()
 
-    within(DEADLINE_SECONDS, lambda: asyncio.run(server._handle_list_projects(writer)))
+    within(DEADLINE_SECONDS, lambda: asyncio.run(server._handle_list_agents(writer)))
 
     replies = _decode_frames(writer)
-    assert len(replies) == 1 and replies[0]["type"] == "projects_list", replies
-    assert replies[0]["projects"] == [], replies
+    assert len(replies) == 1 and replies[0]["type"] == "agents_list", replies
+    assert replies[0]["agents"] == [], replies
 
 
 def test_a_directory_registry_is_refused_by_its_kind_in_the_listing(
@@ -5037,9 +5037,9 @@ def test_a_directory_registry_is_refused_by_its_kind_in_the_listing(
     writer = _FakeWriter()
 
     with caplog.at_level(logging.ERROR):
-        asyncio.run(server._handle_list_projects(writer))
+        asyncio.run(server._handle_list_agents(writer))
 
-    assert _decode_frames(writer)[0]["projects"] == []
+    assert _decode_frames(writer)[0]["agents"] == []
     assert "not a regular file" in caplog.text, (
         "the read was refused by its kind — an unguarded one reports the raw "
         f"directory error instead: {caplog.text}")
@@ -5060,7 +5060,7 @@ def test_a_named_pipe_registry_is_neither_read_nor_rewritten_by_the_register(
 
     assert stat.S_ISFIFO(os.stat(fifo).st_mode), (
         "the registry was rewritten — a read that answered 'no entries' would have "
-        "deleted every project the host registered")
+        "deleted every agent the host registered")
 
 
 def test_a_directory_registry_warns_the_register_and_keeps_it(
@@ -5081,7 +5081,7 @@ def test_a_directory_registry_warns_the_register_and_keeps_it(
 
 @_needs_mkfifo
 def test_a_named_pipe_registry_does_not_stop_the_index_backfill(tmp_path, monkeypatch):
-    """Startup: the backfill runs with no project paths rather than never returning."""
+    """Startup: the backfill runs with no agent paths rather than never returning."""
     from emrg import sessions_index as sessions_index_mod
 
     server = _make_server()
@@ -5119,7 +5119,7 @@ def test_a_directory_registry_is_refused_by_its_kind_in_the_backfill(
 
 
 @_needs_mkfifo
-def test_a_named_pipe_registry_does_not_stop_remove_project(tmp_path):
+def test_a_named_pipe_registry_does_not_stop_remove_agent(tmp_path):
     """The removal answers `removed: false` with its reason, as for a corrupt file."""
     server = _make_server()
     fifo = tmp_path / "agents.yml"
@@ -5128,15 +5128,15 @@ def test_a_named_pipe_registry_does_not_stop_remove_project(tmp_path):
     writer = _FakeWriter()
 
     within(DEADLINE_SECONDS,
-           lambda: asyncio.run(server._handle_remove_project("alpha", writer)))
+           lambda: asyncio.run(server._handle_remove_agent("alpha", writer)))
 
     replies = _decode_frames(writer)
-    assert replies and replies[0]["type"] == "project_removed", replies
+    assert replies and replies[0]["type"] == "agent_removed", replies
     assert replies[0]["removed"] is False, replies
     assert "failed to read" in replies[0].get("error", ""), replies
 
 
-def test_a_directory_registry_is_refused_by_its_kind_in_remove_project(
+def test_a_directory_registry_is_refused_by_its_kind_in_remove_agent(
         tmp_path, monkeypatch, caplog):
     """The pipe-free half: the same refusal, observed through the log."""
     server = _make_server()
@@ -5146,7 +5146,7 @@ def test_a_directory_registry_is_refused_by_its_kind_in_remove_project(
     writer = _FakeWriter()
 
     with caplog.at_level(logging.ERROR):
-        asyncio.run(server._handle_remove_project("alpha", writer))
+        asyncio.run(server._handle_remove_agent("alpha", writer))
 
     assert _decode_frames(writer)[0]["removed"] is False
     assert "not a regular file" in caplog.text, caplog.text
@@ -5631,20 +5631,20 @@ def test_an_out_of_domain_limit_is_refused_rather_than_coerced(tmp_path):
 # call sites, by the resume reader, by the two memory readers and by
 # `delete_session`, which hands the resolved path to `shutil.rmtree`. So the check
 # lives once, in `_refuse_an_unsafe_session_id`: measured 2026-10-21, an id of
-# `../..` reached `rmtree` with the project tree.
+# `../..` reached `rmtree` with the agent tree.
 #
 # It has **two** callers because the daemon has two dispatchers. `_handle_client`
 # intercepts `{"type": "task"}` itself and never reaches `_process_message`, so a
 # check placed only in the latter left unguarded the one message type that creates
 # a session directory — measured on this branch before the fix: a `task` carrying
-# `../../../evil` created a directory one level above the project root, started its
+# `../../../evil` created a directory one level above the agent root, started its
 # turn, and sent the client nothing but `auth_ok`. A test that hands a `task` frame
 # to `_process_message` therefore certifies a door production does not use: that
 # function has no `task` branch at all and answers `unknown message type`. The two
 # tests below drive `_handle_client`, which is the door.
 
 
-def _project_with_a_neighbour(tmp_path):
+def _agent_with_a_neighbour(tmp_path):
     (tmp_path / ".emrg" / "sessions" / "keep").mkdir(parents=True)
     (tmp_path / "victim").mkdir()
     (tmp_path / "victim" / "precious.txt").write_text("keep me", encoding="utf-8")
@@ -5690,33 +5690,33 @@ def _drive_read_loop(monkeypatch, tmp_path, frames: list[dict]) -> list[dict]:
 
 
 def test_delete_session_refuses_an_id_that_is_not_one_component(tmp_path):
-    """A refused delete leaves the project alone and says so in a frame."""
-    project = _project_with_a_neighbour(tmp_path)
+    """A refused delete leaves the agent alone and says so in a frame."""
+    agent = _agent_with_a_neighbour(tmp_path)
     server = _make_server()
 
     frames = _drive(server, {
-        "type": "delete_session", "session_id": "../..", "cwd": str(project),
+        "type": "delete_session", "session_id": "../..", "cwd": str(agent),
     })
 
     assert len(frames) == 1
     assert "invalid session id" in frames[0]["error"]
-    assert (project / "victim" / "precious.txt").read_text(encoding="utf-8") == "keep me"
-    assert (project / ".emrg" / "sessions" / "keep").is_dir()
+    assert (agent / "victim" / "precious.txt").read_text(encoding="utf-8") == "keep me"
+    assert (agent / ".emrg" / "sessions" / "keep").is_dir()
 
 
 def test_delete_session_still_deletes_a_real_one(tmp_path):
     """The other direction on the same seam: a plain id is untouched by the refusal."""
-    project = _project_with_a_neighbour(tmp_path)
+    agent = _agent_with_a_neighbour(tmp_path)
     server = _make_server()
 
     frames = _drive(server, {
-        "type": "delete_session", "session_id": "keep", "cwd": str(project),
+        "type": "delete_session", "session_id": "keep", "cwd": str(agent),
     })
 
     assert frames[0]["type"] == "session_deleted"
     assert frames[0].get("error") is None
-    assert not (project / ".emrg" / "sessions" / "keep").exists()
-    assert (project / "victim" / "precious.txt").exists()
+    assert not (agent / ".emrg" / "sessions" / "keep").exists()
+    assert (agent / "victim" / "precious.txt").exists()
 
 
 def test_the_read_loop_refuses_a_task_carrying_an_unsafe_session_id(
@@ -5726,22 +5726,22 @@ def test_the_read_loop_refuses_a_task_carrying_an_unsafe_session_id(
 
     Driven through `_handle_client`, because that is where a `task` is dispatched.
     The id walks two levels up from the sessions directory, so without the refusal
-    the directory it creates lands **outside** the project — which is what the
+    the directory it creates lands **outside** the agent — which is what the
     assertion on `tmp_path` measures, not on `sessions/`.
     """
-    project = tmp_path / "project"
-    (project / ".emrg" / "sessions" / "keep").mkdir(parents=True)
+    agent = tmp_path / "agent"
+    (agent / ".emrg" / "sessions" / "keep").mkdir(parents=True)
 
     frames = _drive_read_loop(monkeypatch, tmp_path, [{
         "type": "task", "id": "t1", "session_id": "../../../evil",
-        "cwd": str(project), "prompt": "hi",
+        "cwd": str(agent), "prompt": "hi",
     }])
 
     assert [f for f in frames if f.get("type") != "auth_ok"] == [
         {"error": "invalid session id: '../../../evil' (a session id is one path component)"}
     ]
     assert not (tmp_path / "evil").exists()
-    assert sorted(p.name for p in (project / ".emrg" / "sessions").iterdir()) == ["keep"]
+    assert sorted(p.name for p in (agent / ".emrg" / "sessions").iterdir()) == ["keep"]
 
 
 def test_the_read_loop_still_accepts_a_task_carrying_a_plain_session_id(
@@ -5753,16 +5753,16 @@ def test_the_read_loop_still_accepts_a_task_carrying_a_plain_session_id(
     that discriminates: no `invalid session id` frame, and the session directory the
     branch creates exists.
     """
-    project = tmp_path / "project"
-    (project / ".emrg" / "sessions" / "keep").mkdir(parents=True)
+    agent = tmp_path / "agent"
+    (agent / ".emrg" / "sessions" / "keep").mkdir(parents=True)
 
     frames = _drive_read_loop(monkeypatch, tmp_path, [{
         "type": "task", "id": "t2", "session_id": "fresh",
-        "cwd": str(project), "prompt": "hi",
+        "cwd": str(agent), "prompt": "hi",
     }])
 
     assert not [f for f in frames if "invalid session id" in str(f.get("error", ""))]
-    assert (project / ".emrg" / "sessions" / "fresh").is_dir()
+    assert (agent / ".emrg" / "sessions" / "fresh").is_dir()
 
 
 # ── the task list frame is the renderer's one source for the floor ───────────

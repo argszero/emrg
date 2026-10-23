@@ -203,7 +203,7 @@ def test_grep_receives_the_cwd_only_as_a_default(injected, tmp_path):
 def test_the_discovery_tools_take_the_cwd_as_a_default_too(injected, tmp_path):
     """``glob``'s directory is a preference, exactly as ``grep``'s is.
 
-    Both schemas say "default: project root"; neither tool runs a command or
+    Both schemas say "default: agent root"; neither tool runs a command or
     writes a file, so neither directory decides a boundary.  ``glob`` shared the
     shell branch by adjacency — when the guard was dropped from the one line the
     two shared (``8246b691``, whose subject is bash and not glob) it lost the

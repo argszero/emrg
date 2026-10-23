@@ -3,12 +3,12 @@
 Skills are filesystem-based Markdown packages. They live in two roots:
 
   - ~/.emrg/skills/         (user skills)
-  - <project>/.emrg/skills/ (project skills)
+  - <agent>/.emrg/skills/ (agent skills)
 
 and each root is read in **both** layouts, `<name>.md` and `<name>/SKILL.md`
-(`_skill_files_in`). `<project>` is the nearest ancestor of the *session's*
-working directory carrying a `.git` (`_project_root`) — not the process's cwd,
-which for the daemon is `~/.emrg` and would give every session one project's
+(`_skill_files_in`). `<agent>` is the nearest ancestor of the *session's*
+working directory carrying a `.git` (`_agent_root`) — not the process's cwd,
+which for the daemon is `~/.emrg` and would give every session one agent's
 skills.
 
 Nothing here is cached: every `load_skills` call re-reads the files, so a skill
@@ -56,7 +56,7 @@ class Skill:
     description: str
     path: Path          # source file path
     body: str           # markdown body (after frontmatter)
-    source: str         # "user" or "project"
+    source: str         # "user" or "agent"
 
 
 def _parse_frontmatter(text: str) -> dict[str, str]:
@@ -104,10 +104,10 @@ def _parse_skill_file(file_path: Path, source: str) -> Optional[Skill]:
     # caller of this function runs on the daemon's event loop (`load_skills` is called from
     # `_handle_message`'s install branch, the skills auto-update loop, and startup), so the
     # block is the whole server. Measured 2026-10-11 (`cyc20261011-070311`): a `mkfifo`
-    # named `wedged.md` beside a usable skill made `load_skills(project_dir)` **not return
+    # named `wedged.md` beside a usable skill made `load_skills(agent_dir)` **not return
     # in 8 s**, while the same fixture without it returned in 0.00 s.
     #
-    # The project directory is the agent's own write surface (`.emrg/skills/` under the
+    # The agent directory is the agent's own write surface (`.emrg/skills/` under the
     # workspace), which is what makes this reachable rather than theoretical — the same
     # argument `#2076` made for `.emrg/memory/`.
     #
@@ -168,11 +168,11 @@ def _parse_skill_file(file_path: Path, source: str) -> Optional[Skill]:
     )
 
 
-def _project_root(start: Path) -> Path:
+def _agent_root(start: Path) -> Path:
     """The nearest ancestor of ``start`` carrying a ``.git``, else ``start`` itself.
 
-    A session is normally opened *inside* a project rather than at its top, while the
-    project's skills sit at the top — so the root has to be resolved rather than
+    A session is normally opened *inside* an agent rather than at its top, while the
+    agent's skills sit at the top — so the root has to be resolved rather than
     assumed to be the directory the session happens to be in. A directory with no
     repository above it is its own root, which is what a scratch or temp directory
     wants and what keeps a skills directory beside the files being worked on usable.
@@ -241,16 +241,16 @@ def _skills_under(root: Path, source: str, into: dict[str, Skill]) -> None:
             logger.debug("skill loaded: %s (%s) from %s", skill.name, source, skill_file)
 
 
-def load_skills(project_dir: Optional[Path] = None) -> list[Skill]:
-    """Load every skill from the user root and one project root, read live.
+def load_skills(agent_dir: Optional[Path] = None) -> list[Skill]:
+    """Load every skill from the user root and one agent root, read live.
 
-    User skills (``~/.emrg/skills/``) are read first, then the project's
-    (``<root>/.emrg/skills/``); a skill of the same name: the project's wins.
+    User skills (``~/.emrg/skills/``) are read first, then the agent's
+    (``<root>/.emrg/skills/``); a skill of the same name: the agent's wins.
 
-    ``project_dir`` is the **session's** working directory — deliberately not the
+    ``agent_dir`` is the **session's** working directory — deliberately not the
     process's, which for the daemon is whatever it was started in and made every
-    session read the same project's skills. It resolves to the nearest ancestor
-    carrying a ``.git`` (`_project_root`). Called with nothing, it falls back to the
+    session read the same agent's skills. It resolves to the nearest ancestor
+    carrying a ``.git`` (`_agent_root`). Called with nothing, it falls back to the
     process cwd, for a caller that has no session at all.
 
     Nothing is cached, here or above: every call re-reads the files, so a skill
@@ -260,17 +260,17 @@ def load_skills(project_dir: Optional[Path] = None) -> list[Skill]:
     unchanged tree renders a byte-identical prompt prefix, so the provider's cache
     still matches.
     """
-    start = Path(project_dir) if project_dir is not None else Path.cwd()
-    project_root = _project_root(start)
+    start = Path(agent_dir) if agent_dir is not None else Path.cwd()
+    agent_root = _agent_root(start)
 
     all_skills: dict[str, Skill] = {}
     user_root = _user_skills_root()
     if user_root.is_dir():
         _skills_under(user_root, "user", all_skills)
 
-    project_skills_root = project_root / ".emrg" / "skills"
-    if project_skills_root.is_dir():
-        _skills_under(project_skills_root, "project", all_skills)
+    agent_skills_root = agent_root / ".emrg" / "skills"
+    if agent_skills_root.is_dir():
+        _skills_under(agent_skills_root, "agent", all_skills)
 
     return sorted(all_skills.values(), key=lambda s: s.name)
 

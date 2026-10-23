@@ -2,7 +2,7 @@
 
 Why this file exists
 --------------------
-An outside review of PR #1403 measured this: the project has **two** permanent red
+An outside review of PR #1403 measured this: the agent has **two** permanent red
 lines, and only one of them is stated where the agents that must obey them read.
 
 `MANIFESTO.md` 第四条附则三 — never write, restore or introduce anything that triggers
@@ -16,16 +16,16 @@ in `MANIFESTO.md`. It was stated in neither of the two prompts that drive an age
   It carries both permanent rules under one `## Hard limits` section, each as a `###`
   subsection that states the rule in English for the session's own reader; the Chinese
   sentence, the identifiers and the file paths they name live in `MANIFESTO.md`, which the
-  section points at. A task whose working directory is another project does not carry that
+  section points at. A task whose working directory is another agent does not carry that
   file, which is why each limit is stated as a rule rather than as a citation.
 * `emrg/server/evolution_prompt.md` — the template that ships in a release and is
   installed for other instances. Its `### Forbidden` list is where a reader looks for
   exactly this class of rule.
 
 That asymmetry is the defect: a rule that governs every actor, stated only in a carrier
-no other actor is guaranteed to open. `MANIFESTO.md` is a project-context file, read out
+no other actor is guaranteed to open. `MANIFESTO.md` is a agent-context file, read out
 of the **session cwd** — it is present for this repo's tasks and absent for every other
-project's.
+agent's.
 
 A third class: the task templates, not only the evolution one
 ---------------------------------------------------------------
@@ -291,7 +291,7 @@ def test_the_charter_carries_the_identifiers_the_prompt_points_at() -> None:
 
     A rule that named `UpgradeManager.tick()` and `install/version.txt` in every session's
     prompt spent prompt on identifiers no session acts on, and the permanent text that does
-    list them is `MANIFESTO.md` — a project-context file the prompt now points at. The move
+    list them is `MANIFESTO.md` — a agent-context file the prompt now points at. The move
     is only honest if the identifiers are still somewhere: this reads them where they live,
     so deleting them from the charter fails here instead of passing as a tidy-up.
     """
@@ -349,8 +349,8 @@ def test_each_carrier_states_the_rule_in_its_own_language() -> None:
     """Both carriers carry the rule; neither is left to point at the other.
 
     A cross-reference ("see MANIFESTO.md") is not a statement: the file it points at is a
-    project-context file, read from the session cwd, and absent for a task run against
-    another project. So the check is that each carrier names the routes itself — the
+    agent-context file, read from the session cwd, and absent for a task run against
+    another agent. So the check is that each carrier names the routes itself — the
     template by identifier, and the session prompt by what each route *is* (a releases
     request, a version file, the upgrade session), which is the same three routes at the
     altitude the prompt is written at.

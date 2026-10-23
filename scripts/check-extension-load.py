@@ -15,7 +15,7 @@ file is right and the load fails anyway are indistinguishable from a good instal
 * `packaging/smoke-test.sh` item 14 - a venv is created and `pip --version` runs -
   neither of which loads a `.so`.
 
-The cost of that gap is not hypothetical: a different project on this host carried
+The cost of that gap is not hypothetical: a different agent on this host carried
 "any compiled C extension cannot load here" as a hard environment fact for weeks and
 worked around it (a pure-Python brute force replacing an ILP solver, mypy/pyright
 dropped). One command that loads a wheel's `.so` decides it in a single step, which

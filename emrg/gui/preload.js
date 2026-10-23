@@ -50,10 +50,10 @@ const api = {
   panelResized: (payload) => ipcRenderer.invoke("emrg:panelResized", payload), // P2.3：面板布局上报 → bounds 同步
   getPreviewState: () => ipcRenderer.invoke("emrg:getPreviewState"), // P2.3：renderer 崩溃恢复拉取
   listSkills: () => ipcRenderer.invoke("emrg:listSkills"),
-  listProjects: () => ipcRenderer.invoke("emrg:listProjects"),
-  listProjectSessions: (payload) => ipcRenderer.invoke("emrg:listProjectSessions", payload),
-  registerProject: (payload) => ipcRenderer.invoke("emrg:registerProject", payload),
-  removeProject: (payload) => ipcRenderer.invoke("emrg:removeProject", payload),
+  listAgents: () => ipcRenderer.invoke("emrg:listAgents"),
+  listAgentSessions: (payload) => ipcRenderer.invoke("emrg:listAgentSessions", payload),
+  registerAgent: (payload) => ipcRenderer.invoke("emrg:registerAgent", payload),
+  removeAgent: (payload) => ipcRenderer.invoke("emrg:removeAgent", payload),
   listTasks: () => ipcRenderer.invoke("emrg:listTasks"),
   // 间隔下限由 daemon 上报（issue #2490）——渲染层不留第二份数字
   taskLimits: () => ipcRenderer.invoke("emrg:taskLimits"),
@@ -79,7 +79,7 @@ const api = {
   saveSettings: (payload) => ipcRenderer.invoke("emrg:saveSettings", payload),
   getSettings: () => ipcRenderer.invoke("emrg:getSettings"),
   cancel: (sessionId) => ipcRenderer.invoke("emrg:cancel", sessionId),
-  pickProjectDir: () => ipcRenderer.invoke("emrg:pickProjectDir"),
+  pickAgentDir: () => ipcRenderer.invoke("emrg:pickAgentDir"),
   // 渲染进程日志桥（rant 2026-08-24：打开会话链路排障——renderer 点击/调用步骤
   // 经 emrg:log IPC 上报，由 main 写入 ~/.emrg/emrg-gui.log，与 main 日志同文件时序对齐）
   log: (level, msg) => ipcRenderer.invoke("emrg:log", { level, msg }),

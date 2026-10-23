@@ -96,7 +96,7 @@ def _line_cap_line(text: str) -> str:
 
 
 def _make_server() -> EmrgServer:
-    """A minimal server, with the projects log pointed away from the real one.
+    """A minimal server, with the agents log pointed away from the real one.
 
     The shape `tests/test_daemon.py::_make_server` uses, for the same reason: building a
     system prompt must never write the host's `~/.emrg/agents.yml`.
@@ -107,7 +107,7 @@ def _make_server() -> EmrgServer:
 
 
 def _session_with_an_index(tmp_path: Path) -> Session:
-    """A session whose cwd carries a project memory index, so the block really renders.
+    """A session whose cwd carries a agent memory index, so the block really renders.
 
     The hygiene section sits under `{% if has_memories %}`, so a session with no index
     renders the *else* branch — a prompt in which the bound could be absent for a reason

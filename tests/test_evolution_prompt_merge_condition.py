@@ -9,7 +9,7 @@ own docstring carries the measurement (2026-09-11: #1133/#1134/#1136/#1137 each
 showed 4-6 "✅ LGTM" lines and each had **0 valid votes**). Its condition has a clause
 the template's sentence did not: **a vote submitted before the head push is void**.
 So an instance whose task prompt is built from the shipped template was told a rule
-narrower than the one this project's gates measure, and pointed at a route (count the
+narrower than the one this agent's gates measure, and pointed at a route (count the
 ✅ lines by hand) that answers wrongly whenever a head has moved.
 
 A sibling defect — the vote *body* — was fixed the same way (#1409): the template's
@@ -109,10 +109,10 @@ def counter():
 def rendered(tmp_path_factory) -> str:
     """The real template, rendered through the real builder with the real context."""
     tmp_path = tmp_path_factory.mktemp("merge-condition")
-    project_dir = tmp_path / "demoproj"
-    project_dir.mkdir(exist_ok=True)
+    agent_dir = tmp_path / "demoproj"
+    agent_dir.mkdir(exist_ok=True)
     (tmp_path / "agents.yml").write_text(
-        yaml.safe_dump([{"name": "demoproj", "path": str(project_dir)}]), encoding="utf-8"
+        yaml.safe_dump([{"name": "demoproj", "path": str(agent_dir)}]), encoding="utf-8"
     )
     original = mod.config_dir
     mod.config_dir = lambda: tmp_path

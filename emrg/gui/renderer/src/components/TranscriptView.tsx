@@ -287,7 +287,7 @@ function AssistantView({ entry, t, md }: { entry: AssistantEntry; t: TranslateFn
  * streamProject）把「✦ + div.md-stream（稳定块缓存 + 尾部 live 块）」增量写进 host——
  * 已闭合的段落/列表/代码围栏即时按 markdown 渲染，未闭合围栏（esp. 代码围栏）保持
  * 纯文本，不再等 done 才格式化。渲染器无 marked / 投影异常（返回 false）→ 回退纯文本
- * 追加（旧行为）。done/封存：project 模式 streamFinalize 一次性全量校正；plain 模式由
+ * 追加（旧行为）。done/封存：agent 模式 streamFinalize 一次性全量校正；plain 模式由
  * MarkdownText 整体渲染兜底。
  */
 function AssistantSegmentView({
@@ -336,7 +336,7 @@ function AssistantSegmentView({
     }
   }, [segment.typing, segment.text, md]);
 
-  // done/封存（typing 移除）：project 模式 → streamFinalize 把 live 块一次性校正为全量
+  // done/封存（typing 移除）：agent 模式 → streamFinalize 把 live 块一次性校正为全量
   // markdown（与旧 renderMarkdown 整体渲染同源）；plain 模式由 MarkdownText 兜底。
   useEffect(() => {
     if (segment.typing || projectedRef.current !== true) return;

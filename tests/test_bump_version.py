@@ -851,7 +851,7 @@ def test_a_directory_with_only_half_the_shape_is_not_a_checkout(
 ):
     """Both markers are required, so a stray base file does not claim the tree.
 
-    The check is a heuristic for "this is a checkout of this project"; requiring
+    The check is a heuristic for "this is a checkout of this agent"; requiring
     both the base source and the scripts directory keeps it from matching, say,
     an extracted copy of the package that happens to sit under a temp dir.
     """
@@ -864,7 +864,7 @@ def test_a_directory_with_only_half_the_shape_is_not_a_checkout(
 
 
 # --------------------------------------------------------------------------
-# the branch the flow prints — a carrier of the project's convention
+# the branch the flow prints — a carrier of the agent's convention
 # --------------------------------------------------------------------------
 
 
@@ -879,7 +879,7 @@ def test_the_printed_next_steps_name_the_release_branch_the_flow_creates(
     the spelling this module printed until then — survives only on branches
     created under the older convention (the newest is ``feature/release-v0.3.0``).
     A cycle that follows the printed line would cut the next release under a name
-    the project stopped using six releases ago.
+    the agent stopped using six releases ago.
 
     Pinned as the *claim* rather than as the sentence: the branch name and the
     absence of the old one, so that re-numbering the steps (a check inserted

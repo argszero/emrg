@@ -14,7 +14,7 @@ visible by reading one sentence at a time:
 2. **A rule is a rule, not the story of a rule.** A prompt that spends its first paragraphs on when a
    defect was measured, which pull request landed the fix and what the host said about it gives its
    reader no instruction — and the same content is what makes a prompt grow. So history belongs in
-   the charter, in the pull request that landed the line and in the project's memory; the prompt
+   the charter, in the pull request that landed the line and in the agent's memory; the prompt
    carries none of it, and `test_the_template_carries_no_digit_at_all` is the strongest form of that
    claim the file admits.
 
@@ -72,7 +72,7 @@ LIMIT_HEADINGS = (
 #: duplicated heading and a missing one are different defects and a count sees neither.
 EXPECTED_H2 = [
     "## Where you are",
-    "## Project context",
+    "## Agent context",
     "## Skills",
     "## How you work",
     "## Memory",
@@ -280,7 +280,7 @@ def test_the_charter_carries_the_two_principles_verbatim() -> None:
         ("第四条附则三", UPGRADE_PRINCIPLE),
     ):
         assert principle in charter, (
-            f"the {name} statement in MANIFESTO.md no longer matches the text this project pinned: "
+            f"the {name} statement in MANIFESTO.md no longer matches the text this agent pinned: "
             "it is a permanent principle and the Chinese text carrying it is quoted verbatim"
         )
         assert charter.count(principle) == 1, (
@@ -333,7 +333,7 @@ def test_neither_the_file_nor_the_render_carries_provenance() -> None:
         assert not hits, (
             f"{name} carries engineering history: {hits}. Which pull request landed a line, when a "
             "defect was measured and what the host said about it are notes about why the line "
-            "exists — they belong in the charter, the pull request and the project's memory, and "
+            "exists — they belong in the charter, the pull request and the agent's memory, and "
             "every session pays for them here"
         )
 

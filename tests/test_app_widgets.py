@@ -1,4 +1,4 @@
-"""Unit tests for app widgets — ProjectSelector and ModelSelector navigation and rendering."""
+"""Unit tests for app widgets — AgentSelector and ModelSelector navigation and rendering."""
 
 from __future__ import annotations
 
@@ -10,42 +10,42 @@ import pytest
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="app 交互测试依赖 POSIX 终端行为（SIGWINCH/raw mode）")
 
 from emrg.client.python_tui.widgets.base import Line, RenderContext, Span, Widget
-from emrg.client.app import ProjectSelector, ModelSelector
+from emrg.client.app import AgentSelector, ModelSelector
 from emrg.client.widgets import ChatHistory
 
-# ── ProjectSelector tests ──
+# ── AgentSelector tests ──
 
 
-def make_project(name: str, repo: str = "", auto_evolve: bool = False) -> dict:
+def make_agent(name: str, repo: str = "", auto_evolve: bool = False) -> dict:
     return {"name": name, "repo": repo, "path": f"/tmp/{name}", "auto_evolve": auto_evolve}
 
 
-def test_project_selector_empty():
-    """Empty project list renders header only, selected_project_name is None."""
-    ps = ProjectSelector([])
+def test_agent_selector_empty():
+    """Empty agent list renders header only, selected_agent_name is None."""
+    ps = AgentSelector([])
     ctx = RenderContext(width=80)
     lines = ps.render(ctx)
 
     assert len(lines) == 1  # header only
-    assert ps.selected_project_name is None
+    assert ps.selected_agent_name is None
     assert not ps.dirty
 
 
-def test_project_selector_single():
-    """Single project renders with header + project, initial index 0."""
-    ps = ProjectSelector([make_project("foo")])
+def test_agent_selector_single():
+    """Single agent renders with header + agent, initial index 0."""
+    ps = AgentSelector([make_agent("foo")])
     ctx = RenderContext(width=80)
     lines = ps.render(ctx)
 
-    assert len(lines) == 2  # header + 1 project
-    assert ps.selected_project_name == "foo"
+    assert len(lines) == 2  # header + 1 agent
+    assert ps.selected_agent_name == "foo"
     assert not ps.dirty
 
 
-def test_project_selector_navigation():
+def test_agent_selector_navigation():
     """move_up/move_down clamp correctly and mark dirty."""
-    projects = [make_project("a"), make_project("b"), make_project("c")]
-    ps = ProjectSelector(projects)
+    agents = [make_agent("a"), make_agent("b"), make_agent("c")]
+    ps = AgentSelector(agents)
     assert ps.selected_index == 0
 
     ps.move_up()
@@ -59,48 +59,48 @@ def test_project_selector_navigation():
     ps.move_down()
     assert ps.selected_index == 2  # clamped at last
 
-    assert ps.selected_project_name == "c"
+    assert ps.selected_agent_name == "c"
 
 
-def test_project_selector_selected_project_name():
-    """selected_project_name returns the correct name at each index."""
-    projects = [make_project("x"), make_project("y"), make_project("z")]
-    ps = ProjectSelector(projects)
-    assert ps.selected_project_name == "x"
+def test_agent_selector_selected_agent_name():
+    """selected_agent_name returns the correct name at each index."""
+    agents = [make_agent("x"), make_agent("y"), make_agent("z")]
+    ps = AgentSelector(agents)
+    assert ps.selected_agent_name == "x"
 
     ps.selected_index = 2
-    assert ps.selected_project_name == "z"
+    assert ps.selected_agent_name == "z"
 
     ps.selected_index = 99
-    assert ps.selected_project_name is None  # out of bounds
+    assert ps.selected_agent_name is None  # out of bounds
 
 
-def test_project_selector_rendering_indicators():
-    """Project name and repo are shown in the selector."""
-    projects = [
-        make_project("auto", repo="u/auto", auto_evolve=True),
-        make_project("manual", auto_evolve=False),
+def test_agent_selector_rendering_indicators():
+    """Agent name and repo are shown in the selector."""
+    agents = [
+        make_agent("auto", repo="u/auto", auto_evolve=True),
+        make_agent("manual", auto_evolve=False),
     ]
-    ps = ProjectSelector(projects)
+    ps = AgentSelector(agents)
     ctx = RenderContext(width=80)
     lines = ps.render(ctx)
 
-    assert len(lines) == 3  # header + 2 projects
+    assert len(lines) == 3  # header + 2 agents
 
-    # First project: name and repo
+    # First agent: name and repo
     spans_text_0 = "".join(s.text for s in lines[1].spans)
     assert "auto" in spans_text_0
     assert "(u/auto)" in spans_text_0
 
-    # Second project: name, no repo
+    # Second agent: name, no repo
     spans_text_1 = "".join(s.text for s in lines[2].spans)
     assert "manual" in spans_text_1
 
 
-def test_project_selector_selected_highlight():
-    """Selected project has reverse video and '>' prefix."""
-    projects = [make_project("sel"), make_project("unsel")]
-    ps = ProjectSelector(projects)
+def test_agent_selector_selected_highlight():
+    """Selected agent has reverse video and '>' prefix."""
+    agents = [make_agent("sel"), make_agent("unsel")]
+    ps = AgentSelector(agents)
     ctx = RenderContext(width=80)
     lines = ps.render(ctx)
 
@@ -113,9 +113,9 @@ def test_project_selector_selected_highlight():
     assert lines[2].spans[1].style == ctx.style
 
 
-def test_project_selector_dirty_flag():
+def test_agent_selector_dirty_flag():
     """Dirty flag resets after render, set by navigation."""
-    ps = ProjectSelector([make_project("a"), make_project("b")])
+    ps = AgentSelector([make_agent("a"), make_agent("b")])
 
     # Initially dirty
     assert ps.dirty
@@ -133,14 +133,14 @@ def test_project_selector_dirty_flag():
     assert ps.dirty
 
 
-def test_project_selector_no_name_field():
-    """Project without 'name' field shows '?'."""
-    ps = ProjectSelector([{"path": "/tmp/x"}])
+def test_agent_selector_no_name_field():
+    """Agent without 'name' field shows '?'."""
+    ps = AgentSelector([{"path": "/tmp/x"}])
     ctx = RenderContext(width=80)
     lines = ps.render(ctx)
 
     assert "?" in "".join(s.text for s in lines[1].spans)
-    assert ps.selected_project_name == ""  # no name field → ""
+    assert ps.selected_agent_name == ""  # no name field → ""
 
 
 # ── ModelSelector tests ──
@@ -901,9 +901,9 @@ def _rewind_case(count: int = 40):
     return widget, count
 
 
-def _project_case(count: int = 40):
-    from emrg.client.widgets import ProjectSelector
-    return ProjectSelector([make_project(f"proj{i}") for i in range(count)]), count
+def _agent_case(count: int = 40):
+    from emrg.client.widgets import AgentSelector
+    return AgentSelector([make_agent(f"proj{i}") for i in range(count)]), count
 
 
 def _task_case(count: int = 40):
@@ -942,7 +942,7 @@ def _sandbox_case():
 # (builder, rows the terminal gives the widget, rows of chrome the widget declares)
 CASES = [
     pytest.param(_rewind_case, 15, 2, id="rewind"),
-    pytest.param(_project_case, 15, 1, id="project"),
+    pytest.param(_agent_case, 15, 1, id="agent"),
     pytest.param(_task_case, 15, 1, id="task"),
     pytest.param(_model_case, 15, 1, id="model"),
     pytest.param(_command_case, 15, 1, id="command-dropdown"),

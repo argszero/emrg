@@ -171,7 +171,7 @@ def test_a_minute_truncated_spelling_is_still_a_site(snippet, text, expected):
 
 def test_a_timestamp_not_introduced_by_the_word_is_not_a_citation(snippet):
     """system.j2's memory-format example must stay out of scope."""
-    text = "event_at: 2026-01-15T14:30:00\ntype: project\n"
+    text = "event_at: 2026-01-15T14:30:00\ntype: agent\n"
     assert sites_of(snippet, text) == []
     assert snippet.problems(sites_of(snippet, text)) == []
 

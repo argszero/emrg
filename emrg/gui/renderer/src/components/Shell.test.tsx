@@ -25,9 +25,9 @@ function mockEmrg() {
   // DialogHost 用到的 IPC 通道（Batch 5 slice 4）：对话框数据加载 + 直接执行类指令
   const clearSession = vi.fn().mockResolvedValue({ ok: true });
   const compactSession = vi.fn().mockResolvedValue({ ok: true });
-  const listProjects = vi.fn().mockResolvedValue([{ name: "emrg", path: "/p/emrg" }]);
-  const listTasks = vi.fn().mockResolvedValue([{ name: "evo", type: "evolution", enabled: true, session_id: "evo", project_path: "/p/emrg" }]);
-  const listRants = vi.fn().mockResolvedValue([{ timestamp: "2026-08-26T12:00:00+08:00", project: "emrg", status: "pending", message: "x" }]);
+  const listAgents = vi.fn().mockResolvedValue([{ name: "emrg", path: "/p/emrg" }]);
+  const listTasks = vi.fn().mockResolvedValue([{ name: "evo", type: "evolution", enabled: true, session_id: "evo", agent_path: "/p/emrg" }]);
+  const listRants = vi.fn().mockResolvedValue([{ timestamp: "2026-08-26T12:00:00+08:00", agent: "emrg", status: "pending", message: "x" }]);
   const listMemories = vi.fn().mockResolvedValue([]);
   const listSkills = vi.fn().mockResolvedValue([]);
   const listHistory = vi.fn().mockResolvedValue({ messages: [] });
@@ -54,7 +54,7 @@ function mockEmrg() {
     sendMessage,
     clearSession,
     compactSession,
-    listProjects,
+    listAgents,
     listTasks,
     listRants,
     listMemories,
@@ -79,7 +79,7 @@ function mockEmrg() {
     onEvent,
     sendMessage,
     clearSession,
-    listProjects,
+    listAgents,
     listTasks,
     listRants,
     listHistory,
@@ -591,15 +591,15 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     await waitFor(() => expect(screen.getByTestId("transcript-view")).toBeInTheDocument());
     expect(screen.getByTestId("composer")).toBeInTheDocument();
     expect(screen.queryByTestId("workspace-view")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("panel-projects")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("panel-agents")).not.toBeInTheDocument();
   });
 
-  it("点击 nav-projects → 面板视图：显示项目面板，隐藏会话 chrome", async () => {
+  it("点击 nav-agents → 面板视图：显示项目面板，隐藏会话 chrome", async () => {
     render(wrapper(<Shell />));
     await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
-    fireEvent.click(screen.getByTestId("nav-projects"));
-    await waitFor(() => expect(screen.getByTestId("panel-projects")).toBeInTheDocument());
-    expect(screen.getByTestId("nav-projects").className).toContain("active");
+    fireEvent.click(screen.getByTestId("nav-agents"));
+    await waitFor(() => expect(screen.getByTestId("panel-agents")).toBeInTheDocument());
+    expect(screen.getByTestId("nav-agents").className).toContain("active");
     // 面板视图隐藏会话 chrome（vanilla setWorkspaceChrome("panel")）
     expect(screen.queryByTestId("transcript-view")).not.toBeInTheDocument();
     expect(screen.queryByTestId("composer")).not.toBeInTheDocument();
@@ -609,23 +609,23 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
   it("点击当前激活面板 → toggle 回会话视图（vanilla 语义）", async () => {
     render(wrapper(<Shell />));
     await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
-    fireEvent.click(screen.getByTestId("nav-projects"));
-    await waitFor(() => expect(screen.getByTestId("panel-projects")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("nav-agents"));
+    await waitFor(() => expect(screen.getByTestId("panel-agents")).toBeInTheDocument());
     // 再点同一面板 → 关闭回会话
-    fireEvent.click(screen.getByTestId("nav-projects"));
-    await waitFor(() => expect(screen.queryByTestId("panel-projects")).not.toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("nav-agents"));
+    await waitFor(() => expect(screen.queryByTestId("panel-agents")).not.toBeInTheDocument());
     expect(screen.getByTestId("composer")).toBeInTheDocument();
-    expect(screen.getByTestId("nav-projects").className).not.toContain("active");
+    expect(screen.getByTestId("nav-agents").className).not.toContain("active");
   });
 
-  it("面板间切换：projects → tasks → settings", async () => {
+  it("面板间切换：agents → tasks → settings", async () => {
     render(wrapper(<Shell />));
     await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
-    fireEvent.click(screen.getByTestId("nav-projects"));
-    await waitFor(() => expect(screen.getByTestId("panel-projects")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("nav-agents"));
+    await waitFor(() => expect(screen.getByTestId("panel-agents")).toBeInTheDocument());
     fireEvent.click(screen.getByTestId("nav-tasks"));
     await waitFor(() => expect(screen.getByTestId("panel-tasks")).toBeInTheDocument());
-    expect(screen.queryByTestId("panel-projects")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("panel-agents")).not.toBeInTheDocument();
     fireEvent.click(screen.getByTestId("nav-settings"));
     await waitFor(() => expect(screen.getByTestId("panel-settings")).toBeInTheDocument());
     expect(screen.queryByTestId("panel-tasks")).not.toBeInTheDocument();
@@ -650,7 +650,7 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     expect(screen.getByTestId("nav-sessions").className).toContain("active");
   });
 
-  // ── Batch 5 slice 7：workspace 面板数据接线（真实 listProjects/listTasks/listRants） ──
+  // ── Batch 5 slice 7：workspace 面板数据接线（真实 listAgents/listTasks/listRants） ──
 
   it("进入任务面板 → 加载 listTasks 并渲染任务行", async () => {
     const m = mockEmrg();
@@ -695,7 +695,7 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     // 因此断言的是真渲染产物：#### 【现象】 → <h4>。
     const m = mockEmrg();
     m.listRants.mockResolvedValue([
-      { timestamp: "2026-09-30T09:06:16+08:00", project: "emrg", status: "pending", message: "【现象】\n**加粗**正文" },
+      { timestamp: "2026-09-30T09:06:16+08:00", agent: "emrg", status: "pending", message: "【现象】\n**加粗**正文" },
     ]);
     render(wrapper(<Shell />));
     await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
@@ -706,24 +706,24 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     expect(document.querySelector(".rant-md strong")).not.toBeNull();
   });
 
-  it("进入项目面板 → 加载 listProjects；查看会话 → listProjectSessions 加载会话行", async () => {
+  it("进入项目面板 → 加载 listAgents；查看会话 → listAgentSessions 加载会话行", async () => {
     const m = mockEmrg();
-    m.listProjects.mockResolvedValue([{ name: "p1", path: "/p/p1" }]);
-    (window as unknown as { emrg: { listProjectSessions?: unknown } }).emrg.listProjectSessions =
+    m.listAgents.mockResolvedValue([{ name: "p1", path: "/p/p1" }]);
+    (window as unknown as { emrg: { listAgentSessions?: unknown } }).emrg.listAgentSessions =
       vi.fn().mockResolvedValue({ sessions: [{ session_id: "s1", title: "会话一" }] });
     render(wrapper(<Shell />));
     await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
-    fireEvent.click(screen.getByTestId("nav-projects"));
-    await waitFor(() => expect(m.listProjects).toHaveBeenCalled());
-    await waitFor(() => expect(screen.getByTestId("project-row")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("nav-agents"));
+    await waitFor(() => expect(m.listAgents).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByTestId("agent-row")).toBeInTheDocument());
     // 查看会话 → 会话子视图加载（en 标题 "Sessions"；限定在项目行内避免与侧栏撞名）
-    const row = screen.getByTestId("project-row");
+    const row = screen.getByTestId("agent-row");
     fireEvent.click(row.querySelector('button[title="Sessions"]') as HTMLButtonElement);
     await waitFor(() =>
-      expect((window as unknown as { emrg: { listProjectSessions?: unknown } }).emrg.listProjectSessions).toHaveBeenCalled(),
+      expect((window as unknown as { emrg: { listAgentSessions?: unknown } }).emrg.listAgentSessions).toHaveBeenCalled(),
     );
-    await waitFor(() => expect(screen.getByTestId("project-session-row")).toBeInTheDocument());
-    expect(screen.getByTestId("project-session-row")).toHaveTextContent("会话一");
+    await waitFor(() => expect(screen.getByTestId("agent-session-row")).toBeInTheDocument());
+    expect(screen.getByTestId("agent-session-row")).toHaveTextContent("会话一");
   });
 
   // ── Batch 5 slice 8：任务表单 + Rant 对话框接线 ──
@@ -842,12 +842,12 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     fireEvent.click(screen.getByText("＋ New rant"));
     await waitFor(() => expect(screen.getByTestId("rant-dialog")).toBeInTheDocument());
     // 项目下拉含已注册项目 emrg
-    const sel = screen.getByTestId("rant-project") as HTMLSelectElement;
+    const sel = screen.getByTestId("rant-agent") as HTMLSelectElement;
     expect(Array.from(sel.options).some((o) => o.value === "emrg")).toBe(true);
     fireEvent.change(screen.getByTestId("rant-message"), { target: { value: "测试 rant" } });
-    fireEvent.change(screen.getByTestId("rant-project"), { target: { value: "emrg" } });
+    fireEvent.change(screen.getByTestId("rant-agent"), { target: { value: "emrg" } });
     fireEvent.click(screen.getByTestId("rant-submit"));
-    await waitFor(() => expect(m.sendRant).toHaveBeenCalledWith({ message: "测试 rant", project: "emrg" }));
+    await waitFor(() => expect(m.sendRant).toHaveBeenCalledWith({ message: "测试 rant", agent: "emrg" }));
     await waitFor(() => expect(m.listRants).toHaveBeenCalledTimes(2));
     expect(screen.queryByTestId("rant-dialog")).not.toBeInTheDocument();
   });
@@ -885,7 +885,7 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
     delete (window as unknown as { emrg?: unknown }).emrg;
   });
 
-  it("header 显示会话信息：title (sid) · project · N msgs（对齐 TUI 状态栏）", async () => {
+  it("header 显示会话信息：title (sid) · agent · N msgs（对齐 TUI 状态栏）", async () => {
     const m = mockEmrg();
     render(wrapper(<Shell />));
     await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
@@ -984,7 +984,7 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
     await waitFor(() => expect(m.listTasks).toHaveBeenCalled());
   });
 
-  it("/rant @emrg hello → sendRant 直发（对齐 TUI @project 前缀）", async () => {
+  it("/rant @emrg hello → sendRant 直发（对齐 TUI @agent 前缀）", async () => {
     const m = mockEmrg();
     render(wrapper(<Shell />));
     await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
@@ -994,7 +994,7 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
     const input = await screen.findByTestId("composer-input");
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     await waitFor(() =>
-      expect(m.sendRant).toHaveBeenCalledWith({ message: "hello world", project: "emrg" }),
+      expect(m.sendRant).toHaveBeenCalledWith({ message: "hello world", agent: "emrg" }),
     );
   });
 

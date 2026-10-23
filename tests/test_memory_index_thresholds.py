@@ -25,13 +25,13 @@ than characters, so `chars > T` implies `bytes > T`.
 
 **And it holds for both of the cap's subjects, on the strength of where the advisory
 lives.** The cap truncates two files per session (`EmrgServer._collect_memory_data`:
-the project index and the session index), and since 2026-09-24 the advisory is a
+the agent index and the session index), and since 2026-09-24 the advisory is a
 `MemoryStore` method called from the base `_save_index` — so whichever store owns the
 index watches it. That wiring is issue **#1581**, whose measurement was the
-counterexample this file now drives: on one fixture a 56,214-char project index was
+counterexample this file now drives: on one fixture a 56,214-char agent index was
 truncated by the cap with **no advisory having looked at its size**, while the same
 file as a session index fired the advisory first. Before the move the advisory was a
-`SessionMemoryStore` method that `ProjectMemoryStore` did not define, so no reading of
+`SessionMemoryStore` method that `AgentMemoryStore` did not define, so no reading of
 the cap's other subject was possible at all — a store with no such attribute raises
 rather than staying quiet, which is why the arms below name the store they drive.
 
@@ -64,7 +64,7 @@ from pathlib import Path
 from emrg.memory import (
     INDEX_SIZE_WARN,
     MemoryStore,
-    ProjectMemoryStore,
+    AgentMemoryStore,
     SessionMemoryStore,
 )
 from emrg.server.daemon import EmrgServer
@@ -77,12 +77,12 @@ ASCII_ROW = "- [row](x.md) — ascii row for the byte and character comparison\n
 
 # The cap's two subjects are written by two stores, and the claim below is about
 # both of them. Each entry is (name, store class, the ctor argument it needs): the
-# session store's directory is ``<session dir>/memory``, the project store's is
+# session store's directory is ``<session dir>/memory``, the agent store's is
 # ``<cwd>/.emrg/memory`` — so the fixture is placed through ``store.directory``
 # rather than by guessing either layout here.
 STORES = (
     ("session", SessionMemoryStore),
-    ("project", ProjectMemoryStore),
+    ("agent", AgentMemoryStore),
 )
 
 
@@ -160,7 +160,7 @@ def test_the_advisory_reads_bytes_while_the_cap_reads_characters(tmp_path, caplo
     second (it truncates the band, where the advisory said nothing was wrong).
 
     Driven through **both** stores the cap can be handed — the band is a property of
-    the units the two readers use, and it was the project store's silence, not the
+    the units the two readers use, and it was the agent store's silence, not the
     session store's, that issue **#1581** measured. Since the advisory moved to
     `MemoryStore` both stores answer here; before the move this test's loop was one
     line long for a reason.
@@ -198,7 +198,7 @@ def test_both_stores_reach_the_advisory_from_their_own_write_path(tmp_path, capl
 
     The arm is deleting the call from the base `_save_index`: the check still exists
     and still fires when called directly (so the band test above stays green), and
-    this test is the one that reddens — which is exactly the state `ProjectMemoryStore`
+    this test is the one that reddens — which is exactly the state `AgentMemoryStore`
     was in before 2026-09-24, issue **#1581**.
     """
     for store_name, store_cls in STORES:
@@ -222,7 +222,7 @@ def test_the_cap_never_truncates_an_index_the_advisory_left_alone(tmp_path, capl
 
     **Both of the cap's subjects, because both are now watched** — the subject is
     named by the loop, not left to the reader: this test used to carry the qualifier
-    `a_session_index` in its name, because the project index was truncated by
+    `a_session_index` in its name, because the agent index was truncated by
     `_cap_memory_index` while no advisory could look at it (issue **#1581**). With the
     advisory on `MemoryStore`, the claim holds for whichever store owns the index, and
     a name without the qualifier is the one that now matches what is measured.

@@ -103,7 +103,7 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 #: that make "run it and look" the way to ask the question instead of reading its
 #: source for a print statement. `check-memory-index.py` is the second kind: its
 #: two numbers come from `emrg.memory` and `emrg.server.daemon`, so it needs the
-#: project interpreter (which this suite is), and it reads the `.emrg/` trees under
+#: agent interpreter (which this suite is), and it reads the `.emrg/` trees under
 #: the checkout it stands in.
 RUN_HERE = (
     "check-doc-count.py",
@@ -258,7 +258,7 @@ NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE = {
         "not been through those steps, which is the packaging job's reading rather than this "
         "suite's. It reads a working tree (`--root`, default its own emrg/gui) and names it "
         "before the verdict, and that naming IS verified rather than classified: "
-        "`tests/test_check_gui_package_refs.py` runs it against `tmp_path` project dirs and pins "
+        "`tests/test_check_gui_package_refs.py` runs it against `tmp_path` package dirs and pins "
         "the tree line plus each exit code (0 every reference resolves / 1 one does not / 2 "
         "unreadable manifest)"
     ),
@@ -313,17 +313,17 @@ NOT_TREE_READERS = {
     ),
     "check-patch-files.py": "reads the patch files it is given as arguments",
     "check-memory-rotation.py": (
-        "reads two host-state subjects it names before any verdict - the project register "
+        "reads two host-state subjects it names before any verdict - the agent register "
         "(`~/.emrg/agents.yml`) and the rotation bookmark (a Markdown table of the newest "
-        "memory modification time already read per project) - then walks each project's "
+        "memory modification time already read per agent) - then walks each agent's "
         "`.emrg/memory/` and `.emrg/sessions/*/memory/`, which are gitignored host data no "
         "checkout carries. A working tree is not its subject and no tree's name would answer "
-        "anything: the questions are which projects moved and whether every registered "
-        "project has a row, and both are answered about the host's data. Its unmeasurable "
+        "anything: the questions are which agents moved and whether every registered "
+        "agent has a row, and both are answered about the host's data. Its unmeasurable "
         "answer (rc 2: no register, no bookmark, a stamp that cannot be ordered) and its "
         "coverage faults (rc 1) are pinned by tests/test_check_memory_rotation.py - added by "
         "issue #2408, where step 0 was a hand-written probe that read 30 of 31 rows and "
-        "reported 21 projects as changed against rows that already named their newest file"
+        "reported 21 agents as changed against rows that already named their newest file"
     ),
     "check-batching-share.py": (
         "reads a corpus of session history files - `history_*.jsonl` under the roots given "

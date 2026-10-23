@@ -14,15 +14,15 @@ import {
  */
 
 describe("sessionLabel", () => {
-  it("有标题 → project/title 格式", () => {
+  it("有标题 → agent/title 格式", () => {
     expect(sessionLabel("emrg", "我的会话", "s1")).toBe("emrg/我的会话");
   });
 
-  it("无标题 → project/sid 格式（不降级为标题，rant 2026-08-20T22:04:57）", () => {
+  it("无标题 → agent/sid 格式（不降级为标题，rant 2026-08-20T22:04:57）", () => {
     expect(sessionLabel("emrg", "", "s1")).toBe("emrg/s1");
   });
 
-  it("project 为空时仍输出 /sid 或 /title 分隔（保持与 vanilla 一致）", () => {
+  it("agent 为空时仍输出 /sid 或 /title 分隔（保持与 vanilla 一致）", () => {
     expect(sessionLabel("", "", "s1")).toBe("/s1");
   });
 });

@@ -126,8 +126,8 @@ class SubmitRantTool(ToolExecutor):
                 "on it. Must obtain explicit user consent before calling — "
                 "clarify the target and polish the text, show the user the "
                 "result, and only then call. "
-                "**action=list**: list rants (optional status/project/full "
-                "filters). Every rant gets a row carrying timestamp/project/"
+                "**action=list**: list rants (optional status/agent/full "
+                "filters). Every rant gets a row carrying timestamp/agent/"
                 "status/a progress excerpt/completed and a message excerpt — "
                 "the scan view, and the default for an unfiltered read, "
                 "because the queue is scanned to decide *which* rant to act "
@@ -158,14 +158,14 @@ class SubmitRantTool(ToolExecutor):
                             "Which action to perform. Default: submit."
                         ),
                     },
-                    "project": {
+                    "agent": {
                         "type": "string",
                         "description": (
-                            "REQUIRED for submit — target project name = the "
+                            "REQUIRED for submit — the target agent's name = the "
                             "short `name` registered in ~/.emrg/agents.yml "
                             "(e.g. 'emrg', 'aitokenpool') — NOT the GitHub "
                             "owner/repo form (rant 2026-08-24T10:54:04). If "
-                            "you cannot determine which project the rant "
+                            "you cannot determine which agent the rant "
                             "targets, ask the user before calling. Optional "
                             "filter for list."
                         ),
@@ -276,35 +276,35 @@ class SubmitRantTool(ToolExecutor):
                 content="Error: submit_rant requires a message",
                 error=True,
             )
-        project = str(arguments.get("project", "") or "").strip()
-        if not project:
+        agent = str(arguments.get("agent", "") or "").strip()
+        if not agent:
             return ToolResult(
                 name="submit_rant",
                 content=(
-                    "Error: project is required — ask the user which project "
+                    "Error: agent is required — ask the user which agent "
                     "this rant targets before submitting"
                 ),
                 error=True,
             )
         try:
-            count = append_rant(self._rants_log(), message, project)
+            count = append_rant(self._rants_log(), message, agent)
         except Exception as e:  # noqa: BLE001 — tool errors must never crash the loop
             return ToolResult(
                 name="submit_rant",
                 content=f"Error: failed to record rant: {e}",
                 error=True,
             )
-        target = f" ({project})" if project else ""
-        # Rant 2026-08-24T10:54:04: project must be the short name registered
+        target = f" ({agent})" if agent else ""
+        # Rant 2026-08-24T10:54:04: the name must be the short one registered
         # in ~/.emrg/agents.yml — not the GitHub owner/repo form. When the
         # given name is not registered, append a non-blocking warning with the
         # registered candidates so a copy-pasted wrong name is caught at
         # submit time instead of requiring a manual re-submit + void.
-        registered = self._registered_project_names()
-        if registered and project not in registered:
+        registered = self._registered_agent_names()
+        if registered and agent not in registered:
             candidates = " | ".join(sorted(registered))
             warning = (
-                f"\n⚠ project {project!r} is not a registered name in "
+                f"\n⚠ agent {agent!r} is not a registered name in "
                 f"~/.emrg/agents.yml (registered: {candidates}) — use the "
                 f"short `name` (e.g. 'emrg' or 'aitokenpool')."
             )
@@ -315,11 +315,11 @@ class SubmitRantTool(ToolExecutor):
             content=f"Rant recorded{target}. Total rants: {count}.{warning}",
         )
 
-    def _registered_project_names(self) -> list[str]:
+    def _registered_agent_names(self) -> list[str]:
         """Short names registered in ~/.emrg/agents.yml (config dir).
 
-        The daemon registers projects there on first use; the list is the
-        authoritative source for the rant ``project`` field. Any read error
+        The daemon registers a directory there on first use; the list is the
+        authoritative source for the rant ``agent`` field. Any read error
         degrades to "no candidates" (validation is advisory, never blocking).
 
         The subject's kind is asked before it is opened: `exists()` is true for a FIFO, and
@@ -353,11 +353,11 @@ class SubmitRantTool(ToolExecutor):
 
     def _execute_list(self, arguments: dict) -> ToolResult:
         status = arguments.get("status")
-        project = arguments.get("project")
+        agent = arguments.get("agent")
         if status is not None:
             status = str(status).strip() or None
-        if project is not None:
-            project = str(project).strip() or None
+        if agent is not None:
+            agent = str(agent).strip() or None
         # Read by the shared reader, not by truthiness — issue #1935's family, which
         # #2294's schema-derived sweep extends to every parameter a tool declares
         # `"type": "boolean"`. This one was a hand-rolled spelling list, so nothing was
@@ -371,7 +371,7 @@ class SubmitRantTool(ToolExecutor):
         if refusal is not None:
             return ToolResult(name="submit_rant", content=refusal, error=True)
         try:
-            rants = list_rants(self._rants_log(), status=status, project=project)
+            rants = list_rants(self._rants_log(), status=status, agent=agent)
         except Exception as e:  # noqa: BLE001
             return ToolResult(
                 name="submit_rant",
@@ -384,7 +384,7 @@ class SubmitRantTool(ToolExecutor):
                 content=(
                     "No rants match."
                     + (f" (status={status})" if status else "")
-                    + (f" (project={project})" if project else "")
+                    + (f" (agent={agent})" if agent else "")
                 ),
             )
         # The message is the rant, and the row is the scan view of it. `[…][:100]` used to
@@ -410,7 +410,7 @@ class SubmitRantTool(ToolExecutor):
         # 「就定 a + b（c 去掉）」 — item (a) is the scan row, item (b) the text on demand, and
         # rant 2026-10-15T12:35:03 item (b) writes that requirement out as
         # 「正文只在按 status 过滤或显式要求时给」 — the text comes when the caller filters by
-        # status or asks explicitly), or `full=True`. `project=` deliberately does **not**
+        # status or asks explicitly), or `full=True`. `agent=` deliberately does **not**
         # unlock it: it is the dedup filter `promote_prompt.md` uses, and on the queue
         # measured 2026-10-15 it selects 48 of 50 rows — it narrows the *subject*, not the
         # cost. Every withheld row names the call that returns its body, and the read closes
@@ -433,7 +433,7 @@ class SubmitRantTool(ToolExecutor):
             summary = _excerpt(" ".join(message.split()))
             progress_row = _excerpt(" ".join(progress.split()))
             lines.append(
-                f"{r.get('timestamp')} | {r.get('project')} | "
+                f"{r.get('timestamp')} | {r.get('agent')} | "
                 f"status={r.get('status')} | progress={progress_row} | "
                 f"completed={r.get('completed')} | {summary}"
             )

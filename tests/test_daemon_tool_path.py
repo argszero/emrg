@@ -2,7 +2,7 @@
 
 Why this file exists
 --------------------
-Rant 2026-09-27T19:45:54 (project `emrg`), defect B — measured on this host.
+Rant 2026-09-27T19:45:54 (agent `emrg`), defect B — measured on this host.
 After the host restarted the daemon from the GUI, the new daemon's PATH was
 `/Users/argszero/.emrg/install/bin:/usr/bin:/bin:/usr/sbin:/sbin`: no
 `~/.local/bin` (uv), no `/opt/homebrew/bin` (gh), because a Dock-started GUI

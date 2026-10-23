@@ -100,7 +100,7 @@ def test_rant_does_not_call_an_auth_rejection_an_absent_daemon(
     assert cli.connect_to_server.__name__ == "_stub"
 
     with pytest.raises(SystemExit) as excinfo:
-        cli._send_rant("probe", project="emrg")
+        cli._send_rant("probe", agent="emrg")
 
     out = capsys.readouterr().out
     assert len(calls) == 1, "the stub never ran: the CLI opened a real connection"
@@ -116,7 +116,7 @@ def test_rant_keeps_the_honest_message_when_nothing_answered(
         cli, "connect_to_server",
         _connect_raises(FileNotFoundError(2, "No such file or directory"), calls))
 
-    cli._send_rant("probe", project="emrg")  # no SystemExit
+    cli._send_rant("probe", agent="emrg")  # no SystemExit
 
     out = capsys.readouterr().out
     assert len(calls) == 1

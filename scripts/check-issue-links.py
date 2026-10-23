@@ -3,7 +3,7 @@
 
 The rule, and where it came from
 --------------------------------
-Host 2026-09-26T18:52:57 (`submit_rant`, project `emrg`):
+Host 2026-09-26T18:52:57 (`submit_rant`, agent `emrg`):
 
 > 每个issue应该在一个pr里处理完毕。每个pr都应该明确对应哪个issue，并在对应的issue里
 > 说明。也就是双方应该有明确的双向连接。发生pr被拒绝或者要求更正时，应该还是在这个pr里更新。
@@ -233,7 +233,7 @@ as naming #1653, printing a `one-way` row whose remedy asked an unrelated PR to 
 the issue.
 
 So the issue side reads a **claim phrase**: a closing verb in the passive voice (`closed
-by`, `fixed by`, `resolved by`) or one of the two verbs this project actually writes under
+by`, `fixed by`, `resolved by`) or one of the two verbs this agent actually writes under
 an issue (`handled by`, `taken by`), followed by the reference. The vocabulary is measured
 rather than invented — the live rows that must keep reading `ok` are #1658/#1661/#1663/
 #1665 (`Handled by #N`, all four in a **comment**) and #1654 (`Taken by **#1655**`,
@@ -305,7 +305,7 @@ _NEGATED_KEYWORD = re.compile(
 
 #: The issue side's claim form, and the mirror of `_CLOSING_KEYWORD`: a closing verb in
 #: the **passive** voice — the form an issue can write about a PR — plus the two verbs
-#: this project actually writes under an issue. Measured 2026-09-27 against the live
+#: this agent actually writes under an issue. Measured 2026-09-27 against the live
 #: queue rather than invented, because the vocabulary decides which live rows stay `ok`:
 #: `Handled by #1659` (#1658), `Handled by #1662` (#1661), `Handled by #1664` (#1663),
 #: `Handled by #1666` (#1665) — all four in a **comment**, which is why the claim
@@ -582,7 +582,7 @@ def issue_claims(text: str | None) -> set[int]:
     fenced blocks are blanked out first (`_without_code`), a claim the clause negates is
     not one (`_NEGATED_KEYWORD`), and `None` declares nothing. What differs is the
     vocabulary, because GitHub defines none on this side — the closing verbs in the
-    passive voice, plus the two this project writes (`_CLAIMED_BY`, whose comment carries
+    passive voice, plus the two this agent writes (`_CLAIMED_BY`, whose comment carries
     the measurement).
 
     Public for the same reason its counterpart is: this is the reading the whole tool

@@ -3,7 +3,7 @@
 Measured 2026-10-03 (`cyc20261003-112240`): this survey was done **by hand in three
 consecutive cycles** (`cyc20261003-065523`, `-090905`, `-112240`) before it was mechanised
 here. That is the "same trivial check repeated" shape the evolution prompt's Discovery step
-names, and the same reason the project mechanises any rule it can: prose decays, and the
+names, and the same reason the agent mechanises any rule it can: prose decays, and the
 survey lived in three cycle records nobody re-reads.
 
 **Why Markdown and not everything.** `.github/workflows/*.yml` names scripts too, but a

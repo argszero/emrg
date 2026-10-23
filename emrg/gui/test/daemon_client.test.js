@@ -721,7 +721,7 @@ test("sendCommand 帧形状：payload 带 type 字段不覆盖消息类型（ran
   // 否则 daemon 路由失败返回 unknown message type，GUI 保存无响应。
   const client = new DaemonClient();
   await connectClient(client);
-  client.sendCommand("task_create", { type: "evolution", name: "t1", project: "p1" });
+  client.sendCommand("task_create", { type: "evolution", name: "t1", agent: "p1" });
   const frame = JSON.parse(currentMockWs.sent.at(-1));
   assert.strictEqual(frame.type, "task_create", "wire 消息类型必须保留，不被 payload 的 type 覆盖");
   assert.strictEqual(frame.name, "t1");
@@ -1172,7 +1172,7 @@ test("rant 18:23:15 P2/P3：RESPONSE_TYPES 覆盖任务/模板 CRUD（task_resul
   await connectClient(client);
   const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
   // task_create → task_result
-  const p1 = client.sendCommandAndWait("task_create", { name: "t1", type: "evolution", project: "emrg", interval: 600 }, 2000);
+  const p1 = client.sendCommandAndWait("task_create", { name: "t1", type: "evolution", agent: "emrg", interval: 600 }, 2000);
   await new Promise((r) => setTimeout(r, 10));
   send({ type: "task_result", ok: true, task: { name: "t1" }, summary: { added: ["t1"] } });
   const r1 = await p1;
@@ -1235,13 +1235,13 @@ test("error 帧 FIFO reject 最早未决（G103）；无未决 error → 广播"
   client.onEvent((t, d) => seen.push([t, d]));
   // 两个未决命令，error 帧 reject 最早
   const p1 = client.sendCommandAndWait("list_sessions", { cwd: tmpHome }, 2000);
-  const p2 = client.sendCommandAndWait("list_projects", {}, 2000);
+  const p2 = client.sendCommandAndWait("list_agents", {}, 2000);
   await new Promise((r) => setTimeout(r, 10));
   currentMockWs.emit("message", Buffer.from(JSON.stringify({ error: "first failed" })));
   await assert.rejects(p1, /first failed/);
   assert.strictEqual(client._pending.size, 1, "p2 仍未决");
   // resolve p2 后无未决，error → 广播事件
-  currentMockWs.emit("message", Buffer.from(JSON.stringify({ type: "projects_list", projects: [] })));
+  currentMockWs.emit("message", Buffer.from(JSON.stringify({ type: "agents_list", agents: [] })));
   await p2;
   currentMockWs.emit("message", Buffer.from(JSON.stringify({ error: "broadcast error" })));
   assert.ok(seen.some(([t, d]) => t === "error" && d.error === "broadcast error"));
@@ -1387,7 +1387,7 @@ test("断连 pending 请求全部 reject + disconnected（G89）", async () => {
   await connectClient(client);
   const pending = [
     client.sendCommandAndWait("list_sessions", { cwd: tmpHome }, 5000),
-    client.sendCommandAndWait("list_projects", {}, 5000),
+    client.sendCommandAndWait("list_agents", {}, 5000),
   ];
   await new Promise((r) => setTimeout(r, 10));
   currentMockWs.emit("close");

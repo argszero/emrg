@@ -44,7 +44,7 @@ ROW_TWO = "- [row-two](row-two.md) — written after that prompt was built\n"
 
 
 def _make_server() -> EmrgServer:
-    """A minimal server, with the projects log pointed away from the real one.
+    """A minimal server, with the agents log pointed away from the real one.
 
     The shape `tests/test_memory_row_bound_reach.py::_make_server` uses, for the same
     reason: building a system prompt must never write the host's `~/.emrg/agents.yml`.
@@ -94,7 +94,7 @@ def test_a_memory_write_does_not_move_the_system_prefix(tmp_path: Path) -> None:
     # Reading (2): the write is real and the builder can see it. Without this the
     # equality below would hold on a tree that collected no index at all.
     data = server._collect_memory_data(session)
-    assert data is not None and ROW_TWO in data["project_memory_index"], (
+    assert data is not None and ROW_TWO in data["agent_memory_index"], (
         "the fixture did not take: the second row is not in the index the builder reads"
     )
 
@@ -145,7 +145,7 @@ def test_the_rows_reach_the_session_in_the_context_message(tmp_path: Path) -> No
     # Not merely the rows: the index reaches the model as the same bytes it holds on
     # disk, capped by `_cap_memory_index` and by nothing else.
     data = server._collect_memory_data(session)
-    assert data["project_memory_index"] in text, (
+    assert data["agent_memory_index"] in text, (
         "the context message carries only part of the index — content loss is not a "
         "cache win (issue #2292, the 'never cheaper by being thinner' constraint)"
     )

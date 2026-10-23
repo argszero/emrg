@@ -6,7 +6,7 @@ Design ``/Users/argszero/.emrg/designs/bash-tool-v2-design.md`` §5.7; the port 
 **Why most of this file runs on macOS.** The Windows *mechanism* — creating the
 restricted token and applying the DACL — needs the Win32 API, so its end-to-end
 measurement is the Windows-only test at the bottom. Everything above that line is
-the layer P4 adds to *this* project and it is ordinary Python, but it is not
+the layer P4 adds to *this* agent and it is ordinary Python, but it is not
 decoration: the capability-SID derivation decides who can write where, the two
 grant lifetimes decide what outlives a session, and the policy→argv rendering
 decides what the runner is even told. A defect in any of them ships silently on
@@ -662,7 +662,7 @@ def test_the_runner_argv_keeps_the_workdir_out_of_sys_path():
 
     The seam spawns this runner with ``cwd`` set to the session's workdir, and
     ``-m`` resolves the module *through* ``sys.path``, whose head is that
-    workdir.  A workdir that is itself an EMRG checkout — this project's own
+    workdir.  A workdir that is itself an EMRG checkout — this agent's own
     flagship session — then answers the import, and because a checkout need not
     carry ``emrg/sandbox`` the runner dies before it has spawned anything; the
     confined run reports it as the caller's command failing.  ``-P`` removes
@@ -1895,7 +1895,7 @@ def test_a_workdir_that_shadows_the_package_does_not_stop_the_runner(tmp_path):
     workdir on ``sys.path`` dies here with
     ``No module named 'emrg.sandbox'`` (exit 1), because the workdir holds an
     ``emrg`` package of its own that resolution finds first.  That is not a
-    hypothetical checkout: it is the ordinary state of this project's own
+    hypothetical checkout: it is the ordinary state of this agent's own
     sessions, and because such a checkout need not carry ``emrg/sandbox`` at all,
     the run loses its boundary and reports the loss as the caller's command
     failing.  The second arm is that failure, asserted rather than described, so

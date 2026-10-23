@@ -2,7 +2,7 @@
 
 Why this file exists
 --------------------
-The project has a rule about the language of outward-facing output: GitHub-facing text is
+The agent has a rule about the language of outward-facing output: GitHub-facing text is
 written in **English** (PR titles and bodies, review comments, issue replies, commit
 messages, community participation), a quotation from another language is carried in English
 with its source named, and internal artifacts — memory entries, session notes, cycle records
@@ -185,7 +185,7 @@ def test_the_scan_reports_absence() -> None:
 def test_the_retired_verbatim_clause_is_gone_from_every_carrier() -> None:
     """The host's ruling of 2026-09-29, and the mutation that would undo it.
 
-    The retired clause — ``Quotes stay verbatim`` — was not a slip: it was this project's
+    The retired clause — ``Quotes stay verbatim`` — was not a slip: it was this agent's
     stated policy, and it is why issue #1737 went out with 223 Chinese characters of host
     quotation in it. Stating the new rule only in `system.j2` would leave three templates
     teaching the old one, so every carrier is read here, and the assertion is the

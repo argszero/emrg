@@ -128,7 +128,7 @@ def test_cache_tool_paths_preserves_existing_fields(tmp_path, monkeypatch):
 def test_cache_tool_paths_tolerates_corrupt_cache(tmp_path, monkeypatch):
     """A corrupt/partial install-info.json must not raise — degrades to {}.
 
-    Regression for the flaky test_daemon::test_build_prompt_with_project
+    Regression for the flaky test_daemon::test_build_prompt_with_agent
     (json.decoder.JSONDecodeError): the live daemon rewrites this shared
     file non-atomically; a concurrent reader could catch a partial write.
     """

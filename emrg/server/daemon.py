@@ -91,7 +91,7 @@ from emrg.memory import (
     INDEX_COUNT_WARN,
     INDEX_SIZE_WARN,
     INDEX_TITLE_MAX_CHARS,
-    ProjectMemoryStore,
+    AgentMemoryStore,
     SessionMemoryStore,
     is_index_row,
 )
@@ -289,15 +289,15 @@ def _get_jinja_env() -> "jinja2.Environment":
 
 
 # ── Module-level constants ──
-# Which files `_collect_project_context` reads out of a session's cwd into the prompt,
+# Which files `_collect_agent_context` reads out of a session's cwd into the prompt,
 # in precedence order. Named rather than inline for the same reason the cap below is:
 # a guard that reads this list — that the files it embeds name paths this repository
-# still has (`tests/test_project_context_paths.py`) — would otherwise carry a second
+# still has (`tests/test_agent_context_paths.py`) — would otherwise carry a second
 # spelling of the set, and the two could disagree about what is embedded at all.
 PROJECT_CONTEXT_FILES = ("CLAUDE.md", "AGENTS.md", "Agent.md", "MANIFESTO.md")
 
-# How much of each project-context file (Agent.md and its siblings — see
-# `_collect_project_context`) reaches the prompt. Named rather than inline so the
+# How much of each agent-context file (Agent.md and its siblings — see
+# `_collect_agent_context`) reaches the prompt. Named rather than inline so the
 # guard that keeps this repo's own `Agent.md` inside it reads the same number the
 # truncation uses: a second spelling could disagree with the code that cuts.
 PROJECT_CONTEXT_MAX_CHARS = 8000
@@ -367,7 +367,7 @@ MEMORY_INDEX_CAP_HEAD_CHARS = INDEX_SIZE_WARN // 4
 # not changed, on every request. The bodies ride in the per-round `[context]` message
 # instead (`_memory_context_block`) — the placement `current_time` took on 2026-08-23
 # (rant 2026-08-23T13:54:14), which is the precedent this follows.
-MEMORY_INDEX_BODY_KEYS = ("project_memory_index", "session_memory_index")
+MEMORY_INDEX_BODY_KEYS = ("agent_memory_index", "session_memory_index")
 
 
 def _static_memory_context(data: dict[str, Any]) -> dict[str, Any]:
@@ -566,7 +566,7 @@ def _memory_index_compaction_note(paths) -> str:
     One section per index, because the subjects are separate files with separate
     readers, and an instruction naming the wrong one would send the agent to compact a
     file that is not over the cap. The caller's list is the same set as the two indexes
-    `_collect_memory_data` embeds: the session's own and the project's. Until 2026-09-28
+    `_collect_memory_data` embeds: the session's own and the agent's. Until 2026-09-28
     it also carried the instance root's index (issue #1606) for a session running inside
     the root; D9 moved the cycle records onto `{{ source_dir }}`, so that index is a file
     no writer of this session appends to, and the mechanism went with it.
@@ -1050,10 +1050,10 @@ class EmrgServer:
         self._scheduler = TaskScheduler(self.identity)
         self._scheduler.load_and_start()
 
-        # Global cross-project session index (rant 2026-08-13T16:42:22):
-        # backfill the index from every on-disk session (registered projects +
+        # Global cross-agent session index (rant 2026-08-13T16:42:22):
+        # backfill the index from every on-disk session (registered agents +
         # unregistered ones under ~/.emrg) so sessions created before this
-        # feature are discoverable by other projects. Best-effort — never
+        # feature are discoverable by other agents. Best-effort — never
         # crashes startup.
         self._rebuild_sessions_index()
 
@@ -1111,7 +1111,7 @@ class EmrgServer:
         Both sites now name it with ``_serve_stop_reason``, so they cannot drift
         apart again. Split out of ``serve()`` because this decision touches no
         socket, scheduler or background loop: a test can drive it with the
-        teardown mocked, rather than booting the daemon this project forbids
+        teardown mocked, rather than booting the daemon this agent forbids
         stopping.
         """
         try:
@@ -1246,18 +1246,18 @@ class EmrgServer:
         )
 
     def _rebuild_sessions_index(self) -> None:
-        """Backfill the global cross-project session index at startup.
+        """Backfill the global cross-agent session index at startup.
 
         Rant 2026-08-13T16:42:22: sessions created before this feature (or in
-        projects not registered in agents.yml) would otherwise be invisible
-        to other projects. Best-effort — failures are logged at debug level
+        agents not registered in agents.yml) would otherwise be invisible
+        to other agents. Best-effort — failures are logged at debug level
         and never crash the daemon.
         """
         from emrg.sessions_index import rebuild_sessions_index
 
         try:
-            project_paths: list[str] = self._agents.paths()
-            count = rebuild_sessions_index(config_dir(), project_paths)
+            agent_paths: list[str] = self._agents.paths()
+            count = rebuild_sessions_index(config_dir(), agent_paths)
             logger.info("sessions index rebuilt: %d sessions indexed", count)
         except Exception:
             logger.debug("sessions index rebuild failed", exc_info=True)
@@ -1626,7 +1626,7 @@ class EmrgServer:
                         #
                         # Measured 2026-10-08 (`cyc20261008-170402`): the exact TUI
                         # sequence, A (the ask carries the client's cwd) → frames NONE,
-                        # approval frames NONE; B (the ask carries the project's cwd) →
+                        # approval frames NONE; B (the ask carries the agent's cwd) →
                         # `turn_start`, stream, `turn_end`, `approval_request` +
                         # `approval_resolved`. Only the ask's cwd differed.
                         #
@@ -2465,7 +2465,7 @@ class EmrgServer:
         # prompt must say what is mounted, not what the gate would have chosen.
         ctx["shell_tool"] = self._mounted_shell_tool_name()
         # Global config dir (~/.emrg) — injected so system.j2 can reference the
-        # cross-project sessions index and other global data files by path.
+        # cross-agent sessions index and other global data files by path.
         ctx["config_dir"] = str(config_dir())
         # The memory index's per-row bound. It is a bound on a line of a file the
         # *agent* writes, so its carrier has to be one every session reads — and the
@@ -2494,14 +2494,14 @@ class EmrgServer:
         if session:
             ctx["working_dir"] = str(session.cwd)
 
-        # ── Project Context Files ──
+        # ── Agent Context Files ──
         if session:
-            ctx["project_context"] = self._collect_project_context(session)
+            ctx["agent_context"] = self._collect_agent_context(session)
 
         # ── Skills ──
         # Read live, from **this session's** working directory: a skill installed,
         # edited or deleted on disk has to reach the next prompt without a daemon
-        # restart, and a session's project skills are the ones under its own root
+        # restart, and a session's agent skills are the ones under its own root
         # rather than under the directory the daemon was started in.
         skills = load_skills(session.cwd if session else None)
         if skills:
@@ -2560,8 +2560,8 @@ class EmrgServer:
 
         return rendered
 
-    def _collect_project_context(self, session: Session) -> list[dict[str, str]]:
-        """Read project context files, return structured data for template.
+    def _collect_agent_context(self, session: Session) -> list[dict[str, str]]:
+        """Read agent context files, return structured data for template.
 
         An over-long file is cut at the last complete line inside the cap, and the
         notice names the file and says the tail is still on disk. Measured
@@ -2597,7 +2597,7 @@ class EmrgServer:
                         # (rant 2026-09-14T13:23:04).
                         content = content[:cut] + (
                             f"\n\n... [truncated {over} chars — {name} exceeds the "
-                            "project-context limit; the rest is on disk, readable "
+                            "agent-context limit; the rest is on disk, readable "
                             "via the read tool]"
                         )
                     found.append({"name": name, "content": content})
@@ -2637,15 +2637,15 @@ class EmrgServer:
         # measured 2026-09-24, a 30,024-char / 61,160-byte CJK index fires the
         # advisory and leaves this cap silent. So the units stay as they are.
         #
-        # This method has **two** callers (`_collect_memory_data`: the project index
+        # This method has **two** callers (`_collect_memory_data`: the agent index
         # and the session index) and, since 2026-09-24, an advisory for both: the
         # check lives on `MemoryStore` — the base of the two stores — and its
         # `_save_index` calls it, which is what makes the ordering above a property of
         # *the cap* rather than of one of its two subjects. It was a
-        # `SessionMemoryStore` method until then, and the project half was measurably
-        # unwatched: on one fixture a 56,214-char project index was truncated here with
+        # `SessionMemoryStore` method until then, and the agent half was measurably
+        # unwatched: on one fixture a 56,214-char agent index was truncated here with
         # no advisory having looked at its size, while the same file as a session index
-        # fired it first (issue #1581, remedy: wire the project index to the same
+        # fired it first (issue #1581, remedy: wire the agent index to the same
         # advisory). So this can truncate nothing an advisory left unflagged — for an
         # index a **store** wrote. One the agent wrote with `write`/`edit` reaches
         # neither advisory, and the notice below naming the file it cut (#1578) is its
@@ -2712,7 +2712,7 @@ class EmrgServer:
         # cap keeping the head alone left the reader with the oldest part of the file
         # and hid the newest rows — the rows that exist to stop it re-doing work.
         # Saying where the text is without saying which part of it is gone leaves that
-        # to be guessed. Measured 2026-09-25 on a project index this cap really
+        # to be guessed. Measured 2026-09-25 on an agent index this cap really
         # truncates (73,484 chars, 24 of its 163 rows kept out of the prompt — issue
         # #1554 holds that reading and its numbers). *Which* part should survive was
         # that issue's open decision and is now taken (issue #1676; the constant above
@@ -2732,12 +2732,12 @@ class EmrgServer:
         """Read memory indexes, return structured data for template."""
         data: dict[str, Any] = {"has_memories": False}
 
-        project_dir = session.agent.memory_dir
-        pindex_path = project_dir / "MEMORY.md"
+        agent_dir = session.agent.memory_dir
+        pindex_path = agent_dir / "MEMORY.md"
         if pindex_path.exists():
-            data["project_memory_index"] = self._index_for_prompt(pindex_path)
-            data["project_memory_dir"] = str(project_dir)
-            data["project_memory_index_path"] = str(pindex_path)
+            data["agent_memory_index"] = self._index_for_prompt(pindex_path)
+            data["agent_memory_dir"] = str(agent_dir)
+            data["agent_memory_index_path"] = str(pindex_path)
             data["has_memories"] = True
 
         smem_dir = session.memory_dir
@@ -2774,7 +2774,7 @@ class EmrgServer:
         rewritten.
 
         The two sibling readers in this module already answer this question the
-        same way — `_collect_project_context` catches `(OSError, UnicodeDecodeError)`
+        same way — `_collect_agent_context` catches `(OSError, UnicodeDecodeError)`
         per context file, and the file-preview handler answers `UnicodeDecodeError`
         with a `binary` flag — so this was the one reader of a comparable file with
         no answer, on the path where a raise costs everything.
@@ -2843,13 +2843,13 @@ class EmrgServer:
         below: `_get_or_create_session` (eleven callers) writes it, the resume reader and
         the two memory readers open it, and `delete_session` hands the resolved path to
         `shutil.rmtree`. Measured 2026-10-21: `Session.delete("../..", cwd)` walked
-        `cwd/.emrg/sessions/../..` and left the project tree empty.
+        `cwd/.emrg/sessions/../..` and left the agent tree empty.
 
         **Two dispatchers, not one.** `_handle_client` intercepts `{"type": "task"}`
         itself and never reaches `_process_message`, so a check placed only in the latter
         left the one message type that *creates* a session directory unguarded — measured
         on this branch before the fix: a `task` carrying `../../../evil` created a
-        directory one level above the project root and started its turn, telling the
+        directory one level above the agent root and started its turn, telling the
         client nothing. Both call sites ask this method, so the rule has one writer even
         though it has two doors.
         """
@@ -3153,7 +3153,7 @@ class EmrgServer:
             })
 
         elif msg_type == "list_memories":
-            scope = msg.get("scope", "project")
+            scope = msg.get("scope", "agent")
             session_id = msg.get("session_id", "")
             cwd = msg.get("cwd", "")
 
@@ -3167,7 +3167,7 @@ class EmrgServer:
             await self._handle_list_memories(scope, session_id, cwd, ws)
 
         elif msg_type == "read_memory":
-            scope = msg.get("scope", "project")
+            scope = msg.get("scope", "agent")
             memory_id = msg.get("memory_id", "")
             session_id = msg.get("session_id", "")
             cwd = msg.get("cwd", "")
@@ -3222,17 +3222,17 @@ class EmrgServer:
                 await self._send(ws, {"error": "rant requires a message"})
                 return
 
-            # Optional project targeting (multi-project support)
-            project = msg.get("project", "").strip()
+            # Optional agent targeting (multi-agent support)
+            agent = msg.get("agent", "").strip()
 
             # Shared write logic (rant 2026-08-17T11:51:59): daemon ``rant``
             # command and the submit_rant tool use the same append_rant, so
             # the file format / sort / daemon-authoritative timestamp stay
             # consistent no matter which path recorded the rant.
-            count = append_rant(self._rants_log, rant_message, project)
+            count = append_rant(self._rants_log, rant_message, agent)
 
             logger.info("rant recorded (%d total)%s: %s",
-                count, f" project={project}" if project else "", redact_prefix(rant_message, 100))
+                count, f" agent={agent}" if agent else "", redact_prefix(rant_message, 100))
             await self._send(ws, {"ok": True, "count": count})
 
         elif msg_type == "list_rants":
@@ -3273,7 +3273,7 @@ class EmrgServer:
             entries = load_catalog_skills()
             # Live, not a snapshot: the question is whether a skill is on disk *now*,
             # which is the same reason the prompt reads them live. This frame carries
-            # no cwd, so the project half is the daemon's own directory — the catalog
+            # no cwd, so the agent half is the daemon's own directory — the catalog
             # installs into the user root, which is read either way.
             installed = {s.name for s in load_skills()}
             result = [
@@ -3343,21 +3343,21 @@ class EmrgServer:
                 msg.get("kind") or None,
             )
 
-        elif msg_type == "list_projects":
-            await self._handle_list_projects(ws)
+        elif msg_type == "list_agents":
+            await self._handle_list_agents(ws)
 
-        elif msg_type == "remove_project":
+        elif msg_type == "remove_agent":
             # P1 GUI multi-session (rant 2026-08-10T15:07:19): drop a
             # agents.yml entry by name (disk session data preserved).
             name = msg.get("name", "").strip()
             if not name:
                 await self._send(ws, {
-                    "type": "project_removed",
+                    "type": "agent_removed",
                     "removed": False,
-                    "error": "remove_project requires name",
+                    "error": "remove_agent requires name",
                 })
                 return
-            await self._handle_remove_project(name, ws)
+            await self._handle_remove_agent(name, ws)
 
         elif msg_type == "evolution_summary":
             # WorkBuddy P3 (rant 21:35): self-evolution visibility.
@@ -4209,7 +4209,7 @@ class EmrgServer:
           cause rather than a new concept.
         * **the read-only discovery tools take it as a default.** Neither runs a
           command nor writes a file, so their directory decides a preference
-          rather than a boundary — and both schemas say so ("default: project
+          rather than a boundary — and both schemas say so ("default: agent
           root"). ``grep`` has been written that way from the start; ``glob`` was
           not, and its pinning was never decided: it shared the shell branch by
           adjacency, so when the guard above was dropped from that one shared line
@@ -5352,8 +5352,8 @@ class EmrgServer:
             "prefix so that writing a memory does not invalidate the prompt cache)"
         ]
         for body_key, title, dir_key, path_key in (
-            ("project_memory_index", "Project Memory (long-term, cross-session)",
-             "project_memory_dir", "project_memory_index_path"),
+            ("agent_memory_index", "Agent Memory (long-term, cross-session)",
+             "agent_memory_dir", "agent_memory_index_path"),
             ("session_memory_index", "Session Memory (this session only)",
              "session_memory_dir", "session_memory_index_path"),
         ):
@@ -5484,7 +5484,7 @@ class EmrgServer:
 
         Community feedback 2026-08-26T18:21:30 (Dev.to comment 3dh3g): the
         anchor is keyed by session_id only, so a mid-session model switch
-        would project the OLD provider's real prompt_tokens + the NEW
+        would agent the OLD provider's real prompt_tokens + the NEW
         estimate delta — a mixed base that can silently miss the auto-compact
         gate across providers (the #946 failure mode). Invalidate anchors and
         any pending drift window, and mark sessions so the fail-LOUD
@@ -6589,7 +6589,7 @@ class EmrgServer:
             "sessions": sessions,
         })
 
-    async def _handle_list_projects(
+    async def _handle_list_agents(
         self, ws
     ) -> None:
         """Return every registered Agent, ordered by its latest session activity.
@@ -6601,7 +6601,7 @@ class EmrgServer:
 
         No evolution-workspace filter (rant 2026-08-07T10:48:00): the register holds the
         directories this installation has opened sessions in, and on packaged installs
-        the emrg project's only path IS ~/.emrg/evolution/emrg — filtering it hid emrg
+        the emrg agent's only path IS ~/.emrg/evolution/emrg — filtering it hid emrg
         from /rant entirely.
         """
         entries = self._agents.entries()
@@ -6622,13 +6622,13 @@ class EmrgServer:
         ats = await asyncio.gather(*(_latest_session_at(e) for e in entries))
         ordered = sorted(zip(entries, ats), key=lambda t: t[1], reverse=True)
         # rant 2026-08-19T01:05:47 — _detect_git_remote runs a sync git subprocess per
-        # project; offload to worker threads so a slow git probe never freezes the
-        # event loop (websocket clients would otherwise time out during list_projects).
+        # agent; offload to worker threads so a slow git probe never freezes the
+        # event loop (websocket clients would otherwise time out during list_agents).
         repos = await asyncio.gather(*(
             asyncio.to_thread(_detect_git_remote, p.get("path", ""))
             for p, _ in ordered
         ))
-        projects: list[dict] = [
+        agents: list[dict] = [
             {"name": p.get("name", ""),
              "repo": repo,
              "path": p.get("path", ""),
@@ -6636,26 +6636,26 @@ class EmrgServer:
             for (p, at), repo in zip(ordered, repos)
         ]
         await self._send(ws, {
-            "type": "projects_list",
-            "projects": projects,
+            "type": "agents_list",
+            "agents": agents,
         })
 
-    async def _handle_remove_project(self, name: str, ws) -> None:
+    async def _handle_remove_agent(self, name: str, ws) -> None:
         """Drop one row from the register by name; the directory's data stays.
 
         Deletes only the ``agents.yml`` row — what is on disk under
         ``<path>/.emrg/sessions/`` is preserved, and opening a session there again
         registers the directory anew (P1 of the GUI multi-session feature,
         rant 2026-08-10T15:07:19). Responses:
-          {"type": "project_removed", "removed": true,  "name": name}
-          {"type": "project_removed", "removed": false, "name": name, ...}
+          {"type": "agent_removed", "removed": true,  "name": name}
+          {"type": "agent_removed", "removed": false, "name": name, ...}
         """
         try:
             removed = self._agents.remove(name)
         except OSError:
             logger.exception("remove: failed to write %s", self._agents_log)
             await self._send(ws, {
-                "type": "project_removed",
+                "type": "agent_removed",
                 "removed": False,
                 "name": name,
                 "error": "failed to write agents.yml",
@@ -6666,14 +6666,14 @@ class EmrgServer:
             # decided. Answering `removed: false` here would tell the host there is no
             # such row about a file this method never read (`#2062`).
             await self._send(ws, {
-                "type": "project_removed",
+                "type": "agent_removed",
                 "removed": False,
                 "name": name,
                 "error": "failed to read agents.yml",
             })
             return
         await self._send(ws, {
-            "type": "project_removed",
+            "type": "agent_removed",
             "removed": bool(removed),
             "name": name,
         })
@@ -7073,7 +7073,7 @@ class EmrgServer:
         # The rule the three file tools (`#2062`), this daemon's other readers
         # (`#2073`), the memory store (`#2076`) and `Session`'s own files (`#2085`) all
         # share, applied to the one open here that does not go through `Session`; the
-        # path family is the same one, and it is **inside the project the agent works
+        # path family is the same one, and it is **inside the agent the agent works
         # in**, so a `mkfifo` there is the agent's own doing.
         #
         # An **open is not a read**: on a FIFO this `read_text` waits at the open until a
@@ -7143,7 +7143,7 @@ class EmrgServer:
                     "type": "resume_result",
                     "session_id": session_id,
                     "error": f"Session {session_id} not found (no messages at this cwd; "
-                             "real session lives in its project — open from the project's session list)",
+                             "real session lives in its agent — open from the agent's session list)",
                 })
                 return
 
@@ -7188,7 +7188,7 @@ class EmrgServer:
         })
 
     def _canonical_session_cwd(self, session_id: str) -> str | None:
-        """Resolve a session's canonical project cwd from the global sessions index.
+        """Resolve a session's canonical agent cwd from the global sessions index.
 
         Index maps sid → absolute session dir (<cwd>/.emrg/sessions/<sid>);
         the cwd is the dir 3 levels up (covers home-level sessions too:
@@ -7214,7 +7214,7 @@ class EmrgServer:
 
         Rant 2026-09-29T15:52:49 (requirement 6, the client half): the TUI sent
         its **own** cwd with `resume_session`, so a session belonging to another
-        project — a scheduled task's cycle above all — could not be opened from
+        agent — a scheduled task's cycle above all — could not be opened from
         `/resume <id>`, and the live frames never arrived for one that could,
         because the broadcast filter is keyed by (session, cwd). The daemon has
         held the fact all along (`_canonical_session_cwd`, the same global index
@@ -7222,7 +7222,7 @@ class EmrgServer:
         had nothing to ask.
 
         Two states, and they are deliberately not the same value: `index` when
-        the global index knows the session's project, `unknown` when it does
+        the global index knows the session's agent, `unknown` when it does
         not. The requested cwd is **echoed only as a candidate** in the unknown
         case — never relabelled as canonical — because the daemon cannot vouch
         for it, and a client that treats a guess as a fact is the defect this
@@ -7461,9 +7461,9 @@ class EmrgServer:
         self, scope: str, session_id: str, cwd: str, ws
     ) -> None:
         """List memories: return the MEMORY.md index and memory directory info."""
-        if scope == "project":
+        if scope == "agent":
             cwd_path = Path(cwd) if cwd else Path.cwd()
-            store = ProjectMemoryStore(cwd_path)
+            store = AgentMemoryStore(cwd_path)
             index_path = store.index_path
         else:
             session_path = session_dir(cwd, session_id)
@@ -7505,9 +7505,9 @@ class EmrgServer:
         ws,
     ) -> None:
         """Read a specific memory file by id and return its full content."""
-        if scope == "project":
+        if scope == "agent":
             cwd_path = Path(cwd) if cwd else Path.cwd()
-            store = ProjectMemoryStore(cwd_path)
+            store = AgentMemoryStore(cwd_path)
         else:
             session_path = session_dir(cwd, session_id)
             if not session_path.exists():
@@ -7767,7 +7767,7 @@ class EmrgServer:
         # The slot directory is the child's **cwd**, so the child's own session
         # directory is built inside it like any other session's. That is what keeps
         # a child's memory inside the parent's session tree without a second
-        # project root, and it is why nothing here fights `is_safe_session_id`,
+        # agent root, and it is why nothing here fights `is_safe_session_id`,
         # which constrains the id alone.
         slot_cwd = (
             session_dir(parent_cwd, parent_session_id) / "sub-agent" / f"sub{slot}"
@@ -8233,14 +8233,14 @@ class EmrgServer:
                 # embeds, counted by line. Read here rather than beside the entry
                 # count above because the subjects differ — that one measures the
                 # session store's entries and bytes, this one measures each index
-                # file, and only this one can name the project index at all.
+                # file, and only this one can name the agent index at all.
                 #
                 # The session half is asked of the store that writes it instead of
                 # being spelled again here, so the file counted and the file written
-                # are one expression. The project half is spelled out on purpose:
-                # `ProjectMemoryStore.__init__` → `MemoryStore.__init__` mkdirs the
+                # are one expression. The agent half is spelled out on purpose:
+                # `AgentMemoryStore.__init__` → `MemoryStore.__init__` mkdirs the
                 # directory it is handed, and a count that creates `<cwd>/.emrg/
-                # memory/` in every session's cwd — including sessions whose project
+                # memory/` in every session's cwd — including sessions whose agent
                 # has no memory at all — would be a reading with a side effect.
                 #
                 # Two subjects, and only these. A third — the instance root's own
@@ -8266,19 +8266,19 @@ class EmrgServer:
                     f"{existing_summary}\n\n"
                     "## Memory directories\n"
                     f"Session: `{session.memory_dir}/` (session-scope, this session only)\n"
-                    f"Project: `{session.cwd}/.emrg/memory/` (project-scope, cross-session)\n\n"
+                    f"Agent: `{session.cwd}/.emrg/memory/` (agent-scope, cross-session)\n\n"
                     "## Exchange to reflect on\n"
                     f"User: {user_prompt[:500]}\n"
                     f"Assistant: {assistant_content[:1000]}\n\n"
                     "**Instructions**:\n"
                     "- If the user shared a preference or gave feedback → create a `user` or `feedback` memory\n"
                     "- If a technical decision was made → create a `decision` memory\n"
-                    "- If something was learned about the project → create a `project` memory\n"
+                    "- If something was learned about the agent → create a `agent` memory\n"
                     "- If a task was started/in progress/done → create a `task` memory\n"
                     "- Update existing memories if this exchange supersedes or refines them\n"
                     "- If nothing worth remembering happened, just reply 'no new memories' briefly\n"
                     "- Prefer session-scope for tentative/evolving knowledge; "
-                    "project-scope for stable, cross-session facts\n"
+                    "agent-scope for stable, cross-session facts\n"
                     "- Keep MEMORY.md a pure index: one short line per entry; "
                     "update entries in place rather than appending\n"
                     f"{hygiene_note}"
@@ -8290,8 +8290,8 @@ class EmrgServer:
                     'event_at: "<ISO 8601>"\n'
                     'created_at: "<ISO 8601>"\n'
                     'updated_at: "<ISO 8601>"\n'
-                    'type: "<user|feedback|project|reference|decision|task>"\n'
-                    'scope: "<session|project>"\n'
+                    'type: "<user|feedback|agent|reference|decision|task>"\n'
+                    'scope: "<session|agent>"\n'
                     'status: "active"\n'
                     "---\n\n"
                     "# Title\n\nBody content.\n"

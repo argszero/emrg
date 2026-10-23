@@ -2,11 +2,11 @@
  * workspaceView.test.ts — 工作区面板纯逻辑测试（Batch 3 WorkspaceView）。
  * 镜像 vanilla dialogs.js 行为：formatCountdown / formatRelativeTime / relTime /
  * rantTimestamp / rantFirstLine / rantStatusMeta / preprocessRantMarkdown /
- * buildEvolveProjects / projectHint / taskStatusBadge / taskHint / taskMeta。
+ * buildEvolveAgents / projectHint / taskStatusBadge / taskHint / taskMeta。
  */
 import { describe, expect, it, vi } from "vitest";
 import {
-  buildEvolveProjects,
+  buildEvolveAgents,
   formatCountdown,
   formatRelativeTime,
   preprocessRantMarkdown,
@@ -116,21 +116,21 @@ describe("preprocessRantMarkdown", () => {
   });
 });
 
-describe("buildEvolveProjects", () => {
+describe("buildEvolveAgents", () => {
   it("收集 config.agent 集合（含 evolution 任务）", () => {
     const tasks: TaskRec[] = [
       { name: "a", config: { agent: "emrg" } },
       { name: "b", config: { agent: "aitokenpool" } },
       { name: "c", config: {} },
     ];
-    const set = buildEvolveProjects(tasks);
+    const set = buildEvolveAgents(tasks);
     expect(set.has("emrg")).toBe(true);
     expect(set.has("aitokenpool")).toBe(true);
     expect(set.size).toBe(2);
   });
   it("空/缺省安全", () => {
-    expect(buildEvolveProjects(null).size).toBe(0);
-    expect(buildEvolveProjects(undefined).size).toBe(0);
+    expect(buildEvolveAgents(null).size).toBe(0);
+    expect(buildEvolveAgents(undefined).size).toBe(0);
   });
 });
 

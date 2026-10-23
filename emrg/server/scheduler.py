@@ -992,13 +992,13 @@ def _resolve_task_template(task_type: str) -> Path:
     return Path(__file__).parent / "evolution_prompt.md"
 
 
-def _resolve_project_path(name: str) -> str | None:
-    """Resolve a project name to its path from agents.yml."""
-    projects_file = agents_file(config_dir())
-    if not projects_file.exists():
+def _resolve_agent_path(name: str) -> str | None:
+    """Resolve an agent name to its path from agents.yml."""
+    register = agents_file(config_dir())
+    if not register.exists():
         return None
     try:
-        data = yaml.safe_load(_read_text(projects_file))
+        data = yaml.safe_load(_read_text(register))
     except (yaml.YAMLError, OSError):
         return None
     if not isinstance(data, list):
@@ -1009,19 +1009,19 @@ def _resolve_project_path(name: str) -> str | None:
     return None
 
 
-def _load_project_config(name: str, source_dir: str) -> dict:
-    """Return the full agents.yml entry matching the current project.
+def _load_agent_config(name: str, source_dir: str) -> dict:
+    """Return the full agents.yml entry matching the current agent.
 
     Matches by ``name`` first, then by ``path`` against ``source_dir``.
     Returns an empty dict when no match is found. Custom fields added by
     the user in agents.yml are preserved, so templates can reference
-    them via ``{{ project.<field> }}`` without code changes.
+    them via ``{{ agent.<field> }}`` without code changes.
     """
-    projects_file = agents_file(config_dir())
-    if not projects_file.exists():
+    register = agents_file(config_dir())
+    if not register.exists():
         return {}
     try:
-        data = yaml.safe_load(_read_text(projects_file))
+        data = yaml.safe_load(_read_text(register))
     except (yaml.YAMLError, OSError):
         return {}
     if not isinstance(data, list):
@@ -1040,13 +1040,13 @@ def _load_project_config(name: str, source_dir: str) -> dict:
 
 
 class TaskHandler:
-    """Self-contained evolution loop for one project (or emrg itself).
+    """Self-contained evolution loop for one agent (or emrg itself).
 
     Each handler runs its own while+sleep(interval) coroutine,
     independent of all other handlers.
 
     **A handler holds a name and nothing that can go stale** (rant 2026-09-28T09:54:10).
-    It used to be constructed from the task's cfg — type, interval, config, project
+    It used to be constructed from the task's cfg — type, interval, config, agent
     path, owner/repo, template path, sandbox — and kept all of it, which is why editing
     `extra_prompt` in tasks.yml had no effect until a daemon restart, and why the only
     way to apply a config change was to cancel and rebuild the handler mid-cycle.
@@ -1190,10 +1190,10 @@ class TaskHandler:
         """
         self._task = dict(record)
         cfg = record.get("config") if isinstance(record.get("config"), dict) else {}
-        # Resolve project path from config (new schema) or fall back to
+        # Resolve agent path from config (new schema) or fall back to
         # config.path for backward-compat with old tasks.yml entries.
-        project_name = cfg.get("agent", "")
-        path = _resolve_project_path(project_name) if project_name else cfg.get("path", "")
+        agent_name = cfg.get("agent", "")
+        path = _resolve_agent_path(agent_name) if agent_name else cfg.get("path", "")
         # Derive owner/repo/git from config override → path git remote → defaults.
         # (rant 2026-08-19T14:20:52: workspace self-heal deleted — these fields
         # remain for prompt context {repo}/{owner} and task-config resolution;
@@ -1212,12 +1212,12 @@ class TaskHandler:
         else:
             owner, repo = self.OWNER, self.REPO
             repo_url = self.EMRG_REPO_URL
-            repo_configured = project_name == "emrg"
+            repo_configured = agent_name == "emrg"
         sandbox = self._resolve_sandbox(cfg, record.get("sandbox"))
         self._derived = {
             "config": cfg,
-            "project_name": project_name,
-            "project_path": path or self.name,  # default to name for emrg itself
+            "agent_name": agent_name,
+            "agent_path": path or self.name,  # default to name for emrg itself
             "owner": owner,
             "repo": repo,
             "repo_url": repo_url,
@@ -1243,12 +1243,12 @@ class TaskHandler:
         return self._task.get("interval", DEFAULT_INTERVAL)
 
     @property
-    def _project_name(self) -> str:
-        return self._derived.get("project_name", "")
+    def _agent_name(self) -> str:
+        return self._derived.get("agent_name", "")
 
     @property
-    def project_path(self) -> str:
-        return self._derived.get("project_path", self.name)
+    def agent_path(self) -> str:
+        return self._derived.get("agent_path", self.name)
 
     @property
     def _owner(self) -> str:
@@ -1310,7 +1310,7 @@ class TaskHandler:
 
         The entry goes in the repository's *local* ``.git/info/exclude``: per-clone,
         never committed, and never the upstream ``.gitignore``, which belongs to the
-        project's maintainers. Both halves are asked of git rather than derived from
+        agent's maintainers. Both halves are asked of git rather than derived from
         the path (``repo_scope`` / ``ensure_local_exclude``), because "is this
         directory the root of a checkout?" is not the question: a task directory one
         level down has no ``<dir>/.git`` and still writes its runtime data *inside* a
@@ -2509,7 +2509,7 @@ class TaskHandler:
         interval is the whole cost of having no cache: measured, a full read of this
         file is 1.593 ms.
 
-        Both steps run in a worker thread: deriving the record probes the project's git
+        Both steps run in a worker thread: deriving the record probes the agent's git
         remote, which is a subprocess, and this coroutine runs on the event loop
         (rant 2026-08-19T01:05:47).
         """
@@ -2551,7 +2551,7 @@ class TaskHandler:
 
         The record is read from tasks.yml at every wake rather than held from
         construction (rant 2026-09-28T09:54:10): editing `interval`, `config`,
-        `project` or `type` in the file takes effect at the next cycle boundary with
+        `agent` or `type` in the file takes effect at the next cycle boundary with
         nothing to invalidate, and deleting the record (or setting `enabled: false`)
         ends the handler at its next wake instead of leaving it running a task nothing
         declares. A cycle already underway always runs to completion — this loop only
@@ -2823,10 +2823,10 @@ class TaskHandler:
             "saturation": saturation,
             # rant 2026-08-21T17:46:12: expose the task→session link so the GUI
             # tasks panel can add an "open session" action. All in-memory —
-            # project name (config.project), resolved project path, and the
+            # agent name (config.agent), resolved agent path, and the
             # fixed task session_id (the task name).
-            "project": self._project_name,
-            "project_path": self.project_path,
+            "agent": self._agent_name,
+            "agent_path": self.agent_path,
             "session_id": self._session_id,
         }
 
@@ -3373,8 +3373,8 @@ class TaskHandler:
         context renders as an empty string instead of raising (the old
         ``str.format()`` crashed with KeyError on missing placeholders).
         Templates also receive ``task`` (the tasks.yml config dict) and
-        ``project`` (the matching agents.yml entry) so users can reference
-        custom fields via ``{{ task.x }}`` / ``{{ project.x }}`` without
+        ``agent`` (the matching agents.yml entry) so users can reference
+        custom fields via ``{{ task.x }}`` / ``{{ agent.x }}`` without
         code changes.
         """
         import jinja2
@@ -3395,7 +3395,7 @@ class TaskHandler:
             "timestamp": datetime.now().strftime("%Y%m%d-%H%M%S"),
             "current_time_human": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "task": _template_task_context(self._config, self._task),
-            "project": _load_project_config(self._project_name, str(self._source_dir)),
+            "agent": _load_agent_config(self._agent_name, str(self._source_dir)),
         }
 
         env = jinja2.Environment(undefined=jinja2.Undefined)
@@ -3555,12 +3555,12 @@ class TaskScheduler:
             await asyncio.sleep(TABLE_POLL_SECONDS)
 
     def load_and_start(self) -> list[asyncio.Task]:
-        """Ensure the emrg project entry, start the enabled tasks, start reconciliation."""
+        """Ensure the emrg agent entry, start the enabled tasks, start reconciliation."""
         # Packaged installs may have no tasks.yml at all: `read_table` seeds the
         # default table for that case, which is also the only case in which a missing
         # `emrg-task` is restored. A file that exists without that record is the host's
         # decision and stays that way (design decision D2).
-        self._ensure_emrg_project_entry()
+        self._ensure_emrg_agent_entry()
         self.reconcile()
         self._reconcile_task = asyncio.create_task(self.reconcile_loop())
         return [*self._coros.values(), self._reconcile_task]
@@ -3613,7 +3613,7 @@ class TaskScheduler:
             handler = self._live.get(name)
             status = handler.status() if handler is not None else self._idle_status(record)
             # The GUI tasks panel + edit form need the task's declared fields to render
-            # type badges, enabled hints, project links, and prefill the edit form.
+            # type badges, enabled hints, agent links, and prefill the edit form.
             # They come from the record now, not from a start-time copy of it.
             status["type"] = record.get("type", "evolution")
             status["enabled"] = record.get("enabled", True)
@@ -3642,7 +3642,7 @@ class TaskScheduler:
         started before it can render the row.
         """
         cfg = record.get("config") if isinstance(record.get("config"), dict) else {}
-        project = cfg.get("agent", "")
+        agent = cfg.get("agent", "")
         # Issue #2486 ⑦: the same three cadence keys the live handler reports — a
         # client must not have to know whether a task has been started before it can
         # render the frequency that is in force, or when it next changes.
@@ -3659,8 +3659,8 @@ class TaskScheduler:
             "last_run_at": None,
             "recent_runs": [],
             "saturation": {},
-            "project": project,
-            "project_path": _resolve_project_path(project) if project else "",
+            "agent": agent,
+            "agent_path": _resolve_agent_path(agent) if agent else "",
             "session_id": record.get("name"),
         }
 
@@ -3691,7 +3691,7 @@ class TaskScheduler:
         """
         write_table(records, self._tasks_file)
 
-    def _ensure_emrg_project_entry(self) -> None:
+    def _ensure_emrg_agent_entry(self) -> None:
         """Ensure agents.yml has an emrg entry.
 
         Not a task seeder any more (design decision D2, rant 2026-09-28T09:54:10): the
@@ -3699,8 +3699,8 @@ class TaskScheduler:
         deleted from a file that exists is terminal — re-adding it here would resurrect
         exactly what the host deleted.
 
-        What is still needed is the project entry (rant 02:58): if agents.yml lacks
-        `emrg`, `_resolve_project_path("emrg")` returns None and the handler's
+        What is still needed is the agent entry (rant 02:58): if agents.yml lacks
+        `emrg`, `_resolve_agent_path("emrg")` returns None and the handler's
         `_source_dir` degenerates to the relative string "emrg" (a dangling cwd). The
         path is fixed to ~/.emrg/evolution/emrg; an existing entry is preserved as-is
         (dev machines may configure a custom path).
@@ -3719,7 +3719,7 @@ class TaskScheduler:
             # Repair a stale emrg entry whose path no longer exists
             # (2026-08-12 incident: a pytest temp dir leaked into agents.yml by a test
             # run; the dir is deleted after the suite, leaving the entry pointing at a
-            # dead path forever — list_projects/GUI pickers show a wrong path and the
+            # dead path forever — list_agents/GUI pickers show a wrong path and the
             # handler re-resolves a dangling dir every cycle). Dev machines with a real
             # custom checkout keep their path (is_dir() True).
             existing = row.get("path")
@@ -3745,7 +3745,7 @@ class TaskScheduler:
             return f"invalid task name {name!r} ({TASK_NAME_PATTERN}, <= {TASK_NAME_MAX} chars)"
         if task_type not in TASK_TEMPLATES and task_type not in _custom_templates():
             return f"unknown task type {task_type!r} (not builtin, no custom template)"
-        if not agent or _resolve_project_path(agent) is None:
+        if not agent or _resolve_agent_path(agent) is None:
             return f"agent {agent!r} is not registered in agents.yml"
         if not isinstance(interval, int) or isinstance(interval, bool) or interval < MIN_INTERVAL:
             return f"interval must be an integer >= {MIN_INTERVAL}"

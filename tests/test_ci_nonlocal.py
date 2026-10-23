@@ -422,7 +422,7 @@ def test_a_directory_that_is_not_a_checkout_falls_back_to_the_script_root(
 def test_a_directory_with_only_half_the_shape_is_not_a_checkout(monkeypatch, tmp_path):
     """Both markers are required, so a stray app.py cannot claim the tree.
 
-    The predicate is a heuristic for "this is a checkout of this project";
+    The predicate is a heuristic for "this is a checkout of this agent";
     requiring the scripts directory too keeps a report directory that happens to
     contain an app.py from silently becoming the measured tree.
     """

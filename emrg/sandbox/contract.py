@@ -84,7 +84,7 @@ class RunnerFailureRule:
 
     :attr:`start_line` is the **third** reading, and the one the runner itself
     supplies rather than the parent observing it: the line a runner that this
-    project writes prints on its own stderr immediately before it mirrors the
+    agent writes prints on its own stderr immediately before it mirrors the
     command.  Its **absence** from a run's stderr, beside a nonzero exit, is the
     evidence — the runner reached neither its announcement nor its failure
     reporter, so nothing ran.  This is the reading a status cannot give: the

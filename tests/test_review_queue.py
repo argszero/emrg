@@ -130,22 +130,22 @@ def rants_of(mod, monkeypatch, *specs, boom=None):
     """Install ledger rows on the seam and hand back the fake, for its `calls`.
 
     Each `spec` is `(timestamp, status)`, `(timestamp, status, issues)` or
-    `(timestamp, status, issues, project)` — the shape a caller varies one axis of, so the
-    tests below read as one line each. A spec that names no project installs a row without
+    `(timestamp, status, issues, agent)` — the shape a caller varies one axis of, so the
+    tests below read as one line each. A spec that names no agent installs a row without
     one, which is the state §2.2 tells a cycle to ignore entirely, so it must be reachable.
     """
     rows = []
     for spec in specs:
         stamp, status = spec[0], spec[1]
         issues = list(spec[2]) if len(spec) > 2 else []
-        project = spec[3] if len(spec) > 3 else ""
+        agent = spec[3] if len(spec) > 3 else ""
         rows.append(
             mod.Rant(
                 timestamp=stamp,
                 status=status,
                 message=f"the ledger row for {stamp}",
                 issues=issues,
-                project=project,
+                agent=agent,
             )
         )
     fake = FakeLedger(rows, boom)
@@ -1716,17 +1716,17 @@ def test_the_rant_rows_are_after_the_pr_rows_and_under_their_own_header(
     assert "1 PR(s)" in out
 
 
-def test_a_rant_row_names_the_project_it_belongs_to(mod, monkeypatch, capsys):
-    """§2.2 decides membership by `project`, so the row has to carry it.
+def test_a_rant_row_names_the_agent_it_belongs_to(mod, monkeypatch, capsys):
+    """§2.2 decides membership by `agent`, so the row has to carry it.
 
     The reading exists for the cycle that reads the queue *alone* (the tool's own reason for
     adding these rows), and that reader cannot apply a rule whose field is not printed: it
     would have to open the ledger again — the cost the row was added to save. Measured
     2026-10-01 on this host, the queue rendered 39 open rants and every one belonged to
-    another project, while this task's ledger rows were all `completed`.
+    another agent, while this task's ledger rows were all `completed`.
 
     Read through `--all-rants`, because this test is about the **row's shape** and the
-    default rendering withholds another project's row (that behaviour is pinned next door).
+    default rendering withholds another agent's row (that behaviour is pinned next door).
     """
     monkeypatch.setattr(mod, "open_prs", lambda repo=mod.REPO: [])
     rants_of(
@@ -1738,14 +1738,14 @@ def test_a_rant_row_names_the_project_it_belongs_to(mod, monkeypatch, capsys):
     mod.main(["--all-rants"])
     out = capsys.readouterr().out
 
-    assert "project=silicon-science-cs" in out
-    assert "project=(none)" in out, (
-        "a row that names no project must say so: §2.2 makes it one to ignore entirely, "
+    assert "agent=silicon-science-cs" in out
+    assert "agent=(none)" in out, (
+        "a row that names no agent must say so: §2.2 makes it one to ignore entirely, "
         "and a row that prints nothing there is a row with no such state"
     )
 
 
-def test_another_projects_rant_is_counted_and_not_printed(mod, monkeypatch, capsys):
+def test_another_agents_rant_is_counted_and_not_printed(mod, monkeypatch, capsys):
     """The bulk this report pays for, and the row it must not lose.
 
     Measured 2026-10-04 on this host: 40 open rants, 39 of them `silicon-science-cs` — about
@@ -1766,33 +1766,33 @@ def test_another_projects_rant_is_counted_and_not_printed(mod, monkeypatch, caps
     assert rc == 0
     assert "rant 2026-09-30T09:30:16+08:00" in out, "this task's own row is rendered"
     assert "rant 2026-09-30T09:35:04+08:00" not in out, (
-        "another project's row body is what the default withholds"
+        "another agent's row body is what the default withholds"
     )
     header = next(line for line in out.splitlines() if "open rant(s)" in line)
-    assert "2 open rant(s) across 2 project(s)" in header, (
+    assert "2 open rant(s) across 2 agent(s)" in header, (
         "the count stays the ledger's: withholding a row is not hiding it"
     )
     withheld = next(line for line in out.splitlines() if "not printed here" in line)
-    assert "1 of them names another project" in withheld, withheld
+    assert "1 of them names another agent" in withheld, withheld
     assert "--all-rants" in withheld, (
         "a withheld row must come with the way to see it, or the reader has no remedy"
     )
-    assert "`rendered_here` withholds another project's rows and only those" in withheld, (
+    assert "`rendered_here` withholds another agent's rows and only those" in withheld, (
         "the reason must name the axis that withholds. It used to say `no issue in "
-        "argszero/emrg can declare them`, which is also true of the project-less row this "
+        "argszero/emrg can declare them`, which is also true of the agent-less row this "
         "report prints - so it separated nothing (see "
         "test_the_rant_header_and_the_withheld_line_name_what_withholds)"
     )
 
 
-def test_a_project_less_rant_is_still_printed_though_it_can_declare_nothing_here(
+def test_a_agent_less_rant_is_still_printed_though_it_can_declare_nothing_here(
     mod, monkeypatch, capsys
 ):
     """`could_declare_here` is not the rendering rule, and the difference is deliberate.
 
     That predicate answers "could an issue in this repo carry the rant's `Origin:` line",
-    and for a row naming no project it is false. A project-less row is not *another*
-    project's work, though — it is undeclared, and undeclared is something the cycle has to
+    and for a row naming no agent it is false. A agent-less row is not *another*
+    agent's work, though — it is undeclared, and undeclared is something the cycle has to
     look at. The rows this table prints exist because a cycle reading the queue alone
     concluded "nothing to review" while three pending rants had no issue (2026-09-29), so
     hiding an undeclared one would restore exactly that defect for the row most likely to be
@@ -1809,7 +1809,7 @@ def test_a_project_less_rant_is_still_printed_though_it_can_declare_nothing_here
     out = capsys.readouterr().out
 
     assert "rant 2026-09-30T09:30:16+08:00" in out, "the undeclared row is rendered"
-    assert "project=(none)" in out
+    assert "agent=(none)" in out
     assert "rant 2026-09-30T09:35:04+08:00" not in out
     assert mod.could_declare_here("", mod.REPO) is False, (
         "the two rules must be seen to differ here, or this test would pass under either"
@@ -1841,18 +1841,18 @@ def test_all_rants_prints_the_withheld_rows_and_the_line_disappears(
 def test_the_all_rants_help_states_the_withheld_set_the_predicate_defines(mod, capsys):
     """The `--help` sentence is the only statement of the flag's scope a reader meets.
 
-    It was wrong here: it said the default counts "a rant naming another project (or none)",
-    while `rendered_here` renders a project-less row by default - pinned above, and for the
-    reason that an undeclared row is not *another* project's work. A sentence restating a
+    It was wrong here: it said the default counts "a rant naming another agent (or none)",
+    while `rendered_here` renders a agent-less row by default - pinned above, and for the
+    reason that an undeclared row is not *another* agent's work. A sentence restating a
     rule that lives elsewhere is a second copy of it; this holds the copy against the
     original, the predicate's three answers beside the sentence's two claims.
     """
     rendered = [
-        mod.rendered_here(project, mod.REPO)
-        for project in ("emrg", "silicon-science-cs", "")
+        mod.rendered_here(agent, mod.REPO)
+        for agent in ("emrg", "silicon-science-cs", "")
     ]
     assert rendered == [True, False, True], (
-        "the rule the sentence states: this repo's rows, and the rows naming no project"
+        "the rule the sentence states: this repo's rows, and the rows naming no agent"
     )
 
     with pytest.raises(SystemExit):
@@ -1862,7 +1862,7 @@ def test_the_all_rants_help_states_the_withheld_set_the_predicate_defines(mod, c
     out = " ".join(capsys.readouterr().out.split())
 
     assert "rendered_here" in out, "the sentence names the rule that decides it"
-    assert "naming no project is still printed" in out, (
+    assert "naming no agent is still printed" in out, (
         "the one case the sentence had wrong, now stated the way the predicate reads"
     )
 
@@ -1873,18 +1873,18 @@ def test_the_rant_header_and_the_withheld_line_name_what_withholds(
     """Both sentences a cycle reads on every run, held against the predicate that decides.
 
     The `--help` copy was fixed for this on the same branch and the report's **header** was
-    not: it still told the reader that "a row naming another project - or none - is not this
-    cycle's work", one line above the project-less row it then printed. The withheld line
+    not: it still told the reader that "a row naming another agent - or none - is not this
+    cycle's work", one line above the agent-less row it then printed. The withheld line
     gave a reason that does not discriminate either - "no issue in argszero/emrg can declare
-    them" is equally true of that project-less row, because `could_declare_here("")` is False
+    them" is equally true of that agent-less row, because `could_declare_here("")` is False
     too. The rule is `rendered_here`, spelled once, and these are its two copies.
     """
     rendered = [
-        mod.rendered_here(project, mod.REPO)
-        for project in ("emrg", "silicon-science-cs", "")
+        mod.rendered_here(agent, mod.REPO)
+        for agent in ("emrg", "silicon-science-cs", "")
     ]
     assert rendered == [True, False, True], (
-        "the rule both sentences state: this repo's rows, and the rows naming no project"
+        "the rule both sentences state: this repo's rows, and the rows naming no agent"
     )
     assert mod.could_declare_here("silicon-science-cs", mod.REPO) is False
     assert mod.could_declare_here("", mod.REPO) is False, (
@@ -1908,10 +1908,10 @@ def test_the_rant_header_and_the_withheld_line_name_what_withholds(
         "both sentences name the rule that decides them, the way the --help copy does"
     )
     assert "or none" not in out, (
-        "the header's own clause, the defect this pins: a row naming no project is not "
+        "the header's own clause, the defect this pins: a row naming no agent is not "
         "withheld, and a report saying so is contradicted by the row it prints beside it"
     )
-    assert "one naming no project is undeclared rather than another project's" in out, (
+    assert "one naming no agent is undeclared rather than another agent's" in out, (
         "the case the header had wrong, stated the way the predicate reads"
     )
     assert "rant 2026-09-30T09:30:16+08:00" in out, (
@@ -1922,7 +1922,7 @@ def test_the_rant_header_and_the_withheld_line_name_what_withholds(
 def test_the_json_document_keeps_every_rant_row_and_labels_it(mod, monkeypatch, capsys):
     """A consumer must not silently receive a shorter list than the ledger holds.
 
-    The prose withholds another project's row because its reader pays for the bytes; the
+    The prose withholds another agent's row because its reader pays for the bytes; the
     document keeps every row and carries the prose's own predicate as a field, spelled from
     the same function. A JSON path that dropped rows with no marker would be this family's
     "never a pass" defect in its machine-readable form: a short list read as a whole one.
@@ -1940,18 +1940,18 @@ def test_the_json_document_keeps_every_rant_row_and_labels_it(mod, monkeypatch, 
     payload = json.loads(capsys.readouterr().out)
 
     rants = [row for row in payload if row["subject"] == "rant"]
-    assert [row["project"] for row in rants] == ["silicon-science-cs", "", "emrg"]
+    assert [row["agent"] for row in rants] == ["silicon-science-cs", "", "emrg"]
     assert [row["rendered"] for row in rants] == [False, True, True], (
         "the field is the prose's predicate, so a consumer can apply the same rule"
     )
 
 
-def test_the_rant_section_counts_the_ledger_by_project(mod, monkeypatch, capsys):
+def test_the_rant_section_counts_the_ledger_by_agent(mod, monkeypatch, capsys):
     """The number heading the section is the ledger's, not this task's, and it says which.
 
     The trap this closes: a cycle reads "39 open rant(s) - each needs an issue and its PR"
-    as priority 1 (R8.1) and opens an issue in its own repo for another project's work —
-    the cross-project contamination §2.2's filter exists to prevent. Two projects, so the
+    as priority 1 (R8.1) and opens an issue in its own repo for another agent's work —
+    the cross-agent contamination §2.2's filter exists to prevent. Two agents, so the
     grouping is read rather than inferred from a single name.
     """
     monkeypatch.setattr(mod, "open_prs", lambda repo=mod.REPO: [])
@@ -1966,7 +1966,7 @@ def test_the_rant_section_counts_the_ledger_by_project(mod, monkeypatch, capsys)
     out = capsys.readouterr().out
 
     header = next(line for line in out.splitlines() if "open rant(s)" in line)
-    assert "3 open rant(s) across 2 project(s) - emrg 2, silicon-science-cs 1" in header, header
+    assert "3 open rant(s) across 2 agent(s) - emrg 2, silicon-science-cs 1" in header, header
     assert "once it is this task's" in header, (
         "the sentence must not claim every row's issue and PR unconditionally"
     )
@@ -2031,21 +2031,21 @@ def test_the_json_document_carries_both_subjects_in_one_list(mod, monkeypatch, c
     assert rant["issues"] == [1771]
     assert rant["tree"] == "/checkout"
     assert rant["branch"] == "some-branch"
-    assert rant["project"] == "", (
+    assert rant["agent"] == "", (
         "the two renderings must not disagree: whatever the text row shows, the document "
         "carries the same field"
     )
 
 
-def test_the_json_rant_row_carries_the_project(mod, monkeypatch, capsys):
-    """The document's half of the same fix, with a project set rather than absent."""
+def test_the_json_rant_row_carries_the_agent(mod, monkeypatch, capsys):
+    """The document's half of the same fix, with a agent set rather than absent."""
     votes, fresh = FakeVotes(reviews=[]), FakeFresh()
     monkeypatch.setattr(mod, "local_tree", lambda: ("/checkout", "some-branch", "b" * 40))
     rants_of(mod, monkeypatch, ("2026-09-30T09:17:54+08:00", "pending", [], "emrg"))
     _run(mod, monkeypatch, votes, fresh, ["1", "--json"])
     out = capsys.readouterr().out
 
-    assert json.loads(out)[-1]["project"] == "emrg"
+    assert json.loads(out)[-1]["agent"] == "emrg"
 
 
 def test_the_json_document_keeps_its_shape_with_no_rants(mod, monkeypatch, capsys):
@@ -2144,7 +2144,7 @@ def _links(monkeypatch, tool, rows, issues=(), path="/tmp/rants.jsonl", closed_i
 
 
 def _row(stamp, status="pending", message="a rant", progress=None):
-    row = {"timestamp": stamp, "status": status, "message": message, "project": "emrg"}
+    row = {"timestamp": stamp, "status": status, "message": message, "agent": "emrg"}
     if progress is not None:
         row["progress"] = progress
     return row
@@ -2183,12 +2183,12 @@ def test_the_issue_lookup_is_not_spent_when_no_rant_is_open(monkeypatch):
     assert links.queue_calls == [], "the queue must not be listed for a closed ledger"
 
 
-def test_a_rants_project_is_carried_from_the_row_the_ledger_parsed(monkeypatch):
+def test_a_rants_agent_is_carried_from_the_row_the_ledger_parsed(monkeypatch):
     """The field comes from the row the sibling handed over, and nothing else.
 
-    A missing `project` is **not** an error and not a default: §2.2 makes a rant that names
-    no project one to ignore, so the difference between "names none" and "names another" has
-    to survive the parse — a `row["project"]` reached for directly would raise here, and a
+    A missing `agent` is **not** an error and not a default: §2.2 makes a rant that names
+    no agent one to ignore, so the difference between "names none" and "names another" has
+    to survive the parse — a `row["agent"]` reached for directly would raise here, and a
     fallback to the reading's own repo would invent a membership the ledger never claimed.
     """
     tool = _fresh_tool()
@@ -2198,11 +2198,11 @@ def test_a_rants_project_is_carried_from_the_row_the_ledger_parsed(monkeypatch):
         [
             _row("2026-09-30T09:17:54+08:00"),
             {"timestamp": "2026-09-30T09:30:16+08:00", "status": "pending", "message": "m"},
-            {"timestamp": "2026-09-30T09:35:04+08:00", "status": "pending", "project": None},
+            {"timestamp": "2026-09-30T09:35:04+08:00", "status": "pending", "agent": None},
         ],
     )
 
-    rows = {row.timestamp: row.project for row in tool.open_rant_rows(None, tool.REPO)}
+    rows = {row.timestamp: row.agent for row in tool.open_rant_rows(None, tool.REPO)}
 
     assert rows == {
         "2026-09-30T09:17:54+08:00": "emrg",
@@ -2253,11 +2253,11 @@ def test_the_ledger_the_override_names_is_the_one_read(monkeypatch):
     ], links.queue_calls
 
 
-def test_another_projects_rants_do_not_widen_the_closed_window(monkeypatch):
+def test_another_agents_rants_do_not_widen_the_closed_window(monkeypatch):
     """The bound is the oldest instant that can *place* a row, and only this repo's rants can.
 
     Measured 2026-10-02: 40 open rants, 39 of them `silicon-science-cs` reaching back to
-    2026-09-11, and the one `emrg` rant 8 hours old. Letting the other project set the
+    2026-09-11, and the one `emrg` rant 8 hours old. Letting the other agent set the
     bound spent **48.8s / 668 rows** on a reading whose usable window costs **5.8s / 6
     rows** — for a repo that can never place a row for a rant it cannot declare.
     """
@@ -2270,7 +2270,7 @@ def test_another_projects_rants_do_not_widen_the_closed_window(monkeypatch):
         [
             _row(emrg_stamp),
             {"timestamp": other_stamp, "status": "pending", "message": "theirs",
-             "project": "silicon-science-cs"},
+             "agent": "silicon-science-cs"},
         ],
     )
 
@@ -2281,20 +2281,20 @@ def test_another_projects_rants_do_not_widen_the_closed_window(monkeypatch):
         (tool.REPO, "closed", "2026-10-01T23:48:41Z"),
     ], links.queue_calls
     assert len(rows) == 2, (
-        "the narrowing is about the *reading*, not the rows: another project's rant is "
-        "still rendered with its project named, so the cycle reading the queue alone can "
+        "the narrowing is about the *reading*, not the rows: another agent's rant is "
+        "still rendered with its agent named, so the cycle reading the queue alone can "
         f"skip it - got {rows!r}"
     )
-    assert [r.project for r in rows] == ["emrg", "silicon-science-cs"], (
-        "newest first, each row carrying its own project"
+    assert [r.agent for r in rows] == ["emrg", "silicon-science-cs"], (
+        "newest first, each row carrying its own agent"
     )
 
 
-def test_a_foreign_project_alone_spends_no_closed_reading(monkeypatch):
+def test_a_foreign_agent_alone_spends_no_closed_reading(monkeypatch):
     """No rant this repo could declare means no second call at all.
 
     The reading exists to tell `never filed` from `filed and closed` *in this repo*. With
-    only another project's rants open, this repo has nothing to look up: the call would
+    only another agent's rants open, this repo has nothing to look up: the call would
     return rows that cannot place any of them.
     """
     tool = _fresh_tool()
@@ -2302,7 +2302,7 @@ def test_a_foreign_project_alone_spends_no_closed_reading(monkeypatch):
         monkeypatch,
         tool,
         [{"timestamp": "2026-09-11T23:51:35.442412+08:00", "status": "pending",
-          "message": "theirs", "project": "silicon-science-cs"}],
+          "message": "theirs", "agent": "silicon-science-cs"}],
     )
 
     (rant,) = tool.open_rant_rows(None, tool.REPO)
@@ -2311,8 +2311,8 @@ def test_a_foreign_project_alone_spends_no_closed_reading(monkeypatch):
     assert (rant.issues, rant.closed_issues) == ([], [])
 
 
-def test_the_two_spellings_of_this_project_both_match(monkeypatch):
-    """`emrg` and `argszero/emrg` are the same project, and R5's own rule says so.
+def test_the_two_spellings_of_this_agent_both_match(monkeypatch):
+    """`emrg` and `argszero/emrg` are the same agent, and R5's own rule says so.
 
     The template matches a rant to a task by either spelling, so a bound that recognised
     only one would silently stop placing rows for rants written the other way — and a
@@ -2323,17 +2323,17 @@ def test_the_two_spellings_of_this_project_both_match(monkeypatch):
     assert tool.could_declare_here(tool.REPO, tool.REPO) is True
     assert tool.could_declare_here("silicon-science-cs", tool.REPO) is False
     assert tool.could_declare_here("", tool.REPO) is False, (
-        "a rant naming no project belongs to no task, so no repo can declare it"
+        "a rant naming no agent belongs to no task, so no repo can declare it"
     )
     assert tool.could_declare_here("emrg-other", tool.REPO) is False, (
-        "a prefix is not the project: `emrg-other` is another ledger row's name"
+        "a prefix is not the agent: `emrg-other` is another ledger row's name"
     )
 
     stamp = "2026-10-02T07:48:41.525323+08:00"
     links = _links(
         monkeypatch, tool,
         [{"timestamp": stamp, "status": "pending", "message": "ours",
-          "project": tool.REPO}],
+          "agent": tool.REPO}],
         closed_issues=[(1807, f"Origin: rant {stamp}\n\nbody")],
     )
 

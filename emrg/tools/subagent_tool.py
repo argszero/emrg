@@ -23,10 +23,10 @@ this schema: ``cwd`` and the slot are computed (`_parent_session_id` /
 model that picks its own slot picks a wrong one. So this tool refuses a call that
 arrives without them, which is what happens outside a daemon turn.
 
-The slot path is the child's **project cwd**, not its own session directory — the
+The slot path is the child's **agent cwd**, not its own session directory — the
 child's directory is built from its cwd like any other session's
 (``<slot>/.emrg/sessions/<child id>``), which is how the child's memory lands
-inside the parent's session directory without a second project root.
+inside the parent's session directory without a second agent root.
 
 The rest of the mechanism — the nine slots, the least-recently-closed choice, the
 depth limit, the sandbox inherited from the parent, and the close stamp taken

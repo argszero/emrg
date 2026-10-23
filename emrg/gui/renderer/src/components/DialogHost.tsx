@@ -4,10 +4,10 @@ import { COMMANDS, hintText } from "../lib/commands";
 import { helpRows, type MemoryRow, type SkillRow } from "../lib/dialogLists";
 import { rewindPointRow, type RewindPoint } from "../lib/rewind";
 import {
-  isProtectedProject,
-  projectRowView,
+  isProtectedAgent,
+  agentRowView,
   sessionRowView,
-  type ProjectRow,
+  type AgentRow,
   type SessionRow,
 } from "../lib/openSession";
 import { dialogReducer, initialDialogState } from "../lib/dialog";
@@ -42,11 +42,11 @@ import { SandboxRootsDialog } from "./SandboxRootsDialog";
 
 /** DialogHost 用到的 preload 桥方法（与 preload.js 的 52 通道子集对齐） */
 interface EmrgBridge {
-  listProjects(): Promise<ProjectRow[]>;
-  listProjectSessions(p: { projectPath: string }): Promise<{ sessions: SessionRow[] }>;
+  listAgents(): Promise<AgentRow[]>;
+  listAgentSessions(p: { projectPath: string }): Promise<{ sessions: SessionRow[] }>;
   newSession(p: { projectPath: string }): Promise<{ session_id: string }>;
-  pickProjectDir(): Promise<{ path?: string } | null>;
-  registerProject(p: { path: string }): Promise<{ ok: boolean; path: string }>;
+  pickAgentDir(): Promise<{ path?: string } | null>;
+  registerAgent(p: { path: string }): Promise<{ ok: boolean; path: string }>;
   switchSession(p: { sessionId: string }): Promise<unknown>;
   deleteSession(p: { sessionId: string }): Promise<unknown>;
   renameSession(p: { sessionId: string; title: string }): Promise<unknown>;
@@ -54,14 +54,14 @@ interface EmrgBridge {
   compactSession(p: { sessionId: string }): Promise<unknown>;
   listHistory(p: { sessionId: string }): Promise<{ messages: RewindPoint[]; hasMore?: boolean }>;
   rewindSession(p: { sessionId: string; recordIndex: number }): Promise<unknown>;
-  listMemories(p: { scope: "session" | "project"; sessionId?: string }): Promise<MemoryRow[]>;
-  readMemory(p: { memoryId: string; scope: "session" | "project"; sessionId?: string }): Promise<{
+  listMemories(p: { scope: "session" | "agent"; sessionId?: string }): Promise<MemoryRow[]>;
+  readMemory(p: { memoryId: string; scope: "session" | "agent"; sessionId?: string }): Promise<{
     id?: string;
     title?: string;
     content?: string;
   }>;
   listSkills(): Promise<SkillRow[]>;
-  removeProject(p: { name: string; path: string }): Promise<{ ok: boolean; error?: string }>;
+  removeAgent(p: { name: string; path: string }): Promise<{ ok: boolean; error?: string }>;
 }
 
 function bridge(): EmrgBridge | undefined {
@@ -144,11 +144,11 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
   // confirm/rename 走 lib/dialog 的 reducer（vanilla showConfirm/showRename 请求槽）
   const [dialogState, dispatch] = useReducer(dialogReducer, initialDialogState);
   const [listDialog, setListDialog] = useState<ListDialogOpen>(CLOSED);
-  const [memoryScope, setMemoryScope] = useState<"session" | "project">("project");
+  const [memoryScope, setMemoryScope] = useState<"session" | "agent">("agent");
 
   // 列表数据（null = loading）
-  const [projects, setProjects] = useState<ProjectRow[] | null>(null);
-  const [openStep, setOpenStep] = useState<OpenSessionStep>("projects");
+  const [agents, setAgents] = useState<AgentRow[] | null>(null);
+  const [openStep, setOpenStep] = useState<OpenSessionStep>("agents");
   const [openSessions, setOpenSessions] = useState<SessionRow[] | null>(null);
   const [openProjectName, setOpenProjectName] = useState("");
   const [sessionsError, setSessionsError] = useState<string | null>(null);
@@ -172,17 +172,17 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
 
   // ── 数据加载（打开即拉取；bridge 缺失时 no-op 降级） ──
 
-  // projects：open-session / new-session 共用
+  // agents：open-session / new-session 共用
   useEffect(() => {
     if (!listDialog.sessions && !listDialog.newSession) return;
     const b = bridge();
     if (!b) return;
     let cancelled = false;
-    setProjects(null);
+    setAgents(null);
     setSessionsError(null);
-    b.listProjects()
+    b.listAgents()
       .then((rows) => {
-        if (!cancelled) setProjects(rows);
+        if (!cancelled) setAgents(rows);
       })
       .catch((e) => {
         if (!cancelled) setSessionsError((e as Error)?.message ?? String(e));
@@ -192,7 +192,7 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
     };
   }, [listDialog.sessions, listDialog.newSession]);
 
-  // memories（/memory [session|project]）
+  // memories（/memory [session|agent]）
   useEffect(() => {
     if (!listDialog.memory) return;
     const b = bridge();
@@ -256,7 +256,7 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
   // ── 命令路由动作 ──
 
   function openMemory(scopeArg?: string): void {
-    setMemoryScope(scopeArg === "session" ? "session" : "project");
+    setMemoryScope(scopeArg === "session" ? "session" : "agent");
     openDialog("memory");
   }
 
@@ -323,7 +323,7 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
   }
 
   /** 打开会话两步流：项目 → 会话（vanilla showOpenSessionDialog） */
-  async function pickProject(p: ProjectRow): Promise<void> {
+  async function pickProject(p: AgentRow): Promise<void> {
     const b = bridge();
     if (!b || !p.path) return;
     setOpenStep("sessions");
@@ -331,21 +331,21 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
     setOpenSessions(null);
     setSessionsError(null);
     try {
-      const res = await b.listProjectSessions({ projectPath: p.path });
+      const res = await b.listAgentSessions({ projectPath: p.path });
       setOpenSessions(res.sessions ?? []);
     } catch (e) {
       setSessionsError((e as Error)?.message ?? String(e));
     }
   }
 
-  /** 删除项目：受保护 → 拒绝提示；否则确认后 removeProject + 重载列表 */
-  function deleteProject(p: ProjectRow): void {
-    if (isProtectedProject(p)) {
+  /** 删除项目：受保护 → 拒绝提示；否则确认后 removeAgent + 重载列表 */
+  function deleteAgent(p: AgentRow): void {
+    if (isProtectedAgent(p)) {
       dispatch({
         type: "open-confirm",
         payload: {
-          title: t("deleteProject.title"),
-          message: t("deleteProject.protectedBody", { name: String(p.name || p.path || "") }),
+          title: t("deleteAgent.title"),
+          message: t("deleteAgent.protectedBody", { name: String(p.name || p.path || "") }),
           okText: "dlg.gotIt",
           danger: false,
         },
@@ -355,36 +355,36 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
     dispatch({
       type: "open-confirm",
       payload: {
-        title: t("deleteProject.title"),
-        message: t("deleteProject.body", { name: String(p.name || p.path || "") }),
+        title: t("deleteAgent.title"),
+        message: t("deleteAgent.body", { name: String(p.name || p.path || "") }),
         okText: "dlg.delete",
         danger: true,
         onOk: async () => {
           const b = bridge();
           if (!b) return;
-          const res = await b.removeProject({ name: p.name || "", path: p.path || "" });
+          const res = await b.removeAgent({ name: p.name || "", path: p.path || "" });
           if (res && res.error) {
-            transcript.addSystemMessage(t("deleteProject.failed", { msg: String(res.error) }), sid);
+            transcript.addSystemMessage(t("deleteAgent.failed", { msg: String(res.error) }), sid);
           } else {
-            transcript.addSystemMessage(t("deleteProject.removed", { name: String(p.name || p.path || "") }), sid);
-            setProjects(null); // 重载项目列表
+            transcript.addSystemMessage(t("deleteAgent.removed", { name: String(p.name || p.path || "") }), sid);
+            setAgents(null); // 重载项目列表
           }
         },
       },
     });
   }
 
-  /** 新建项目 = 选目录 → 注册 → 重载项目列表（vanilla new-session 的 new-project 路径） */
-  async function newProject(): Promise<void> {
+  /** 新建项目 = 选目录 → 注册 → 重载项目列表（vanilla new-session 的 new-agent 路径） */
+  async function newAgent(): Promise<void> {
     const b = bridge();
     if (!b) return;
     try {
-      const res = await b.pickProjectDir();
+      const res = await b.pickAgentDir();
       if (!res?.path) return;
-      await b.registerProject({ path: res.path });
-      setProjects(null);
-      const rows = await b.listProjects();
-      setProjects(rows);
+      await b.registerAgent({ path: res.path });
+      setAgents(null);
+      const rows = await b.listAgents();
+      setAgents(rows);
     } catch (e) {
       setSessionsError((e as Error)?.message ?? String(e));
     }
@@ -444,7 +444,7 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
     openRename,
     openDelete,
     openSessions: () => {
-      setOpenStep("projects");
+      setOpenStep("agents");
       openDialog("sessions");
     },
     openNewSession: () => openDialog("newSession"),
@@ -517,20 +517,20 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
       <OpenSessionDialog
         open={listDialog.sessions}
         step={openStep}
-        projects={openStep === "projects" ? projects : null}
+        agents={openStep === "agents" ? agents : null}
         sessions={openStep === "sessions" ? openSessions : null}
         projectName={openProjectName}
         currentSid={sid}
         error={sessionsError}
-        onPickProject={pickProject}
+        onPickAgent={pickProject}
         onPickSession={async (s) => {
           const b = bridge();
           if (b) await b.switchSession({ sessionId: s.session_id });
           onSwitchSession(s.session_id);
           closeDialog("sessions");
         }}
-        onDeleteProject={deleteProject}
-        onNewProject={newProject}
+        onDeleteAgent={deleteAgent}
+        onNewAgent={newAgent}
         onNewSession={() => {
           closeDialog("sessions");
           openDialog("newSession");
@@ -539,12 +539,12 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
       />
       <NewSessionDialog
         open={listDialog.newSession}
-        projects={projects}
+        agents={agents}
         error={sessionsError}
-        onPickProject={(p) => {
+        onPickAgent={(p) => {
           if (p.path) void createSession(p.path);
         }}
-        onNewProject={newProject}
+        onNewAgent={newAgent}
         onDismiss={() => closeDialog("newSession")}
       />
       <SandboxRootsDialog
@@ -564,4 +564,4 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
 });
 
 // 类型 re-export（测试/调用方构造行视图用）
-export { projectRowView, sessionRowView, rewindPointRow };
+export { agentRowView, sessionRowView, rewindPointRow };

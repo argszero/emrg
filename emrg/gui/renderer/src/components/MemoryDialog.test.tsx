@@ -38,7 +38,7 @@ describe("MemoryDialog", () => {
     expect(screen.getByTestId("memory-loading")).toHaveTextContent("加载中");
   });
 
-  it("空列表 → app.noMemories（project scope 文案）", () => {
+  it("空列表 → app.noMemories（agent scope 文案）", () => {
     setup({ memories: [] });
     expect(screen.getByTestId("memory-empty")).toHaveTextContent("项目");
   });

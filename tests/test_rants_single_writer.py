@@ -200,7 +200,7 @@ def test_the_detector_detects_the_shape_it_was_written_for() -> None:
         assert _RANT_FILE_WRITE.search(planted), planted
     for legal in (
         'cat ~/.emrg/rants.jsonl 2>/dev/null || echo "[no rants.jsonl — skip]"',
-        'submit_rant(action="submit", project="emrg", message="...")',
+        'submit_rant(action="submit", agent="emrg", message="...")',
         "Every cycle must curate `~/.emrg/rants.jsonl`.",
     ):
         assert not _RANT_FILE_WRITE.search(legal), legal

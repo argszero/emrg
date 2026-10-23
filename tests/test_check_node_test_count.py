@@ -388,7 +388,7 @@ def test_runner_failure_is_reported_with_its_output(mod, monkeypatch) -> None:
 
 
 def test_every_hint_in_this_tool_uses_the_runnable_invocation(mod) -> None:
-    """Every mention of this tool's own invocation must carry the project runner.
+    """Every mention of this tool's own invocation must carry the agent runner.
 
     The sibling tool's spelling was already fixed once because a hint that fails
     is worse than no hint - it looks like a next step (a bare `python3` cannot
@@ -406,7 +406,7 @@ def test_every_hint_in_this_tool_uses_the_runnable_invocation(mod) -> None:
         prefix = source[max(0, hit.start() - len("uv run --no-sync ")) : hit.start()]
         assert prefix == "uv run --no-sync ", (
             "a hint in scripts/check-node-test-count.py spells the invocation "
-            "without the project runner: "
+            "without the agent runner: "
             f"...{source[max(0, hit.start() - 40) : hit.end() + 20]!r}"
         )
 

@@ -47,7 +47,7 @@ in the usual install locations before calling it blocked.
   task instructions.
 - Take the messages that arrived after the last one you handled. Remember that boundary
   yourself; there is no state file to keep and none to trust.
-- Rants whose `project` is `{{ task.agent }}` are the host's instructions for this round
+- Rants whose `agent` is `{{ task.agent }}` are the host's instructions for this round
   and outrank the plan; those that do not match are counted, not acted on.
 - A CLI that cannot run is a `blocked` item reported to the host, and so is an account that
   really cannot authenticate — but `missing identity` is a symptom, not a cause. The CLI

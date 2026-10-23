@@ -134,7 +134,7 @@ class _FakeWs:
 
 
 def _history_messages(tmp_path, records: list[dict]) -> list[dict]:
-    """Project `records` through the real `list_history` handler."""
+    """Agent `records` through the real `list_history` handler."""
     server = _make_server()
     session = Session.create_with_id("batch-label-history", tmp_path)
     for record in records:

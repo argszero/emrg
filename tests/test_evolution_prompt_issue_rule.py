@@ -2,7 +2,7 @@
 
 Why this file exists
 --------------------
-Host rant 2026-09-26T18:52:47 (`~/.emrg/rants.jsonl`, project `emrg`), in the host's
+Host rant 2026-09-26T18:52:47 (`~/.emrg/rants.jsonl`, agent `emrg`), in the host's
 words: *每个issue应该在一个pr里处理完毕。每个pr都应该明确对应哪个issue，并在对应的issue里
 说明。也就是双方应该有明确的双向连接。发生pr被拒绝或者要求更正时，应该还是在这个pr里更新。*
 — one issue is finished by exactly one PR, the two name each other in both directions, and

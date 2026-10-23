@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../lib/i18n";
-import type { ProjectRec, ScheduleWindow, TaskRec } from "../lib/workspaceView";
+import type { AgentRec, ScheduleWindow, TaskRec } from "../lib/workspaceView";
 import { Dialog } from "./Dialog";
 
 /**
@@ -38,7 +38,7 @@ export interface TaskFormDialogProps {
   /** 类型下拉选项（内置 + 自定义，由调用方经 taskTemplateList 加载） */
   types?: string[];
   /** 项目下拉选项（仅已注册项目） */
-  projects?: ProjectRec[];
+  agents?: AgentRec[];
   /**
    * 间隔下限，由 daemon 上报（`tasks_list` 帧的 `min_interval`）。
    * 缺省（未拿到）时不做客户端预检，交给 daemon 权威校验 —— 这样渲染层
@@ -80,7 +80,7 @@ function windowsOf(task: TaskRec | null): ScheduleWindow[] {
 export function TaskFormDialog({
   request,
   types = [],
-  projects = [],
+  agents = [],
   minInterval,
   onSubmit,
   onDismiss,
@@ -114,9 +114,9 @@ export function TaskFormDialog({
     const curType =
       (task?.type && types.includes(task.type) ? task.type : types[0]) || "evolution";
     if (typeRef.current) typeRef.current.value = curType;
-    const curProj = projects.some((p) => (p.name || p.path || "") === task?.config?.agent)
+    const curProj = agents.some((p) => (p.name || p.path || "") === task?.config?.agent)
       ? (task?.config?.agent as string)
-      : (projects[0]?.name || projects[0]?.path || "");
+      : (agents[0]?.name || agents[0]?.path || "");
     if (projectRef.current) projectRef.current.value = curProj;
     if (intervalRef.current) intervalRef.current.value = String(task?.interval ?? 1800);
     if (enabledRef.current) enabledRef.current.checked = task ? task.enabled !== false : true;
@@ -127,7 +127,7 @@ export function TaskFormDialog({
     setHadWindows(existing.length > 0);
     nameRef.current?.focus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, task, types.length, projects.length]);
+  }, [open, task, types.length, agents.length]);
 
   const patchRow = (index: number, field: keyof WindowRow, value: string) => {
     setRows((prev) => prev.map((row, i) => (i === index ? { ...row, [field]: value } : row)));
@@ -233,10 +233,10 @@ export function TaskFormDialog({
           </select>
         </label>
         <label className="form-row">
-          <span>{t("settings.taskProject")}</span>
-          <select ref={projectRef} data-testid="task-form-project">
-            {projects.length === 0 && <option value="">—</option>}
-            {projects.map((p) => {
+          <span>{t("settings.taskAgent")}</span>
+          <select ref={projectRef} data-testid="task-form-agent">
+            {agents.length === 0 && <option value="">—</option>}
+            {agents.map((p) => {
               const v = p.name || p.path || "";
               return (
                 <option key={v} value={v}>

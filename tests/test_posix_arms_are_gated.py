@@ -76,7 +76,7 @@ Named limits
 ------------
 * **A kind-selecting helper is not followed.** ``test_config.py``, ``test_client_log_sink.py``
   and ``test_skills_loader.py`` each make their FIFO from one branch of a helper chosen by an
-  argument (``_plant(path, kind)``, ``_project(tmp_path, fifo=True)``). The graph is seeded
+  argument (``_plant(path, kind)``, ``_agent(tmp_path, fifo=True)``). The graph is seeded
   only by an **unconditional** reference, because the guard cannot read which argument a caller
   passes -- so a *new* ungated caller of one of those helpers is not caught, and the tree's
   FIFO callers there are still gated by hand. The same cut is what keeps their FIFO-free

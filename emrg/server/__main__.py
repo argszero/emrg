@@ -9,6 +9,7 @@ from emrg.config import logs_dir, migrate_legacy_registry
 from emrg.logfiles import migrate_legacy_logs
 from emrg.server.daemon import DaemonExit, _non_regular_kind, run_server
 from emrg.server.logcontext import session_label
+from emrg.server.rants import migrate_rant_agent_field
 from emrg.server.scheduler import migrate_task_config_keys
 from emrg.tool_path import ensure_tool_dirs
 
@@ -210,6 +211,18 @@ def main() -> None:
         # daemon still reading the old key. Asking a record for its agent never
         # writes; only this call does.
         migrate_task_config_keys()
+        # The rant ledger's target key moved from `project` to `agent` (issue #2533),
+        # and it moves here for the reason the two calls above do: this process owns
+        # the file, it runs before the daemon opens the ledger, and no test path
+        # reaches it. It is not a reader-side fallback on purpose — a row still
+        # carrying the old key normalizes to `agent: None`, and `append_rant` is a
+        # read-modify-write, so the first submission after the rename would have
+        # rewritten the ledger and dropped every pre-rename target.
+        migrated_rants = migrate_rant_agent_field()
+        if migrated_rants:
+            logging.getLogger("emrg.server").info(
+                "rant ledger: moved %d row(s) from `project` to `agent`", migrated_rants
+            )
         result = asyncio.run(run_server(config.llm))
     except KeyboardInterrupt:
         # SIGINT delivered at the event-loop poll point escapes the main

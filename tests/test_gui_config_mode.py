@@ -315,14 +315,14 @@ def test_every_main_process_module_a_module_requires_is_packaged():
     `scripts/check-gui-package-refs.py` reads the `from` / `buildResources` / `icon` declarations
     and not this one, so an omission here is caught by nothing: `require("./config_mode")` would
     resolve in this checkout and fail inside the packaged app's asar. The class of files is
-    **discovered** (`emrg/gui/*.js` at the project root), not listed, so the next module is
+    **discovered** (`emrg/gui/*.js` at the agent root), not listed, so the next module is
     covered without this test being edited.
     """
     files = _packaging_files()
     assert "main.js" in files, "the packaging list was not read as expected"
 
     modules = sorted(p.name for p in GUI_DIR.glob("*.js"))
-    assert len(modules) >= 5, f"discovery found only {modules} — that is not this project's tree"
+    assert len(modules) >= 5, f"discovery found only {modules} — that is not this agent's tree"
 
     missing: list[str] = []
     for module in modules:
@@ -330,7 +330,7 @@ def test_every_main_process_module_a_module_requires_is_packaged():
         for spec in re.findall(r'require\(["\']\./([^"\']+)["\']\)', source):
             target = spec if (GUI_DIR / spec).is_file() else f"{spec}.js"
             if not (GUI_DIR / target).is_file():
-                continue  # not a file in this project dir (a package, or a build-time path)
+                continue  # not a file in this package dir (a package, or a build-time path)
             if not any(_is_covered(target, entry) for entry in files):
                 missing.append(f"{module} requires ./{spec}, but no `build.files` entry covers {target}")
     assert missing == [], (

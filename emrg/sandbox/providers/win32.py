@@ -155,7 +155,7 @@ def runner_invocation() -> list[str]:
     **working directory** at the head of ``sys.path``, ahead of ``PYTHONPATH``,
     and the seam spawns this runner with ``cwd`` set to the session's workdir
     (:mod:`emrg.tools.pwsh_tool_v2`, :mod:`emrg.tools.bash_tool_v2`).  A workdir
-    that is itself an EMRG checkout — the ordinary state of this project's own
+    that is itself an EMRG checkout — the ordinary state of this agent's own
     sessions — therefore shadows the installed package, and the runner dies at
     import before it has spawned anything: measured on Windows Server 2022
     under both confined tiers,

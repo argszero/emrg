@@ -4,13 +4,13 @@
 Usage
 -----
     python3 scripts/check-gui-package-refs.py                    # this checkout's emrg/gui
-    python3 scripts/check-gui-package-refs.py --root <GUIPROJ>   # another project dir
+    python3 scripts/check-gui-package-refs.py --root <GUIPROJ>   # another GUI package dir
     python3 scripts/check-gui-package-refs.py --platform linux   # only the refs that build reads
 
 Why this exists
 ---------------
 electron-builder resolves every `from` in `extraResources`, and `directories.buildResources`,
-relative to the **project dir** — the directory holding `package.json`, here `emrg/gui` — and a
+relative to the **package dir** — the directory holding `package.json`, here `emrg/gui` — and a
 source that is not there is a **warning, not a failure**. Measured on the v0.3.9 tag build
 (`build-release.yml` run 37723424917, job 113136083119):
 
@@ -45,7 +45,7 @@ module was read under <root>". It matters more here than for a citation, because
 guard's own fault arrives is a **declaration** going missing (`extraResources` dropped from
 `package.json`), which leaves the artifact without its payload and was reported as clean.
 
-The first line is `tree: <project dir>`, printed before **any** verdict — the family's
+The first line is `tree: <package dir>`, printed before **any** verdict — the family's
 convention for a guard that reads a working tree, so that the same report is not true of
 this checkout, of a worktree and of a directory a test built.
 """
@@ -74,7 +74,7 @@ def _refs(build: dict, block: str) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     default_root = Path(__file__).resolve().parent.parent / "emrg" / "gui"
     ap = argparse.ArgumentParser(description="Resolve electron-builder's GUI path references and report missing sources.")
-    ap.add_argument("--root", default=str(default_root), help="the GUI project dir (default: this checkout's emrg/gui)")
+    ap.add_argument("--root", default=str(default_root), help="the GUI package dir (default: this checkout's emrg/gui)")
     ap.add_argument(
         "--platform",
         default=PLATFORM_BLOCKS.get(sys.platform, "linux"),

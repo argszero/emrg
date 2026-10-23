@@ -3,10 +3,10 @@
 A session id arrives in a client message and is pasted onto
 `<cwd>/.emrg/sessions/` before anything opens, reads or removes it. The kernel
 resolves `..` and an absolute id at that point, so an id of `../..` names the
-project tree rather than a session directory inside it.
+agent tree rather than a session directory inside it.
 
-Measured 2026-10-21 through `Session.delete("../..", <project>)`: the call walked
-`<project>/.emrg/sessions/../..`, left the project tree empty — a `victim/`
+Measured 2026-10-21 through `Session.delete("../..", <agent>)`: the call walked
+`<agent>/.emrg/sessions/../..`, left the agent tree empty — a `victim/`
 directory and `.emrg/` alike — and then raised from `shutil.rmtree`'s final
 `os.rmdir` on the unresolved path. These tests pin the refusal and, in the other
 direction, that a real id still deletes its own directory.
@@ -33,7 +33,7 @@ def test_a_plain_name_is_one_component(session_id):
     "",           # nothing to name
     ".",          # the sessions directory itself
     "..",         # its parent
-    "../..",      # the project tree
+    "../..",      # the agent tree
     "a/b",        # a path, not a name
     "/abs",       # an absolute path replaces the join entirely
     "a\\b",       # a separator on Windows, an ordinary character on POSIX
@@ -47,8 +47,8 @@ def test_a_name_that_is_not_one_component_is_refused(session_id):
     assert is_safe_session_id(session_id) is False
 
 
-def _project(tmp_path):
-    """A project tree: one session directory, and a neighbour that must survive."""
+def _agent(tmp_path):
+    """A agent tree: one session directory, and a neighbour that must survive."""
     (tmp_path / ".emrg" / "sessions" / "keep").mkdir(parents=True)
     (tmp_path / "victim").mkdir()
     (tmp_path / "victim" / "precious.txt").write_text("keep me", encoding="utf-8")
@@ -56,20 +56,20 @@ def _project(tmp_path):
 
 
 def test_an_escaping_id_deletes_nothing(tmp_path):
-    """The measured shape: the id resolves to the project tree, so nothing may move."""
-    project = _project(tmp_path)
+    """The measured shape: the id resolves to the agent tree, so nothing may move."""
+    agent = _agent(tmp_path)
 
-    assert Session.delete("../..", project) is False
+    assert Session.delete("../..", agent) is False
 
-    assert (project / "victim" / "precious.txt").read_text(encoding="utf-8") == "keep me"
-    assert (project / ".emrg" / "sessions" / "keep").is_dir()
+    assert (agent / "victim" / "precious.txt").read_text(encoding="utf-8") == "keep me"
+    assert (agent / ".emrg" / "sessions" / "keep").is_dir()
 
 
 def test_a_real_id_still_deletes_its_own_directory(tmp_path):
     """The other direction: the refusal must not cost the feature."""
-    project = _project(tmp_path)
+    agent = _agent(tmp_path)
 
-    assert Session.delete("keep", project) is True
+    assert Session.delete("keep", agent) is True
 
-    assert not (project / ".emrg" / "sessions" / "keep").exists()
-    assert (project / "victim" / "precious.txt").exists()
+    assert not (agent / ".emrg" / "sessions" / "keep").exists()
+    assert (agent / "victim" / "precious.txt").exists()

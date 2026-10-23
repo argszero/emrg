@@ -19,12 +19,12 @@ from emrg.protocol import InstanceIdentity
 from emrg.server.scheduler import (
     TaskHandler,
     TaskScheduler,
-    _resolve_project_path,
+    _resolve_agent_path,
 )
 from tests.task_handler_factory import make_handler
 
 
-# ── _resolve_project_path ─────────────────────────────────────────
+# ── _resolve_agent_path ─────────────────────────────────────────
 
 
 def test_task_handler_logger_adapter_carries_task_column(tmp_path):
@@ -68,10 +68,10 @@ def test_task_handler_logger_adapter_carries_task_column(tmp_path):
     assert getattr(records[0], "task", None) == "emrg-task"
 
 
-def test_resolve_project_path_found(tmp_path):
-    """Returns path when project name exists in agents.yml."""
-    projects_yml = tmp_path / "agents.yml"
-    projects_yml.write_text(
+def test_resolve_agent_path_found(tmp_path):
+    """Returns path when agent name exists in agents.yml."""
+    agents_yml = tmp_path / "agents.yml"
+    agents_yml.write_text(
         yaml.safe_dump([
             {"name": "emrg", "path": "/home/emrg/src"},
             {"name": "other", "path": "/tmp/other"},
@@ -82,33 +82,33 @@ def test_resolve_project_path_found(tmp_path):
     orig = mod.config_dir
     try:
         mod.config_dir = lambda: tmp_path
-        assert _resolve_project_path("emrg") == "/home/emrg/src"
-        assert _resolve_project_path("other") == "/tmp/other"
-        assert _resolve_project_path("nonexistent") is None
+        assert _resolve_agent_path("emrg") == "/home/emrg/src"
+        assert _resolve_agent_path("other") == "/tmp/other"
+        assert _resolve_agent_path("nonexistent") is None
     finally:
         mod.config_dir = orig
 
 
-def test_resolve_project_path_no_file(tmp_path):
+def test_resolve_agent_path_no_file(tmp_path):
     """Returns None when agents.yml doesn't exist."""
     from emrg.server import scheduler as mod
     orig = mod.config_dir
     try:
         mod.config_dir = lambda: tmp_path
-        assert _resolve_project_path("anything") is None
+        assert _resolve_agent_path("anything") is None
     finally:
         mod.config_dir = orig
 
 
-def test_resolve_project_path_invalid_yaml(tmp_path):
+def test_resolve_agent_path_invalid_yaml(tmp_path):
     """Returns None for invalid (non-list) YAML."""
-    projects_yml = tmp_path / "agents.yml"
-    projects_yml.write_text("key: value\n")
+    agents_yml = tmp_path / "agents.yml"
+    agents_yml.write_text("key: value\n")
     from emrg.server import scheduler as mod
     orig = mod.config_dir
     try:
         mod.config_dir = lambda: tmp_path
-        assert _resolve_project_path("anything") is None
+        assert _resolve_agent_path("anything") is None
     finally:
         mod.config_dir = orig
 
@@ -156,7 +156,7 @@ def test_a_write_keeps_multiline_strings_as_literal_blocks(tmp_path):
         "- name: a\n"
         "  type: evolution\n"
         "  config:\n"
-        "    project: emrg\n"
+        "    agent: emrg\n"
         "  extra_prompt: |\n"
         "    first line\n"
         "    second line\n"
@@ -215,7 +215,7 @@ def test_read_table_refuses_a_root_that_is_not_a_list(tmp_path):
 
 
 def _task_create_fixture(tmp_path, monkeypatch, sched):
-    """A registered project + a tasks.yml, so task_create has something to be valid against."""
+    """A registered agent + a tasks.yml, so task_create has something to be valid against."""
     from emrg.server import scheduler as mod
 
     monkeypatch.setattr(mod, "config_dir", lambda: tmp_path)
@@ -745,7 +745,7 @@ def test_journal_template_renders_with_context():
     # Irrelevant-rant exclusion (rant 18:15:31)
     assert "Irrelevant-rant exclusion" in out
     # Editor role renders too (diversity/adversarial text is author-side)
-    ctx2 = dict(ctx); ctx2["task"] = {"role": "editor", "project": "j"}
+    ctx2 = dict(ctx); ctx2["task"] = {"role": "editor", "agent": "j"}
     out2 = template.render(**ctx2)
     assert "Editor Work Cycle" in out2
     assert "Contribution-level consistency" in out2 or "contribution-level" in out2
@@ -754,26 +754,26 @@ def test_journal_template_renders_with_context():
 # ── TaskHandler core ─────────────────────────────────────────
 
 
-def test_evolution_handler_project_path_fallback():
-    """Without config.project or config.path, name is the fallback path."""
+def test_evolution_handler_agent_path_fallback():
+    """Without config.agent or config.path, name is the fallback path."""
     handler = make_handler(
         name="emrg",
         config={},
         interval=1800,
         identity=InstanceIdentity(),
     )
-    assert handler.project_path == "emrg"
+    assert handler.agent_path == "emrg"
 
 
-def test_evolution_handler_project_path_from_config():
-    """config.path is used when config.project is empty."""
+def test_evolution_handler_agent_path_from_config():
+    """config.path is used when config.agent is empty."""
     handler = make_handler(
         name="emrg",
         config={"path": "/custom/path"},
         interval=1800,
         identity=InstanceIdentity(),
     )
-    assert handler.project_path == "/custom/path"
+    assert handler.agent_path == "/custom/path"
 
 
 def test_evolution_handler_stop():
@@ -806,8 +806,8 @@ def test_evolution_handler_status_last_run_fields():
     assert st["recent_runs"] == []
     # rant 2026-08-21T17:46:12: task→session link fields (GUI open-session action)
     assert st["session_id"] == "test"
-    assert st["project"] == ""  # config={} → empty project name
-    assert st["project_path"] == "test"  # fallback path = name
+    assert st["agent"] == ""  # config={} → empty agent name
+    assert st["agent_path"] == "test"  # fallback path = name
     # rant 2026-08-22T07:18:35: started_at = per-CYCLE start epoch (set at tick
     # begin, cleared at cycle end), only valid while running; None when idle
     assert st["started_at"] is None, "idle handler → started_at None"
@@ -1021,7 +1021,7 @@ def test_task_handler_task_runs_write_failure_tolerated(tmp_path):
 def test_evolution_handler_default_owner():
     """When no git remote is detectable, falls back to EMRG defaults."""
     handler = make_handler(
-        name="unknown-project",
+        name="unknown-agent",
         config={"path": "/nonexistent/path"},
         interval=1800,
         identity=InstanceIdentity(),
@@ -1029,7 +1029,7 @@ def test_evolution_handler_default_owner():
     assert handler._owner == "argszero"
     assert handler._repo == "emrg"
     assert handler._repo_url == "https://github.com/argszero/emrg.git"
-    # No repo configured (non-emrg project, no remote, no config) → no self-heal
+    # No repo configured (non-emrg agent, no remote, no config) → no self-heal
     assert handler._repo_configured is False
 
 
@@ -1100,7 +1100,7 @@ def test_paper_template_renders_with_context():
     template = env.from_string(template_path.read_text(encoding="utf-8"))
     out = template.render(
         instance_id="test", host_name="host", source_dir="/tmp/paper", session_id="s1", timestamp="20260806",
-        task={}, project={}, )
+        task={}, agent={}, )
     # The per-round `paper_state.md` was retired (rant 2026-09-14T14:35:47): the
     # session is the state now, so the template must render the continuity contract
     # and the closing summary that replaces the file — and must not name the file.
@@ -1124,7 +1124,7 @@ def test_journal_template_renders_the_continuity_contract():
     out = template.render(
         instance_id="test", host_name="host", source_dir="/tmp/journal", session_id="s1", timestamp="20260919-100129",
         current_time_human="2026-09-19 10:01", task={"role": "editor", "agent": "silicon-science-cs"},
-        project={}, owner="argszero", repo="silicon-science-cs",
+        agent={}, owner="argszero", repo="silicon-science-cs",
     )
     # The state and reflection files were retired (rant 2026-09-14T14:35:47): the
     # session is the state now, so the template must render the continuity contract
@@ -1153,13 +1153,13 @@ def test_open_source_template_renders_with_context():
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
         timestamp="20260813",
         task={"role": "committer", "agent": "aitokenpool"},
-        project={}, git_path="git", gh_path="gh",
+        agent={}, git_path="git", gh_path="gh",
     )
     assert "The rant queue" in out, "rant-scan 0.5 节应渲染"
     assert "rants.jsonl" in out, "rant 扫描命令应渲染"
-    assert "config.project" in out, "project 匹配过滤应渲染"
-    # Rant 2026-08-17T14:17:03: rant project matching is the SINGLE value
-    # config.project — owner/repo dual-compat removed (host decision).
+    assert "config.agent" in out, "agent 匹配过滤应渲染"
+    # Rant 2026-08-17T14:17:03: rant agent matching is the SINGLE value
+    # config.agent — owner/repo dual-compat removed (host decision).
     assert "aitokenpool" in out, "task.agent 值应渲染进 0.5 节"
     assert "does **NOT** match" in out, "owner/repo 形式明确不匹配"
     # the unmatched-rant hint may still mention the owner/repo form for
@@ -1196,7 +1196,7 @@ def test_open_source_template_allow_self_merge_conditional():
         instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
         timestamp="20260814",
-        project={}, git_path="git", gh_path="gh",
+        agent={}, git_path="git", gh_path="gh",
     )
 
     # default (allow_self_merge absent) → rule stands, no override
@@ -1236,7 +1236,7 @@ def test_task_extra_prompt_conditional_all_templates():
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
         timestamp="20260824",
         current_time_human="2026-08-24 22:00",
-        project={"name": "x"}, git_path="git", gh_path="gh",
+        agent={"name": "x"}, git_path="git", gh_path="gh",
     )
     extra = "插件开发（plugin）也是对本项目的合法贡献，不应被排除在贡献范围之外"
     heading = "Task-specific Instructions (extra_prompt from tasks.yml)"
@@ -1270,7 +1270,7 @@ def test_open_source_template_never_stashes_host_work():
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
         timestamp="20260820",
         task={"role": "committer", "agent": "aitokenpool"},
-        project={}, git_path="git", gh_path="gh",
+        agent={}, git_path="git", gh_path="gh",
     )
     # the old data-losing instruction is gone
     assert "→ `git stash`" not in out, "no more 'git stash' action instruction"
@@ -1302,7 +1302,7 @@ def test_open_source_template_full_code_study_b2b():
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
         timestamp="20260814",
         task={"role": "committer", "agent": "aitokenpool"},
-        project={}, git_path="git", gh_path="gh",
+        agent={}, git_path="git", gh_path="gh",
     )
     # 1) the new section exists (positive discrimination: absent section → red)
     assert "Read the full codebase" in out, "B.2b 全代码研读节应渲染"
@@ -1336,14 +1336,14 @@ def test_open_source_template_measures_the_shipped_artifact():
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
         timestamp="20260814",
         task={"role": "committer", "agent": "aitokenpool"},
-        project={}, git_path="git", gh_path="gh",
+        agent={}, git_path="git", gh_path="gh",
     )
     # 1) a defect is measured on the shipped artifact, not only on the checkout
     assert "A defect is a claim about what the project ships, so measure it there." in out, "shipped 产物节应渲染"
     # 2) the report names which artifact the reading came from
     assert "a report says which artifact its reading came from" in out, "应要求说明读的是哪个产物"
     # 2b) it does not contradict the sentence above it: latest code for design
-    # intent, what ships for the defect — and a project that publishes nothing
+    # intent, what ships for the defect — and a agent that publishes nothing
     # still has an artifact in the branch or tag its users run
     assert "The latest code is still what you read for design intent" in out, "应与「读最新代码」并存而非互斥"
     assert "where the project publishes neither" in out, "应覆盖不发布产物的项目"
@@ -1365,7 +1365,7 @@ def test_open_source_template_distinguishes_an_unrunnable_toolchain():
     suite, so the command exits 127 or fails to exec with no test collected. The block
     echoed "test failures" for every non-zero exit, which named a cause it could not
     know: one line reported an absent interpreter as a red suite, and the cycle then
-    reported a defect the project did not have.
+    reported a defect the agent did not have.
     """
     import jinja2
 
@@ -1380,7 +1380,7 @@ def test_open_source_template_distinguishes_an_unrunnable_toolchain():
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
         timestamp="20260814",
         task={"role": "committer", "agent": "aitokenpool"},
-        project={}, git_path="git", gh_path="gh",
+        agent={}, git_path="git", gh_path="gh",
     )
     # 1) the resolver runs before the suite and says what an absent tool is not
     assert "command -v <the tool the suite needs>" in out, "应先解析运行器再读结果"
@@ -1419,7 +1419,7 @@ def test_open_source_template_parallel_recon_c15():
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
         timestamp="20260824",
         task={"role": "committer", "agent": "aitokenpool"},
-        project={}, git_path="git", gh_path="gh",
+        agent={}, git_path="git", gh_path="gh",
     )
     # 1) the new section exists
     assert "The healthy rule" in out, "C.1.5 并行 Recon 节应渲染"
@@ -1473,7 +1473,7 @@ def test_open_source_entry_check_reads_the_claim_thread():
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
         timestamp="20260824",
         task={"role": "committer", "agent": "aitokenpool"},
-        project={}, git_path="git", gh_path="gh",
+        agent={}, git_path="git", gh_path="gh",
     )
     # 1) the entry check asks for the thread, which is where a claim is written
     assert "assignees,comments" in out, "入口检查应读取评论线程"
@@ -1516,7 +1516,7 @@ def test_open_source_template_empty_recon_names_the_extension_surface():
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
         timestamp="20260824",
         task={"role": "committer", "agent": "aitokenpool"},
-        project={}, git_path="git", gh_path="gh",
+        agent={}, git_path="git", gh_path="gh",
     )
     assert "no gap inside the project's extension surface" in out, "空 Recon 结论须含扩展面阅读"
 
@@ -1547,7 +1547,7 @@ def test_open_source_template_reads_the_extension_surface():
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
         timestamp="20260824",
         task={"role": "committer", "agent": "aitokenpool"},
-        project={}, git_path="git", gh_path="gh",
+        agent={}, git_path="git", gh_path="gh",
     )
     # 1) the section exists and says what a contribution through that layer even is
     assert "The project's extension surface" in out, "§1.6 扩展面阅读应渲染"
@@ -1565,7 +1565,7 @@ def test_open_source_template_reads_the_extension_surface():
 
 
 def test_promote_template_learn_latest_state_04():
-    """promote_prompt.md §0.4 requires learning the project's latest state
+    """promote_prompt.md §0.4 requires learning the agent's latest state
     before promoting (rant 2026-08-14T22:13:57, mirrors open-source B.2b #790)."""
     import jinja2
 
@@ -1580,14 +1580,14 @@ def test_promote_template_learn_latest_state_04():
         local_source="/tmp/pm", source_dir="/tmp/pm", session_id="s1",
         timestamp="20260814",
         task={"agent": "aitokenpool"},
-        project={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
+        agent={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
         git_path="git", gh_path="gh",
     )
     # 1) the new section exists (positive discrimination: absent section → red)
     assert "0.4 Learn the project's latest state" in out, "0.4 节应渲染"
     # 2) MUST every round
     assert "re-learn the project's latest state before every promotion round" in out, "每轮 MUST 前提应渲染"
-    # 3) latest commit inspection command with project.path
+    # 3) latest commit inspection command with agent.path
     assert "git fetch -q origin" in out, "git fetch 最新代码应渲染"
     assert "git log --oneline -10 origin/HEAD" in out, "最近 commit 检视应渲染"
     # 4) claims must come from just-verified state, not stale memory
@@ -1616,7 +1616,7 @@ def test_promote_template_homework_first_dehardening():
         local_source="/tmp/pm", source_dir="/tmp/pm", session_id="s1",
         timestamp="20260815",
         task={"agent": "aitokenpool"},
-        project={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
+        agent={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
         git_path="git", gh_path="gh",
     )
     # A. homework-before-participating section exists (positive discrimination)
@@ -1656,7 +1656,7 @@ def test_promote_template_direct_cdp_rule():
         local_source="/tmp/pm", source_dir="/tmp/pm", session_id="s1",
         timestamp="20260825",
         task={"agent": "aitokenpool"},
-        project={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
+        agent={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
         git_path="git", gh_path="gh",
     )
     # A. direct CDP endpoint mandated (positive discrimination)
@@ -1684,7 +1684,7 @@ def test_promote_template_registration_blog_sections():
         local_source="/tmp/pm", source_dir="/tmp/pm", session_id="s1",
         timestamp="20260815",
         task={"agent": "aitokenpool"},
-        project={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
+        agent={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
         git_path="git", gh_path="gh",
     )
     # A. Account Registration (host-authorized) section with 3 preconditions
@@ -1711,7 +1711,7 @@ def test_promote_template_registration_blog_sections():
 # ── Evolution workspace self-heal (rant 2026-08-06T20:42:05, 方案 C) ──────
 
 
-def _make_handler(tmp_path, name="emrg-task", project="emrg", path=None):
+def _make_handler(tmp_path, name="emrg-task", agent="emrg", path=None):
     """Build a TaskHandler whose record points at a tmp config dir."""
     from emrg.server import scheduler as mod
 
@@ -1720,7 +1720,7 @@ def _make_handler(tmp_path, name="emrg-task", project="emrg", path=None):
     try:
         handler = make_handler(
             name=name,
-            config={"agent": project} if project else {},
+            config={"agent": agent} if agent else {},
             interval=60,
         )
     finally:
@@ -1729,7 +1729,7 @@ def _make_handler(tmp_path, name="emrg-task", project="emrg", path=None):
         # What the handler reads is the derived set, so a test that needs a particular
         # resolution states it there rather than building a agents.yml to derive it.
         handler._derived["source_dir"] = str(path)
-        handler._derived["project_path"] = str(path)
+        handler._derived["agent_path"] = str(path)
     return handler
 
 
@@ -1754,8 +1754,8 @@ def test_a_record_deleted_from_an_existing_file_stays_deleted(tmp_path):
     orig_config = mod.config_dir
     try:
         mod.config_dir = lambda: tmp_path
-        sched._ensure_emrg_project_entry()
-        sched._ensure_emrg_project_entry()  # idempotent
+        sched._ensure_emrg_agent_entry()
+        sched._ensure_emrg_agent_entry()  # idempotent
     finally:
         mod.config_dir = orig_config
 
@@ -1780,7 +1780,7 @@ def test_the_seed_returns_when_the_whole_file_is_deleted(tmp_path):
     assert names == ["emrg-task"]
 
 
-def test_ensure_emrg_project_entry_adds_project_entry_when_missing(tmp_path):
+def test_ensure_emrg_agent_entry_adds_agent_entry_when_missing(tmp_path):
     """Missing agents.yml emrg entry gets added (fixed path, no network)."""
     from emrg.server import scheduler as mod
     from emrg.server.scheduler import TaskScheduler
@@ -1790,30 +1790,30 @@ def test_ensure_emrg_project_entry_adds_project_entry_when_missing(tmp_path):
     orig_config = mod.config_dir
     try:
         mod.config_dir = lambda: tmp_path
-        sched._ensure_emrg_project_entry()
-        sched._ensure_emrg_project_entry()  # idempotent
+        sched._ensure_emrg_agent_entry()
+        sched._ensure_emrg_agent_entry()  # idempotent
     finally:
         mod.config_dir = orig_config
 
-    projects_yml = tmp_path / "agents.yml"
-    assert projects_yml.exists()
-    data = yaml.safe_load(projects_yml.read_text(encoding="utf-8"))
+    agents_yml = tmp_path / "agents.yml"
+    assert agents_yml.exists()
+    data = yaml.safe_load(agents_yml.read_text(encoding="utf-8"))
     assert isinstance(data, list)
     emrg = next(e for e in data if e.get("name") == "emrg")
     assert emrg["path"] == str(Path.home() / ".emrg" / "evolution" / "emrg")
     assert len([e for e in data if e.get("name") == "emrg"]) == 1  # no dup
 
 
-def test_ensure_emrg_project_entry_preserves_existing_project_entry(tmp_path):
-    """Existing emrg project entry (dev-machine path) is preserved as-is."""
+def test_ensure_emrg_agent_entry_preserves_existing_agent_entry(tmp_path):
+    """Existing emrg agent entry (dev-machine path) is preserved as-is."""
     from emrg.server import scheduler as mod
     from emrg.server.scheduler import TaskScheduler
 
     # A real existing checkout dir (dev machine) — preserved, never repaired.
     dev_path = tmp_path / "dev" / "emrg"
     dev_path.mkdir(parents=True)
-    projects_yml = tmp_path / "agents.yml"
-    projects_yml.write_text(yaml.safe_dump([
+    agents_yml = tmp_path / "agents.yml"
+    agents_yml.write_text(yaml.safe_dump([
         {"name": "emrg", "path": str(dev_path),
          "last_active": "2026-01-01T00:00:00"},
     ]))
@@ -1823,27 +1823,27 @@ def test_ensure_emrg_project_entry_preserves_existing_project_entry(tmp_path):
     orig_config = mod.config_dir
     try:
         mod.config_dir = lambda: tmp_path
-        sched._ensure_emrg_project_entry()
+        sched._ensure_emrg_agent_entry()
     finally:
         mod.config_dir = orig_config
 
-    data = yaml.safe_load(projects_yml.read_text(encoding="utf-8"))
+    data = yaml.safe_load(agents_yml.read_text(encoding="utf-8"))
     assert len(data) == 1
     assert data[0]["name"] == "emrg"
     assert data[0]["path"] == str(dev_path)  # untouched
 
 
-def test_ensure_emrg_project_entry_repairs_stale_project_entry(tmp_path):
+def test_ensure_emrg_agent_entry_repairs_stale_agent_entry(tmp_path):
     """A dead emrg path (deleted pytest-temp dir) is repaired to the canonical
     workspace (2026-08-12 incident: a test run leaked a pytest temp path into
     the real ~/.emrg/agents.yml; the dir is gone after the suite, leaving a
-    dangling entry that list_projects/GUI pickers would show forever)."""
+    dangling entry that list_agents/GUI pickers would show forever)."""
     from emrg.server import scheduler as mod
     from emrg.server.scheduler import TaskScheduler
 
     stale = tmp_path / "gone" / "emrg"  # never created → dead path
-    projects_yml = tmp_path / "agents.yml"
-    projects_yml.write_text(yaml.safe_dump([
+    agents_yml = tmp_path / "agents.yml"
+    agents_yml.write_text(yaml.safe_dump([
         {"name": "emrg", "path": str(stale),
          "last_active": "2026-08-12T18:44:50"},
         {"name": "other", "path": str(tmp_path / "other")},
@@ -1854,11 +1854,11 @@ def test_ensure_emrg_project_entry_repairs_stale_project_entry(tmp_path):
     orig_config = mod.config_dir
     try:
         mod.config_dir = lambda: tmp_path
-        sched._ensure_emrg_project_entry()
+        sched._ensure_emrg_agent_entry()
     finally:
         mod.config_dir = orig_config
 
-    data = yaml.safe_load(projects_yml.read_text(encoding="utf-8"))
+    data = yaml.safe_load(agents_yml.read_text(encoding="utf-8"))
     by_name = {e["name"]: e for e in data}
     assert by_name["emrg"]["path"] == (
         str(Path.home() / ".emrg" / "evolution" / "emrg")
@@ -1867,13 +1867,13 @@ def test_ensure_emrg_project_entry_repairs_stale_project_entry(tmp_path):
     assert len(data) == 2
 
 
-def test_ensure_emrg_project_entry_other_entries_preserved(tmp_path):
-    """Non-emrg project entries survive the self-heal."""
+def test_ensure_emrg_agent_entry_other_entries_preserved(tmp_path):
+    """Non-emrg agent entries survive the self-heal."""
     from emrg.server import scheduler as mod
     from emrg.server.scheduler import TaskScheduler
 
-    projects_yml = tmp_path / "agents.yml"
-    projects_yml.write_text(yaml.safe_dump([
+    agents_yml = tmp_path / "agents.yml"
+    agents_yml.write_text(yaml.safe_dump([
         {"name": "paper", "path": "/some/paper"},
     ]))
 
@@ -1882,11 +1882,11 @@ def test_ensure_emrg_project_entry_other_entries_preserved(tmp_path):
     orig_config = mod.config_dir
     try:
         mod.config_dir = lambda: tmp_path
-        sched._ensure_emrg_project_entry()
+        sched._ensure_emrg_agent_entry()
     finally:
         mod.config_dir = orig_config
 
-    data = yaml.safe_load(projects_yml.read_text(encoding="utf-8"))
+    data = yaml.safe_load(agents_yml.read_text(encoding="utf-8"))
     names = [e.get("name") for e in data]
     assert "paper" in names
     assert "emrg" in names
@@ -1933,7 +1933,7 @@ def _make_cycle_handler(tmp_path, frames):
     async def _fake_connect():
         return _FakeWS(frames)
 
-    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    handler = _make_handler(tmp_path, agent="", path=str(tmp_path))
     handler._build_evolution_prompt = lambda: "test prompt"
     mod.connect_to_server = _fake_connect
 
@@ -1990,7 +1990,7 @@ def test_a_scheduled_task_message_declares_its_prompt_is_not_host_input(tmp_path
     async def _fake_connect():
         return _FakeWS()
 
-    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    handler = _make_handler(tmp_path, agent="", path=str(tmp_path))
     handler._build_evolution_prompt = lambda: "a rendered task prompt"
     orig_connect = mod.connect_to_server
     mod.connect_to_server = _fake_connect
@@ -2799,7 +2799,7 @@ def test_saturation_heartbeat_active_true_when_throttled(tmp_path):
     """Throttle flag on → heartbeat cadence (not skip), no network (rant
     2026-08-18T20:32:07 — upstream check removed; flag from vibe check, rant
     2026-08-20T10:58:55)."""
-    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    handler = _make_handler(tmp_path, agent="", path=str(tmp_path))
     handler._slowdown_active = True
     assert handler._saturation_heartbeat_active() is True
     assert handler._heartbeat_interval() == 480  # 60s task → 8 min
@@ -2834,7 +2834,7 @@ def test_saturation_heartbeat_makes_no_network_calls(tmp_path):
     deleted the self-heal git machinery) — no subprocess can be called."""
     from emrg.server import scheduler as mod
 
-    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    handler = _make_handler(tmp_path, agent="", path=str(tmp_path))
     handler._slowdown_active = True
 
     assert not hasattr(mod, "subprocess"), \
@@ -2844,7 +2844,7 @@ def test_saturation_heartbeat_makes_no_network_calls(tmp_path):
 
 def test_saturation_heartbeat_false_when_normal(tmp_path):
     """No throttle flag → normal interval (remote state irrelevant)."""
-    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    handler = _make_handler(tmp_path, agent="", path=str(tmp_path))
     handler._slowdown_active = False
     assert handler._saturation_heartbeat_active() is False
 
@@ -2877,7 +2877,7 @@ def test_list_tasks_logs_slow_status(tmp_path, caplog):
     import time as _time
     from emrg.server import scheduler as mod
 
-    handler = _make_handler(tmp_path, name="slow", project="", path=str(tmp_path))
+    handler = _make_handler(tmp_path, name="slow", agent="", path=str(tmp_path))
     orig_status = handler.status
 
     def slow_status():
@@ -2957,10 +2957,10 @@ def test_list_tasks_shows_a_deleted_task_gone_at_once(tmp_path):
 
 
 def _p2_env(tmp_path):
-    """Point config_dir at tmp_path with a registered project."""
+    """Point config_dir at tmp_path with a registered agent."""
     from emrg.server import scheduler as mod
-    projects_yml = tmp_path / "agents.yml"
-    projects_yml.write_text(yaml.safe_dump([
+    agents_yml = tmp_path / "agents.yml"
+    agents_yml.write_text(yaml.safe_dump([
         {"name": "emrg", "path": str(tmp_path / "emrg")},
         {"name": "mem", "path": str(tmp_path / "mem")},
     ]))
@@ -2970,7 +2970,7 @@ def _p2_env(tmp_path):
 
 
 def test_task_create_validation(tmp_path):
-    """Invalid name / unknown type / unregistered project / interval<60 rejected."""
+    """Invalid name / unknown type / unregistered agent / interval<60 rejected."""
     from emrg.server import scheduler as mod
     mod, orig = _p2_env(tmp_path)
     try:
@@ -3012,7 +3012,7 @@ def test_task_create_and_duplicate(tmp_path):
 def test_a_record_the_file_carries_runs_even_with_uppercase_in_its_name(tmp_path):
     """The loader must not refuse the content of its own file.
 
-    `OfficeCLI-opensource-task` is the host's real record, named after the project
+    `OfficeCLI-opensource-task` is the host's real record, named after the agent
     `OfficeCLI` in agents.yml. While the name rule accepted lowercase only, the loader
     refused it at **every** scheduler tick — measured 2026-09-30: one identical error
     line ×3963 in `~/.emrg/emrgd.log`, first at 06:51:45 and still firing at 11:19:11, so
@@ -3067,7 +3067,7 @@ def test_the_name_rule_is_about_the_path_not_the_case(tmp_path):
     def record(name: str) -> dict:
         return {"name": name, "type": "evolution", "interval": 60, "config": {}}
 
-    # Accepted — including the host's own name and any other real project name.
+    # Accepted — including the host's own name and any other real agent name.
     assert validate_task_record(record("OfficeCLI-opensource-task")) is None
     assert validate_task_record(record("MixedCase-Task")) is None
     assert validate_task_record(record("a" * TASK_NAME_MAX)) is None
@@ -3242,7 +3242,7 @@ def test_reconcile_changes_nothing_when_the_table_is_unreadable(tmp_path):
 def test_the_record_read_is_what_leaves_the_event_loop():
     """rant 2026-08-19T01:05:47 — the git probe must not run on the loop.
 
-    Deriving a record probes the project's git remote (a subprocess), and that now
+    Deriving a record probes the agent's git remote (a subprocess), and that now
     happens at every wake inside `run()` rather than once in `__init__` — so the
     offload moved with it and has to be asserted where it now is. Reading a source
     string is the check because the alternative is a slow git on the loop, which this
@@ -3257,9 +3257,9 @@ def test_the_record_read_is_what_leaves_the_event_loop():
     assert "await asyncio.to_thread(self._apply_record, record)" in src
 
 
-def test_daemon_projects_list_offloads_git_probe_to_thread():
-    """rant 2026-08-19T01:05:47 — the daemon's projects_list handler probes
-    each project's git remote with a sync subprocess; it must run in worker
+def test_daemon_agents_list_offloads_git_probe_to_thread():
+    """rant 2026-08-19T01:05:47 — the daemon's agents_list handler probes
+    each agent's git remote with a sync subprocess; it must run in worker
     threads (asyncio.to_thread) so a slow git probe never freezes the loop."""
     from pathlib import Path as _Path
 
@@ -3345,9 +3345,9 @@ def test_task_create_custom_type(tmp_path):
         mod.config_dir = orig
 
 
-def test_evolution_template_renders_dual_project_match():
-    """evolution_prompt.md renders the dual-compatible rant project match
-    (rant 2026-08-17T12:09:57): both config.project AND owner/repo forms
+def test_evolution_template_renders_dual_agent_match():
+    """evolution_prompt.md renders the dual-compatible rant agent match
+    (rant 2026-08-17T12:09:57): both config.agent AND owner/repo forms
     must be accepted when scanning rants."""
     import jinja2
 
@@ -3362,11 +3362,11 @@ def test_evolution_template_renders_dual_project_match():
         repo="emrg", local_source="/tmp/evo", source_dir="/tmp/evo",
         session_id="s1", timestamp="20260817",
         task={"role": "committer", "agent": "emrg"},
-        project={}, git_path="git", gh_path="gh",
+        agent={}, git_path="git", gh_path="gh",
     )
     assert "emrg" in out, "task.agent 值应渲染"
     assert "argszero/emrg" in out, "owner/repo 形式应渲染"
-    assert "ignore rants without a `project` field entirely" in out
+    assert "ignore rants without a `agent` field entirely" in out
 
 
 # ── sandbox tier resolution (rant 2026-08-20T18:05:20) ─────────────
@@ -3920,7 +3920,7 @@ def test_a_silent_turn_ends_as_a_stall_not_as_a_completion(tmp_path, monkeypatch
     from emrg.server import scheduler as mod
 
     monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
-    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    handler = _make_handler(tmp_path, agent="", path=str(tmp_path))
     _silence_frames(handler, tmp_path, monkeypatch, frames=[
         {"request_id": "r1", "content": "thinking", "done": False,
          "delta": True, "session_id": "s"},
@@ -3956,7 +3956,7 @@ def test_a_tool_call_is_bounded_by_its_own_declared_timeout(tmp_path, monkeypatc
 
     monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
     monkeypatch.setattr(mod, "_TOOL_SILENCE_GRACE_SECONDS", 0.05)
-    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    handler = _make_handler(tmp_path, agent="", path=str(tmp_path))
     _silence_frames(handler, tmp_path, monkeypatch, frames=[
         {"type": "tool_start", "tool_name": "bash",
          "arguments": {"command": "sleep 3000", "timeout": 3700}},
@@ -4017,7 +4017,7 @@ def test_a_stalled_cycle_frees_the_slot_and_records_why(tmp_path, monkeypatch, c
     from emrg.server import scheduler as mod
 
     monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
-    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    handler = _make_handler(tmp_path, agent="", path=str(tmp_path))
     _silence_frames(handler, tmp_path, monkeypatch, frames=[
         {"request_id": "r1", "content": "thinking", "done": False,
          "delta": True, "session_id": "s"},
@@ -4058,7 +4058,7 @@ def test_a_cycle_queued_behind_a_busy_session_is_not_a_stall(tmp_path, monkeypat
     from emrg.server import scheduler as mod
 
     monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
-    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    handler = _make_handler(tmp_path, agent="", path=str(tmp_path))
     _silence_frames(handler, tmp_path, monkeypatch, frames=[
         {"type": "task_queued", "request_id": "evolution-x", "session_id": "s",
          "position": 1},
@@ -4101,7 +4101,7 @@ def test_a_queued_request_that_is_served_inside_the_wait_is_a_normal_cycle(
     from emrg.server import scheduler as mod
 
     monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
-    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    handler = _make_handler(tmp_path, agent="", path=str(tmp_path))
     _silence_frames(handler, tmp_path, monkeypatch, frames=[
         {"type": "task_queued", "request_id": "evolution-x", "session_id": "s",
          "position": 1},
@@ -4142,7 +4142,7 @@ def test_the_handlers_own_work_between_frames_is_not_silence(
     from emrg.server import scheduler as mod
 
     monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
-    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    handler = _make_handler(tmp_path, agent="", path=str(tmp_path))
     _silence_frames(handler, tmp_path, monkeypatch, frames=[
         {"type": "task_queued", "request_id": "evolution-x", "session_id": "s",
          "position": 1},
@@ -4181,7 +4181,7 @@ def test_silence_after_a_queued_cycle_started_is_a_stall_again(tmp_path, monkeyp
     from emrg.server import scheduler as mod
 
     monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
-    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    handler = _make_handler(tmp_path, agent="", path=str(tmp_path))
     _silence_frames(handler, tmp_path, monkeypatch, frames=[
         {"type": "task_queued", "request_id": "evolution-x", "session_id": "s",
          "position": 1},
@@ -4214,7 +4214,7 @@ def test_a_queued_cycle_leaves_a_marker_that_names_the_busy_session(
     from emrg.server import scheduler as mod
 
     monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
-    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    handler = _make_handler(tmp_path, agent="", path=str(tmp_path))
     _silence_frames(handler, tmp_path, monkeypatch, frames=[
         {"type": "task_queued", "request_id": "evolution-x", "session_id": "s",
          "position": 2},
@@ -4303,7 +4303,7 @@ def test_a_silent_daemon_after_the_terminal_frame_does_not_wedge_the_handler(
     from emrg.server import scheduler as mod
 
     monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
-    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    handler = _make_handler(tmp_path, agent="", path=str(tmp_path))
     _silence_frames(handler, tmp_path, monkeypatch, frames=[
         {"request_id": "r1", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
@@ -4351,7 +4351,7 @@ class TestSchedulerReadersAskTheKindBeforeOpening:
     """A scheduler subject that is not a regular file is answered, not opened (#2095).
 
     Measured on master `171d90d0` before the fix, one child process per arm under an
-    8 s cap: `read_table`, `_resolve_project_path`, `_load_project_config`,
+    8 s cap: `read_table`, `_resolve_agent_path`, `_load_agent_config`,
     `_read_custom_template` and the handler's saturation / heartbeat / next-run /
     task-run readers each **did not return** against a FIFO, where the same call with
     the subject absent answered at once. Each test below is therefore also a bound: it
@@ -4372,7 +4372,7 @@ class TestSchedulerReadersAskTheKindBeforeOpening:
         monkeypatch.setattr(mod, "config_dir", lambda: tmp_path)
 
     def _handler(self, tmp_path, attr: str, rel: str):
-        handler = _make_handler(tmp_path, name="probe", project="", path=str(tmp_path))
+        handler = _make_handler(tmp_path, name="probe", agent="", path=str(tmp_path))
         setattr(handler, attr, self._fifo(tmp_path / rel))
         return handler
 
@@ -4392,20 +4392,20 @@ class TestSchedulerReadersAskTheKindBeforeOpening:
         assert "a FIFO" in str(excinfo.value), str(excinfo.value)
 
     @_needs_mkfifo
-    def test_resolve_project_path_answers_none_for_a_fifo(self, tmp_path, monkeypatch):
+    def test_resolve_agent_path_answers_none_for_a_fifo(self, tmp_path, monkeypatch):
         from emrg.server import scheduler as mod
 
         self._config(tmp_path, monkeypatch)
         self._fifo(tmp_path / "agents.yml")
-        assert within(DEADLINE_SECONDS, lambda: mod._resolve_project_path("probe")) is None
+        assert within(DEADLINE_SECONDS, lambda: mod._resolve_agent_path("probe")) is None
 
     @_needs_mkfifo
-    def test_load_project_config_answers_empty_for_a_fifo(self, tmp_path, monkeypatch):
+    def test_load_agent_config_answers_empty_for_a_fifo(self, tmp_path, monkeypatch):
         from emrg.server import scheduler as mod
 
         self._config(tmp_path, monkeypatch)
         self._fifo(tmp_path / "agents.yml")
-        assert within(DEADLINE_SECONDS, lambda: mod._load_project_config("probe", str(tmp_path))) == {}
+        assert within(DEADLINE_SECONDS, lambda: mod._load_agent_config("probe", str(tmp_path))) == {}
 
     @_needs_mkfifo
     def test_read_custom_template_answers_none_for_a_fifo(self, tmp_path, monkeypatch):
@@ -4451,7 +4451,7 @@ class TestSchedulerReadersAskTheKindBeforeOpening:
 
     @_needs_mkfifo
     def test_the_recovery_receipt_writer_refuses_a_fifo(self, tmp_path, monkeypatch, caplog):
-        """The receipt lives in the git dir — inside the project the agent works in."""
+        """The receipt lives in the git dir — inside the agent the agent works in."""
         git_dir = tmp_path / ".git"
         git_dir.mkdir()
         self._fifo(git_dir / "emrg-recovery-receipt.json")
@@ -4470,7 +4470,7 @@ class TestSchedulerReadersAskTheKindBeforeOpening:
         """This site has no handler of its own: today it does not raise, it never
         returns. Naming the kind is the answer a task whose prompt cannot be read
         owes — silence is not."""
-        handler = _make_handler(tmp_path, name="probe", project="", path=str(tmp_path))
+        handler = _make_handler(tmp_path, name="probe", agent="", path=str(tmp_path))
         handler._derived["template_path"] = self._fifo(tmp_path / "prompt.md")
         with pytest.raises(NotARegularFile) as excinfo:
             within(DEADLINE_SECONDS, handler._build_evolution_prompt)
@@ -4494,7 +4494,7 @@ class TestSchedulerReadersAskTheKindBeforeOpening:
         # and thrown away one line later. Making one also needs `os.mkfifo`, which does
         # not exist on Windows — the control would have been skipped on the one platform
         # least able to run the subjects above it, which is the opposite of a control.
-        handler = _make_handler(tmp_path, name="probe", project="", path=str(tmp_path))
+        handler = _make_handler(tmp_path, name="probe", agent="", path=str(tmp_path))
         handler._task_runs_file = tmp_path / "task-runs" / "regular.jsonl"
         handler._task_runs_file.parent.mkdir(parents=True, exist_ok=True)
         handler._task_runs_file.write_text(
@@ -4531,7 +4531,7 @@ class TestSchedulerWritersAskTheKindBeforeOpening:
         return path
 
     def _handler(self, tmp_path, attr: str, rel: str):
-        handler = _make_handler(tmp_path, name="probe", project="", path=str(tmp_path))
+        handler = _make_handler(tmp_path, name="probe", agent="", path=str(tmp_path))
         setattr(handler, attr, self._fifo(tmp_path / rel))
         return handler
 
@@ -4563,7 +4563,7 @@ class TestSchedulerWritersAskTheKindBeforeOpening:
         It is reached once per handler lifetime, on the way out of `run()`; silence
         there is the same `never returns` the rest of this class is about.
         """
-        handler = _make_handler(tmp_path, name="probe", project="", path=str(tmp_path))
+        handler = _make_handler(tmp_path, name="probe", agent="", path=str(tmp_path))
         handler._logs_dir = tmp_path / "logs"
         self._fifo(handler._logs_dir / "summary.json")
         handler.evolutions = [
@@ -4601,7 +4601,7 @@ class TestSchedulerWritersAskTheKindBeforeOpening:
         from emrg.server import scheduler as mod
 
         monkeypatch.setattr(mod, "config_dir", lambda: tmp_path)
-        handler = _make_handler(tmp_path, name="probe", project="", path=str(tmp_path))
+        handler = _make_handler(tmp_path, name="probe", agent="", path=str(tmp_path))
         handler._heartbeat_file = tmp_path / "task-runs" / "probe.heartbeat.json"
         handler._saturation_file = tmp_path / "saturation" / "probe.json"
         handler._next_run_file = tmp_path / "next-run" / "probe.json"

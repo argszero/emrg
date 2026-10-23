@@ -1,8 +1,8 @@
-"""The files the daemon embeds as project context must name files this repository has.
+"""The files the daemon embeds as agent context must name files this repository has.
 
 The defect class, one carrier over from PR #1610
 ------------------------------------------------
-`EmrgServer._collect_project_context` reads `PROJECT_CONTEXT_FILES` out of a session's
+`EmrgServer._collect_agent_context` reads `PROJECT_CONTEXT_FILES` out of a session's
 cwd and puts their text into the system prompt of every session whose cwd is this
 checkout — the same render site a task session and a host conversation both go through.
 For this repository that is `Agent.md` (embedded whole, and the file that *is* the
@@ -66,7 +66,7 @@ def test_the_embedded_set_is_the_one_this_scan_reads() -> None:
     """The subject is the daemon's list, and this checkout ships a non-empty part of it.
 
     Without this the scan could pass over a set that is empty — green because it read
-    nothing, which is the shape this project refuses to call a pass.
+    nothing, which is the shape this agent refuses to call a pass.
     """
     files = _embedded_here()
     assert files, (
@@ -94,9 +94,9 @@ def test_the_collector_embeds_exactly_the_files_the_constant_names(tmp_path: Pat
     for name in PROJECT_CONTEXT_FILES:
         (tmp_path / name).write_text(f"# {name}\n", encoding="utf-8")
     (tmp_path / "NOTES.md").write_text("# not in the embedded set\n", encoding="utf-8")
-    session = Session.create_with_id("project-context-set", tmp_path)
+    session = Session.create_with_id("agent-context-set", tmp_path)
 
-    got = [entry["name"] for entry in server._collect_project_context(session)]
+    got = [entry["name"] for entry in server._collect_agent_context(session)]
     assert got == list(PROJECT_CONTEXT_FILES), (
         f"the prompt embedded {got}, and PROJECT_CONTEXT_FILES says "
         f"{list(PROJECT_CONTEXT_FILES)} — the guard that reads the constant would then be "
@@ -104,7 +104,7 @@ def test_the_collector_embeds_exactly_the_files_the_constant_names(tmp_path: Pat
     )
 
 
-def test_every_repo_path_a_project_context_file_names_is_a_file_in_the_tree() -> None:
+def test_every_repo_path_a_agent_context_file_names_is_a_file_in_the_tree() -> None:
     """The brief's commands name files this repository has.
 
     Measured before the guard was written: 19 named paths across the two files this
@@ -121,7 +121,7 @@ def test_every_repo_path_a_project_context_file_names_is_a_file_in_the_tree() ->
         if (gone := _named_repo_paths_without_a_file(text))
     }
     assert not missing, (
-        f"these project-context files name a path this repository does not have: {missing} — "
+        f"these agent-context files name a path this repository does not have: {missing} — "
         "the daemon puts this text in the prompt of every session running in this checkout, so "
         "a citation that stopped resolving sends every session after it to a file that is gone"
     )

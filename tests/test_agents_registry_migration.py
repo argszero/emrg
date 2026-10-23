@@ -164,7 +164,7 @@ def test_the_old_name_is_spelled_only_where_the_move_is():
     One carrier is exempt, and it is enumerated rather than matched: the rotation
     script runs stdlib-only, so it cannot ask `emrg.config`, and it must keep
     answering while a checkout is ahead of the daemon that performs the move
-    (`agents.yml` travels in a release, and installing one is what restarts that
+    (`projects.yml` travels in a release, and installing one is what restarts that
     daemon). Its exemption is checked to be live below — an exemption that no
     longer names anything fails, so this list cannot rot into a permission.
     """
@@ -185,10 +185,10 @@ def test_the_old_name_is_spelled_only_where_the_move_is():
             text = path.read_text(encoding="utf-8", errors="replace")
             if "projects.yml" in text:
                 offenders.append(f"{relative}: old name")
-            if "agents.yml" in text and "config_dir()" in text:
+            if "projects.yml" in text and "config_dir()" in text:
                 # A path built from the config directory again, rather than asked for.
                 for line in text.splitlines():
-                    if "agents.yml" in line and "config_dir()" in line:
+                    if "projects.yml" in line and "config_dir()" in line:
                         offenders.append(f"{relative}: {line.strip()}")
     assert not offenders, "the register's path is built outside its one producer:\n" + "\n".join(
         offenders

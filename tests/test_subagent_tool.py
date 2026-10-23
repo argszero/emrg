@@ -53,7 +53,7 @@ def _run(coro):
 
 
 def _server(tmp_path, monkeypatch) -> EmrgServer:
-    """A server whose planted-fire markers and projects log stay under `tmp_path`.
+    """A server whose planted-fire markers and agents log stay under `tmp_path`.
 
     The loop stamps host state at round finalization; a suite run must not write
     `~/.emrg/logs`, and a test that leaves the real marker behind changes what the
@@ -135,7 +135,7 @@ def test_the_parent_receives_the_childs_answer_and_its_facts(tmp_path, monkeypat
     assert cwd.is_dir(), f"the report names a cwd that does not exist: {cwd}"
     assert str(tmp_path) in str(cwd), (
         "a child's cwd must sit inside the parent's session tree, or its memory is "
-        f"planted in a project root nobody asked about: {cwd}"
+        f"planted in a agent root nobody asked about: {cwd}"
     )
     assert _report_field(report, "rounds").isdigit()
     assert float(_report_field(report, "elapsed").rstrip("s")) >= 0.0

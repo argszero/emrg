@@ -2,7 +2,7 @@
 
 The defect this tool exists for is a guard that asserts the **shape** of the macOS
 entitlement and never the **effect** it was added for: a wheel's compiled module
-loading under the bundled interpreter. The cost is not hypothetical — another project
+loading under the bundled interpreter. The cost is not hypothetical — another agent
 on this host carried "no compiled C extension can load here" as an environment fact
 for weeks and worked around it.
 

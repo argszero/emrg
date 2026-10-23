@@ -179,7 +179,7 @@ def test_the_entry_names_the_runtime_dirs_path_in_the_repository(tmp_path):
         "EMRG's own bookkeeping must stop being the task's dirt here as well"
     )
     assert _status(repo, "work/clone").strip() == ""
-    assert not (repo / ".gitignore").exists(), "the project's .gitignore is not ours"
+    assert not (repo / ".gitignore").exists(), "the agent's .gitignore is not ours"
 
 
 def test_the_sandbox_stops_reading_emrgs_own_runtime_data_as_the_hosts(tmp_path):

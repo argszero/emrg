@@ -20,8 +20,8 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "check-gui-package-refs.py"
 
 
-def _gui_project(tmp_path: Path, *, app_from: str = "../../dist/runtime", icon: str = "../../packaging/assets/icon.png") -> Path:
-    """A GUI project dir shaped like emrg/gui, plus the repo-root products its refs name."""
+def _gui_agent(tmp_path: Path, *, app_from: str = "../../dist/runtime", icon: str = "../../packaging/assets/icon.png") -> Path:
+    """A GUI package dir shaped like emrg/gui, plus the repo-root products its refs name."""
     repo = tmp_path / "repo"
     gui = repo / "emrg" / "gui"
     gui.mkdir(parents=True)
@@ -60,7 +60,7 @@ def _run(gui: Path, platform: str = "linux") -> subprocess.CompletedProcess[str]
 
 
 def test_every_reference_resolving_is_a_pass(tmp_path: Path) -> None:
-    gui = _gui_project(tmp_path)
+    gui = _gui_agent(tmp_path)
     done = _run(gui)
     assert done.returncode == 0, done.stdout + done.stderr
     assert "OK: " in done.stdout
@@ -70,7 +70,7 @@ def test_every_reference_resolving_is_a_pass(tmp_path: Path) -> None:
 
 def test_a_reference_one_level_short_is_a_fault(tmp_path: Path) -> None:
     """The measured shape: `../dist/runtime` resolves inside emrg/ while the product is at the root."""
-    gui = _gui_project(tmp_path, app_from="../dist/runtime")
+    gui = _gui_agent(tmp_path, app_from="../dist/runtime")
     done = _run(gui)
     assert done.returncode == 1, done.stdout + done.stderr
     # the reading names the place the short path lands (inside emrg/), not just "something is wrong"
@@ -80,7 +80,7 @@ def test_a_reference_one_level_short_is_a_fault(tmp_path: Path) -> None:
 
 def test_a_platform_block_is_read_only_where_its_build_runs(tmp_path: Path) -> None:
     """The mac icons exist on macOS alone (iconutil), so a Linux reading must not fault on them."""
-    gui = _gui_project(tmp_path)
+    gui = _gui_agent(tmp_path)
     (gui.parent.parent / "packaging" / "assets" / "icon.icns").unlink()
     assert _run(gui, platform="linux").returncode == 0
     mac = _run(gui, platform="mac")
@@ -89,7 +89,7 @@ def test_a_platform_block_is_read_only_where_its_build_runs(tmp_path: Path) -> N
 
 
 def test_an_unreadable_manifest_is_not_a_pass(tmp_path: Path) -> None:
-    gui = _gui_project(tmp_path)
+    gui = _gui_agent(tmp_path)
     (gui / "package.json").write_text("{ not json", encoding="utf-8")
     done = _run(gui)
     assert done.returncode == 2, done.stdout + done.stderr
@@ -108,7 +108,7 @@ def test_a_manifest_without_build_resources_is_not_a_pass(tmp_path: Path) -> Non
     Uncovered until 2026-10-10 — the second of the guard's two unmeasurable paths, with no
     test reading it.
     """
-    gui = _gui_project(tmp_path)
+    gui = _gui_agent(tmp_path)
     manifest = json.loads((gui / "package.json").read_text(encoding="utf-8"))
     del manifest["build"]["directories"]["buildResources"]
     (gui / "package.json").write_text(json.dumps(manifest), encoding="utf-8")

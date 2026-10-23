@@ -17,7 +17,7 @@ from emrg.client.python_tui import ChatRow, Diff, InputParser, StatusLine, Termi
 from emrg.client.python_tui.pending_rows import ParkedUserRows
 from emrg.client.python_tui.widgets.markdown import StreamingMarkdown
 from emrg.client.widgets import (
-    InputWidget, RewindSelector, SessionSelector, ProjectSelector,
+    InputWidget, RewindSelector, SessionSelector, AgentSelector,
     TaskSelector, ModelSelector, SandboxSelector, CommandDropdown, ChatHistory,
     SelectorState, _COMMAND_HELP,
     ToolSelector,
@@ -171,7 +171,7 @@ def _auto_title_from_prompt(text: str, max_len: int = 30) -> str | None:
 def _task_session_target(task: dict | None) -> tuple[str, str] | None:
     """The ``(cwd, session_id)`` that opening a task's session needs.
 
-    ``list_tasks`` rows already carry both (`handler.status()` → `project_path`,
+    ``list_tasks`` rows already carry both (`handler.status()` → `agent_path`,
     `session_id`), so /task-session needs no server change (rant
     2026-09-17T18:36:08). Returns ``None`` when they cannot be used — a task
     that has never run, or a row without them — and the caller then reports that
@@ -181,11 +181,11 @@ def _task_session_target(task: dict | None) -> tuple[str, str] | None:
     Module-level and pure so it is unit-testable without a terminal: the branch
     it feeds is otherwise only reachable by driving the TUI. Missing, empty and
     non-string fields all count as unusable — `os.getcwd`-style falsiness is not
-    an answer to "where is this project".
+    an answer to "where is this agent".
     """
     if not isinstance(task, dict):
         return None
-    cwd = task.get("project_path")
+    cwd = task.get("agent_path")
     sid = task.get("session_id")
     if not isinstance(cwd, str) or not cwd.strip():
         return None
@@ -202,7 +202,7 @@ def _task_open_switch(pending: tuple[str, str] | None, resumed_sid: str) -> str 
     answer is about a *different* session than the one the open asked for. The
     second is not hypothetical — an open whose verdict never arrived (the
     connection dropped) leaves its target behind, and a later `/resume <id>`
-    succeeding must not then drag the host into a project they never picked,
+    succeeding must not then drag the host into an agent they never picked,
     which is the defect a cwd is the wrong place to discover.
     """
     if pending is None or pending[1] != resumed_sid:
@@ -217,7 +217,7 @@ def _resume_target_from_resolution(
 
     Rant 2026-09-29T15:52:49 (requirement 6, the client half). The client used to
     send its **own** cwd with every ``resume_session``, which is only ever right
-    by accident: a session belonging to another project — a scheduled task's
+    by accident: a session belonging to another agent — a scheduled task's
     cycle above all — lives under a different ``.emrg/sessions/``, and the
     daemon's broadcast filter is keyed by ``(session, cwd)``, so the wrong cwd
     both fails to open it and, where it opens, leaves the live frames addressed
@@ -227,12 +227,12 @@ def _resume_target_from_resolution(
     names a different session than the one asked for. Same discipline as
     ``_task_open_switch`` at the other end of the same round trip, and for the
     same reason — a verdict that arrives after its request was abandoned must not
-    move the host into a project they never picked.
+    move the host into an agent they never picked.
 
     An ``unknown`` answer is **not** the same reading as an answer that carries a
-    cwd. The daemon cannot vouch for the session's project when the global index
+    cwd. The daemon cannot vouch for the session's agent when the global index
     does not know it, so the client keeps the cwd it has (correct for a session in
-    the current project) rather than treating a guess as a fact.
+    the current agent) rather than treating a guess as a fact.
     """
     if not pending_sid or result.get("session_id") != pending_sid:
         return None
@@ -282,7 +282,7 @@ def _cards_from_tool_calls(tool_calls) -> list[ToolCard]:
             status="pending",
             tool_call_id=str(call.get("id") or ""),
             arguments=args,
-            # The daemon projects `call_label` into every history entry it returns,
+            # The daemon agents `call_label` into every history entry it returns,
             # so a resumed session shows the same label the live one did — including
             # a session recorded before the field existed (rant 2026-10-20T12:22:21).
             call_label=str(call.get("call_label") or ""),
@@ -384,7 +384,7 @@ def _replay_rows(messages) -> list[tuple[str, object, str]]:
     contract: `kind: "message"` for the user, assistant and system roles,
     `kind: "tool_result"` for tool output, and `kind: "summary"` for a compaction
     boundary. A record outside that set is skipped rather than rendered as a blank
-    row — a role the file on disk may hold and the records mode does not project is
+    row — a role the file on disk may hold and the records mode does not agent is
     invented nowhere here, because inventing it would put the TUI and the GUI back on
     two different content paths, which is the defect that requirement removes.
 
@@ -1124,7 +1124,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
     # Session setup
     cwd = os.getcwd()
     session_id = generate_session_id(Path(cwd))
-    project_name = Path(cwd).name
+    agent_name = Path(cwd).name
 
     # Send init_auto_evolve if requested (before ping, so daemon
     # processes it before any user interaction starts)
@@ -1210,7 +1210,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         status.elapsed = ""
         # Rant 2026-09-02T10:31:11：与 done 路径（:617）一致的标题复位——中断
         # 漏清 term.set_title 会让标题残留 [m:ss] 计时停住。
-        term.set_title(f"{session_title or session_id} @ {project_name}")
+        term.set_title(f"{session_title or session_id} @ {agent_name}")
         chat.add("system", CANCELLED_LINE)
         _last_center = server_id or "emrg"
         status.update(center=_last_center)
@@ -1272,7 +1272,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                 mins, secs = divmod(elapsed, 60)
                 timer = f"[{mins}:{secs:02d}]"
                 status.elapsed = timer
-                term.set_title(f"{timer} {session_title or session_id} @ {project_name}")
+                term.set_title(f"{timer} {session_title or session_id} @ {agent_name}")
                 term.render()
             except Exception as e:
                 logger.error("elapsed timer error: %s", e)
@@ -1297,13 +1297,13 @@ async def interactive(init_auto_evolve: bool = False, console=None):
     # Selector state — each selector has an active flag, widget ref, and pending flag.
     session_sel = SelectorState()
     delete_sel = SelectorState()
-    project_sel = SelectorState()
+    agent_sel = SelectorState()
     model_sel = SelectorState()
     sandbox_sel = SelectorState()
     rewind_sel = SelectorState()
     task_sel = SelectorState()
     tool_sel = SelectorState()  # Tab: the tool-detail selector (rant 2026-09-30T09:17:54)
-    _rant_project: str | None = None  # Set after project selection, used on next Enter
+    _rant_agent: str | None = None  # Set after agent selection, used on next Enter
     _skills_confirm: tuple | None = None  # (skill_name, install_cmd) — next Enter answers the prompt
     # (request_id, question, deadline) while the daemon is waiting on this
     # client's answer to an escalation request — the next line typed is the
@@ -1362,8 +1362,8 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         nonlocal _last_center, _elapsed_task, conn
         nonlocal _request_start, turn_running
         # /task-session: the daemon's verdict on a task's session decides whether
-        # the client moves into that task's project at all (rant 2026-09-17T18:36:08).
-        nonlocal cwd, project_name, _task_list_intent, _task_open_pending
+        # the client moves into that task's agent at all (rant 2026-09-17T18:36:08).
+        nonlocal cwd, agent_name, _task_list_intent, _task_open_pending
         nonlocal _resume_pending_sid
         nonlocal _replay_pending
         nonlocal _rewind_fill, _rewind_replay
@@ -1447,7 +1447,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                         ver = getattr(emrg, "__version__", "dev")
                         chat.add("system", f"EMRG {ver}  |  {server_id}\nType /help for shortcuts, or just start chatting.")
                     status.update(left=_status_left(session_title, session_id, current_model, current_vision, current_sandbox), center=server_id)
-                    term.set_title(f"{session_title or session_id} @ {project_name}")
+                    term.set_title(f"{session_title or session_id} @ {agent_name}")
                     term.render(); continue
 
                 # P1 queue-injection client side (daemon #655): messages sent
@@ -1744,7 +1744,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                         chat.add("system", f"⚠ {resp.content}  Try '继续' to resume.")
                     _last_center = server_id or "emrg"
                     status.update(center=_last_center)
-                    term.set_title(f"{session_title or session_id} @ {project_name}")
+                    term.set_title(f"{session_title or session_id} @ {agent_name}")
                     # rant 21:52:18: daemon's done frame reports the authoritative
                     # current-context message count (system + history + tool results);
                     # fall back to the local +1 approximation when absent.
@@ -1816,7 +1816,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                             chat.dirty = True
                             chat.add("system", f"Created new session {new_sid} — continue chatting.")
                             status.update(left=_status_left("", new_sid, current_model, current_vision, current_sandbox), center=server_id or "emrg")
-                            term.set_title(f"{new_sid} @ {project_name}")
+                            term.set_title(f"{new_sid} @ {agent_name}")
                             msg_count = 0
                             _update_left_extra()
                     status.update(center=server_id or "emrg")
@@ -2116,7 +2116,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                             f"({count} messages, "
                             f"created {_created}, updated {_updated})")
                         status.update(left=_status_left(session_title, session_id, current_model, current_vision, current_sandbox), center=server_id or "emrg")
-                        term.set_title(f"{session_title or pending_sid} @ {project_name}")
+                        term.set_title(f"{session_title or pending_sid} @ {agent_name}")
                         _update_left_extra()
                         term.render()
                         continue
@@ -2138,29 +2138,29 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     term.render()
                     continue
 
-                # Projects list
-                if data.get("type") == "projects_list":
-                    nonlocal project_sel
-                    projects = data.get("projects", [])
+                # Agents list
+                if data.get("type") == "agents_list":
+                    nonlocal agent_sel
+                    agents = data.get("agents", [])
                     err = data.get("error", "")
                     if err:
                         chat.add("system", f"Error: {err}")
-                        project_sel.pending = False
-                    elif project_sel.pending and projects:
-                        project_sel.pending = False
-                        project_sel.widget = ProjectSelector(projects)
-                        project_sel.active = True
-                        chat.add(project_sel.widget)
-                        status.update(center="select project: ↑↓ Enter Esc  (j/k vim)")
+                        agent_sel.pending = False
+                    elif agent_sel.pending and agents:
+                        agent_sel.pending = False
+                        agent_sel.widget = AgentSelector(agents)
+                        agent_sel.active = True
+                        chat.add(agent_sel.widget)
+                        status.update(center="select agent: ↑↓ Enter Esc  (j/k vim)")
                     else:
-                        project_sel.pending = False
-                        if projects:
-                            project_sel.widget = ProjectSelector(projects)
-                            project_sel.active = True
-                            chat.add(project_sel.widget)
-                            status.update(center="select project: ↑↓ Enter Esc  (j/k vim)")
+                        agent_sel.pending = False
+                        if agents:
+                            agent_sel.widget = AgentSelector(agents)
+                            agent_sel.active = True
+                            chat.add(agent_sel.widget)
+                            status.update(center="select agent: ↑↓ Enter Esc  (j/k vim)")
                         else:
-                            chat.add("system", "No projects configured. Use emrg in a git repo to auto-register.")
+                            chat.add("system", "No agents configured. Use emrg in a git repo to auto-register.")
                     term.render()
                     continue
 
@@ -2429,7 +2429,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                 # Where a session lives, asked before resuming it (rant
                 # 2026-09-29T15:52:49, requirement 6). The client used to send its
                 # own cwd with every resume; the daemon answers with the session's
-                # real project instead, and the pair is then handed to the same
+                # real agent instead, and the pair is then handed to the same
                 # `_task_open_pending` machinery that moves the client into it.
                 if data.get("type") == "session_cwd_result":
                     target = _resume_target_from_resolution(
@@ -2492,13 +2492,13 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     current_roots = list(meta.get("sandbox_roots") or [])
 
                     # /task-session: the session exists, so the client now moves
-                    # into that task's project — before the history replay below,
+                    # into that task's agent — before the history replay below,
                     # which reads it from `cwd`.
                     switch_to = _task_open_switch(_task_open_pending, new_sid)
                     _task_open_pending = None
                     if switch_to is not None:
                         cwd = switch_to
-                        project_name = Path(cwd).name
+                        agent_name = Path(cwd).name
 
                     # Clear and replay: the material comes from the daemon, not
                     # from disk (rant 2026-09-29T15:52:49, requirement 4 — two
@@ -2547,7 +2547,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                         session_title = new_title
                         chat.add("system", f"Session renamed to: {new_title}")
                         status.update(left=_status_left(session_title, session_id, current_model, current_vision, current_sandbox), center=server_id or "emrg")
-                        term.set_title(f"{session_title} @ {project_name}")
+                        term.set_title(f"{session_title} @ {agent_name}")
                     term.render()
                     continue
 
@@ -2557,7 +2557,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     if err:
                         chat.add("system", f"Error: {err}")
                     else:
-                        scope = data.get("scope", "project")
+                        scope = data.get("scope", "agent")
                         directory = data.get("directory", "")
                         memories = data.get("memories", [])
                         lines = [f"Memories ({scope}):", f"  Directory: {directory}", ""]
@@ -2574,7 +2574,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                             lines.append("")
                             lines.append("Type /memory <id> to read a specific memory.")
                             lines.append("Type /memory session for session memories.")
-                            lines.append("Type /memory project for project memories.")
+                            lines.append("Type /memory agent for agent memories.")
                         else:
                             lines.append("  (no memories yet)")
                         chat.add("system", "\n".join(lines))
@@ -2713,8 +2713,8 @@ async def interactive(init_auto_evolve: bool = False, console=None):
     async def handle_key(data: bytes) -> bool:
         nonlocal inp, status, history, paste_mode, stream_buffer, conn, chat, busy, need_new_assistant, session_id, session_title, msg_count, cwd
         nonlocal turn_ended_cancelled, cancel_receipt_held
-        nonlocal current_model, project_name, current_sandbox
-        nonlocal session_sel, delete_sel, project_sel, model_sel, rewind_sel, task_sel
+        nonlocal current_model, agent_name, current_sandbox
+        nonlocal session_sel, delete_sel, agent_sel, model_sel, rewind_sel, task_sel
         nonlocal _rewind_fill
         nonlocal sandbox_sel, tool_sel
         nonlocal _task_list_intent, _task_open_pending
@@ -2874,35 +2874,35 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                 return True
             return True
 
-        # ── Project selector mode ──────────────────────────
-        if project_sel.active and project_sel.widget:
+        # ── Agent selector mode ──────────────────────────
+        if agent_sel.active and agent_sel.widget:
             if data == b"\x1b":  # Esc — cancel selection
-                project_sel.active = False
-                chat.add("system", "Project selection cancelled.")
-                chat.remove(project_sel.widget)
-                project_sel.widget = None
+                agent_sel.active = False
+                chat.add("system", "Agent selection cancelled.")
+                chat.remove(agent_sel.widget)
+                agent_sel.widget = None
                 status.update(center=server_id or "emrg")
                 chat.dirty = True; term.render()
                 return True
             if data == b"\r" or data == b"\n":  # Enter — confirm
-                pname = project_sel.widget.selected_project_name
-                project_sel.active = False
-                chat.remove(project_sel.widget)
-                project_sel.widget = None
+                pname = agent_sel.widget.selected_agent_name
+                agent_sel.active = False
+                chat.remove(agent_sel.widget)
+                agent_sel.widget = None
                 if pname:
-                    nonlocal _rant_project
-                    _rant_project = pname
-                    chat.add("system", f"Rant to project '@{pname}' — type your message and press Enter:")
+                    nonlocal _rant_agent
+                    _rant_agent = pname
+                    chat.add("system", f"Rant to agent '@{pname}' — type your message and press Enter:")
                     status.update(center=f"rant to @{pname}")
                 else:
-                    chat.add("system", "No project selected.")
+                    chat.add("system", "No agent selected.")
                     status.update(center=server_id or "emrg")
                 chat.dirty = True; term.render()
                 return True
-            if _handle_selector_nav(data, project_sel.widget):
+            if _handle_selector_nav(data, agent_sel.widget):
                 chat.dirty = True; term.render()
                 return True
-            # Ignore other keys when in project selector mode
+            # Ignore other keys when in agent selector mode
             return True
 
         # ── Model selector mode ──────────────────────────
@@ -3026,7 +3026,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                 if task_intent == "session":
                     # /task-session (rant 2026-09-17T18:36:08): open the task's
                     # session instead of triggering it. The cwd the daemon is
-                    # asked with is the TASK's project — the client's own cwd
+                    # asked with is the TASK's agent — the client's own cwd
                     # only moves once the daemon confirms the session exists, so
                     # a never-run task leaves the host where they were.
                     target = _task_session_target(task_row)
@@ -3242,14 +3242,14 @@ async def interactive(init_auto_evolve: bool = False, console=None):
             if text:
                 if text.lower() in ("quit", "exit"): return False
 
-                # If a rant project was selected, use this message as the rant
+                # If a rant agent was selected, use this message as the rant
                 # (rant 2026-08-17T11:51:59: routes through the agent for
                 # polish/confirm, then the submit_rant tool records it)
-                if _rant_project:
+                if _rant_agent:
                     hint = (
                         f"[Host wants to submit this rant — polish it, ask for "
                         f"confirmation if needed, then call submit_rant "
-                        f"(project: {_rant_project})]\n{text}"
+                        f"(agent: {_rant_agent})]\n{text}"
                     )
                     # This path echoes its own user row too, so it parks it the
                     # same way the ordinary submit does — the id is minted here,
@@ -3259,7 +3259,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     # submit's).
                     rid = new_task_id()
                     parked_user_rows.park(
-                        rid, chat.add("user", f"/rant @{_rant_project} {text}"))
+                        rid, chat.add("user", f"/rant @{_rant_agent} {text}"))
                     chat.add("assistant", "")
                     msg_count += 1; _update_left_extra()
                     _last_center = "thinking..."
@@ -3269,14 +3269,14 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     # path does before ITS send: `was_busy` is this function's
                     # own local (the assignment further down is what binds it),
                     # so a read that does not follow one raises
-                    # UnboundLocalError — the /rant-with-project path crashed
+                    # UnboundLocalError — the /rant-with-agent path crashed
                     # on every Enter (issue #1759).
                     was_busy = busy
                     rid = await conn.send_task(session_id=session_id, cwd=cwd,
                                                prompt=hint, id=rid)
                     if was_busy:
                         _queued_sends.append({"id": rid, "prompt": hint, "images": None})
-                    _rant_project = None
+                    _rant_agent = None
                     status.update(center=server_id or "emrg")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
@@ -3336,15 +3336,15 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                 if text.lower().startswith("/memory"):
                     parts = text.split(None, 1)
                     sub = parts[1].strip() if len(parts) > 1 else ""
-                    scope = "project"
+                    scope = "agent"
                     mem_id = ""
                     if sub:
                         # /memory session → list session memories
                         # /memory <id> → read specific memory
                         if sub.lower() == "session":
                             scope = "session"
-                        elif sub.lower() == "project":
-                            scope = "project"
+                        elif sub.lower() == "agent":
+                            scope = "agent"
                         else:
                             mem_id = sub
                             # Could be a read request — send as read
@@ -3433,7 +3433,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                         await conn.send_command("skills_update")
                         status.update(center="checking skill updates…")
                     else:
-                        # The session's directory, not this process's: the project
+                        # The session's directory, not this process's: the agent
                         # skills a session has are the ones under its own root.
                         skills = load_skills(Path(cwd) if cwd else None)
                         if skills:
@@ -3541,19 +3541,19 @@ Navigation
 
 Commands
   /help               Show this help
-  /skills             List loaded skills (user + project)
+  /skills             List loaded skills (user + agent)
   /version            Show EMRG version and instance info
   /image              Insert clipboard image into input field
   /compact            Compress conversation history
   /clear              Clear current session and start fresh
-  /memory [session|project|<id>]  Browse memories
+  /memory [session|agent|<id>]  Browse memories
   /sessions           Interactive session picker (↑↓/j/k to select)
   /resume [id]        Switch to session (no args = interactive picker, ↑↓/j/k)
   /rename [title]     Rename current session
   /delete [id]        Delete session (no args = interactive picker, ↑↓/j/k)
   /rant <msg>         Send feedback to evolution system
-  /rant @<project> <msg>  Rant to a specific project
-  /rant               Interactive project picker, then type message
+  /rant @<agent> <msg>  Rant to a specific agent
+  /rant               Interactive agent picker, then type message
   /model [name]        Switch LLM model (no args = interactive picker)
   /trigger             List scheduled tasks (type name to trigger)
   /trigger <name>      Manually trigger a scheduled task now
@@ -3594,29 +3594,29 @@ Streaming
                 if text.lower().startswith("/rant"):
                     parts = text.split(None, 2)
                     message = parts[1].strip() if len(parts) > 1 else ""
-                    project = None
+                    agent = None
                     if message.startswith("@"):
-                        # /rant @<project> <message> — project-targeted rant
+                        # /rant @<agent> <message> — agent-targeted rant
                         sub = text.split(None, 2)
-                        project = sub[1][1:]  # strip @
+                        agent = sub[1][1:]  # strip @
                         message = sub[2].strip() if len(sub) > 2 else ""
                     if not message:
-                        if project:
-                            chat.add("system", "Usage: /rant @<project> <message>")
+                        if agent:
+                            chat.add("system", "Usage: /rant @<agent> <message>")
                             inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                             return True
-                        # /rant without args → interactive project selector
-                        project_sel.pending = True
-                        await conn.send_command("list_projects")
+                        # /rant without args → interactive agent selector
+                        agent_sel.pending = True
+                        await conn.send_command("list_agents")
 
-                        status.update(center="loading projects...")
+                        status.update(center="loading agents...")
                         inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                         return True
-                    target = f" (@{project})" if project else ""
+                    target = f" (@{agent})" if agent else ""
                     hint = (
                         f"[Host wants to submit this rant — polish it, ask for "
                         f"confirmation if needed, then call submit_rant "
-                        f"(project: {project if project else 'emrg'})]\n{message}"
+                        f"(agent: {agent if agent else 'emrg'})]\n{message}"
                     )
                     # Parked before the send, under an id minted here — the other
                     # `/rant` shape does the same, so an echoed row on either path
@@ -3756,7 +3756,7 @@ Streaming
                         session_sel.widget = None
                         session_sel.pending = False
                         # Ask where the session lives instead of assuming it is
-                        # here: the id may name another project's session — a
+                        # here: the id may name another agent's session — a
                         # scheduled task's, above all — and `cwd` is this
                         # client's, not that session's (rant 2026-09-29T15:52:49,
                         # requirement 6). The answer drives the resume.

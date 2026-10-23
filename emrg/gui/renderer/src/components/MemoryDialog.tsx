@@ -7,7 +7,7 @@ import { DialogActions } from "./HelpDialog";
  * MemoryDialog — /memory 记忆浏览器对话框（Batch 4 slice 2）。
  * 镜像 vanilla `showMemoryDialog(sub)`：
  * - loading（memories=null）→ dlg.loading 行
- * - 空列表 → app.noMemories（scope 区分 session/project 文案）
+ * - 空列表 → app.noMemories（scope 区分 session/agent 文案）
  * - 行 = 标题(40 截断) + 摘要(50 截断)；点击 → onSelect(id)（vanilla 内联 readMemory）
  * - detail 传入 → 显示详情块（title + pre body）
  * - error → app.memFailed
@@ -22,7 +22,7 @@ export interface MemoryDialogProps {
   open: boolean;
   /** null = loading；[] = 空；有值 = 列表 */
   memories?: MemoryRow[] | null;
-  scope?: "session" | "project";
+  scope?: "session" | "agent";
   error?: string | null;
   detail?: MemoryDetailView | null;
   onSelect?: (id: string) => void;
@@ -32,7 +32,7 @@ export interface MemoryDialogProps {
 export function MemoryDialog({
   open,
   memories = null,
-  scope = "project",
+  scope = "agent",
   error = null,
   detail = null,
   onSelect,

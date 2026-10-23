@@ -123,7 +123,7 @@ function isSessionId(id) {
 const RESPONSE_TYPES = {
   list_sessions: "sessions_list",
   list_models: "models_list",
-  list_projects: "projects_list",
+  list_agents: "agents_list",
   list_history: "history_list",
   // The prompts the host typed in one session (issue #2349, part 2/2): the daemon
   // answers a `list_input_history` command with an `input_history` frame, so the
@@ -164,8 +164,8 @@ const RESPONSE_TYPES = {
  *
  * The daemon answers where a session lives so that a client does not have to
  * guess (issue #2484). Two answers are deliberately not the same value: `index`
- * carries the project the global session index holds, and `unknown` carries
- * `null` — the daemon cannot vouch for that session's project, so the requested
+ * carries the agent the global session index holds, and `unknown` carries
+ * `null` — the daemon cannot vouch for that session's agent, so the requested
  * cwd comes back only as a candidate and must not be relabelled as a fact.
  *
  * So everything except a non-empty `index` cwd answers the caller's fallback,
@@ -547,7 +547,7 @@ class DaemonClient {
         errFd === null ? null : EMRGD_START_ERR()
       );
     }
-    // G125：spawn 设 cwd=project_dir（daemon load_skills 用 Path.cwd() 加载项目级 skills）
+    // G125：spawn 设 cwd=agent_dir（daemon load_skills 用 Path.cwd() 加载项目级 skills）
     const python = this._findPython();
     const args = ["-m", "emrg.server"];
     this.logger.info(`[gui] spawning daemon: ${python} ${args.join(" ")} cwd=${os.homedir()}`);
@@ -1172,7 +1172,7 @@ class DaemonClient {
       // both (`app.py:1345` / `:1353`), so this layer was the only client that
       // dropped them: they matched no branch, fell to the unknown-frame log at
       // the bottom, and reached no renderer. The catch-all's list of *expected*
-      // drops (`templates_list` / `compact_result` / `projects_list`) never named
+      // drops (`templates_list` / `compact_result` / `agents_list`) never named
       // them.
       this._emit(frame.type, frame);
       return;
@@ -1200,7 +1200,7 @@ class DaemonClient {
     // 日志以 `type=` 开头，下一次可以 `grep 'unknown frame type=' | sort | uniq -c`
     // 直接数，而不必从截断的 JSON 里抠类型。
     // 注意：本支对某些帧是**预期**的——daemon 会把 `templates_list` / `compact_result`
-    // / `projects_list` 广播给全部订阅者（`daemon.py:1518`），而这是别的会话发出的
+    // / `agents_list` 广播给全部订阅者（`daemon.py:1518`），而这是别的会话发出的
     // 命令的回执，本连接既不认领也不该转发。
     const unknownType = frame.type === undefined ? "<no-type>" : String(frame.type);
     this.logger.warn(`[gui] unknown frame type=${unknownType}: ${JSON.stringify(frame).slice(0, 200)}`);

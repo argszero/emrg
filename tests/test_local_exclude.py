@@ -9,7 +9,7 @@ refused the git verbs that would have converged the tree.
 
 The dirt is EMRG's, not the repository's, so it belongs in the repository's
 *local* ignore file: `.git/info/exclude` is per-clone, is never committed, and
-leaves the upstream `.gitignore` (which belongs to the project's maintainers)
+leaves the upstream `.gitignore` (which belongs to the agent's maintainers)
 alone. These tests hold both halves: the runtime directory stops being dirt,
 and every other kind of dirt still is.
 """
@@ -107,8 +107,8 @@ def test_the_guard_stops_seeing_this_instances_own_runtime_dir(tmp_path):
     assert EXCLUDE_ENTRY in _exclude_file(repo).read_text(encoding="utf-8")
 
 
-def test_the_projects_own_gitignore_is_not_touched(tmp_path):
-    """The upstream `.gitignore` belongs to the project's maintainers: this fix is
+def test_the_agents_own_gitignore_is_not_touched(tmp_path):
+    """The upstream `.gitignore` belongs to the agent's maintainers: this fix is
     local-only and must not appear in anything that could be committed."""
     repo = _repo(tmp_path / "clone")
     before = sorted(p.name for p in repo.iterdir())
@@ -271,9 +271,9 @@ def test_real_dirt_still_triggers_the_guard(tmp_path):
     assert kept.stdout == "work that exists nowhere else"
 
 
-def test_registering_a_project_writes_the_exclude_too(tmp_path):
+def test_registering_a_agent_writes_the_exclude_too(tmp_path):
     """The daemon-side call site: `AgentRegistry.for_dir` is where this instance takes a
-    directory on as a project, so a later session in it never starts from a tree
+    directory on as a agent, so a later session in it never starts from a tree
     whose dirt is EMRG's own bookkeeping.
 
     Built with `object.__new__` on purpose — `for_dir` reads one path
@@ -294,11 +294,11 @@ def test_registering_a_project_writes_the_exclude_too(tmp_path):
     assert TaskHandler._is_dirty_tree_sync(str(repo)) is False
 
 
-def test_a_nested_project_directory_learns_to_ignore_its_own_runtime_dir(tmp_path):
+def test_a_nested_agent_directory_learns_to_ignore_its_own_runtime_dir(tmp_path):
     """The daemon-side call site, one directory shape over (issue #1527).
 
     `AgentRegistry.for_dir` used to call the exclude helper only when `<cwd>/.git`
-    existed — the *root* question, `repo_scope`'s other answer. A project
+    existed — the *root* question, `repo_scope`'s other answer. A agent
     registered at a directory inside a repository (a package in a monorepo, this
     instance's own `work/` tree, a clone nested in a larger checkout) therefore
     never learned to ignore its runtime data, and the dirt came back one gate

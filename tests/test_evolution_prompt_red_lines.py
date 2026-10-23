@@ -2,7 +2,7 @@
 
 Why this file exists
 --------------------
-Issue #1324 measured the first gap. The project's highest-priority rule — never write,
+Issue #1324 measured the first gap. The agent's highest-priority rule — never write,
 restore or introduce anything that stops or restarts the emrg server / `emrgd` —
 was enforced in one place and stated in two: `tests/conftest.py` refuses the
 in-process, `os.kill` and spawned-child routes, and `MANIFESTO.md` 第四条附则二 plus
@@ -12,10 +12,10 @@ prompt is built from the shipped template never saw the rule at all.
 
 The second clause was measured the same way, on 2026-09-28 by cycle `cyc20260928-070538`,
 and it is the same failure with a wider blast radius. The host's rule *never start a
-background process* was in force in **one** project's memory and in **no** template,
-so every other evolution instance — a different project's cycle, on a different machine
+background process* was in force in **one** agent's memory and in **no** template,
+so every other evolution instance — a different agent's cycle, on a different machine
 — carried none of it; two more isomorphic incidents happened on this host the morning
-it was measured. Memory is per-project and per-session; the template is the one carrier
+it was measured. Memory is per-agent and per-session; the template is the one carrier
 that reaches every instance, which is why the rule belongs here.
 
 The fix, both times, is a clause in the template's `### Forbidden` list — the section a

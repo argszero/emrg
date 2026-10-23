@@ -43,7 +43,7 @@ SESSION_ID = "turn-context-prefix"
 
 
 def _make_server() -> EmrgServer:
-    """A minimal server with the projects log pointed away from the host's."""
+    """A minimal server with the agents log pointed away from the host's."""
     server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
     server._agents_log = Path(tempfile.mkdtemp()) / "agents.yml"
     return server

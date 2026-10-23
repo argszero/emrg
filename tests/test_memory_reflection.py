@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-from emrg.memory import ProjectMemoryStore, SessionMemoryStore
+from emrg.memory import AgentMemoryStore, SessionMemoryStore
 from emrg.session import Session
 
 
@@ -216,11 +216,11 @@ class TestMemoryIndexCompactionPrompt:
 
         asyncio.run(_test())
 
-    def test_the_project_index_is_counted_too(self):
-        """Two indexes reach the prompt; the project one is the other half.
+    def test_the_agent_index_is_counted_too(self):
+        """Two indexes reach the prompt; the agent one is the other half.
 
         A rule that only watched the session index would miss every long-lived
-        project index — the ones a project's own cycles keep appending to.
+        agent index — the ones a agent's own cycles keep appending to.
         """
         from emrg.server.daemon import MEMORY_INDEX_ROW_CAP
 
@@ -228,14 +228,14 @@ class TestMemoryIndexCompactionPrompt:
             with tempfile.TemporaryDirectory() as tmp:
                 cwd = Path(tmp)
                 session = Session.create_with_id("s_test_cap_proj", cwd)
-                project_index = cwd / ".emrg" / "memory" / "MEMORY.md"
-                self._index(project_index, MEMORY_INDEX_ROW_CAP + 7)
+                agent_index = cwd / ".emrg" / "memory" / "MEMORY.md"
+                self._index(agent_index, MEMORY_INDEX_ROW_CAP + 7)
                 server = _make_server({"content": "no new memories"})
 
                 prompt = await _reflect(server, session)
 
                 assert "Memory index compaction" in prompt
-                assert str(project_index) in prompt
+                assert str(agent_index) in prompt
                 assert f"has {MEMORY_INDEX_ROW_CAP + 7} lines" in prompt
 
         asyncio.run(_test())
@@ -269,7 +269,7 @@ class TestMemoryIndexCompactionPrompt:
         session whose cwd is `<root>/emrg`: the cycles wrote their records into the
         root's index, one directory *above* the cwd, so neither of the two subjects
         named the file they grew. D9 then re-based the template's record path onto
-        `{{ source_dir }}/.emrg/memory/`, which for such a session *is* the project
+        `{{ source_dir }}/.emrg/memory/`, which for such a session *is* the agent
         subject, and every record since 2026-09-27T13:24 landed there.
 
         What the removal rests on is the **writer**, not any host's disk: with the
@@ -472,7 +472,7 @@ class TestReflectionReplyRedaction:
                     server._maybe_reflect_memory(
                         session,
                         "Please set up the credentials for the deployment pipeline",
-                        "I have configured the deployment credentials for this project",
+                        "I have configured the deployment credentials for this agent",
                     )
                     await asyncio.sleep(0.2)
 

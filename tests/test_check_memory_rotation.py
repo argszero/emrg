@@ -2,33 +2,33 @@
 
 What this file holds
 --------------------
-The tool answers §1.5's step 0 - which registered projects' memory is newer than that
-project's bookmark row - and it exists because two hand-written probes answered it
+The tool answers §1.5's step 0 - which registered agents' memory is newer than that
+agent's bookmark row - and it exists because two hand-written probes answered it
 wrongly while reading as clean (issue #2408). So the assertions here are the three
 halves of "does it answer that question, and can a wrong answer look right":
 
 * **each boundary is read in both states, and they are built from what the tool reads,
   never from a literal** - a file *at* its stamp is `unchanged` and one *after* it is
   `changed`; the file a row was written from, carrying a sub-second fraction, is
-  `unchanged` (a comparison that kept the fraction reported **21 of 23** projects as
-  changed on this host while their rows already named that very file); a project with a
+  `unchanged` (a comparison that kept the fraction reported **21 of 23** agents as
+  changed on this host while their rows already named that very file); a agent with a
   memory root and one without; a path on disk and a path that is gone.
 * **all three key forms the bookmark writes are resolved** - a bare name, a name with a
   parenthetical disambiguator (inside the code span and just after it, because this
-  host's bookmark carries both), and a path suffix. A form the parser drops is a project
+  host's bookmark carries both), and a path suffix. A form the parser drops is a agent
   that leaves the rotation in silence, which is the failure the tool was written for.
 * **a reading that could not be taken is never a pass** - no register, no bookmark, a
-  stamp that does not parse, and a row that matches two projects all answer exit **2**
+  stamp that does not parse, and a row that matches two agents all answer exit **2**
   or exit **1** with the reason named, and `0` is reserved for a reading that covered
-  every project and every row;
+  every agent and every row;
 * **the rotation's third key has a carrier or it is not a key** - a row's reading cycle is
-  found wherever the table puts it and printed beside its project, and a row that records
+  found wherever the table puts it and printed beside its agent, and a row that records
   none is reported as recording none rather than left looking recently read: §1.5 orders the
   rotation by "least recently visited", which no bookmark without that field can answer
   (issue #2525);
 * **a note from an earlier day is re-measured, not repeated** - `no memory root` and
   `path missing` are readings, so a row carrying one the disk now contradicts is a fault
-  rather than a verdict that hides a project for ever.
+  rather than a verdict that hides a agent for ever.
 
 It **measures and never repairs**: one assertion reads the bookmark's bytes before and
 after a run, because a tool that quietly rewrote rows would hide exactly the drift its
@@ -86,7 +86,7 @@ def _write_memory(root: Path, relative: str, mtime: float) -> Path:
     return path
 
 
-def _projects(path: Path, records: list[dict]) -> Path:
+def _agents(path: Path, records: list[dict]) -> Path:
     """The register, written the way the daemon writes it: every scalar quoted."""
     text = "".join(f"- name: '{r['name']}'\n  path: '{r['path']}'\n" for r in records)
     path.write_text(text, encoding="utf-8")
@@ -95,20 +95,20 @@ def _projects(path: Path, records: list[dict]) -> Path:
 
 def _bookmark(path: Path, rows: list[tuple[str, str]]) -> Path:
     """A bookmark with a title, the table's two header lines, and one row per pair."""
-    lines = ["# Bookmark", "", "| project | newest read | files |", "| --- | --- | --- |"]
+    lines = ["# Bookmark", "", "| agent | newest read | files |", "| --- | --- | --- |"]
     lines += [f"| {key} | {value} | 0 |" for key, value in rows]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
 
 
-def _reading(mod, tmp_path: Path, projects: list[dict], rows: list[tuple[str, str]]):
-    register = _projects(tmp_path / "agents.yml", projects)
+def _reading(mod, tmp_path: Path, agents: list[dict], rows: list[tuple[str, str]]):
+    register = _agents(tmp_path / "agents.yml", agents)
     book = _bookmark(tmp_path / "bookmark.md", rows)
     return mod.read(register, book)
 
 
 def _root(tmp_path: Path, name: str) -> str:
-    root = tmp_path / "projects" / name
+    root = tmp_path / "agents" / name
     root.mkdir(parents=True, exist_ok=True)
     return str(root)
 
@@ -135,7 +135,7 @@ def test_a_sub_second_fraction_does_not_re_flag_the_file_its_row_was_written_fro
     """The row is written from `stat`'s second-precision `%Sm`; the file keeps a fraction.
 
     This is the defect the tool was written against: a comparison that kept the fraction
-    reported 21 of 23 projects as changed on this host while their rows already named the
+    reported 21 of 23 agents as changed on this host while their rows already named the
     very files it was reporting.
     """
     root = _root(tmp_path, "fraction")
@@ -167,23 +167,23 @@ def test_the_newest_of_several_is_the_one_named(mod, tmp_path):
     assert reading["states"][0]["newest"]["path"] == str(newest)
 
 
-def test_the_bookmark_does_not_count_as_memory_of_the_project_that_holds_it(mod, tmp_path):
+def test_the_bookmark_does_not_count_as_memory_of_the_agent_that_holds_it(mod, tmp_path):
     """The clock is not a subject: the bookmark sits under the memory root it scans.
 
-    On this host the bookmark lives under the evolution project's own memory root, so a scan
-    that counted it made that project's row permanently stale — measured in the cycle that
+    On this host the bookmark lives under the evolution agent's own memory root, so a scan
+    that counted it made that agent's row permanently stale — measured in the cycle that
     filed issue #2422: a row written at `22:01:14` read as changed at `00:09:25`, naming the
-    bookmark itself. Here the project's memory file is older than its row and the bookmark
-    newer, so the bookmark is the only file that could make the project look changed.
+    bookmark itself. Here the agent's memory file is older than its row and the bookmark
+    newer, so the bookmark is the only file that could make the agent look changed.
     """
     root = Path(_root(tmp_path, "holder"))
     _write_memory(root, ".emrg/memory/MEMORY.md", _stamp(mod))
-    register = _projects(tmp_path / "agents.yml", [{"name": "holder", "path": str(root)}])
+    register = _agents(tmp_path / "agents.yml", [{"name": "holder", "path": str(root)}])
     book = _bookmark(root / ".emrg/memory/bookmark.md", [("`holder`", BASE)])
     os.utime(book, (_stamp(mod, 60), _stamp(mod, 60)))
     reading = mod.read(register, book)
     assert reading["states"][0]["state"] == "unchanged", reading["states"][0]
-    assert mod.main(["--projects", str(register), "--bookmark", str(book)]) == 0
+    assert mod.main(["--agents", str(register), "--bookmark", str(book)]) == 0
 
 
 def test_a_memory_file_newer_than_the_row_still_reads_changed_beside_the_bookmark(mod, tmp_path):
@@ -194,7 +194,7 @@ def test_a_memory_file_newer_than_the_row_still_reads_changed_beside_the_bookmar
     """
     root = Path(_root(tmp_path, "holder-with-news"))
     newer = _write_memory(root, ".emrg/memory/MEMORY.md", _stamp(mod, 60))
-    register = _projects(tmp_path / "agents.yml",
+    register = _agents(tmp_path / "agents.yml",
                          [{"name": "holder-with-news", "path": str(root)}])
     book = _bookmark(root / ".emrg/memory/bookmark.md", [("`holder-with-news`", BASE)])
     os.utime(book, (_stamp(mod, 30), _stamp(mod, 30)))
@@ -207,8 +207,8 @@ def test_a_row_stamped_later_than_the_clock_is_unmeasurable(mod, tmp_path, monke
     """A row stamped after the reading refuses, because it would keep every file for ever.
 
     `newest_memory` keeps the files strictly newer than the row's instant, so a row stamped
-    later than the clock keeps *nothing*: its project reads `unchanged`, and a bookmark with
-    a row for every project prints "every project is at or before its stamp" and exits 0 —
+    later than the clock keeps *nothing*: its agent reads `unchanged`, and a bookmark with
+    a row for every agent prints "every agent is at or before its stamp" and exits 0 —
     the silently-forever failure the module docstring already catalogues for the ISO `T`
     form and for the sub-second comparison, with a stamp that parses. Measured in the cycle
     that filed issue #2421: rows stamped `2099-01-01 00:00:00` answered `changed since their
@@ -223,7 +223,7 @@ def test_a_row_stamped_later_than_the_clock_is_unmeasurable(mod, tmp_path, monke
     taken = datetime.strptime(BASE, mod.STAMP_FORMAT)
     monkeypatch.setattr(mod, "now", lambda: taken)
     ahead = (taken + timedelta(seconds=1)).strftime(mod.STAMP_FORMAT)
-    register = _projects(tmp_path / "agents.yml", [{"name": "ahead", "path": root}])
+    register = _agents(tmp_path / "agents.yml", [{"name": "ahead", "path": root}])
     book = _bookmark(tmp_path / "ahead.md", [("`ahead`", ahead)])
     with pytest.raises(mod.Unmeasurable) as excinfo:
         mod.read(register, book)
@@ -231,7 +231,7 @@ def test_a_row_stamped_later_than_the_clock_is_unmeasurable(mod, tmp_path, monke
     assert ahead in message, message
     assert taken.strftime(mod.STAMP_FORMAT) in message, message
     assert "ahead" in message, message
-    assert mod.main(["--projects", str(register), "--bookmark", str(book)]) == 2
+    assert mod.main(["--agents", str(register), "--bookmark", str(book)]) == 2
 
 
 def test_a_row_stamped_at_the_clock_is_read_normally(mod, tmp_path, monkeypatch):
@@ -246,17 +246,17 @@ def test_a_row_stamped_at_the_clock_is_read_normally(mod, tmp_path, monkeypatch)
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
     taken = datetime.strptime(BASE, mod.STAMP_FORMAT)
     monkeypatch.setattr(mod, "now", lambda: taken)
-    register = _projects(tmp_path / "agents.yml", [{"name": "at-the-clock", "path": root}])
+    register = _agents(tmp_path / "agents.yml", [{"name": "at-the-clock", "path": root}])
     book = _bookmark(tmp_path / "at.md", [("`at-the-clock`", BASE)])
     reading = mod.read(register, book)
     assert reading["states"][0]["state"] == "unchanged"
-    assert mod.main(["--projects", str(register), "--bookmark", str(book)]) == 0
+    assert mod.main(["--agents", str(register), "--bookmark", str(book)]) == 0
 
 
-def test_a_project_with_no_memory_root_and_one_whose_path_is_gone(mod, tmp_path):
+def test_a_agent_with_no_memory_root_and_one_whose_path_is_gone(mod, tmp_path):
     """Two states that are not a time: neither can be ordered against an mtime."""
     bare = _root(tmp_path, "bare")
-    gone = str(tmp_path / "projects" / "gone")
+    gone = str(tmp_path / "agents" / "gone")
     reading = _reading(mod, tmp_path,
                        [{"name": "bare", "path": bare}, {"name": "gone", "path": gone}],
                        [("`bare`", "no memory root"), ("`gone`", "path missing (gone from disk)")])
@@ -268,7 +268,7 @@ def test_a_project_with_no_memory_root_and_one_whose_path_is_gone(mod, tmp_path)
 
 def test_a_note_the_disk_contradicts_is_a_fault_in_both_directions(mod, tmp_path):
     """A row may carry `no memory root` / `path missing` instead of a stamp - and those are
-    readings from a day, not properties. Repeating a note would hide a project that started
+    readings from a day, not properties. Repeating a note would hide a agent that started
     writing memory or came back on disk, for ever: the class of stale-past-state defect the
     sub-second comparison belongs to as well. Each direction is asserted, and each is
     asserted where the note is still *true* too, so the fault cannot fire unconditionally.
@@ -277,7 +277,7 @@ def test_a_note_the_disk_contradicts_is_a_fault_in_both_directions(mod, tmp_path
     _write_memory(Path(now_memory), ".emrg/memory/MEMORY.md", _stamp(mod))
     still_bare = _root(tmp_path, "still-bare")
     back = _root(tmp_path, "back")
-    still_gone = str(tmp_path / "projects" / "still-gone")
+    still_gone = str(tmp_path / "agents" / "still-gone")
 
     reading = _reading(mod, tmp_path,
                        [{"name": "now-memory", "path": now_memory},
@@ -298,7 +298,7 @@ def test_a_note_the_disk_contradicts_is_a_fault_in_both_directions(mod, tmp_path
 
 
 def test_an_empty_memory_directory_is_nothing_to_read(mod, tmp_path):
-    """A directory is not a reading: three projects on this host carry an empty
+    """A directory is not a reading: three agents on this host carry an empty
     `.emrg/sessions/*/memory/`, and counting the directory reported all three as
     contradicting their `no memory root` note while nothing was there to read."""
     empty = _root(tmp_path, "empty-root")
@@ -313,12 +313,12 @@ def test_an_empty_memory_directory_is_nothing_to_read(mod, tmp_path):
 
 
 def test_all_three_key_forms_the_bookmark_writes_resolve(mod, tmp_path):
-    """A bare name, a parenthetical that separates two same-named projects, a path suffix.
+    """A bare name, a parenthetical that separates two same-named agents, a path suffix.
 
     The middle form is asserted in **both** spellings, because this host's bookmark
     carries both: the disambiguator inside the code span (`aitokenpool (github)`) and just
     after it (`1` (Downloads/1)). A parser that insisted on one dropped the other row and
-    reported its project as never visited.
+    reported its agent as never visited.
     """
     git = _root(tmp_path, "github/aitokenpool")
     lab = _root(tmp_path, "gitlab.xinluex.com/shaoaq/aitokenpool")
@@ -326,13 +326,13 @@ def test_all_three_key_forms_the_bookmark_writes_resolve(mod, tmp_path):
     download = _root(tmp_path, "Downloads/1")
     for root in (git, lab, mem, download):
         _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
-    projects = [
+    agents = [
         {"name": "aitokenpool", "path": git},
         {"name": "aitokenpool", "path": lab},
         {"name": "mem", "path": mem},
         {"name": "1", "path": download},
     ]
-    reading = _reading(mod, tmp_path, projects, [
+    reading = _reading(mod, tmp_path, agents, [
         ("`aitokenpool` (github)", BASE),          # a name, hint inside the span
         ("`gitlab/shaoaq/aitokenpool`", BASE),     # a path suffix, same name as the first
         ("`gitlab/shaoaq/mem`", BASE),             # a path suffix for an unambiguous name
@@ -346,11 +346,11 @@ def test_all_three_key_forms_the_bookmark_writes_resolve(mod, tmp_path):
     assert reading["faults"] == [], reading["faults"]
 
 
-def test_a_project_whose_name_looks_numeric_still_matches_its_row(mod, tmp_path):
+def test_a_agent_whose_name_looks_numeric_still_matches_its_row(mod, tmp_path):
     """Machine-written YAML hands `1` over as an `int`, and the row writes it as text.
 
-    Left as the loader found it, the comparison is `int == str` and answers no: the project
-    reads as never visited while its row sits in the file. This host registers a project by
+    Left as the loader found it, the comparison is `int == str` and answers no: the agent
+    reads as never visited while its row sits in the file. This host registers a agent by
     exactly that name.
     """
     root = _root(tmp_path, "numeric")
@@ -364,14 +364,14 @@ def test_a_project_whose_name_looks_numeric_still_matches_its_row(mod, tmp_path)
     assert reading["faults"] == []
 
 
-def test_a_bare_name_shared_by_two_projects_is_reported_rather_than_guessed(mod, tmp_path):
-    """Two projects, one name, one bare row: which was read is a judgement, not a match."""
+def test_a_bare_name_shared_by_two_agents_is_reported_rather_than_guessed(mod, tmp_path):
+    """Two agents, one name, one bare row: which was read is a judgement, not a match."""
     one, two = _root(tmp_path, "one"), _root(tmp_path, "two")
     reading = _reading(mod, tmp_path,
                        [{"name": "twin", "path": one}, {"name": "twin", "path": two}],
                        [("`twin`", BASE)])
     assert len(reading["faults"]) == 3, reading["faults"]      # ambiguous row + two unrowed
-    assert any("names 2 projects" in f for f in reading["faults"])
+    assert any("names 2 agents" in f for f in reading["faults"])
     assert sum(1 for f in reading["faults"] if "never been visited" in f) == 2
 
 # -------------------------------------------------------- measuring, and never a pass
@@ -381,10 +381,10 @@ def test_a_row_is_found_in_a_table_of_any_width(mod, tmp_path):
     """§1.5 fixes what a row states, not how many columns the table lays it out in.
 
     This installation writes three cells (`| `name` | stamp | files |`); another writes
-    four (`| project | path | stamp | read by |`), and three cells was the whole of the
+    four (`| agent | path | stamp | read by |`), and three cells was the whole of the
     pattern an earlier revision matched on. Measured against a four-column bookmark, that
-    pattern read **0 rows**, so every project came back `no bookmark row` and the report
-    said "every project is at or before its stamp" - a false statement about live data,
+    pattern read **0 rows**, so every agent came back `no bookmark row` and the report
+    said "every agent is at or before its stamp" - a false statement about live data,
     where the shape is exactly what the repository has twice refused to answer (#2275,
     #2277: *could not read* narrowed into *read as empty*). Both files must read alike.
     """
@@ -392,17 +392,17 @@ def test_a_row_is_found_in_a_table_of_any_width(mod, tmp_path):
     narrow = _root(tmp_path, "narrow")
     for root in (wide, narrow):
         _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 60))
-    register = _projects(tmp_path / "agents.yml", [
+    register = _agents(tmp_path / "agents.yml", [
         {"name": "wide", "path": wide}, {"name": "narrow", "path": narrow}])
 
     # The same two rows, in the two tables the two installations write. The wide one puts
-    # the project's path and the reading cycle on either side of the stamp, so a reader
+    # the agent's path and the reading cycle on either side of the stamp, so a reader
     # that counted cells would take the path for the value.
     narrow_book = _bookmark(tmp_path / "narrow.md", [("`wide`", BASE), ("`narrow`", BASE)])
     wide_book = tmp_path / "wide.md"
     wide_book.write_text("\n".join([
         "# Bookmark", "",
-        "| project | path | newest | read by |",
+        "| agent | path | newest | read by |",
         "| --- | --- | --- | --- |",
         f"| `wide` | {wide} | {BASE} (`MEMORY.md`) | cyc20261020-141450 |",
         f"| `narrow` | {narrow} | {BASE} | cyc20261020-141450 |",
@@ -421,13 +421,13 @@ def test_a_row_is_found_in_a_table_of_any_width(mod, tmp_path):
 def test_a_row_that_carries_no_stamp_is_unmeasurable_rather_than_dropped(mod, tmp_path):
     """The other half: a table this reader cannot read must not answer as an empty one.
 
-    With the rows located by shape, the remaining failure is a row that names its project
+    With the rows located by shape, the remaining failure is a row that names its agent
     in a code span and then carries neither a stamp nor a note in any cell. Dropping it
-    would report that project as never visited while its row sits in the file - the
+    would report that agent as never visited while its row sits in the file - the
     original defect - so it is exit 2, and the message names the line it could not read.
     """
     root = _root(tmp_path, "unreadable")
-    register = _projects(tmp_path / "agents.yml", [{"name": "unreadable", "path": root}])
+    register = _agents(tmp_path / "agents.yml", [{"name": "unreadable", "path": root}])
     book = _bookmark(tmp_path / "bookmark.md", [("`unreadable`", "read on Tuesday")])
     with pytest.raises(mod.Unmeasurable) as excinfo:
         mod.read(register, book)
@@ -439,18 +439,18 @@ def test_a_row_that_carries_no_stamp_is_unmeasurable_rather_than_dropped(mod, tm
 def test_a_header_written_with_a_code_span_is_not_a_body_row(mod, tmp_path):
     """The rows are located by shape, so the header is the one shape that must not qualify.
 
-    A table may label its columns with code spans (`| `project` | `newest` |`), and read as a
+    A table may label its columns with code spans (`| `agent` | `newest` |`), and read as a
     body row that header would ask for a stamp the header does not carry - turning a
     readable bookmark into an unmeasurable one. Markdown decides a header by the separator
     under it, which is what this pins, and the body rows beneath it still read.
     """
     root = _root(tmp_path, "spanned")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 60))
-    register = _projects(tmp_path / "agents.yml", [{"name": "spanned", "path": root}])
+    register = _agents(tmp_path / "agents.yml", [{"name": "spanned", "path": root}])
     book = tmp_path / "bookmark.md"
     book.write_text("\n".join([
         "# Bookmark", "",
-        "| `project` | `newest` | `files` |",
+        "| `agent` | `newest` | `files` |",
         "| --- | --- | --- |",
         f"| `spanned` | {BASE} | 0 |",
     ]) + "\n", encoding="utf-8")
@@ -461,19 +461,19 @@ def test_a_header_written_with_a_code_span_is_not_a_body_row(mod, tmp_path):
 
 
 def test_a_bookmark_in_another_shape_is_unmeasurable_rather_than_empty(mod, tmp_path):
-    """The shape §1.5's prose asks for - "one line per project" - is not a table.
+    """The shape §1.5's prose asks for - "one line per agent" - is not a table.
 
     Nothing in that sentence says markdown table with a code span in the first cell, so a
     cycle that follows it writes a file this reader cannot parse. Read as an empty bookmark
-    that file produces one "never been visited" fault per project (exit 1), whose remedy is
+    that file produces one "never been visited" fault per agent (exit 1), whose remedy is
     to re-read all of them — the opposite of the truth, which is that the bookmark's shape
     needs fixing. Measured on this host in the cycle that filed issue #2419: a bullet-list
-    bookmark and a prose-only bookmark both answered `0 row(s)` with a fault per project.
+    bookmark and a prose-only bookmark both answered `0 row(s)` with a fault per agent.
     """
     root = _root(tmp_path, "unlisted")
-    register = _projects(tmp_path / "agents.yml", [{"name": "unlisted", "path": root}])
+    register = _agents(tmp_path / "agents.yml", [{"name": "unlisted", "path": root}])
     for shape, text in (
-            ("one line per project",
+            ("one line per agent",
              f"# Rotation bookmark\n\n- `unlisted` {BASE} (cyc20261020-214924)\n"),
             ("prose only", "# Rotation bookmark\n\nNothing has been read yet.\n")):
         book = tmp_path / f"{shape.replace(' ', '-')}.md"
@@ -486,7 +486,7 @@ def test_a_bookmark_in_another_shape_is_unmeasurable_rather_than_empty(mod, tmp_
         assert "never visited" in message, shape
 
 
-def test_a_body_row_that_names_its_project_in_no_code_span_is_unmeasurable(mod, tmp_path):
+def test_a_body_row_that_names_its_agent_in_no_code_span_is_unmeasurable(mod, tmp_path):
     """The same silence one level in: a real table whose keys are written plainly.
 
     `KEY_CELL` requires the span, so such a row was skipped by the loop with no record
@@ -494,11 +494,11 @@ def test_a_body_row_that_names_its_project_in_no_code_span_is_unmeasurable(mod, 
     refusals are the same defect - a shape the reader does not know answered as an absence.
     """
     root = _root(tmp_path, "plain")
-    register = _projects(tmp_path / "agents.yml", [{"name": "plain", "path": root}])
+    register = _agents(tmp_path / "agents.yml", [{"name": "plain", "path": root}])
     book = tmp_path / "bookmark.md"
     book.write_text("\n".join([
         "# Bookmark", "",
-        "| project | newest read | files |",
+        "| agent | newest read | files |",
         "| --- | --- | --- |",
         f"| plain | {BASE} | 0 |",
     ]) + "\n", encoding="utf-8")
@@ -509,7 +509,7 @@ def test_a_body_row_that_names_its_project_in_no_code_span_is_unmeasurable(mod, 
     assert "line 5" in message and "| plain |" in message
 
 
-def test_a_bookmark_that_really_is_empty_still_reports_every_project_never_visited(mod, tmp_path):
+def test_a_bookmark_that_really_is_empty_still_reports_every_agent_never_visited(mod, tmp_path):
     """The control for the arm above: the same `0 row(s)`, and the honest answer.
 
     A header and no body rows is a first-ever bookmark, so "never been visited" is true
@@ -519,11 +519,11 @@ def test_a_bookmark_that_really_is_empty_still_reports_every_project_never_visit
     rotation would never start.
     """
     root = _root(tmp_path, "fresh")
-    register = _projects(tmp_path / "agents.yml", [{"name": "fresh", "path": root}])
+    register = _agents(tmp_path / "agents.yml", [{"name": "fresh", "path": root}])
     book = tmp_path / "bookmark.md"
     book.write_text("\n".join([
         "# Bookmark", "",
-        "| project | newest read | files |",
+        "| agent | newest read | files |",
         "| --- | --- | --- |",
     ]) + "\n", encoding="utf-8")
     reading = mod.read(register, book)
@@ -533,7 +533,7 @@ def test_a_bookmark_that_really_is_empty_still_reports_every_project_never_visit
     assert "never been visited" in reading["faults"][0]
 
 
-def test_a_project_with_no_row_is_a_fault_and_is_reported_as_never_visited(mod, tmp_path):
+def test_a_agent_with_no_row_is_a_fault_and_is_reported_as_never_visited(mod, tmp_path):
     root = _root(tmp_path, "unrowded")
     reading = _reading(mod, tmp_path, [{"name": "unrowded", "path": root}], [])
     assert reading["states"][0]["state"] == "no bookmark row"
@@ -541,12 +541,12 @@ def test_a_project_with_no_row_is_a_fault_and_is_reported_as_never_visited(mod, 
     assert "never been visited" in reading["faults"][0]
 
 
-def test_a_row_that_names_no_project_is_a_fault(mod, tmp_path):
+def test_a_row_that_names_no_agent_is_a_fault(mod, tmp_path):
     root = _root(tmp_path, "kept")
     reading = _reading(mod, tmp_path, [{"name": "kept", "path": root}],
                        [("`kept`", BASE), ("`ghost`", BASE)])
     assert len(reading["faults"]) == 1
-    assert "names no registered project" in reading["faults"][0]
+    assert "names no registered agent" in reading["faults"][0]
 
 
 def test_a_stamp_that_does_not_parse_is_unmeasurable_never_unchanged(mod, tmp_path):
@@ -562,7 +562,7 @@ def test_a_stamp_that_does_not_parse_is_unmeasurable_never_unchanged(mod, tmp_pa
 
 def test_no_register_and_no_bookmark_are_unmeasurable(mod, tmp_path):
     for subject in ("register", "bookmark"):
-        register = _projects(tmp_path / "agents.yml", [{"name": "x", "path": str(tmp_path)}])
+        register = _agents(tmp_path / "agents.yml", [{"name": "x", "path": str(tmp_path)}])
         book = _bookmark(tmp_path / "bookmark.md", [("`x`", BASE)])
         if subject == "register":
             register.unlink()
@@ -570,14 +570,14 @@ def test_no_register_and_no_bookmark_are_unmeasurable(mod, tmp_path):
             book.unlink()
         with pytest.raises(mod.Unmeasurable) as excinfo:
             mod.read(register, book)
-        assert "no project register" in str(excinfo.value) or "no bookmark" in str(excinfo.value)
+        assert "no agent register" in str(excinfo.value) or "no bookmark" in str(excinfo.value)
 
 
 def test_the_bookmark_is_not_rewritten(mod, tmp_path):
     """It measures and never repairs: the bytes are the same after a run."""
     root = _root(tmp_path, "stable")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 4))
-    register = _projects(tmp_path / "agents.yml", [{"name": "stable", "path": root}])
+    register = _agents(tmp_path / "agents.yml", [{"name": "stable", "path": root}])
     book = _bookmark(tmp_path / "bookmark.md", [("`stable`", BASE)])
     before = book.read_bytes()
     mod.read(register, book)
@@ -592,10 +592,10 @@ def test_both_subjects_are_named_before_any_verdict(mod, tmp_path):
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 2))
     reading = _reading(mod, tmp_path, [{"name": "named", "path": root}], [("`named`", BASE)])
     lines = mod.render(reading, False).splitlines()
-    assert lines[0].startswith("projects: ") and str(tmp_path) in lines[0]
+    assert lines[0].startswith("agents: ") and str(tmp_path) in lines[0]
     assert lines[1].startswith("bookmark: ") and "1 row(s)" in lines[1]
     assert "changed since their bookmark: 1" in lines[2]
-    assert "coverage: every project has a row" in "\n".join(lines)
+    assert "coverage: every agent has a row" in "\n".join(lines)
 
 
 def test_an_empty_reading_says_zero_rather_than_printing_nothing(mod, tmp_path):
@@ -610,25 +610,25 @@ def test_the_exit_codes_are_0_1_and_2_and_2_is_never_a_pass(mod, tmp_path):
     """The contract a caller reads: clean, a coverage fault, unmeasurable."""
     root = _root(tmp_path, "codes")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
-    register = _projects(tmp_path / "agents.yml", [{"name": "codes", "path": root}])
+    register = _agents(tmp_path / "agents.yml", [{"name": "codes", "path": root}])
     clean = _bookmark(tmp_path / "clean.md", [("`codes`", BASE)])
     faulty = _bookmark(tmp_path / "faulty.md", [("`codes`", BASE), ("`ghost`", BASE)])
-    assert mod.main(["--projects", str(register), "--bookmark", str(clean)]) == 0
-    assert mod.main(["--projects", str(register), "--bookmark", str(faulty)]) == 1
-    assert mod.main(["--projects", str(tmp_path / "absent.yml"),
+    assert mod.main(["--agents", str(register), "--bookmark", str(clean)]) == 0
+    assert mod.main(["--agents", str(register), "--bookmark", str(faulty)]) == 1
+    assert mod.main(["--agents", str(tmp_path / "absent.yml"),
                      "--bookmark", str(clean)]) == 2
 
 
 def test_json_is_one_document_that_names_its_subjects(mod, tmp_path, capsys):
     root = _root(tmp_path, "documented")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 1))
-    register = _projects(tmp_path / "agents.yml", [{"name": "documented", "path": root}])
+    register = _agents(tmp_path / "agents.yml", [{"name": "documented", "path": root}])
     book = _bookmark(tmp_path / "bookmark.md", [("`documented`", BASE)])
-    assert mod.main(["--projects", str(register), "--bookmark", str(book), "--json"]) == 0
+    assert mod.main(["--agents", str(register), "--bookmark", str(book), "--json"]) == 0
     document = json.loads(capsys.readouterr().out)
-    assert document["project_count"] == 1
+    assert document["agent_count"] == 1
     assert document["states"][0]["state"] == "changed"
-    assert document["projects_file"] == str(register)
+    assert document["agents_file"] == str(register)
 
 
 # --------------------------------------------------------------------------- its structure
@@ -643,7 +643,7 @@ def _sectioned(path: Path, rows: list[tuple[str, str]], sections: int) -> Path:
     lines = ["# Bookmark", ""]
     for n in range(sections):
         lines += [f"{SECTION}-{n}", "", "one line of narration", ""]
-    lines += ["| project | newest read | files |", "| --- | --- | --- |"]
+    lines += ["| agent | newest read | files |", "| --- | --- | --- |"]
     lines += [f"| {key} | {value} | 0 |" for key, value in rows]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
@@ -662,7 +662,7 @@ def test_a_second_cycle_section_is_a_fault_the_rows_cannot_show(mod, tmp_path):
     """
     root = _root(tmp_path, "growing")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
-    register = _projects(tmp_path / "agents.yml", [{"name": "growing", "path": root}])
+    register = _agents(tmp_path / "agents.yml", [{"name": "growing", "path": root}])
     one = _sectioned(tmp_path / "one.md", [("`growing`", BASE)], 1)
     two = _sectioned(tmp_path / "two.md", [("`growing`", BASE)], 2)
 
@@ -677,8 +677,8 @@ def test_a_second_cycle_section_is_a_fault_the_rows_cannot_show(mod, tmp_path):
     assert "2 cycle sections" in doubled["structure"][0]
 
     assert "structure faults: 1" in mod.render(doubled, False)
-    assert mod.main(["--projects", str(register), "--bookmark", str(two)]) == 1
-    assert mod.main(["--projects", str(register), "--bookmark", str(one)]) == 0
+    assert mod.main(["--agents", str(register), "--bookmark", str(two)]) == 1
+    assert mod.main(["--agents", str(register), "--bookmark", str(one)]) == 0
 
 
 def test_one_cycle_section_is_the_contract_and_none_is_legitimate(mod, tmp_path):
@@ -691,11 +691,11 @@ def test_one_cycle_section_is_the_contract_and_none_is_legitimate(mod, tmp_path)
     """
     root = _root(tmp_path, "shapes")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
-    register = _projects(tmp_path / "agents.yml", [{"name": "shapes", "path": root}])
+    register = _agents(tmp_path / "agents.yml", [{"name": "shapes", "path": root}])
     bare = _bookmark(tmp_path / "bare.md", [("`shapes`", BASE)])
     noted = tmp_path / "noted.md"
     noted.write_text("# Bookmark\n\n## Notes\n\n- the qualifier matters\n\n"
-                     "| project | newest read | files |\n| --- | --- | --- |\n"
+                     "| agent | newest read | files |\n| --- | --- | --- |\n"
                      f"| `shapes` | {BASE} | 0 |\n", encoding="utf-8")
 
     for path in (bare, noted):
@@ -703,7 +703,7 @@ def test_one_cycle_section_is_the_contract_and_none_is_legitimate(mod, tmp_path)
         assert reading["structure"] == [], (path.name, reading["structure"])
         assert reading["cycle_sections"] == 0, path.name
         assert "structure: 0 cycle section(s)" in mod.render(reading, False), path.name
-        assert mod.main(["--projects", str(register), "--bookmark", str(path)]) == 0
+        assert mod.main(["--agents", str(register), "--bookmark", str(path)]) == 0
 
 
 def test_a_bookmark_truncated_at_its_section_is_diagnosed_as_truncation(mod, tmp_path):
@@ -715,7 +715,7 @@ def test_a_bookmark_truncated_at_its_section_is_diagnosed_as_truncation(mod, tmp
     remedies, so the section-carrying case gets its own sentence, and the table-less file
     with no section keeps the original one.
     """
-    register = _projects(tmp_path / "agents.yml", [{"name": "cut", "path": str(tmp_path)}])
+    register = _agents(tmp_path / "agents.yml", [{"name": "cut", "path": str(tmp_path)}])
     cut = tmp_path / "cut.md"
     cut.write_text(f"# Bookmark\n\n{SECTION}\n\nthe rewrite stopped here\n", encoding="utf-8")
     with pytest.raises(mod.Unmeasurable) as excinfo:
@@ -744,7 +744,7 @@ def _bookmark_with_read_by(path: Path, rows: list[tuple[str, str, str]]) -> Path
     writer rather than a changed one.
     """
     lines = ["# Bookmark", "",
-             "| project | newest read | files | read by |",
+             "| agent | newest read | files | read by |",
              "| --- | --- | --- | --- |"]
     lines += [f"| {key} | {value} | 0 | {cycle} |" for key, value, cycle in rows]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -754,12 +754,12 @@ def _bookmark_with_read_by(path: Path, rows: list[tuple[str, str, str]]) -> Path
 def test_a_row_that_records_its_reading_cycle_is_reported_with_it(mod, tmp_path):
     """A bookmark that records the cycle and a report that drops it is the same as neither.
 
-    §1.5 orders the rotation by "least recently visited" once the changed projects are
+    §1.5 orders the rotation by "least recently visited" once the changed agents are
     taken, so the field is the only carrier that key has (issue #2525).
     """
     root = _root(tmp_path, "cycled")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
-    register = _projects(tmp_path / "projects.yml", [{"name": "cycled", "path": root}])
+    register = _agents(tmp_path / "agents.yml", [{"name": "cycled", "path": root}])
     book = _bookmark_with_read_by(tmp_path / "book.md", [("`cycled`", BASE, "cyc20261020-141450")])
     reading = mod.read(register, book)
     assert [s["read_by"] for s in reading["states"]] == ["cyc20261020-141450"]
@@ -790,7 +790,7 @@ def test_a_cell_that_only_resembles_a_cycle_is_not_read_as_one(mod, tmp_path):
     right width, or nothing. A near miss must not become an ordering key."""
     root = _root(tmp_path, "almost")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
-    register = _projects(tmp_path / "projects.yml", [{"name": "almost", "path": root}])
+    register = _agents(tmp_path / "agents.yml", [{"name": "almost", "path": root}])
     for near_miss in ("cyc2026102-14145", "cyc20261020-1414", "cyc20261020-1414500",
                       "cycle 20261020-141450", "2026-10-20 14:14:50"):
         book = _bookmark_with_read_by(tmp_path / "book.md", [("`almost`", BASE, near_miss)])
@@ -817,10 +817,10 @@ def test_the_default_reads_the_registers_old_name_while_the_move_is_pending(
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 3))
     # `agents.yml` is never created: the move has not happened on this host yet.
     new_name = tmp_path / "agents.yml"
-    legacy = _projects(tmp_path / "projects.yml", [{"name": "pending", "path": root}])
+    legacy = _agents(tmp_path / "projects.yml", [{"name": "pending", "path": root}])
     book = _bookmark(tmp_path / "bookmark.md", [("`pending`", BASE)])
-    monkeypatch.setattr(mod, "DEFAULT_PROJECTS", str(new_name))
-    monkeypatch.setattr(mod, "LEGACY_PROJECTS", str(legacy))
+    monkeypatch.setattr(mod, "DEFAULT_AGENTS", str(new_name))
+    monkeypatch.setattr(mod, "LEGACY_AGENTS", str(legacy))
     monkeypatch.setattr(mod, "DEFAULT_BOOKMARK", str(book))
 
     assert mod.main([]) == 0
@@ -842,13 +842,13 @@ def test_an_explicit_register_is_never_second_guessed(mod, tmp_path, monkeypatch
     """
     root = _root(tmp_path, "explicit")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 1))
-    decoy = _projects(tmp_path / "projects.yml", [{"name": "decoy", "path": root}])
-    wanted = _projects(tmp_path / "named-by-caller.yml", [{"name": "explicit", "path": root}])
+    decoy = _agents(tmp_path / "projects.yml", [{"name": "decoy", "path": root}])
+    wanted = _agents(tmp_path / "named-by-caller.yml", [{"name": "explicit", "path": root}])
     book = _bookmark(tmp_path / "bookmark.md", [("`explicit`", BASE)])
-    monkeypatch.setattr(mod, "DEFAULT_PROJECTS", str(tmp_path / "agents.yml"))
-    monkeypatch.setattr(mod, "LEGACY_PROJECTS", str(decoy))
+    monkeypatch.setattr(mod, "DEFAULT_AGENTS", str(tmp_path / "agents.yml"))
+    monkeypatch.setattr(mod, "LEGACY_AGENTS", str(decoy))
 
-    assert mod.main(["--projects", str(wanted), "--bookmark", str(book)]) == 0
+    assert mod.main(["--agents", str(wanted), "--bookmark", str(book)]) == 0
 
     captured = capsys.readouterr()
     assert str(wanted) in captured.out.splitlines()[0]
@@ -860,8 +860,8 @@ def test_with_neither_name_the_reading_is_unmeasurable_never_a_pass(
 ):
     """The fallback is not a way to manufacture a reading out of nothing."""
     book = _bookmark(tmp_path / "bookmark.md", [("`gone`", BASE)])
-    monkeypatch.setattr(mod, "DEFAULT_PROJECTS", str(tmp_path / "agents.yml"))
-    monkeypatch.setattr(mod, "LEGACY_PROJECTS", str(tmp_path / "projects.yml"))
+    monkeypatch.setattr(mod, "DEFAULT_AGENTS", str(tmp_path / "agents.yml"))
+    monkeypatch.setattr(mod, "LEGACY_AGENTS", str(tmp_path / "projects.yml"))
     monkeypatch.setattr(mod, "DEFAULT_BOOKMARK", str(book))
 
     assert mod.main([]) == 2
@@ -869,4 +869,31 @@ def test_with_neither_name_the_reading_is_unmeasurable_never_a_pass(
     captured = capsys.readouterr()
     assert "not measurable" in captured.err
     assert "does not exist yet" not in captured.err
+
+
+# ------------------------------------------------ the bookmark's name, which no code moves
+
+
+def test_the_bookmark_default_names_the_file_this_installation_writes(mod):
+    """The register's name **moves**; the bookmark's does not, and the default must say so.
+
+    Nothing above catches this. Every test in this file replaces `DEFAULT_BOOKMARK` with a
+    file under `tmp_path`, so the default's own value is read by no test and a wrong one is
+    green everywhere - measured on the branch that renamed the register, where the same
+    pass translated this constant too and the whole suite stayed green.
+
+    What a wrong value costs is not a failing test but a stopped clock: step 0 is the step
+    that is never skipped, and its answer becomes `not measurable` on every cycle from the
+    merge onwards, because the file the constant then names is created by nothing. The
+    register is the mirror image and stays correct *because* something moves it
+    (`emrg.config` migrates the file), which is why its new name is right and this one is
+    not. So the pin is the requirement: the basename is host state, preserved verbatim
+    until a change in this tree actually renames that file.
+    """
+    assert mod.DEFAULT_BOOKMARK.endswith(
+        "/.emrg/memory/project-memory-rotation-bookmark.md"
+    ), (
+        "the bookmark's basename is host state: no code in this tree renames that file, so a "
+        "renamed constant points at nothing and step 0 answers `not measurable` every cycle"
+    )
 

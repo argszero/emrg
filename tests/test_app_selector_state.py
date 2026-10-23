@@ -21,14 +21,14 @@ class TestSelectorState:
         """Each instance is independent — setting one doesn't affect another."""
         from emrg.client.app import SelectorState
         session_sel = SelectorState()
-        project_sel = SelectorState()
+        agent_sel = SelectorState()
         model_sel = SelectorState()
 
         session_sel.active = True
         session_sel.pending = True
 
-        assert project_sel.active is False
-        assert project_sel.pending is False
+        assert agent_sel.active is False
+        assert agent_sel.pending is False
         assert model_sel.active is False
         assert model_sel.pending is False
 
@@ -64,18 +64,18 @@ class TestSelectorState:
         class SessionSelector:
             pass
 
-        class ProjectSelector:
+        class AgentSelector:
             pass
 
         session_sel = SelectorState()
         session_sel.widget = SessionSelector()
 
-        project_sel = SelectorState()
-        project_sel.widget = ProjectSelector()
+        agent_sel = SelectorState()
+        agent_sel.widget = AgentSelector()
 
         # Each widget type is independent
         assert isinstance(session_sel.widget, SessionSelector)
-        assert isinstance(project_sel.widget, ProjectSelector)
+        assert isinstance(agent_sel.widget, AgentSelector)
 
     def test_pending_flag_independent_from_active(self):
         """pending and active are independent — a selector can be pending without being active."""

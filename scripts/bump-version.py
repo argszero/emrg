@@ -87,7 +87,7 @@ SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 #: ``git for-each-ref refs/remotes/origin``: ``release/v0.3.2``, ``release/v0.3.3``
 #: and ``release/v0.3.4`` are what the flow creates now, while the older spelling
 #: survives only on branches that were created back then). A tool that prints an
-#: instruction is a carrier of the project's rules, so the spelling is named once
+#: instruction is a carrier of the agent's rules, so the spelling is named once
 #: here and read by both the run's next-steps and the test that pins it.
 RELEASE_BRANCH = "release/v{version}"
 

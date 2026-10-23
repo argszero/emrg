@@ -66,11 +66,11 @@ function mockEmrg(over: Record<string, unknown> = {}) {
     return mock;
   };
   const bridge = {
-    listProjects: fn("listProjects", [{ name: "emrg", path: "/p/emrg" }, { name: "demo", path: "/p/demo", latest_session_at: "2026-08-27T00:00:00Z" }]),
-    listProjectSessions: fn("listProjectSessions", { sessions: [{ session_id: "s9", title: "Demo session" }] }),
+    listAgents: fn("listAgents", [{ name: "emrg", path: "/p/emrg" }, { name: "demo", path: "/p/demo", latest_session_at: "2026-08-27T00:00:00Z" }]),
+    listAgentSessions: fn("listAgentSessions", { sessions: [{ session_id: "s9", title: "Demo session" }] }),
     newSession: fn("newSession", { session_id: "s-new" }),
-    pickProjectDir: fn("pickProjectDir", { path: "/p/new" }),
-    registerProject: fn("registerProject", { ok: true, path: "/p/new" }),
+    pickAgentDir: fn("pickAgentDir", { path: "/p/new" }),
+    registerAgent: fn("registerAgent", { ok: true, path: "/p/new" }),
     switchSession: fn("switchSession", { ok: true }),
     deleteSession: fn("deleteSession", { ok: true }),
     renameSession: fn("renameSession", { ok: true }),
@@ -81,7 +81,7 @@ function mockEmrg(over: Record<string, unknown> = {}) {
     listMemories: fn("listMemories", [{ id: "m1", title: "记忆一", summary: "摘要内容" }]),
     readMemory: fn("readMemory", { id: "m1", title: "记忆一", content: "详情正文" }),
     listSkills: fn("listSkills", [{ name: "browser-harness", description: "web automation", source: "user" }]),
-    removeProject: fn("removeProject", { ok: true }),
+    removeAgent: fn("removeAgent", { ok: true }),
     ...over,
   };
   (window as unknown as { emrg?: unknown }).emrg = bridge;
@@ -147,7 +147,7 @@ describe("DialogHost (Batch 5 slice 4)", () => {
     await waitFor(() => expect(screen.getByText("记忆一")).toBeInTheDocument());
     fireEvent.click(screen.getByText("记忆一"));
     await waitFor(() => expect(screen.getByTestId("memory-detail")).toBeInTheDocument());
-    expect(calls.readMemory[0][0]).toMatchObject({ memoryId: "m1", scope: "project" });
+    expect(calls.readMemory[0][0]).toMatchObject({ memoryId: "m1", scope: "agent" });
   });
 
   it("记忆详情按 vanilla 截断：title 80 / body 2000", async () => {
@@ -277,7 +277,7 @@ describe("DialogHost (Batch 5 slice 4)", () => {
     await waitFor(() => expect(screen.getByTestId("open-session-dialog")).toBeInTheDocument());
     await waitFor(() => expect(screen.getByText("demo")).toBeInTheDocument());
     fireEvent.click(screen.getByText("demo"));
-    await waitFor(() => expect(calls.listProjectSessions.length).toBe(1));
+    await waitFor(() => expect(calls.listAgentSessions.length).toBe(1));
     await waitFor(() => expect(screen.getByText("Demo session")).toBeInTheDocument());
     fireEvent.click(screen.getByText("Demo session"));
     await waitFor(() => expect(calls.switchSession.length).toBe(1));
@@ -292,7 +292,7 @@ describe("DialogHost (Batch 5 slice 4)", () => {
     const del = screen.getAllByTestId("open-session-delete");
     fireEvent.click(del[0]); // emrg 项目
     await waitFor(() => expect(screen.getByTestId("confirm-dialog")).toBeInTheDocument());
-    expect(screen.getByText(/system project/i)).toBeInTheDocument();
+    expect(screen.getByText(/system agent/i)).toBeInTheDocument();
   });
 
   it("新建会话：点选项目 → newSession + onSwitchSession(新会话)", async () => {

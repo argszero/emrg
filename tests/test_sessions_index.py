@@ -1,4 +1,4 @@
-"""Tests for the global cross-project session index (rant 2026-08-13T16:42:22)."""
+"""Tests for the global cross-agent session index (rant 2026-08-13T16:42:22)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import pytest
 from tests.bounded_read import DEADLINE_SECONDS, within
 from emrg.session import Session
 from emrg.sessions_index import (
-    _iter_project_sessions,
+    _iter_agent_sessions,
     _load,
     _read_meta_session_id,
     _write,
@@ -112,12 +112,12 @@ class TestRebuild:
         data = _load(cfg / "sessions_index.json")
         assert data["s_nested"] == str(sdir)
 
-    def test_rebuild_scans_project_paths_outside_root(self, tmp_path):
+    def test_rebuild_scans_agent_paths_outside_root(self, tmp_path):
         cfg = tmp_path / "cfg"
         cfg.mkdir(parents=True, exist_ok=True)
-        project = tmp_path / "outside_project"
-        sdir = self._make_session(project, "s_outside")
-        count = rebuild_sessions_index(cfg, project_paths=[str(project)])
+        agent = tmp_path / "outside_agent"
+        sdir = self._make_session(agent, "s_outside")
+        count = rebuild_sessions_index(cfg, agent_paths=[str(agent)])
         assert count == 1
         data = _load(cfg / "sessions_index.json")
         assert data["s_outside"] == str(sdir)
@@ -220,11 +220,11 @@ class TestAWalkByKindRatherThanByOpening:
     `_read_meta_session_id` opened its subject inside `except (json.JSONDecodeError,
     OSError)` — which cannot bound a *block*: `read_text` on a FIFO waits at the open for a
     writer, raises nothing, and never returns. Measured 2026-10-11 (`cyc20261011-070311`) on
-    master `3386f239`: a `mkfifo` at `<project>/.emrg/sessions/s1/meta.json` made
-    `_iter_project_sessions` **not return in 8 s**.
+    master `3386f239`: a `mkfifo` at `<agent>/.emrg/sessions/s1/meta.json` made
+    `_iter_agent_sessions` **not return in 8 s**.
 
     The path is under the *workspace* — the agent's own write surface — and both walkers
-    (`_iter_project_sessions`, `_iter_nested_sessions`) read through this one function, so
+    (`_iter_agent_sessions`, `_iter_nested_sessions`) read through this one function, so
     the kind is asked once where the open happens.
     """
 
@@ -249,14 +249,14 @@ class TestAWalkByKindRatherThanByOpening:
         wedged.mkdir()
         os.mkfifo(wedged / "meta.json")
 
-        rows = within(DEADLINE_SECONDS, lambda: list(_iter_project_sessions(tmp_path)))
+        rows = within(DEADLINE_SECONDS, lambda: list(_iter_agent_sessions(tmp_path)))
         assert [sid for sid, _ in rows] == ["s_real"], rows
 
     def test_the_control_without_the_fifo(self, tmp_path):
         """Same fixture, a regular meta.json: both sessions read, so the kind is the axis."""
         self._session(tmp_path, "s_real")
         self._session(tmp_path, "s_also")
-        rows = list(_iter_project_sessions(tmp_path))
+        rows = list(_iter_agent_sessions(tmp_path))
         assert sorted(sid for sid, _ in rows) == ["s_also", "s_real"], rows
 
     @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")

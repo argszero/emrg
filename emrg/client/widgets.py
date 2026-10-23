@@ -1,6 +1,6 @@
 """EMRG client — TUI widget classes extracted from app.py.
 
-Contains InputWidget, selectors (Session/Project/Model/Rewind/Command),
+Contains InputWidget, selectors (Session/Agent/Model/Rewind/Command),
 ChatHistory, _COMMAND_HELP, and SelectorState.
 """
 
@@ -657,15 +657,15 @@ def _format_tool_input(arguments: dict) -> list[str]:
     return text.split("\n")
 
 
-class ProjectSelector(Widget):
-    """Interactive project picker — arrow-key navigation with highlight.
+class AgentSelector(Widget):
+    """Interactive agent picker — arrow-key navigation with highlight.
 
-    Renders a list of projects from agents.yml with the selected one in
-    reverse video. Used by /rant when invoked without @project.
+    Renders a list of agents from agents.yml with the selected one in
+    reverse video. Used by /rant when invoked without @agent.
     """
 
-    def __init__(self, projects: list[dict] | None = None):
-        self.projects: list[dict] = projects or []
+    def __init__(self, agents: list[dict] | None = None):
+        self.agents: list[dict] = agents or []
         self.selected_index: int = 0
         self._dirty: bool = True
 
@@ -683,25 +683,25 @@ class ProjectSelector(Widget):
             self._dirty = True
 
     def move_down(self) -> None:
-        if self.selected_index < len(self.projects) - 1:
+        if self.selected_index < len(self.agents) - 1:
             self.selected_index += 1
             self._dirty = True
 
     @property
-    def selected_project_name(self) -> str | None:
-        if 0 <= self.selected_index < len(self.projects):
-            return self.projects[self.selected_index].get("name", "")
+    def selected_agent_name(self) -> str | None:
+        if 0 <= self.selected_index < len(self.agents):
+            return self.agents[self.selected_index].get("name", "")
         return None
 
     def render(self, ctx):
         lines: list[Line] = []
         pstyle = Style.parse("bold cyan")
         avail = getattr(ctx, "height", 0) or 0
-        n = len(self.projects)
+        n = len(self.agents)
         chrome, start, end, markers = window_plan(avail, n, self.selected_index)
         if chrome:
             lines.append(Line(
-                spans=[Span("○ ", style="dim"), Span("Select a project (↑↓/j/k to move, Enter to confirm, Esc to cancel):", style="bold")],
+                spans=[Span("○ ", style="dim"), Span("Select an agent (↑↓/j/k to move, Enter to confirm, Esc to cancel):", style="bold")],
                 style=ctx.style,
             ))
         if markers and start > 0:
@@ -710,7 +710,7 @@ class ProjectSelector(Widget):
                 style=ctx.style,
             ))
         for i in range(start, end):
-            p = self.projects[i]
+            p = self.agents[i]
             name = p.get("name", "?")
             repo = p.get("repo", "")
             label = f"  {name}"
@@ -878,7 +878,7 @@ class TaskSelector(Widget):
 
     @property
     def selected_task(self) -> dict | None:
-        """The whole selected row — /task-session needs `project_path` and
+        """The whole selected row — /task-session needs `agent_path` and
         `session_id`, which `selected_task_name` does not carry."""
         if 0 <= self.selected_index < len(self.tasks):
             return self.tasks[self.selected_index]
@@ -1030,18 +1030,18 @@ _COMMAND_HELP: dict[str, str] = {
     "/sessions": "Browse and switch between saved sessions (↑↓/j/k to navigate)",
     "/rewind":   "Rewind session — pick a user message to truncate history to",
     "/compact":  "Compress conversation history to save context",
-    "/memory":   "Browse and search memories [session|project|<id>]",
+    "/memory":   "Browse and search memories [session|agent|<id>]",
     "/rename":   "Rename current session [title]",
     "/delete":   "Delete a session [/delete | /delete <session_id>]",
     "/clear":    "Clear current session history and start fresh",
-    "/rant":     "Send feedback to the evolution system [/rant | /rant @<project> <msg>]",
+    "/rant":     "Send feedback to the evolution system [/rant | /rant @<agent> <msg>]",
     "/model":    "Switch LLM model [/model | /model <name>]",
     "/sandbox":  "Set this session's sandbox tier, or its extra writable roots "
                  "[/sandbox | /sandbox <mode> | /sandbox add|remove|list <path>] "
                  "[/sandbox add|remove --registry <key> names a registry key]",
     "/trigger":  "List or manually trigger scheduled tasks [/trigger | /trigger <name>]",
     "/task-session": "Open a scheduled task's session (no args = interactive picker)",
-    "/skills":   "List loaded skills (user + project)",
+    "/skills":   "List loaded skills (user + agent)",
     "/version":  "Show EMRG version and instance info",
     "/image":    "Insert clipboard image into input field",
     "/help":     "Show keyboard shortcuts and commands",
@@ -1259,7 +1259,7 @@ class ChatHistory(Widget):
 
 
 class SelectorState:
-    """Unified state for interactive selectors (session, project, model).
+    """Unified state for interactive selectors (session, agent, model).
 
     Consolidates 9 separate variables into 3 typed instances to eliminate
     nonlocal declaration errors (rant #31).
@@ -1268,5 +1268,5 @@ class SelectorState:
 
     def __init__(self) -> None:
         self.active: bool = False
-        self.widget: 'SessionSelector | ProjectSelector | ModelSelector | None' = None
+        self.widget: 'SessionSelector | AgentSelector | ModelSelector | None' = None
         self.pending: bool = False

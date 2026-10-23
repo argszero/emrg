@@ -5,7 +5,7 @@ import { MarkdownText } from "./MarkdownText";
 import { SettingsPanel } from "./SettingsPanel";
 import { sessionRowView, type SessionRow } from "../lib/openSession";
 import {
-  buildEvolveProjects,
+  buildEvolveAgents,
   preprocessRantMarkdown,
   projectHint,
   rantFirstLine,
@@ -14,7 +14,7 @@ import {
   taskHint,
   taskMeta,
   taskStatusBadge,
-  type ProjectRec,
+  type AgentRec,
   type RantFilter,
   type RantRec,
   type TaskRec,
@@ -30,13 +30,13 @@ import {
  * - 设置面板仅渲染 tab 壳（Batch 4 对话框迁移时填充）
  * - 项目/任务/Rant 数据经 props 注入；操作经回调上抛（onSelectSession / onTriggerTask / …）
  */
-export type WorkspaceViewId = "projects" | "tasks" | "rants" | "settings";
+export type WorkspaceViewId = "agents" | "tasks" | "rants" | "settings";
 
 export interface WorkspaceViewProps {
-  projects?: ProjectRec[];
+  agents?: AgentRec[];
   tasks?: TaskRec[];
   rants?: RantRec[];
-  /** 当前项目会话列表（Batch 5 接线：Shell 经 listProjectSessions 加载） */
+  /** 当前项目会话列表（Batch 5 接线：Shell 经 listAgentSessions 加载） */
   projectSessions?: SessionRow[] | null;
   projectSessionsError?: string | null;
   /** 激活会话（会话行 "当前" 标记，vanilla App.state.sessionId 语义） */
@@ -46,10 +46,10 @@ export interface WorkspaceViewProps {
   /** 设置面板关于 tab 数据（Shell appState 注入，Batch 5 slice 6） */
   version?: string;
   evolutionCount?: number | null;
-  onSelectProjectSession?: (project: ProjectRec, sessionId: string) => void;
-  onViewProjectSessions?: (project: ProjectRec) => void;
-  onAddProject?: () => void;
-  onDeleteProject?: (project: ProjectRec) => void;
+  onSelectAgentSession?: (agent: AgentRec, sessionId: string) => void;
+  onViewAgentSessions?: (agent: AgentRec) => void;
+  onAddAgent?: () => void;
+  onDeleteAgent?: (agent: AgentRec) => void;
   onTriggerTask?: (task: TaskRec) => void;
   onEditTask?: (task: TaskRec) => void;
   onDeleteTask?: (task: TaskRec) => void;
@@ -71,7 +71,7 @@ const RANT_FILTERS: { value: RantFilter; labelKey: string }[] = [
 ];
 
 export function WorkspaceView({
-  projects = [],
+  agents = [],
   tasks = [],
   rants = [],
   projectSessions = null,
@@ -81,10 +81,10 @@ export function WorkspaceView({
   onSwitch,
   version,
   evolutionCount,
-  onSelectProjectSession,
-  onViewProjectSessions,
-  onAddProject,
-  onDeleteProject,
+  onSelectAgentSession,
+  onViewAgentSessions,
+  onAddAgent,
+  onDeleteAgent,
   onTriggerTask,
   onEditTask,
   onDeleteTask,
@@ -95,7 +95,7 @@ export function WorkspaceView({
   const { t } = useI18n();
   const [rantFilter, setRantFilter] = useState<RantFilter>("");
   const [expandedRant, setExpandedRant] = useState<string | null>(null);
-  const [sessionsProject, setSessionsProject] = useState<ProjectRec | null>(null);
+  const [sessionsProject, setSessionsProject] = useState<AgentRec | null>(null);
   // 任务面板激活时每秒 tick → 倒计时/运行时长实时更新（vanilla taskPollTimer 行为；
   // 评审 #1008：静态快照导致运行时长恒 0s）
   const [, setTick] = useState(0);
@@ -105,7 +105,7 @@ export function WorkspaceView({
     return () => clearInterval(id);
   }, [activeView]);
 
-  const evolveProjects = useMemo(() => buildEvolveProjects(tasks), [tasks]);
+  const evolveAgents = useMemo(() => buildEvolveAgents(tasks), [tasks]);
   const filteredRants = useMemo(
     () => (rantFilter ? rants.filter((r) => (r.status || "pending") === rantFilter) : rants),
     [rants, rantFilter],
@@ -113,35 +113,35 @@ export function WorkspaceView({
 
   function switchView(v: WorkspaceViewId) {
     // 离开项目会话子视图 → 重置回项目列表
-    if (v !== "projects" && sessionsProject) setSessionsProject(null);
+    if (v !== "agents" && sessionsProject) setSessionsProject(null);
     onSwitch?.(v);
   }
 
   return (
     <div className="workspace" data-testid="workspace-view">
-      {activeView === "projects" && (
-        <section className="workspace-view" data-view="projects" data-testid="panel-projects">
+      {activeView === "agents" && (
+        <section className="workspace-view" data-view="agents" data-testid="panel-agents">
           <div className="workspace-view-body">
-            <h2 className="workspace-view-title">{t("projects.title")}</h2>
+            <h2 className="workspace-view-title">{t("agents.title")}</h2>
             {sessionsProject ? (
-              <ProjectSessions
-                project={sessionsProject}
+              <AgentSessions
+                agent={sessionsProject}
                 sessions={projectSessions}
                 error={projectSessionsError}
                 currentSid={currentSid}
                 onBack={() => setSessionsProject(null)}
-                onSelect={(sid) => onSelectProjectSession?.(sessionsProject, sid)}
+                onSelect={(sid) => onSelectAgentSession?.(sessionsProject, sid)}
               />
             ) : (
-              <ProjectList
-                projects={projects}
-                evolveProjects={evolveProjects}
+              <AgentList
+                agents={agents}
+                evolveAgents={evolveAgents}
                 t={t}
                 onViewSessions={(p) => {
                   setSessionsProject(p);
-                  onViewProjectSessions?.(p);
+                  onViewAgentSessions?.(p);
                 }}
-                onDelete={onDeleteProject}
+                onDelete={onDeleteAgent}
               />
             )}
             <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
@@ -149,9 +149,9 @@ export function WorkspaceView({
                 type="button"
                 className="btn btn-ghost"
                 style={{ flex: 1 }}
-                onClick={onAddProject}
+                onClick={onAddAgent}
               >
-                {t("projects.add")}
+                {t("agents.add")}
               </button>
             </div>
           </div>
@@ -199,7 +199,7 @@ export function WorkspaceView({
             </div>
             <div className="rant-head">
               <span className="rant-col-time">{t("rants.colTime")}</span>
-              <span className="rant-col-project">{t("rants.colProject")}</span>
+              <span className="rant-col-agent">{t("rants.colAgent")}</span>
               <span className="rant-col-status">{t("rants.colStatus")}</span>
               <span className="rant-col-progress">{t("rants.colProgress")}</span>
               <span className="rant-col-content">{t("rants.colContent")}</span>
@@ -230,51 +230,51 @@ export function WorkspaceView({
 
 /* ── 项目列表 ────────────────────────────────────────────── */
 
-function ProjectList({
-  projects,
-  evolveProjects,
+function AgentList({
+  agents,
+  evolveAgents,
   t,
   onViewSessions,
   onDelete,
 }: {
-  projects: ProjectRec[];
-  evolveProjects: Set<string>;
+  agents: AgentRec[];
+  evolveAgents: Set<string>;
   t: (k: string, v?: Record<string, unknown>) => string;
-  onViewSessions: (p: ProjectRec) => void;
-  onDelete?: (p: ProjectRec) => void;
+  onViewSessions: (p: AgentRec) => void;
+  onDelete?: (p: AgentRec) => void;
 }) {
-  if (!projects.length) {
-    return <div className="task-empty" data-testid="projects-empty">{t("projects.empty")}</div>;
+  if (!agents.length) {
+    return <div className="task-empty" data-testid="agents-empty">{t("agents.empty")}</div>;
   }
   return (
-    <div className="task-list" data-testid="project-list">
-      {projects.map((p) => {
+    <div className="task-list" data-testid="agent-list">
+      {agents.map((p) => {
         const name = p.name || p.path || "?";
         const hint = projectHint(p, t);
         return (
-          <div className="task-row" key={name} data-testid="project-row">
+          <div className="task-row" key={name} data-testid="agent-row">
             <span className="task-name">{name}</span>
-            {evolveProjects.has(name) && (
-              <span className="task-badge" data-testid="project-evolve-badge">⚡ {t("projects.autoEvolve")}</span>
+            {evolveAgents.has(name) && (
+              <span className="task-badge" data-testid="agent-evolve-badge">⚡ {t("agents.autoEvolve")}</span>
             )}
             {hint && <span className="task-hint">{hint}</span>}
             <span className="task-actions">
               <button
                 type="button"
                 className="model-action-btn"
-                title={t("projects.viewSessions")}
+                title={t("agents.viewSessions")}
                 onClick={() => onViewSessions(p)}
               >
-                {t("projects.viewSessions")}
+                {t("agents.viewSessions")}
               </button>
               {onDelete && (
                 <button
                   type="button"
                   className="model-action-btn danger"
-                  title={t("deleteProject.delete")}
+                  title={t("deleteAgent.delete")}
                   onClick={() => onDelete(p)}
                 >
-                  {t("deleteProject.delete")}
+                  {t("deleteAgent.delete")}
                 </button>
               )}
             </span>
@@ -286,15 +286,15 @@ function ProjectList({
 }
 
 /** 项目会话子视图（点击项目"查看会话"后展示） */
-function ProjectSessions({
-  project,
+function AgentSessions({
+  agent,
   sessions,
   error,
   currentSid,
   onBack,
   onSelect,
 }: {
-  project: ProjectRec;
+  agent: AgentRec;
   sessions: SessionRow[] | null;
   error?: string | null;
   currentSid?: string | null;
@@ -303,19 +303,19 @@ function ProjectSessions({
 }) {
   const { t } = useI18n();
   return (
-    <div className="task-list" data-testid="project-sessions">
+    <div className="task-list" data-testid="agent-sessions">
       <div className="task-row">
         <button type="button" className="model-action-btn" style={{ flexShrink: 0 }} onClick={onBack}>
-          {t("projects.back")}
+          {t("agents.back")}
         </button>
-        <span className="task-name">{t("projects.sessionsOf", { project: project.name || project.path || "" })}</span>
+        <span className="task-name">{t("agents.sessionsOf", { agent: agent.name || agent.path || "" })}</span>
       </div>
       {error ? (
-        <div className="task-empty" data-testid="project-sessions-error">{t("openSession.loadFailed", { msg: error })}</div>
+        <div className="task-empty" data-testid="agent-sessions-error">{t("openSession.loadFailed", { msg: error })}</div>
       ) : sessions === null ? (
-        <div className="task-empty" data-testid="project-sessions-loading">{t("dlg.loading")}</div>
+        <div className="task-empty" data-testid="agent-sessions-loading">{t("dlg.loading")}</div>
       ) : sessions.length === 0 ? (
-        <div className="task-empty" data-testid="project-sessions-empty">{t("projects.noSessions")}</div>
+        <div className="task-empty" data-testid="agent-sessions-empty">{t("agents.noSessions")}</div>
       ) : (
         sessions.map((s) => {
           const v = sessionRowView(s, currentSid ?? null, t);
@@ -324,7 +324,7 @@ function ProjectSessions({
               type="button"
               className="help-row"
               key={s.session_id}
-              data-testid="project-session-row"
+              data-testid="agent-session-row"
               style={{ width: "100%", textAlign: "left", cursor: "pointer", background: "none", border: "none" }}
               onClick={() => onSelect(s.session_id)}
             >
@@ -453,7 +453,7 @@ function RantList({
   return (
     <div className="task-list" data-testid="rant-list">
       {rants.map((r) => {
-        const key = String(r.timestamp || r.project || r.message || Math.random());
+        const key = String(r.timestamp || r.agent || r.message || Math.random());
         const ts = rantTimestamp(r.timestamp);
         const st = rantStatusMeta(r.status, t);
         const firstLine = rantFirstLine(r.message);
@@ -466,14 +466,14 @@ function RantList({
               onClick={() => onToggle(key)}
             >
               <span className="rant-col-time">{ts}</span>
-              <span className="rant-col-project">{r.project || "—"}</span>
+              <span className="rant-col-agent">{r.agent || "—"}</span>
               <span className={`task-badge ${st.badgeCls}`} data-testid="rant-status-badge">{st.text}</span>
               <span className="rant-col-progress">{r.progress ? String(r.progress) : "—"}</span>
               <span className="rant-col-content">{firstLine}</span>
             </div>
             {isExpanded && (
               <div className="rant-detail" style={{ padding: "6px 8px", borderTop: "1px solid var(--border)", fontSize: "var(--fs-secondary)" }}>
-                <div className="rant-meta">{ts} · {r.project || "—"} · {st.text}</div>
+                <div className="rant-meta">{ts} · {r.agent || "—"} · {st.text}</div>
                 <div className="rant-section">
                   <div className="rant-section-label">{t("rants.colContent")}</div>
                   {/* markdown 渲染（rant 2026-09-30T09:06:16 / #1763）：preprocessRantMarkdown 的
