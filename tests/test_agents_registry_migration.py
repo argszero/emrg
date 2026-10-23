@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from emrg.config import agents_file, migrate_legacy_registry
+from emrg.config import agents_file, migrate_legacy_registry, register_for_reading
 
 #: A register with what the daemon cares about: a `name`/`path` pair, and the
 #: `last_active` stamp the pickers sort by. The second entry carries a custom
@@ -193,3 +193,85 @@ def test_the_old_name_is_spelled_only_where_the_move_is():
     assert not offenders, "the register's path is built outside its one producer:\n" + "\n".join(
         offenders
     )
+
+
+# ── The register read path (#2545) ────────────────────────────────────────────
+#
+# The move above is the *writer's* business. These pin the reader's: while the
+# file is still at the old name — because the move cannot happen on this host,
+# or because a checkout runs ahead of the daemon that performs it — every reader
+# must read the register that is actually there, and must not answer "empty".
+
+
+def test_a_register_at_the_old_name_is_read_by_every_reader(tmp_path, monkeypatch):
+    """The measured defect, one reader per assertion.
+
+    With only the pre-rename file present, each of these answered the empty
+    answer — `[]`, `None`, `{}` — while the register held two entries: silent,
+    because "nothing there" and "it is at the other name" read alike. The
+    candidate list is the one with a consequence: `submit_rant`'s warning about a
+    mis-spelled agent is gated on that list being non-empty, so it never fired.
+    """
+    from emrg.server.scheduler import _load_agent_config, _resolve_agent_path
+    from emrg.tools.file_policy import protected_paths
+    from emrg.tools.submit_rant_tool import SubmitRantTool
+
+    legacy = _legacy(tmp_path)
+    # Each module holds its own bound copy of `config_dir` (`from emrg.config
+    # import config_dir`), so patching the definition does not rebind them — a
+    # seam that patches only the library leaves the caller reading the host's
+    # real register, which is host state in a test.
+    monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
+    monkeypatch.setattr("emrg.server.scheduler.config_dir", lambda: tmp_path)
+
+    assert register_for_reading(tmp_path) == legacy
+
+    assert sorted(SubmitRantTool()._registered_agent_names()) == ["aitokenpool", "emrg"]
+
+    assert _resolve_agent_path("emrg") == "/home/h/evolution/emrg"
+
+    entry = _load_agent_config("emrg", "/home/h/evolution/emrg")
+    assert entry.get("name") == "emrg", entry
+    assert entry.get("path") == "/home/h/evolution/emrg", entry
+
+    assert str(legacy.resolve()) in protected_paths(), (
+        "the register a sandboxed write must not touch is the one that is live"
+    )
+
+
+def test_the_new_name_governs_when_both_are_present(tmp_path):
+    """A legacy file an older daemon re-created cannot shadow the register."""
+    _legacy(tmp_path)
+    current = tmp_path / "agents.yml"
+    current.write_text(yaml.safe_dump([{"name": "only-new"}]), encoding="utf-8")
+
+    assert register_for_reading(tmp_path) == current
+
+
+def test_the_read_path_never_moves_the_register(tmp_path):
+    """Asking a reader where the register is must not perform the migration."""
+    legacy = _legacy(tmp_path)
+
+    assert register_for_reading(tmp_path) == legacy
+
+    assert legacy.exists(), "reading the register moved it"
+    assert not (tmp_path / "agents.yml").exists()
+
+
+def test_the_read_fallback_cannot_shadow_the_migration_target(tmp_path):
+    """The reason the fallback is its own function and not part of `agents_file`.
+
+    `migrate_legacy_registry` takes `agents_file()` as the move *target*. A
+    fallback inside that function would hand it the legacy path as the target,
+    `target.exists()` would be true, and the move would answer "already done" on
+    every host for ever. Read the fallback first, then migrate, and the move
+    still happens.
+    """
+    legacy = _legacy(tmp_path)
+
+    assert register_for_reading(tmp_path) == legacy
+    assert migrate_legacy_registry(tmp_path) is True, "the fallback made the move a no-op"
+
+    assert not legacy.exists()
+    assert agents_file(tmp_path).exists()
+    assert register_for_reading(tmp_path) == agents_file(tmp_path)

@@ -36,7 +36,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import yaml
 
-from emrg.config import agents_file, config_dir
+from emrg.config import agents_file, config_dir, register_for_reading
 from emrg.connect import connect_to_server
 from emrg.memory import NotARegularFile
 from emrg.tools.base import non_regular_kind
@@ -993,8 +993,13 @@ def _resolve_task_template(task_type: str) -> Path:
 
 
 def _resolve_agent_path(name: str) -> str | None:
-    """Resolve an agent name to its path from agents.yml."""
-    register = agents_file(config_dir())
+    """Resolve an agent name to its path from the register.
+
+    The register is opened through :func:`emrg.config.register_for_reading`, so a
+    host whose file is still at the pre-rename name resolves here instead of
+    answering `None` (#2545).
+    """
+    register = register_for_reading(config_dir())
     if not register.exists():
         return None
     try:
@@ -1010,14 +1015,14 @@ def _resolve_agent_path(name: str) -> str | None:
 
 
 def _load_agent_config(name: str, source_dir: str) -> dict:
-    """Return the full agents.yml entry matching the current agent.
+    """Return the full register entry matching the current agent.
 
     Matches by ``name`` first, then by ``path`` against ``source_dir``.
     Returns an empty dict when no match is found. Custom fields added by
     the user in agents.yml are preserved, so templates can reference
     them via ``{{ agent.<field> }}`` without code changes.
     """
-    register = agents_file(config_dir())
+    register = register_for_reading(config_dir())
     if not register.exists():
         return {}
     try:
