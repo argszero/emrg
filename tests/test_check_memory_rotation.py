@@ -726,3 +726,77 @@ def test_a_bookmark_truncated_at_its_section_is_diagnosed_as_truncation(mod, tmp
     with pytest.raises(mod.Unmeasurable) as excinfo:
         mod.read(register, shapeless)
     assert "another shape" in str(excinfo.value)
+
+
+# ------------------------------------------------- the register's name, mid-move
+
+
+def test_the_default_reads_the_registers_old_name_while_the_move_is_pending(
+    mod, tmp_path, monkeypatch, capsys
+):
+    """A checkout can run ahead of the daemon that owns the register.
+
+    The rename travels in a release, and installing one is what restarts the daemon
+    that performs the move, so between the change landing and that release the default
+    names a file no host has yet. A default alone would answer `not measurable` every
+    cycle of that window and stop the rotation's clock - which is a silent way for step
+    0 to stop being answered, since the step is never skipped. So the default falls
+    back, and the report names the file it actually read.
+    """
+    root = _root(tmp_path, "pending")
+    _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 3))
+    # `agents.yml` is never created: the move has not happened on this host yet.
+    new_name = tmp_path / "agents.yml"
+    legacy = _projects(tmp_path / "projects.yml", [{"name": "pending", "path": root}])
+    book = _bookmark(tmp_path / "bookmark.md", [("`pending`", BASE)])
+    monkeypatch.setattr(mod, "DEFAULT_PROJECTS", str(new_name))
+    monkeypatch.setattr(mod, "LEGACY_PROJECTS", str(legacy))
+    monkeypatch.setattr(mod, "DEFAULT_BOOKMARK", str(book))
+
+    assert mod.main([]) == 0
+
+    captured = capsys.readouterr()
+    assert str(legacy) in captured.out.splitlines()[0], (
+        "the first line is the reading's subject; it must name the file that was opened"
+    )
+    assert "does not exist yet" in captured.err and str(legacy) in captured.err
+    assert "changed since their bookmark: 1" in captured.out
+
+
+def test_an_explicit_register_is_never_second_guessed(mod, tmp_path, monkeypatch, capsys):
+    """The fallback belongs to the default alone.
+
+    A caller that named a register asked about that register. Falling back on it would
+    answer a question nobody put, and would hide a mistyped path behind a plausible
+    reading of a different file.
+    """
+    root = _root(tmp_path, "explicit")
+    _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 1))
+    decoy = _projects(tmp_path / "projects.yml", [{"name": "decoy", "path": root}])
+    wanted = _projects(tmp_path / "named-by-caller.yml", [{"name": "explicit", "path": root}])
+    book = _bookmark(tmp_path / "bookmark.md", [("`explicit`", BASE)])
+    monkeypatch.setattr(mod, "DEFAULT_PROJECTS", str(tmp_path / "agents.yml"))
+    monkeypatch.setattr(mod, "LEGACY_PROJECTS", str(decoy))
+
+    assert mod.main(["--projects", str(wanted), "--bookmark", str(book)]) == 0
+
+    captured = capsys.readouterr()
+    assert str(wanted) in captured.out.splitlines()[0]
+    assert "does not exist yet" not in captured.err
+
+
+def test_with_neither_name_the_reading_is_unmeasurable_never_a_pass(
+    mod, tmp_path, monkeypatch, capsys
+):
+    """The fallback is not a way to manufacture a reading out of nothing."""
+    book = _bookmark(tmp_path / "bookmark.md", [("`gone`", BASE)])
+    monkeypatch.setattr(mod, "DEFAULT_PROJECTS", str(tmp_path / "agents.yml"))
+    monkeypatch.setattr(mod, "LEGACY_PROJECTS", str(tmp_path / "projects.yml"))
+    monkeypatch.setattr(mod, "DEFAULT_BOOKMARK", str(book))
+
+    assert mod.main([]) == 2
+
+    captured = capsys.readouterr()
+    assert "not measurable" in captured.err
+    assert "does not exist yet" not in captured.err
+

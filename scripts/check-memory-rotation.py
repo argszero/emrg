@@ -81,6 +81,19 @@ Exit codes
        ordered against an mtime - a value that does not parse, or one later than the
        instant of the reading - which is never a pass
 
+**The register's name, and one window where two names exist.** The register is
+`agents.yml`. It was called `projects.yml` until an Agent became the record of the
+directory a session runs in, and the mopping-up move belongs to the daemon that owns
+the file (`emrg.config.migrate_legacy_registry`), which performs it when it starts.
+This tree can therefore run ahead of that daemon: the rename travels in a release,
+and installing a release is what restarts the daemon that does the move. In that
+window the no-argument form - the one every cycle is told to run - would answer
+`not measurable` on every run and stop the rotation's clock. So the default falls
+back: when `agents.yml` is absent and `projects.yml` is present, the reading is taken
+on `projects.yml`, a note on stderr says so, and the first line of the report names
+that file as the subject. Once the daemon has moved the register the fallback is
+never reached, and a run that names `--projects` explicitly is never second-guessed.
+
 What it does not do
 -------------------
 It **measures and never repairs**: it does not rewrite the bookmark, add a row, or
@@ -168,6 +181,22 @@ SESSIONS_SUBDIR = (".emrg", "sessions")
 #: layout is reached by naming the two paths, and the report says which it read.
 DEFAULT_PROJECTS = "~/.emrg/agents.yml"
 DEFAULT_BOOKMARK = "~/.emrg/evolution/emrg/.emrg/memory/project-memory-rotation-bookmark.md"
+
+#: The register's name before an Agent became the record of the directory a
+#: session runs in. **Named here because this script runs without the package** —
+#: it is stdlib-only, so it cannot ask `emrg.config`, and `emrg.config` is where
+#: the move itself lives.
+#:
+#: The fallback below exists for one window, and the window is not hypothetical:
+#: a checkout can run ahead of the daemon that holds the register. The code that
+#: moves the file ships in a release, and what restarts the daemon that performs
+#: the move is installing one — so between the change landing and the next
+#: release, this tree names `agents.yml` while the host still keeps its register
+#: at the old name. A default naming only the new file would answer
+#: `not measurable` on every cycle of that window and stop the rotation's clock;
+#: the fallback reads what is there and **says which file it read**, so the
+#: reading never claims a subject it did not open.
+LEGACY_PROJECTS = "~/.emrg/projects.yml"
 
 
 class Unmeasurable(Exception):
@@ -689,6 +718,19 @@ def main(argv: list[str] | None = None) -> int:
 
     projects_path = Path(os.path.expanduser(args.projects))
     bookmark_path = Path(os.path.expanduser(args.bookmark))
+    # The one window where two names exist, and never a second guess at an
+    # explicit argument: only the default is allowed to fall back, so a caller
+    # that named a register is answered about that register.
+    if args.projects == DEFAULT_PROJECTS and not projects_path.exists():
+        legacy_path = Path(os.path.expanduser(LEGACY_PROJECTS))
+        if legacy_path.exists():
+            print(
+                f"note: {projects_path} does not exist yet - reading {legacy_path}, "
+                f"the register's pre-rename name (it moves when the daemon that owns it "
+                f"next starts)",
+                file=sys.stderr,
+            )
+            projects_path = legacy_path
     try:
         reading = read(projects_path, bookmark_path)
     except Unmeasurable as exc:

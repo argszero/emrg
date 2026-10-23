@@ -155,21 +155,36 @@ def test_the_old_name_is_spelled_only_where_the_move_is():
     A reading of the source, not of behaviour, because the question is exactly
     "how many places spell this name" — and a second spelling is what a rename
     leaves behind. `emrg/config.py` is the move itself; every other file asks.
+
+    One carrier is exempt, and it is enumerated rather than matched: the rotation
+    script runs stdlib-only, so it cannot ask `emrg.config`, and it must keep
+    answering while a checkout is ahead of the daemon that performs the move
+    (`agents.yml` travels in a release, and installing one is what restarts that
+    daemon). Its exemption is checked to be live below — an exemption that no
+    longer names anything fails, so this list cannot rot into a permission.
     """
     root = Path(__file__).resolve().parent.parent
+    exemptions = ("scripts/check-memory-rotation.py",)
+    for name in exemptions:
+        text = (root / name).read_text(encoding="utf-8", errors="replace")
+        assert "projects.yml" in text, (
+            f"{name} is exempted from the one-name rule but no longer names the old "
+            f"name — drop it from `exemptions` rather than leaving a permission"
+        )
     offenders: list[str] = []
     for area in ("emrg", "scripts"):
         for path in (root / area).rglob("*.py"):
-            if path == root / "emrg" / "config.py":
+            relative = path.relative_to(root).as_posix()
+            if path == root / "emrg" / "config.py" or relative in exemptions:
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
             if "projects.yml" in text:
-                offenders.append(f"{path.relative_to(root)}: old name")
+                offenders.append(f"{relative}: old name")
             if "agents.yml" in text and "config_dir()" in text:
                 # A path built from the config directory again, rather than asked for.
                 for line in text.splitlines():
                     if "agents.yml" in line and "config_dir()" in line:
-                        offenders.append(f"{path.relative_to(root)}: {line.strip()}")
+                        offenders.append(f"{relative}: {line.strip()}")
     assert not offenders, "the register's path is built outside its one producer:\n" + "\n".join(
         offenders
     )
