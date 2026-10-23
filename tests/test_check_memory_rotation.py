@@ -817,7 +817,7 @@ def test_the_default_reads_the_registers_old_name_while_the_move_is_pending(
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 3))
     # `agents.yml` is never created: the move has not happened on this host yet.
     new_name = tmp_path / "agents.yml"
-    legacy = _agents(tmp_path / "agents.yml", [{"name": "pending", "path": root}])
+    legacy = _agents(tmp_path / "projects.yml", [{"name": "pending", "path": root}])
     book = _bookmark(tmp_path / "bookmark.md", [("`pending`", BASE)])
     monkeypatch.setattr(mod, "DEFAULT_AGENTS", str(new_name))
     monkeypatch.setattr(mod, "LEGACY_AGENTS", str(legacy))
@@ -842,7 +842,7 @@ def test_an_explicit_register_is_never_second_guessed(mod, tmp_path, monkeypatch
     """
     root = _root(tmp_path, "explicit")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 1))
-    decoy = _agents(tmp_path / "agents.yml", [{"name": "decoy", "path": root}])
+    decoy = _agents(tmp_path / "projects.yml", [{"name": "decoy", "path": root}])
     wanted = _agents(tmp_path / "named-by-caller.yml", [{"name": "explicit", "path": root}])
     book = _bookmark(tmp_path / "bookmark.md", [("`explicit`", BASE)])
     monkeypatch.setattr(mod, "DEFAULT_AGENTS", str(tmp_path / "agents.yml"))
@@ -861,7 +861,7 @@ def test_with_neither_name_the_reading_is_unmeasurable_never_a_pass(
     """The fallback is not a way to manufacture a reading out of nothing."""
     book = _bookmark(tmp_path / "bookmark.md", [("`gone`", BASE)])
     monkeypatch.setattr(mod, "DEFAULT_AGENTS", str(tmp_path / "agents.yml"))
-    monkeypatch.setattr(mod, "LEGACY_AGENTS", str(tmp_path / "agents.yml"))
+    monkeypatch.setattr(mod, "LEGACY_AGENTS", str(tmp_path / "projects.yml"))
     monkeypatch.setattr(mod, "DEFAULT_BOOKMARK", str(book))
 
     assert mod.main([]) == 2

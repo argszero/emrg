@@ -91,15 +91,15 @@ Exit codes
        instant of the reading - which is never a pass
 
 **The register's name, and one window where two names exist.** The register is
-`agents.yml`. It was called `agents.yml` until an Agent became the record of the
+`agents.yml`. It was called `projects.yml` until an Agent became the record of the
 directory a session runs in, and the mopping-up move belongs to the daemon that owns
 the file (`emrg.config.migrate_legacy_registry`), which performs it when it starts.
 This tree can therefore run ahead of that daemon: the rename travels in a release,
 and installing a release is what restarts the daemon that does the move. In that
 window the no-argument form - the one every cycle is told to run - would answer
 `not measurable` on every run and stop the rotation's clock. So the default falls
-back: when `agents.yml` is absent and `agents.yml` is present, the reading is taken
-on `agents.yml`, a note on stderr says so, and the first line of the report names
+back: when `agents.yml` is absent and `projects.yml` is present, the reading is taken
+on `projects.yml`, a note on stderr says so, and the first line of the report names
 that file as the subject. Once the daemon has moved the register the fallback is
 never reached, and a run that names `--agents` explicitly is never second-guessed.
 
@@ -213,7 +213,7 @@ DEFAULT_BOOKMARK = "~/.emrg/evolution/emrg/.emrg/memory/agent-memory-rotation-bo
 #: `not measurable` on every cycle of that window and stop the rotation's clock;
 #: the fallback reads what is there and **says which file it read**, so the
 #: reading never claims a subject it did not open.
-LEGACY_AGENTS = "~/.emrg/agents.yml"
+LEGACY_AGENTS = "~/.emrg/projects.yml"
 
 
 class Unmeasurable(Exception):
