@@ -28,11 +28,15 @@ executor calls it at the boundary (``BashToolV2.execute`` / ``PwshToolV2.execute
 so the rules are enforced on the path a command really takes rather than on the
 one the switch retired.
 
-**What is shared with the legacy file.** The tokenizer and its helpers
-(``tokenize_command``, ``nested_command_texts``, ``basename``, the Windows
-backslash protection) — the legacy scanner keeps private aliases to these for its
-own ~30 call sites, and those aliases are the *same function objects*, so the two
-readers cannot drift into two spellings of one command.
+**The mechanics have one home.** The tokenizer and its helpers
+(``_tokenize_command``, ``_nested_command_texts``, ``_basename``, the Windows
+backslash protection) are defined here and nowhere else, so the guards below and
+the executors that call them read one implementation of a command's text rather
+than two that could drift into two spellings of one command.
+``emrg/tools/bash_tool.py`` once re-bound these names as private aliases for its
+own ~30 call sites; P7 (issue #1675) deleted that file, and the aliases went with
+it — ``tests/test_file_policy_has_one_home.py`` holds that no module re-binds
+them.
 """
 
 from __future__ import annotations
@@ -121,7 +125,8 @@ _SHELL_EVALUATORS = frozenset({"eval"})
 
 #: A shell parameter expansion — `$X`, `${X}`, `$1`, `$@` … — as one pattern, because
 #: the rules below ask "does a value spelling name a variable?" rather than "which
-#: variable?". `_UNRESOLVED_ROOT_RE` stays with the legacy scanner and imports this.
+#: variable?". It stays a string rather than a compiled pattern because
+#: `_UNRESOLVED_VAR_RE` below is the only reader, and it wants the repetition.
 _PARAM_EXPANSION = r"\$(?:\{[^}]*\}|[A-Za-z_0-9@*#?$!-][A-Za-z0-9_]*)"
 _UNRESOLVED_VAR_RE = re.compile(rf"(?:{_PARAM_EXPANSION})+")
 

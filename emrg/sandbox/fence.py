@@ -88,7 +88,10 @@ def file_refusal(file_path: str, policy: SandboxPolicy) -> str | None:
         # is the one place the in-process fence is **stricter** than the kernel
         # profile rather than identical to it: it can refuse a write bash would
         # be allowed to make, never the reverse.  The list stays in
-        # ``emrg/tools/file_policy.py`` because the legacy scanner reads it too.
+        # ``emrg/tools/file_policy.py`` because this module and
+        # ``emrg/sandbox/roots.py`` are its two readers — the in-process fence
+        # and the kernel profile refuse the same five paths because they ask the
+        # same derivation, not because two lists happen to agree.
         return f"{policy.mode} sandbox: blocked write to protected daemon file {file_path!r}"
     try:
         # The enforcement question is asked here rather than left to
