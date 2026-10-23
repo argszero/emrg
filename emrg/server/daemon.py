@@ -39,12 +39,12 @@ from emrg._win import win32_no_window_kwargs
 from emrg.config import (
     LlmConfig,
     SandboxConfig,
-    agents_file,
     config_dir,
     logs_dir,
     find_model_entry,
     load_sandbox_config,
     load_update_config,
+    register_for_reading,
     resolve_model_vision,
 )
 from emrg.connect import EMRGD_PORT, cleanup_server, is_server_running_sync
@@ -869,7 +869,18 @@ class EmrgServer:
         # (session_id → (text, injected_ms)) so unchanged context is not
         # re-sent (context_refresh_interval_ms gating).
         self._context_snapshots: dict[str, tuple[str, float]] = {}
-        self._agents_log = agents_file(runtime_dir)
+        # The register this daemon reads and writes is the one that *is there*, not the
+        # name it belongs at: `register_for_reading` answers the file
+        # `migrate_legacy_registry` actually left on disk (#2545), and a register still
+        # carrying its pre-rename name is a state that migration documents and tolerates
+        # — a read-only home, a permission boundary, a caller that got there first (#2521).
+        # Asking the canonical name here put both halves on a file that does not exist,
+        # and `AgentRegistry._read` answers a missing file with `[]`, so the first session
+        # opened wrote a *second* register holding only its own row; because readers
+        # prefer the new name once it exists, every entry left at the old one then
+        # vanished from view without an error (#2549 — the shape #2548 removed from the
+        # scheduler's self-heal, at the call site that runs on every session open).
+        self._agents_log = register_for_reading(runtime_dir)
         self._rants_log = runtime_dir / "rants.jsonl"
 
         # ── Phase 2 broadcast model (protocol-contract §2.6) ──

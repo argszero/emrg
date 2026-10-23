@@ -199,10 +199,12 @@ def main() -> None:
         config = load_config()
         # The agent register's move from its pre-rename name runs here and only here
         # (#2521): this is the one process that owns the file, and it runs before the
-        # server object below asks `emrg.config.agents_file()` for the path. It is
-        # placed after `load_config()` so a startup whose configuration is broken
-        # fails without touching the host's register at all, and it sits in no path
-        # derivation — asking where the register lives must never move it.
+        # server object below asks `emrg.config.register_for_reading()` which file to
+        # open, so a host whose move succeeds is already at the new name before anything
+        # reads or writes it (#2549). It is placed after `load_config()` so a startup
+        # whose configuration is broken fails without touching the host's register at
+        # all, and it sits in no path derivation — asking where the register lives must
+        # never move it.
         migrate_legacy_registry()
         # The task table's agent key moved from `project` to `agent` (issue #2531),
         # and it moves here for the same reason: this is a process that owns the
