@@ -690,7 +690,7 @@ def read_task_run_records(path: Path) -> list[dict]:
     **One derivation of the durable task-run store**, shared by its readers: a handler
     restores its own file at init (:meth:`TaskHandler._load_task_runs`) and the daemon
     reports the instance's record from every file in the store
-    (:meth:`Daemon._evolution_count` and the ``evolution_summary`` frame).
+    (:meth:`EmrgServer._evolution_count` and the ``evolution_summary`` frame).
 
     Those two daemon readings used to walk ``<logs>/evolution-*.json`` instead — a
     directory whose writer was removed with the store it belonged to. Measured on this
