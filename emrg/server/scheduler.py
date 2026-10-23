@@ -769,6 +769,65 @@ def write_table(records: list[dict], path: Path | None = None) -> None:
     atomic_write_yaml(records, path, prefix=".tasks_", dumper=_TaskTableDumper)
 
 
+def migrate_task_config_keys(path: Path | None = None) -> int:
+    """Move a task record's agent key from ``project`` to ``agent``, in place.
+
+    Returns how many records this call rewrote, so a caller can say whether it did
+    anything rather than guess.
+
+    **One spelling, no compat read** (issue #2531). The resolution reads
+    ``config.agent`` and only ``config.agent``: a tree that answered both spellings
+    would keep alive exactly the ambiguity the rename exists to remove — every
+    reader would again have to decide which of the two a given record meant. So the
+    old key is not a fallback; it is moved, once, and then it is gone.
+
+    **Called from the daemon's process entry and nowhere else.** The same separation
+    `emrg.config.migrate_legacy_registry` uses, for the same reason: the test suite
+    constructs schedulers and drives `load_and_start` against tables of its own, and
+    a migration reachable from those paths would rewrite a host's live ``tasks.yml``
+    under a daemon that is still reading the old key. The reader never writes —
+    :func:`read_table` returns a record exactly as written, old key and all — which is
+    the property ``test_scheduler.py`` pins.
+
+    A record is rewritten at the key's own position, so every other key, its order and
+    its value travel across unchanged. A record already carrying ``agent`` keeps it
+    and loses the stale ``project`` rather than gaining a second value. A record with
+    neither is untouched, a table that cannot be read is left exactly where it lies
+    (the caller is starting up, and refusing to start over a table it could not parse
+    would be a worse failure than the one it reports), and a file that does not exist
+    is not created — this moves an existing table, it never seeds one.
+    """
+    path = path or _tasks_yml_path()
+    if not path.exists():
+        return 0
+    try:
+        records = read_table(path)
+    except TableUnreadable as exc:
+        logger.warning("TaskScheduler: %s not migrated — %s", path, exc)
+        return 0
+    changed = 0
+    for record in records:
+        cfg = record.get("config")
+        if not isinstance(cfg, dict) or "project" not in cfg:
+            continue
+        moved: dict = {}
+        for key, value in cfg.items():
+            if key == "project":
+                if "agent" not in cfg:
+                    moved["agent"] = value
+                continue
+            moved[key] = value
+        record["config"] = moved
+        changed += 1
+    if changed:
+        write_table(records, path)
+        logger.info(
+            "TaskScheduler: %s migrated — %d task record(s) moved to config.agent",
+            path, changed,
+        )
+    return changed
+
+
 def _template_task_context(config: dict, record: dict) -> dict:
     """The ``task`` mapping the prompt templates render against.
 

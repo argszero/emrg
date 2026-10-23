@@ -344,6 +344,9 @@ def test_the_launcher_entry_normalizes_the_path(monkeypatch):
     # Stubbed so the test opens no host file: these are the real entry's side effects.
     monkeypatch.setattr(server_main, "_configure_logging", lambda: None)
     monkeypatch.setattr(server_main, "_redirect_std_streams", lambda: None)
+    # Stubbed for the same reason as the logging hooks above: the real call moves a
+    # key in the host's tasks.yml, and a test opens no host file.
+    monkeypatch.setattr(server_main, "migrate_task_config_keys", lambda *a, **k: 0)
     monkeypatch.setattr("emrg.config.load_config", lambda: types.SimpleNamespace(llm=object()))
 
     class _Exit:
