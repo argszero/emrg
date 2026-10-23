@@ -870,3 +870,30 @@ def test_with_neither_name_the_reading_is_unmeasurable_never_a_pass(
     assert "not measurable" in captured.err
     assert "does not exist yet" not in captured.err
 
+
+# ------------------------------------------------ the bookmark's name, which no code moves
+
+
+def test_the_bookmark_default_names_the_file_this_installation_writes(mod):
+    """The register's name **moves**; the bookmark's does not, and the default must say so.
+
+    Nothing above catches this. Every test in this file replaces `DEFAULT_BOOKMARK` with a
+    file under `tmp_path`, so the default's own value is read by no test and a wrong one is
+    green everywhere - measured on the branch that renamed the register, where the same
+    pass translated this constant too and the whole suite stayed green.
+
+    What a wrong value costs is not a failing test but a stopped clock: step 0 is the step
+    that is never skipped, and its answer becomes `not measurable` on every cycle from the
+    merge onwards, because the file the constant then names is created by nothing. The
+    register is the mirror image and stays correct *because* something moves it
+    (`emrg.config` migrates the file), which is why its new name is right and this one is
+    not. So the pin is the requirement: the basename is host state, preserved verbatim
+    until a change in this tree actually renames that file.
+    """
+    assert mod.DEFAULT_BOOKMARK.endswith(
+        "/.emrg/memory/project-memory-rotation-bookmark.md"
+    ), (
+        "the bookmark's basename is host state: no code in this tree renames that file, so a "
+        "renamed constant points at nothing and step 0 answers `not measurable` every cycle"
+    )
+

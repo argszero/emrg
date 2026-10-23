@@ -21,7 +21,7 @@ SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "check-gui-package
 
 
 def _gui_agent(tmp_path: Path, *, app_from: str = "../../dist/runtime", icon: str = "../../packaging/assets/icon.png") -> Path:
-    """A GUI agent dir shaped like emrg/gui, plus the repo-root products its refs name."""
+    """A GUI package dir shaped like emrg/gui, plus the repo-root products its refs name."""
     repo = tmp_path / "repo"
     gui = repo / "emrg" / "gui"
     gui.mkdir(parents=True)

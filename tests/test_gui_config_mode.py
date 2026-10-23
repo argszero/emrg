@@ -330,7 +330,7 @@ def test_every_main_process_module_a_module_requires_is_packaged():
         for spec in re.findall(r'require\(["\']\./([^"\']+)["\']\)', source):
             target = spec if (GUI_DIR / spec).is_file() else f"{spec}.js"
             if not (GUI_DIR / target).is_file():
-                continue  # not a file in this agent dir (a package, or a build-time path)
+                continue  # not a file in this package dir (a package, or a build-time path)
             if not any(_is_covered(target, entry) for entry in files):
                 missing.append(f"{module} requires ./{spec}, but no `build.files` entry covers {target}")
     assert missing == [], (

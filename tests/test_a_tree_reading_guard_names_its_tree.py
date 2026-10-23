@@ -258,7 +258,7 @@ NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE = {
         "not been through those steps, which is the packaging job's reading rather than this "
         "suite's. It reads a working tree (`--root`, default its own emrg/gui) and names it "
         "before the verdict, and that naming IS verified rather than classified: "
-        "`tests/test_check_gui_package_refs.py` runs it against `tmp_path` agent dirs and pins "
+        "`tests/test_check_gui_package_refs.py` runs it against `tmp_path` package dirs and pins "
         "the tree line plus each exit code (0 every reference resolves / 1 one does not / 2 "
         "unreadable manifest)"
     ),

@@ -197,7 +197,16 @@ SESSIONS_SUBDIR = (".emrg", "sessions")
 #: arguments because step 0 runs every cycle on this installation; any other
 #: layout is reached by naming the two paths, and the report says which it read.
 DEFAULT_AGENTS = "~/.emrg/agents.yml"
-DEFAULT_BOOKMARK = "~/.emrg/evolution/emrg/.emrg/memory/agent-memory-rotation-bookmark.md"
+#: The bookmark keeps its **pre-rename basename**, and the difference from the
+#: register above is the whole point: the register's move is a migration
+#: (`emrg.config` performs it), so naming the new file and falling back over the
+#: window is right. The bookmark is moved by **nothing** — no code in this tree
+#: renames it, it is a file this installation writes and this tool reads — so a
+#: renamed constant renames no file and answers `not measurable` on every cycle
+#: from then on. A name whose value is host state is preserved verbatim, which is
+#: the same rule the register already obeys one line down: its fallback still
+#: spells the **old** name (`projects.yml`) rather than translating it.
+DEFAULT_BOOKMARK = "~/.emrg/evolution/emrg/.emrg/memory/project-memory-rotation-bookmark.md"
 
 #: The register's name before an Agent became the record of the directory a
 #: session runs in. **Named here because this script runs without the package** —
