@@ -1356,6 +1356,52 @@ def test_open_source_template_measures_the_shipped_artifact():
     assert out.index("A defect is a claim about what the project ships") < out.index("##### 3.1.4 Fork, clone and branch"), "规则应落在 §3.1.3 内"
 
 
+def test_open_source_template_distinguishes_an_unrunnable_toolchain():
+    """open_source_prompt.md §3.1.6 resolves the runner before reading a result, and
+    treats a suite that could not start as a skip rather than a failure (issue #2515).
+
+    A tool a version manager (asdf, nvm, pyenv) or a shell startup file exports is
+    resolved for an interactive shell and often not for the subprocess that runs the
+    suite, so the command exits 127 or fails to exec with no test collected. The block
+    echoed "test failures" for every non-zero exit, which named a cause it could not
+    know: one line reported an absent interpreter as a red suite, and the cycle then
+    reported a defect the project did not have.
+    """
+    import jinja2
+
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "emrg" / "server" / "open_source_prompt.md"
+    )
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(template_path.read_text(encoding="utf-8"))
+    out = template.render(
+        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
+        timestamp="20260814",
+        task={"role": "committer", "project": "aitokenpool"},
+        project={}, git_path="git", gh_path="gh",
+    )
+    # 1) the resolver runs before the suite and says what an absent tool is not
+    assert "command -v <the tool the suite needs>" in out, "应先解析运行器再读结果"
+    assert "not on PATH — resolve it, this is not a test result" in out, "缺工具不得被当成测试结果"
+    # 2) the export is spelled, and scoped to the same block that runs the suite
+    assert 'export PATH="<the tool\'s bin directory>:$PATH"' in out, "应给出同块内 export PATH 的写法"
+    assert "the block is copied on its own, so it cannot inherit the export" in out, \
+        "应说明为何解析必须写在同一块"
+    # 3) the masking echo no longer names a cause it cannot know
+    assert "⚠️ test failures" not in out, "不得再为任何非零退出打印 test failures"
+    assert out.count("⚠️ suite did not pass") == 4, "四套跑法各自保留非零退出提示"
+    # 4) an unrunnable suite is a skip, and both misreadings are named
+    assert "A suite that could not be run is not a suite that failed." in out, "应区分跑不了与跑失败"
+    assert "state that the suite did not run" in out, "应要求写明套件未运行"
+    assert "invents a defect the project does not have" in out, "应点明误报失败的代价"
+    assert "claims a run that never happened" in out, "应点明误报通过的代价"
+    # 5) the rule lives in §3.1.6, the section that owns running the suite
+    assert out.index("A suite that could not be run is not a suite that failed.") < out.index("##### 3.1.7"), \
+        "规则应落在 §3.1.6 内"
+
+
 def test_open_source_template_parallel_recon_c15():
     """open_source_prompt.md Phase C.1.5 allows parallel Recon when all open
     PRs are healthy (rant 2026-08-24T14:05:06): a long-lived healthy PR must
