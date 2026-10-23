@@ -154,6 +154,23 @@ def _ws_policy(workspace, extra=()) -> SandboxPolicy:
     return resolve_policy(mode="workspace-write", workspace_root=str(workspace), extra_roots=extra)
 
 
+#: An absolute workspace root on **every** platform, derived rather than spelled.
+#:
+#: ``"/tmp"`` is not one: ``os.path.isabs("/tmp")`` is **False** on Windows, because
+#: a drive-less rooted spelling does not resolve under the cwd, so ``SandboxPolicy``
+#: refuses it before any of this file's subject runs. The registry judges below never
+#: read the workspace — a key is granted as itself — so the value only has to clear
+#: that precondition, and it has to clear it on the platform the test runs on. The
+#: Windows leg measured the difference: ten failures, run 39881732802, every one of
+#: them ``workspace_root must be an absolute execution-world path (got '/tmp')``
+#: while the same tests passed on Linux.
+#:
+#: ``abspath`` is what makes it platform-honest: the host's own ``os.path`` answers,
+#: so this is ``/`` here and ``C:\\`` on Windows, and no spelling is written down for
+#: a platform nobody measured.
+_ANY_WS = os.path.abspath(os.sep)
+
+
 # ── §1 what a path is judged to be ────────────────────────────────────────
 
 
@@ -558,7 +575,7 @@ def test_a_key_is_validated_by_the_parser_the_applier_uses():
     because the capability SID is derived from the spelling.
     """
     verdict = judge_registry_key(
-        "HKEY_CURRENT_USER\\Software\\LarkCli\\keychain", _ws_policy("/tmp"), platform="win32"
+        "HKEY_CURRENT_USER\\Software\\LarkCli\\keychain", _ws_policy(_ANY_WS), platform="win32"
     )
     assert verdict.refusal is None, verdict
     assert verdict.grant == RootGrant(GRANT_REGISTRY, "HKCU\\Software\\LarkCli\\keychain")
@@ -574,7 +591,7 @@ def test_a_key_is_validated_by_the_parser_the_applier_uses():
 ])
 def test_a_key_that_names_no_key_is_refused_with_the_parsers_own_reason(bad, phrase):
     """One parser, one wording: the refusal a host reads is `split_key`'s."""
-    verdict = judge_registry_key(bad, _ws_policy("/tmp"), platform="win32")
+    verdict = judge_registry_key(bad, _ws_policy(_ANY_WS), platform="win32")
     assert verdict.refusal and phrase in verdict.refusal, verdict
     # ``store`` is deliberately not asserted: :class:`ExtraRootVerdict` documents
     # it as the caller's instruction for the *accepted* outcomes — "False only
@@ -590,14 +607,14 @@ def test_the_spelling_is_judged_before_the_platform():
     the more useful answer than "this platform has no registry" — the host would
     otherwise fix the platform question and meet the spelling one afterwards.
     """
-    verdict = judge_registry_key("HKCU", _ws_policy("/tmp"), platform="darwin")
+    verdict = judge_registry_key("HKCU", _ws_policy(_ANY_WS), platform="darwin")
     assert verdict.refusal and "whole hive" in verdict.refusal, verdict
 
 
 def test_a_platform_that_cannot_apply_a_key_refuses_it_with_the_platform_sentence():
     """The refusal names the platform's limit, and never a stage that has landed."""
     verdict = judge_registry_key(
-        "HKCU\\Software\\LarkCli", _ws_policy("/tmp"), platform="darwin"
+        "HKCU\\Software\\LarkCli", _ws_policy(_ANY_WS), platform="darwin"
     )
     assert verdict.refusal, verdict
     assert "cannot be enforced on" in verdict.refusal
@@ -617,7 +634,7 @@ def test_naming_a_key_twice_reports_the_grant_that_is_stored():
     """
     policy = resolve_policy(
         mode="workspace-write",
-        workspace_root="/tmp",
+        workspace_root=_ANY_WS,
         extra_grants=[RootGrant(GRANT_REGISTRY, "HKCU\\Software\\LarkCli")],
     )
     verdict = judge_registry_key(
@@ -641,7 +658,7 @@ def test_a_key_named_twice_at_read_only_is_not_stored_twice():
     """
     policy = resolve_policy(
         mode="read-only",
-        workspace_root="/tmp",
+        workspace_root=_ANY_WS,
         extra_grants=[RootGrant(GRANT_REGISTRY, "HKCU\\Software\\LarkCli")],
     )
     verdict = judge_registry_key(
@@ -661,12 +678,47 @@ def test_a_key_is_withdrawn_by_the_flag_that_added_it():
     policy, because a withdrawal is not a grant.
     """
     verdict = judge_root_removal(
-        "HKEY_CURRENT_USER\\Software\\LarkCli", _ws_policy("/tmp"), GRANT_REGISTRY
+        "HKEY_CURRENT_USER\\Software\\LarkCli", _ws_policy(_ANY_WS), GRANT_REGISTRY
     )
     assert verdict.refusal is None, verdict
     assert verdict.canonical == "HKCU\\Software\\LarkCli"
-    refused = judge_root_removal("HKCU", _ws_policy("/tmp"), GRANT_REGISTRY)
+    refused = judge_root_removal("HKCU", _ws_policy(_ANY_WS), GRANT_REGISTRY)
     assert refused.refusal and "whole hive" in refused.refusal
+
+
+# ── §5c the region above reads its own precondition ───────────────────────
+
+
+def test_the_key_judges_never_spell_a_posix_workspace_root():
+    """The registry judges read no workspace, so the root they are handed is derived.
+
+    Ten tests in this section spelled ``"/tmp"`` as the workspace root, and the
+    Windows leg refused every one of them inside ``SandboxPolicy.__post_init__``
+    before a line of the subject ran: ``os.path.isabs("/tmp")`` is **False** on
+    Windows, because a drive-less rooted spelling does not resolve under the cwd.
+    The Linux leg passed, so nothing here saw it. A key is granted as itself and
+    none of these judges reads the workspace, so the value is irrelevant to what is
+    measured — which is exactly why it must never be a literal.
+
+    The region is bounded by the §5b and §5c markers rather than read to the end of
+    the file: a ``split(marker, 1)[0]`` bound widens to EOF, and §7's wire frame
+    legitimately carries a ``/tmp`` spelling this rule is not about. The guard keeps
+    its own section for a reason it measured: written inside §5b it failed on itself,
+    because the spelling it forbids is quoted in the sentence forbidding it.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    start = source.index("# ── §5b a registry key is judged by its own rules")
+    end = source.index("# ── §5c the region above reads its own precondition")
+    region = source[start:end]
+
+    assert "_ANY_WS" in region, "the region did not read — nothing was measured"
+    assert '"/tmp"' not in region, (
+        "a registry-judge test spells a POSIX workspace root; os.path.isabs('/tmp') is "
+        "False on Windows, so SandboxPolicy refuses it before the subject runs"
+    )
+    assert os.path.isabs(_ANY_WS), (
+        f"the derived root must clear the predicate the policy applies, got {_ANY_WS!r}"
+    )
 
 
 # ── §6 the daemon's command ───────────────────────────────────────────────
