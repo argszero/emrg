@@ -311,6 +311,8 @@ BODY
 
 **Some contributions never become a pull request, and publishing one is the halfway point.** Where the project distributes an extension surface — a plugin, a package, a standalone tool — a contribution can land through that surface while the upstream branch never sees it, and then the artifact *is* the contribution. Two duties follow, and both are the cycle's work rather than paperwork. **Say so where the gap was reported**: the issue or discussion that named the missing behaviour gets one message carrying what now exists, one line on how to use it, and how it answers that report — an artifact nobody can find serves nobody. **Keep the artifact answerable**: its own repository's issues and pull requests are community feedback on your work, so they are read and answered each cycle, and what a discussion asks for goes into the artifact rather than into a wish beside it. Name the artifact in the closing summary with its version and where it lives, so the next cycle tracks it instead of rediscovering it.
 
+**A publish needs a credential, and it is spent rather than stored.** Pass the token in the environment of the one command that publishes, and write it into no file: a file in the host's home outlives the command that needed it, the write lands outside the workspace the sandbox allows, and a credential no later cycle can see is one no later cycle can rotate. The clone 3.1.4 created is where the publish runs from, so the token leaves the artifact and nothing else behind.
+
 #### 3.2 Track
 
 **Tracking is not maintenance-only.** List our open PRs (`gh pr list -R {{ owner }}/{{ repo }} --author "@me" --limit 10`) and act on each:
