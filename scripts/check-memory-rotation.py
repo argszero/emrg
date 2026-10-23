@@ -48,6 +48,15 @@ that read it). Per project it looks under `.emrg/memory/**/*.md` and under
 `.emrg/sessions/*/memory/**/*.md` - the two places the rotation's rule names - and
 keeps the newest file strictly newer than that project's stamp.
 
+**The rotation's third key has a carrier here too.** §1.5 orders the rotation by changed
+projects first and **least recently visited** after that, and the second key can only be
+ordered from a bookmark that records which cycle read which row. This tool therefore reads
+a row's cycle id wherever the row puts it and prints it beside the project, plus one line
+saying how many of the table's rows record one - so a bookmark that records none says so,
+instead of leaving every project looking equally recent (issue #2525). The field is read,
+never required: a row written before the column existed is not unreadable, it is a row that
+does not answer this question yet.
+
 **The bookmark is not memory content.** On this host it lives under the evolution
 project's own memory root, so counting it would make that project's newest file the clock
 itself: the row could never be current, and every run would report the project changed on
@@ -133,6 +142,14 @@ PATH_MISSING_PREFIX = "path missing"
 #: a span-only pattern read 30 of 31 rows and reported the missing project as never
 #: visited.
 KEY_CELL = re.compile(r"^`(?P<key>[^`]+)`\s*(?:\((?P<hint>[^)]*)\))?$")
+
+#: A row's **reading cycle**: the cycle id §1.5 asks a row to carry beside the stamp it read,
+#: so that "least recently visited" - the rotation's third key - can be ordered from the
+#: bookmark instead of from recollection. Found, never required: this installation's 32 rows
+#: carried none when the field was added (issue #2525), and a reader that refused them would
+#: have called every live project unreadable. A row without one is reported as not recording
+#: it, which is a fact about that row rather than a fault in the reading.
+READ_BY_CELL = re.compile(r"\bcyc\d{8}-\d{6}\b")
 
 #: What a row's **value cell** carries: a stamp, or one of the two notes. A cell may append
 #: a parenthetical - this host writes `path missing (gone from disk)`, another writes the
@@ -228,6 +245,22 @@ def _value_of(cells: list[str]) -> str | None:
     return None
 
 
+def _read_by_of(cells: list[str]) -> str | None:
+    """The cycle id a row carries, from whichever cell holds it, or `None`.
+
+    Searched rather than counted, for the reason `_value_of` gives: the column's index
+    belongs to the installation writing the bookmark, and this host's table puts the cycle
+    nowhere at all. A cell is only read as a cycle when it *is* one - `cyc` and a stamp of
+    the right width - so a date, a path or a word that resembles an id is left alone
+    (issue #2525).
+    """
+    for cell in cells:
+        found = READ_BY_CELL.search(cell)
+        if found:
+            return found.group(0)
+    return None
+
+
 #: The heading that opens a bookmark's per-cycle narration section.
 #:
 #: The bookmark keeps **exactly one** such section, replaced in place each cycle. That is
@@ -295,7 +328,8 @@ def parse_bookmark(path: Path) -> list[dict]:
             continue
         key = key_cell.group("key")
         hint = key_cell.group("hint")
-        rows.append({"key": f"{key} ({hint})" if hint else key, "value": value})
+        rows.append({"key": f"{key} ({hint})" if hint else key, "value": value,
+                     "read_by": _read_by_of(cells[1:])})
     if not saw_table:
         sections = [line.strip() for line in lines if CYCLE_SECTION.match(line)]
         if sections:
@@ -538,7 +572,8 @@ def project_state(project: dict, row: dict | None, bookmark_path: Path | None = 
     """
     name = project["name"]
     raw_path = project.get("path") or ""
-    state = {"name": name, "path": raw_path, "key": row["key"] if row else None}
+    state = {"name": name, "path": raw_path, "key": row["key"] if row else None,
+             "read_by": row.get("read_by") if row else None}
     if row is None:
         state.update(state="no bookmark row", bookmark=None, newest=None)
         return state
@@ -624,11 +659,21 @@ def read(projects_path: Path, bookmark_path: Path) -> dict:
         "bookmark_file": str(bookmark_path),
         "project_count": len(projects),
         "row_count": len(rows),
+        "rows_with_cycle": sum(1 for row in rows if row.get("read_by")),
         "states": states,
         "faults": faults,
         "cycle_sections": len(sections),
         "structure": structure,
     }
+
+
+def _cycle_of(state: dict) -> str:
+    """The cycle that read this project's row, or a phrase saying the row recorded none.
+
+    A phrase rather than a blank, because the two are different readings: a project read by
+    `cyc…` and one whose row predates the column must not print alike.
+    """
+    return state.get("read_by") or "no cycle recorded"
 
 
 def render(reading: dict, show_all: bool) -> str:
@@ -645,7 +690,7 @@ def render(reading: dict, show_all: bool) -> str:
         out.append(f"changed since their bookmark: {len(changed)}")
         for state in changed:
             out.append(f"  {state['name']}  {state['bookmark']} -> {state['newest']['mtime']}  "
-                       f"{state['newest']['path']}")
+                       f"{state['newest']['path']}  read by {_cycle_of(state)}")
     else:
         out.append("changed since their bookmark: 0 - every project is at or before its stamp")
     if show_all:
@@ -653,9 +698,18 @@ def render(reading: dict, show_all: bool) -> str:
         if others:
             out.append("every other project:")
             for state in others:
-                out.append(f"  {state['state']:<16} {state['name']}  {state['path']}")
+                out.append(f"  {state['state']:<16} {state['name']}  {state['path']}  "
+                           f"read by {_cycle_of(state)}")
     summary = ", ".join(f"{name} {count}" for name, count in sorted(counts.items()))
     out.append(f"states: {summary}" if summary else "states: none recorded")
+    recorded = reading["rows_with_cycle"]
+    out.append(
+        f"reading cycles: {recorded} of {reading['row_count']} row(s) record the cycle that read "
+        f"them"
+        + ("" if recorded else
+           ' - none does, so "least recently visited" cannot be ordered from this bookmark '
+           'until the rows that are read carry one (§1.5)')
+    )
     if reading["faults"]:
         out.append(f"coverage faults: {len(reading['faults'])}")
         out.extend(f"  {fault}" for fault in reading["faults"])
