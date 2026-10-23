@@ -526,6 +526,59 @@ def test_a_declaration_that_already_names_the_root_is_left_alone(monkeypatch):
     assert runner_import_env() == {}
 
 
+def _same_name_other_case(path: str) -> str:
+    """One directory's other spelling: the same name, case swapped."""
+    head, tail = os.path.split(path.rstrip(os.sep))
+    return os.path.join(head, tail.swapcase())
+
+
+def test_the_case_a_folding_volume_folds_is_one_directory():
+    """The answer comes from the volume, not from ``os.name`` (issue #2557).
+
+    ``os.path.normcase`` folds case only where ``os.name`` is ``nt`` — it is the
+    *identity function* on POSIX — so a volume that folds case while the platform
+    is POSIX (APFS's default, which is what macOS runs) was read as two
+    directories, and the root was prepended a second time. The test above cannot
+    see that: its case half is armed only on ``nt``, and on POSIX it asserts
+    nothing about a fold.
+
+    The probe comes first and the skip states its reason. On a volume that keeps
+    two case spellings apart there is no fold to measure, and passing without
+    asking would make this test evidence for a property it never measured — which
+    is exactly how the defect survived: the fold was asserted where it happened
+    to work and nowhere else.
+    """
+    from emrg.tools.shell_env import runner_import_env
+
+    root = _running_root()
+    variant = _same_name_other_case(root)
+    if not os.path.exists(variant) or not os.path.samefile(variant, root):
+        pytest.skip(
+            "this volume keeps two case spellings apart, so there is no fold to "
+            "measure; the arm runs on a case-folding volume (APFS's default, NTFS)"
+        )
+    assert runner_import_env({"PYTHONPATH": variant}) == {}
+
+
+def test_a_declaration_naming_a_missing_directory_is_not_the_root(tmp_path):
+    """A path with no inode is not the root, so the root is prepended (issue #2557).
+
+    Prepending is the fail-safe direction: a redundant entry naming a directory
+    that does not exist changes nothing a run can see, while withholding the entry
+    the runner needs breaks its import. This is also the arm that keeps an
+    identity test from turning a missing path into an ``OSError`` raised out of a
+    function whose whole contract is "add a variable, or add nothing".
+
+    ``tmp_path`` is used and its subdirectory deliberately never created, so the
+    subject is a path that cannot exist rather than one that happens not to.
+    """
+    from emrg.tools.shell_env import runner_import_env
+
+    missing = str(tmp_path / "not-created" / "emrg")
+    env = runner_import_env({"PYTHONPATH": missing})
+    assert env["PYTHONPATH"].split(os.pathsep) == [_running_root(), missing]
+
+
 def test_the_unconfined_path_relocates_nothing(tmp_path, monkeypatch):
     """``danger-full-access`` runs bare, so its caches belong where they always were."""
     import emrg.tools.bash_tool_v2 as v2
