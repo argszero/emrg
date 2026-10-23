@@ -252,17 +252,27 @@ cd "$DEV" && git checkout -b <branch name per project convention> "upstream/$DEF
 ```bash
 DEV="{{ source_dir }}/.emrg/sessions/{{ session_id }}/tmp/{{ repo }}-dev"   # re-declared: a block is copied on its own
 cd "$DEV"    # the clone from §3.1.4 — never {{ source_dir }}
-# 1. Run the existing suite, chosen by project type:
-#    Python: uv run pytest tests/ -v 2>&1 || echo "⚠️ test failures"
-#    Node/TS: npm test 2>&1 || echo "⚠️ test failures"
-#    Rust: cargo test 2>&1 || echo "⚠️ test failures"
-#    Go: go test ./... 2>&1 || echo "⚠️ test failures"
+# 1. Resolve the runner before reading anything below as a test result:
+command -v <the tool the suite needs> || echo "⚠️ not on PATH — resolve it, this is not a test result"
+#    A version manager (asdf, nvm, pyenv) or a shell startup file exports a tool for an
+#    interactive shell, not necessarily for this one. Either put its directory on PATH in
+#    this same block — export PATH="<the tool's bin directory>:$PATH" — or call the tool by
+#    its absolute path; the block is copied on its own, so it cannot inherit the export.
+# 2. Run the existing suite, chosen by project type. The `|| echo` only keeps a non-zero
+#    exit from stopping the block — it does not say why: read the error above it before
+#    naming a cause.
+#    Python: uv run pytest tests/ -v 2>&1 || echo "⚠️ suite did not pass"
+#    Node/TS: npm test 2>&1 || echo "⚠️ suite did not pass"
+#    Rust: cargo test 2>&1 || echo "⚠️ suite did not pass"
+#    Go: go test ./... 2>&1 || echo "⚠️ suite did not pass"
 #
-# 2. No test suite at all → verify the change by hand:
-python -c "<verification code snippet>" 2>&1 || echo "⚠️ verification failed"
+# 3. No test suite at all → verify the change by hand:
+python -c "<verification code snippet>" 2>&1 || echo "⚠️ verification did not pass"
 ```
 
 Failing → fix, re-test, until green; a failure you cannot fix does not get hidden — say so in the PR description. A new feature → add the test that covers it.
+
+**A suite that could not be run is not a suite that failed.** `command not found`, an exec-format error or an interpreter that is simply absent says nothing about the project — the shell never started the runner, so no test was collected. Record it as a skip: name the command and its exact error in the closing summary, state that the suite did not run, and finish the cycle without a verdict about that tree. Read as a failure it invents a defect the project does not have; read as green it claims a run that never happened.
 
 ##### 3.1.7 Commit and open the pull request
 
