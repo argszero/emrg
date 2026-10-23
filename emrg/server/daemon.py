@@ -39,6 +39,7 @@ from emrg._win import win32_no_window_kwargs
 from emrg.config import (
     LlmConfig,
     SandboxConfig,
+    agents_file,
     config_dir,
     logs_dir,
     find_model_entry,
@@ -868,7 +869,7 @@ class EmrgServer:
         # (session_id → (text, injected_ms)) so unchanged context is not
         # re-sent (context_refresh_interval_ms gating).
         self._context_snapshots: dict[str, tuple[str, float]] = {}
-        self._projects_log = runtime_dir / "projects.yml"
+        self._projects_log = agents_file(runtime_dir)
         self._rants_log = runtime_dir / "rants.jsonl"
 
         # ── Phase 2 broadcast model (protocol-contract §2.6) ──
@@ -1248,7 +1249,7 @@ class EmrgServer:
         """Backfill the global cross-project session index at startup.
 
         Rant 2026-08-13T16:42:22: sessions created before this feature (or in
-        projects not registered in projects.yml) would otherwise be invisible
+        projects not registered in agents.yml) would otherwise be invisible
         to other projects. Best-effort — failures are logged at debug level
         and never crash the daemon.
         """
@@ -2103,7 +2104,7 @@ class EmrgServer:
     # ── Project tracking ─────────────────────────────────────
 
     def _touch_project(self, cwd: str) -> None:
-        """Record a project as active in ~/.emrg/projects.yml.
+        """Record a project as active in ~/.emrg/agents.yml.
 
         Used by the evolution cycle to discover which projects have
         recent user activity and analyze their sessions for improvement ideas.
@@ -3456,7 +3457,7 @@ class EmrgServer:
 
         elif msg_type == "remove_project":
             # P1 GUI multi-session (rant 2026-08-10T15:07:19): drop a
-            # projects.yml entry by name (disk session data preserved).
+            # agents.yml entry by name (disk session data preserved).
             name = msg.get("name", "").strip()
             if not name:
                 await self._send(ws, {
@@ -6684,14 +6685,14 @@ class EmrgServer:
     async def _handle_list_projects(
         self, ws
     ) -> None:
-        """Read projects.yml and return all project entries.
+        """Read agents.yml and return all project entries.
 
         Ordered by each project's latest session activity (created_at desc,
         parallel scan) — P6 of the GUI multi-session rant (2026-08-10T15:07:19)
         so the open/new-session dialogs show the most recently active projects
         first.
 
-        No evolution-workspace filter (rant 2026-08-07T10:48:00): projects.yml
+        No evolution-workspace filter (rant 2026-08-07T10:48:00): agents.yml
         only contains explicitly registered entries, and on packaged installs
         the emrg project's only path IS ~/.emrg/evolution/emrg — filtering it
         hid emrg from /rant entirely.
@@ -6738,17 +6739,17 @@ class EmrgServer:
                         for (p, at), repo in zip(ordered, repos)
                     ]
         except (yaml.YAMLError, OSError):
-            logger.exception("Failed to read projects.yml")
+            logger.exception("Failed to read agents.yml")
         await self._send(ws, {
             "type": "projects_list",
             "projects": projects,
         })
 
     async def _handle_remove_project(self, name: str, ws) -> None:
-        """Remove a project entry from projects.yml by name.
+        """Remove a project entry from agents.yml by name.
 
         P1 of the GUI multi-session feature (rant 2026-08-10T15:07:19):
-        deletes only the projects.yml entry — on-disk session data under
+        deletes only the agents.yml entry — on-disk session data under
         <path>/.emrg/sessions/ is preserved (a later _touch_project
         re-registers the project). Mirrors _touch_project's read path and
         atomic_write_yaml. Responses:
@@ -6774,7 +6775,7 @@ class EmrgServer:
                 "type": "project_removed",
                 "removed": False,
                 "name": name,
-                "error": "failed to read projects.yml",
+                "error": "failed to read agents.yml",
             })
             return
         if not isinstance(data, list):
@@ -6803,10 +6804,10 @@ class EmrgServer:
                 "type": "project_removed",
                 "removed": False,
                 "name": name,
-                "error": "failed to write projects.yml",
+                "error": "failed to write agents.yml",
             })
             return
-        logger.info("remove_project: removed %s from projects.yml", name)
+        logger.info("remove_project: removed %s from agents.yml", name)
         await self._send(ws, {
             "type": "project_removed",
             "removed": True,

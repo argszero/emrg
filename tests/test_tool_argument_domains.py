@@ -446,7 +446,7 @@ def test_the_sweeps_subject_is_the_registered_tool_set(tmp_path):
     # `tests/test_shell_tool_mount.py::_instantiate` makes so construction writes nothing
     # of the host's. No daemon is started and nothing is torn down — this is an object.
     server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
-    server._projects_log = tmp_path / "projects.yml"
+    server._projects_log = tmp_path / "agents.yml"
 
     listed = {t.definition().name for t in TOOL_SET}
     registered = set(server.tools.names)

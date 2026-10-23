@@ -1,7 +1,7 @@
 """Shared pytest fixtures — hermeticity guards.
 
 2026-08-13 incident: the full test suite intermittently wrote pytest
-temp paths into the real ~/.emrg/projects.yml. The mechanism is a
+temp paths into the real ~/.emrg/agents.yml. The mechanism is a
 feedback loop — once a stale entry lands in the file (seeded by the
 workspace self-heal family), subsequent tests re-read it and re-write
 it, advancing the pytest-N counter on every full run. The daemon's
@@ -11,13 +11,13 @@ GUI project picker shows a dead path.
 CI finding (PR #738): test_ws_e2e._boot_server only patched
 daemon/connect config_dir, but EmrgServer.serve() builds a real
 TaskScheduler whose load_and_start() → _ensure_emrg_project_entry()
-writes config_dir()/projects.yml, and whose reader/writer (`read_table`,
+writes config_dir()/agents.yml, and whose reader/writer (`read_table`,
 `write_table`) touch tasks.yml — all through scheduler.py's own
 (unpatched) config_dir → on a fresh runner this hits the real ~/.emrg/
 files.
 
 This autouse fixture makes any write to the REAL ~/.emrg/config.toml,
-~/.emrg/projects.yml or ~/.emrg/tasks.yml a hard test failure: the offending
+~/.emrg/agents.yml or ~/.emrg/tasks.yml a hard test failure: the offending
 test is named immediately instead of the pollution being discovered later
 (precedent: #583 assertPortFileInTmp sandbox guard for the emrgd.token file).
 """
@@ -32,7 +32,7 @@ import pytest
 
 _REAL_CONFIG_FILES = (
     (Path.home() / ".emrg" / "config.toml").resolve(),
-    (Path.home() / ".emrg" / "projects.yml").resolve(),
+    (Path.home() / ".emrg" / "agents.yml").resolve(),
     (Path.home() / ".emrg" / "tasks.yml").resolve(),
 )
 
@@ -81,7 +81,7 @@ def _guard_real_config_files(monkeypatch):
     rather than in any channel a startup-failure report reads.
 
     **The second seam is the plain one.** ``atomic_write_yaml`` is how
-    ``projects.yml`` and ``tasks.yml`` are saved, and patching it was enough
+    ``agents.yml`` and ``tasks.yml`` are saved, and patching it was enough
     while those were the only two files here. ``config.toml`` is not YAML: it is
     written by ``ensure_config`` through ``cfg_path.write_text``, which that
     patch never sees. So a guard naming only the YAML seam would leave
@@ -164,7 +164,7 @@ def _redirect_sessions_index(monkeypatch, tmp_path):
     Session._save_meta_with_title / Session.delete write to on every session
     create/append/delete. Without redirection, the whole session test suite
     would pollute the host's real index with pytest temp paths (same class as
-    the projects.yml leak guarded above).
+    the agents.yml leak guarded above).
     """
     import emrg.sessions_index as sidx
 

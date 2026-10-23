@@ -69,8 +69,8 @@ def test_task_handler_logger_adapter_carries_task_column(tmp_path):
 
 
 def test_resolve_project_path_found(tmp_path):
-    """Returns path when project name exists in projects.yml."""
-    projects_yml = tmp_path / "projects.yml"
+    """Returns path when project name exists in agents.yml."""
+    projects_yml = tmp_path / "agents.yml"
     projects_yml.write_text(
         yaml.safe_dump([
             {"name": "emrg", "path": "/home/emrg/src"},
@@ -90,7 +90,7 @@ def test_resolve_project_path_found(tmp_path):
 
 
 def test_resolve_project_path_no_file(tmp_path):
-    """Returns None when projects.yml doesn't exist."""
+    """Returns None when agents.yml doesn't exist."""
     from emrg.server import scheduler as mod
     orig = mod.config_dir
     try:
@@ -102,7 +102,7 @@ def test_resolve_project_path_no_file(tmp_path):
 
 def test_resolve_project_path_invalid_yaml(tmp_path):
     """Returns None for invalid (non-list) YAML."""
-    projects_yml = tmp_path / "projects.yml"
+    projects_yml = tmp_path / "agents.yml"
     projects_yml.write_text("key: value\n")
     from emrg.server import scheduler as mod
     orig = mod.config_dir
@@ -219,7 +219,7 @@ def _task_create_fixture(tmp_path, monkeypatch, sched):
     from emrg.server import scheduler as mod
 
     monkeypatch.setattr(mod, "config_dir", lambda: tmp_path)
-    (tmp_path / "projects.yml").write_text(
+    (tmp_path / "agents.yml").write_text(
         yaml.safe_dump([{"name": "proj", "path": str(tmp_path / "proj")}])
     )
     sched._tasks_file = tmp_path / "tasks.yml"
@@ -1727,7 +1727,7 @@ def _make_handler(tmp_path, name="emrg-task", project="emrg", path=None):
         mod.config_dir = orig_config
     if path is not None:
         # What the handler reads is the derived set, so a test that needs a particular
-        # resolution states it there rather than building a projects.yml to derive it.
+        # resolution states it there rather than building a agents.yml to derive it.
         handler._derived["source_dir"] = str(path)
         handler._derived["project_path"] = str(path)
     return handler
@@ -1781,7 +1781,7 @@ def test_the_seed_returns_when_the_whole_file_is_deleted(tmp_path):
 
 
 def test_ensure_emrg_project_entry_adds_project_entry_when_missing(tmp_path):
-    """Missing projects.yml emrg entry gets added (fixed path, no network)."""
+    """Missing agents.yml emrg entry gets added (fixed path, no network)."""
     from emrg.server import scheduler as mod
     from emrg.server.scheduler import TaskScheduler
 
@@ -1795,7 +1795,7 @@ def test_ensure_emrg_project_entry_adds_project_entry_when_missing(tmp_path):
     finally:
         mod.config_dir = orig_config
 
-    projects_yml = tmp_path / "projects.yml"
+    projects_yml = tmp_path / "agents.yml"
     assert projects_yml.exists()
     data = yaml.safe_load(projects_yml.read_text(encoding="utf-8"))
     assert isinstance(data, list)
@@ -1812,7 +1812,7 @@ def test_ensure_emrg_project_entry_preserves_existing_project_entry(tmp_path):
     # A real existing checkout dir (dev machine) — preserved, never repaired.
     dev_path = tmp_path / "dev" / "emrg"
     dev_path.mkdir(parents=True)
-    projects_yml = tmp_path / "projects.yml"
+    projects_yml = tmp_path / "agents.yml"
     projects_yml.write_text(yaml.safe_dump([
         {"name": "emrg", "path": str(dev_path),
          "last_active": "2026-01-01T00:00:00"},
@@ -1836,13 +1836,13 @@ def test_ensure_emrg_project_entry_preserves_existing_project_entry(tmp_path):
 def test_ensure_emrg_project_entry_repairs_stale_project_entry(tmp_path):
     """A dead emrg path (deleted pytest-temp dir) is repaired to the canonical
     workspace (2026-08-12 incident: a test run leaked a pytest temp path into
-    the real ~/.emrg/projects.yml; the dir is gone after the suite, leaving a
+    the real ~/.emrg/agents.yml; the dir is gone after the suite, leaving a
     dangling entry that list_projects/GUI pickers would show forever)."""
     from emrg.server import scheduler as mod
     from emrg.server.scheduler import TaskScheduler
 
     stale = tmp_path / "gone" / "emrg"  # never created → dead path
-    projects_yml = tmp_path / "projects.yml"
+    projects_yml = tmp_path / "agents.yml"
     projects_yml.write_text(yaml.safe_dump([
         {"name": "emrg", "path": str(stale),
          "last_active": "2026-08-12T18:44:50"},
@@ -1872,7 +1872,7 @@ def test_ensure_emrg_project_entry_other_entries_preserved(tmp_path):
     from emrg.server import scheduler as mod
     from emrg.server.scheduler import TaskScheduler
 
-    projects_yml = tmp_path / "projects.yml"
+    projects_yml = tmp_path / "agents.yml"
     projects_yml.write_text(yaml.safe_dump([
         {"name": "paper", "path": "/some/paper"},
     ]))
@@ -2959,7 +2959,7 @@ def test_list_tasks_shows_a_deleted_task_gone_at_once(tmp_path):
 def _p2_env(tmp_path):
     """Point config_dir at tmp_path with a registered project."""
     from emrg.server import scheduler as mod
-    projects_yml = tmp_path / "projects.yml"
+    projects_yml = tmp_path / "agents.yml"
     projects_yml.write_text(yaml.safe_dump([
         {"name": "emrg", "path": str(tmp_path / "emrg")},
         {"name": "mem", "path": str(tmp_path / "mem")},
@@ -3013,7 +3013,7 @@ def test_a_record_the_file_carries_runs_even_with_uppercase_in_its_name(tmp_path
     """The loader must not refuse the content of its own file.
 
     `OfficeCLI-opensource-task` is the host's real record, named after the project
-    `OfficeCLI` in projects.yml. While the name rule accepted lowercase only, the loader
+    `OfficeCLI` in agents.yml. While the name rule accepted lowercase only, the loader
     refused it at **every** scheduler tick — measured 2026-09-30: one identical error
     line ×3963 in `~/.emrg/emrgd.log`, first at 06:51:45 and still firing at 11:19:11, so
     the task did not run all morning while its record still read `enabled: true`.
@@ -4396,7 +4396,7 @@ class TestSchedulerReadersAskTheKindBeforeOpening:
         from emrg.server import scheduler as mod
 
         self._config(tmp_path, monkeypatch)
-        self._fifo(tmp_path / "projects.yml")
+        self._fifo(tmp_path / "agents.yml")
         assert within(DEADLINE_SECONDS, lambda: mod._resolve_project_path("probe")) is None
 
     @_needs_mkfifo
@@ -4404,7 +4404,7 @@ class TestSchedulerReadersAskTheKindBeforeOpening:
         from emrg.server import scheduler as mod
 
         self._config(tmp_path, monkeypatch)
-        self._fifo(tmp_path / "projects.yml")
+        self._fifo(tmp_path / "agents.yml")
         assert within(DEADLINE_SECONDS, lambda: mod._load_project_config("probe", str(tmp_path))) == {}
 
     @_needs_mkfifo

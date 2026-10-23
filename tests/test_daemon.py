@@ -166,9 +166,9 @@ def _make_server() -> EmrgServer:
     """Create a minimal EmrgServer for testing."""
     server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
     # Point the project log at a tmp file by default so context/message tests
-    # can never write the real ~/.emrg/projects.yml (2026-08-13 leak). Tests
+    # can never write the real ~/.emrg/agents.yml (2026-08-13 leak). Tests
     # that exercise _projects_log override it explicitly afterwards.
-    server._projects_log = Path(tempfile.mkdtemp()) / "projects.yml"
+    server._projects_log = Path(tempfile.mkdtemp()) / "agents.yml"
     return server
 
 
@@ -3179,7 +3179,7 @@ def test_list_projects_includes_evolution_workspace(tmp_path, monkeypatch):
 
     The filter that used to exclude it was deleted with the `EVOLUTION_CWD`
     constant (rant 2026-09-29T10:06:33 item 4): what /rant lists is
-    projects.yml, and a path under `~/.emrg/evolution/` is a project like any
+    agents.yml, and a path under `~/.emrg/evolution/` is a project like any
     other. The entry is written in the real evolution-root spelling on purpose —
     re-adding a workspace filter would drop it and fail the assertion, which is
     the only reason this test exists.
@@ -3188,7 +3188,7 @@ def test_list_projects_includes_evolution_workspace(tmp_path, monkeypatch):
 
     server = _make_server()
     emrg_path = str(Path.home() / ".emrg" / "evolution" / "emrg")
-    projects_file = tmp_path / "projects.yml"
+    projects_file = tmp_path / "agents.yml"
     projects_file.write_text(
         f"- name: emrg\n  path: {emrg_path}\n"
         "- name: other\n  path: /home/u/work/other\n",
@@ -3211,9 +3211,9 @@ def test_list_projects_includes_evolution_workspace(tmp_path, monkeypatch):
 
 
 def _server_with_projects(tmp_path: Path, entries: list[dict]) -> tuple[EmrgServer, Path]:
-    """Server whose _projects_log points at a tmp projects.yml with entries."""
+    """Server whose _projects_log points at a tmp agents.yml with entries."""
     server = _make_server()
-    projects_file = tmp_path / "projects.yml"
+    projects_file = tmp_path / "agents.yml"
     projects_file.write_text(
         yaml.safe_dump(entries, allow_unicode=True), encoding="utf-8"
     )
@@ -3226,7 +3226,7 @@ def _decode_frames(writer: _FakeWriter) -> list[dict]:
 
 
 def test_remove_project_removes_matching_entry(tmp_path):
-    """Removing an existing project drops only its projects.yml entry."""
+    """Removing an existing project drops only its agents.yml entry."""
     server, projects_file = _server_with_projects(tmp_path, [
         {"name": "alpha", "path": "/home/u/a", "last_active": "2026-08-10T10:00:00"},
         {"name": "beta", "path": "/home/u/b", "last_active": "2026-08-10T10:05:00"},
@@ -3276,9 +3276,9 @@ def test_remove_project_preserves_disk_session_data(tmp_path):
 
 
 def test_remove_project_no_projects_file(tmp_path):
-    """No projects.yml → removed=False without raising."""
+    """No agents.yml → removed=False without raising."""
     server = _make_server()
-    server._projects_log = tmp_path / "projects.yml"  # never created
+    server._projects_log = tmp_path / "agents.yml"  # never created
     writer = _FakeWriter()
     asyncio.run(server._handle_remove_project("alpha", writer))
     assert _decode_frames(writer)[0] == {
@@ -3287,9 +3287,9 @@ def test_remove_project_no_projects_file(tmp_path):
 
 
 def test_remove_project_corrupt_yaml_reports_error(tmp_path):
-    """Corrupt projects.yml → removed=False + error, no crash."""
+    """Corrupt agents.yml → removed=False + error, no crash."""
     server = _make_server()
-    projects_file = tmp_path / "projects.yml"
+    projects_file = tmp_path / "agents.yml"
     projects_file.write_text("a: [unclosed", encoding="utf-8")
     server._projects_log = projects_file
     writer = _FakeWriter()
@@ -3331,7 +3331,7 @@ def test_list_projects_ordered_by_latest_session_activity(tmp_path, monkeypatch)
         json.dumps({"session_id": "s-new", "created_at": "2026-08-10T12:00:00"}), encoding="utf-8"
     )
     # 无会话项目 → 排最后（无 latest_session_at）
-    projects_file = tmp_path / "projects.yml"
+    projects_file = tmp_path / "agents.yml"
     projects_file.write_text(
         f"- name: old\n  path: {p_old}\n"
         f"- name: new\n  path: {p_new}\n"
@@ -4984,9 +4984,9 @@ def test_the_rant_panel_survives_a_legacy_array_row_and_a_bare_scalar(tmp_path):
     assert frames[0]["rants"][0]["project"] == "emrg", frames[0]
 
 
-# ── projects.yml: the registry every client reads first ─────────────
+# ── agents.yml: the registry every client reads first ─────────────
 #
-# These are the daemon's four readers of one file, `~/.emrg/projects.yml`, and each of
+# These are the daemon's four readers of one file, `~/.emrg/agents.yml`, and each of
 # them runs on the daemon's **event loop**: the startup backfill, the per-message project
 # touch, `list_projects` — which every client sends on connect, so it is the first frame
 # a GUI or TUI ever gets an answer to — and `remove_project`. A FIFO at that path
@@ -5014,7 +5014,7 @@ def test_the_rant_panel_survives_a_legacy_array_row_and_a_bare_scalar(tmp_path):
 def test_a_named_pipe_registry_does_not_stop_the_project_listing(tmp_path, monkeypatch):
     """The first frame every client sends: answered, not blocked on the open."""
     server = _make_server()
-    fifo = tmp_path / "projects.yml"
+    fifo = tmp_path / "agents.yml"
     os.mkfifo(fifo)
     monkeypatch.setattr(server, "_projects_log", fifo)
     writer = _FakeWriter()
@@ -5030,7 +5030,7 @@ def test_a_directory_registry_is_refused_by_its_kind_in_the_listing(
         tmp_path, monkeypatch, caplog):
     """The pipe-free half: the refusal names the kind, which is what discriminates."""
     server = _make_server()
-    registry = tmp_path / "projects.yml"
+    registry = tmp_path / "agents.yml"
     registry.mkdir()
     monkeypatch.setattr(server, "_projects_log", registry)
     writer = _FakeWriter()
@@ -5051,7 +5051,7 @@ def test_a_named_pipe_registry_is_neither_read_nor_rewritten_by_touch_project(
     import stat
 
     server = _make_server()
-    fifo = tmp_path / "projects.yml"
+    fifo = tmp_path / "agents.yml"
     os.mkfifo(fifo)
     monkeypatch.setattr(server, "_projects_log", fifo)
 
@@ -5066,7 +5066,7 @@ def test_a_directory_registry_warns_touch_project_and_keeps_it(
         tmp_path, monkeypatch, caplog):
     """The pipe-free half: the warning names the kind, and no write replaces it."""
     server = _make_server()
-    registry = tmp_path / "projects.yml"
+    registry = tmp_path / "agents.yml"
     registry.mkdir()
     monkeypatch.setattr(server, "_projects_log", registry)
 
@@ -5084,7 +5084,7 @@ def test_a_named_pipe_registry_does_not_stop_the_index_backfill(tmp_path, monkey
     from emrg import sessions_index as sessions_index_mod
 
     server = _make_server()
-    fifo = tmp_path / "projects.yml"
+    fifo = tmp_path / "agents.yml"
     os.mkfifo(fifo)
     monkeypatch.setattr(server, "_projects_log", fifo)
     seen: dict[str, list[str]] = {}
@@ -5105,7 +5105,7 @@ def test_a_directory_registry_is_refused_by_its_kind_in_the_backfill(
     from emrg import sessions_index as sessions_index_mod
 
     server = _make_server()
-    registry = tmp_path / "projects.yml"
+    registry = tmp_path / "agents.yml"
     registry.mkdir()
     monkeypatch.setattr(server, "_projects_log", registry)
     monkeypatch.setattr(
@@ -5121,7 +5121,7 @@ def test_a_directory_registry_is_refused_by_its_kind_in_the_backfill(
 def test_a_named_pipe_registry_does_not_stop_remove_project(tmp_path):
     """The removal answers `removed: false` with its reason, as for a corrupt file."""
     server = _make_server()
-    fifo = tmp_path / "projects.yml"
+    fifo = tmp_path / "agents.yml"
     os.mkfifo(fifo)
     server._projects_log = fifo
     writer = _FakeWriter()
@@ -5139,7 +5139,7 @@ def test_a_directory_registry_is_refused_by_its_kind_in_remove_project(
         tmp_path, monkeypatch, caplog):
     """The pipe-free half: the same refusal, observed through the log."""
     server = _make_server()
-    registry = tmp_path / "projects.yml"
+    registry = tmp_path / "agents.yml"
     registry.mkdir()
     monkeypatch.setattr(server, "_projects_log", registry)
     writer = _FakeWriter()

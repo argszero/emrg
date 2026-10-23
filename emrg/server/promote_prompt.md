@@ -32,7 +32,7 @@ Run this loop every round; never stop at "executed":
 ---
 
 ### Current State
-- Promotion target: {{ project.name }}（{% if project.description %}{{ project.description }}{% else %}see projects.yml for description{% endif %}）
+- Promotion target: {{ project.name }}（{% if project.description %}{{ project.description }}{% else %}see agents.yml for description{% endif %}）
 - Project path: `{{ project.path }}`
 - Session ID: `{{ session_id }}`
 
@@ -63,7 +63,7 @@ Durable facts — `channel accounts`, `blog posts`, `blog drafts`, `banned list`
 
 #### 0.2 Read the project config
 
-Read the full config of `{{ project.name }}` from `~/.emrg/projects.yml` (path, name, description, custom fields) as context. The `project` variable in the template (name/path/description and other fields) is already injected into this prompt.
+Read the full config of `{{ project.name }}` from `~/.emrg/agents.yml` (path, name, description, custom fields) as context. The `project` variable in the template (name/path/description and other fields) is already injected into this prompt.
 
 #### 0.3 Confirm promotion channel availability
 
@@ -307,7 +307,7 @@ here, because a second copy of a rule is a copy that can disagree. So there is
 nothing for this prompt to write by hand — and no reason to open the file at all,
 not even to read it.
 
-- `project` = the promoted project's registered short name (as in `~/.emrg/projects.yml`); the rant is then handled by that project's evolution task. The tool warns when the name is not registered.
+- `project` = the promoted project's registered short name (as in `~/.emrg/agents.yml`); the rant is then handled by that project's evolution task. The tool warns when the name is not registered.
 - Deduplicate before submitting: `submit_rant(action="list", project="{{ project.name }}")` and skip feedback that is already queued.
 - Each message notes the source (channel + link) so the evolution task can trace back.
 

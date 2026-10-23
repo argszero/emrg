@@ -5,7 +5,7 @@ import sys
 import traceback
 from logging.handlers import RotatingFileHandler
 
-from emrg.config import logs_dir
+from emrg.config import logs_dir, migrate_legacy_registry
 from emrg.logfiles import migrate_legacy_logs
 from emrg.server.daemon import DaemonExit, _non_regular_kind, run_server
 from emrg.server.logcontext import session_label
@@ -195,6 +195,13 @@ def main() -> None:
     # whatever the crash log keeps as the low-level sink.
     try:
         config = load_config()
+        # The agent register's move from its pre-rename name runs here and only here
+        # (#2521): this is the one process that owns the file, and it runs before the
+        # server object below asks `emrg.config.agents_file()` for the path. It is
+        # placed after `load_config()` so a startup whose configuration is broken
+        # fails without touching the host's register at all, and it sits in no path
+        # derivation — asking where the register lives must never move it.
+        migrate_legacy_registry()
         result = asyncio.run(run_server(config.llm))
     except KeyboardInterrupt:
         # SIGINT delivered at the event-loop poll point escapes the main

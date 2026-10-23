@@ -116,11 +116,11 @@ def test_submit_rant_tool_requires_project():
 
 
 def test_submit_rant_warns_on_unregistered_project(tmp_path, monkeypatch):
-    """Rant 2026-08-24T10:54:04: project must be a projects.yml short name —
+    """Rant 2026-08-24T10:54:04: project must be a agents.yml short name —
     an owner/repo-style name is recorded but flagged with registered
     candidates so the mistake is visible at submit time."""
     monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
-    (tmp_path / "projects.yml").write_text(
+    (tmp_path / "agents.yml").write_text(
         "- name: emrg\n  path: /p/emrg\n"
         "- name: aitokenpool\n  path: /p/aitokenpool\n",
         encoding="utf-8",
@@ -144,7 +144,7 @@ def test_submit_rant_warns_on_unregistered_project(tmp_path, monkeypatch):
 def test_submit_rant_clean_on_registered_project(tmp_path, monkeypatch):
     """A registered short name submits without the warning."""
     monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
-    (tmp_path / "projects.yml").write_text(
+    (tmp_path / "agents.yml").write_text(
         "- name: emrg\n  path: /p/emrg\n",
         encoding="utf-8",
     )
@@ -1050,7 +1050,7 @@ def test_tool_definition_exposes_actions():
 # ── the rant store asks its subject's kind before opening it (issue #2097) ────
 #
 # `rants.jsonl` is the host's feedback channel and the evolution loop's queue, and it is
-# opened by path in three places (`_read_rants`, `_write_rants`, the tool's `projects.yml`
+# opened by path in three places (`_read_rants`, `_write_rants`, the tool's `agents.yml`
 # read). `exists()` was the guard, and it is the *wrong* question: it is true for a FIFO,
 # for a socket and for a device, and an `open()` on any of those blocks — the read until a
 # writer appears, the write until a reader does, a device never. Nothing is raised, so no
@@ -1146,18 +1146,18 @@ def test_the_list_action_on_a_named_pipe_is_a_tool_error_not_a_hang(tmp_path, mo
 def test_a_named_pipe_projects_yml_yields_no_candidates(tmp_path, monkeypatch):
     """The advisory read degrades instead of refusing, as it already did for a missing file.
 
-    `projects.yml` only feeds a warning about a mis-spelled project name, so turning its
+    `agents.yml` only feeds a warning about a mis-spelled project name, so turning its
     unreadability into a hard failure would break `submit` for a reason unrelated to the
     rant. The control in the same test is a real file: the read still works.
     """
     monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
     tool = SubmitRantTool()
-    os.mkfifo(tmp_path / "projects.yml")
+    os.mkfifo(tmp_path / "agents.yml")
 
     assert within(DEADLINE_SECONDS, tool._registered_project_names) == []
 
-    (tmp_path / "projects.yml").unlink()
-    (tmp_path / "projects.yml").write_text(
+    (tmp_path / "agents.yml").unlink()
+    (tmp_path / "agents.yml").write_text(
         "- name: emrg\n- name: aitokenpool\n", encoding="utf-8")
 
     assert sorted(within(DEADLINE_SECONDS, tool._registered_project_names)) == [
@@ -1193,10 +1193,10 @@ def test_projects_yml_absent_or_malformed_yields_no_candidates(tmp_path, monkeyp
     tool = SubmitRantTool()
 
     assert tool._registered_project_names() == []       # absent
-    (tmp_path / "projects.yml").write_text("just a string\n", encoding="utf-8")
+    (tmp_path / "agents.yml").write_text("just a string\n", encoding="utf-8")
     assert tool._registered_project_names() == []       # not a list
-    (tmp_path / "projects.yml").write_text(": :\n", encoding="utf-8")
+    (tmp_path / "agents.yml").write_text(": :\n", encoding="utf-8")
     assert tool._registered_project_names() == []       # unparseable
-    (tmp_path / "projects.yml").write_text(
+    (tmp_path / "agents.yml").write_text(
         "- name: emrg\n- notadict\n- name: ''\n", encoding="utf-8")
     assert tool._registered_project_names() == ["emrg"]

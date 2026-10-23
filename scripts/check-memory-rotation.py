@@ -17,10 +17,10 @@ anything: **which registered projects' memory is newer than that project's
 bookmark line, and what is the newest file**. Step 0 is the step that is never
 skipped, and nothing in this repository performed it - `check-memory-index.py`
 measures an index against the index rule's two numbers and never looks at
-`projects.yml`. Every cycle therefore hand-wrote the probe in a `bash` heredoc,
+`agents.yml`. Every cycle therefore hand-wrote the probe in a `bash` heredoc,
 and it answered wrongly in two ways that both read as a clean result.
 
-**Keying.** A probe that keys rows by `projects.yml`'s `name` field cannot
+**Keying.** A probe that keys rows by `agents.yml`'s `name` field cannot
 resolve every row the bookmark carries. The bookmark writes a row's key as
 whatever disambiguates that project, and this host's bookmark has three forms:
 `emrg` (a bare name), `aitokenpool (github)` (a name plus the parenthetical that
@@ -41,7 +41,7 @@ about out loud (a stamp that does not parse is exit **2**, never "unchanged").
 
 What it reads, and what it prints first
 --------------------------------------
-Two subjects, both named before any verdict: the `projects.yml` (the register of
+Two subjects, both named before any verdict: the `agents.yml` (the register of
 projects this installation tracks) and the **bookmark** (one Markdown-table row
 per project: the newest memory modification time already read, and the cycle
 that read it). Per project it looks under `.emrg/memory/**/*.md` and under
@@ -68,7 +68,7 @@ taken on a day rather than a property: both are re-measured on every run, and a 
 contradicts (`row says path missing`, `row says no memory root`) is a fault with the row named.
 Repeating a note would hide a project that came back, or one that started writing memory, for
 ever - the same stale-past-state defect as comparing a whole second against a sub-second mtime.
-    no bookmark row  the project has a line in `projects.yml` and none in the
+    no bookmark row  the project has a line in `agents.yml` and none in the
                      bookmark: it has never been visited, and §1.5 reads it
 
 Exit codes
@@ -77,7 +77,7 @@ Exit codes
     1  the coverage the bookmark exists to guarantee is broken: a project with no row,
        a row naming no project, a row that matches more than one, or a row whose state
        field is none of the three forms above
-    2  nothing was measured: no `projects.yml`, no bookmark, or a stamp that cannot be
+    2  nothing was measured: no `agents.yml`, no bookmark, or a stamp that cannot be
        ordered against an mtime - a value that does not parse, or one later than the
        instant of the reading - which is never a pass
 
@@ -166,7 +166,7 @@ SESSIONS_SUBDIR = (".emrg", "sessions")
 #: Both defaults are this host's paths. They are defaults rather than required
 #: arguments because step 0 runs every cycle on this installation; any other
 #: layout is reached by naming the two paths, and the report says which it read.
-DEFAULT_PROJECTS = "~/.emrg/projects.yml"
+DEFAULT_PROJECTS = "~/.emrg/agents.yml"
 DEFAULT_BOOKMARK = "~/.emrg/evolution/emrg/.emrg/memory/project-memory-rotation-bookmark.md"
 
 

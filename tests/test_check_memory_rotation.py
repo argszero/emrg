@@ -97,7 +97,7 @@ def _bookmark(path: Path, rows: list[tuple[str, str]]) -> Path:
 
 
 def _reading(mod, tmp_path: Path, projects: list[dict], rows: list[tuple[str, str]]):
-    register = _projects(tmp_path / "projects.yml", projects)
+    register = _projects(tmp_path / "agents.yml", projects)
     book = _bookmark(tmp_path / "bookmark.md", rows)
     return mod.read(register, book)
 
@@ -173,7 +173,7 @@ def test_the_bookmark_does_not_count_as_memory_of_the_project_that_holds_it(mod,
     """
     root = Path(_root(tmp_path, "holder"))
     _write_memory(root, ".emrg/memory/MEMORY.md", _stamp(mod))
-    register = _projects(tmp_path / "projects.yml", [{"name": "holder", "path": str(root)}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "holder", "path": str(root)}])
     book = _bookmark(root / ".emrg/memory/bookmark.md", [("`holder`", BASE)])
     os.utime(book, (_stamp(mod, 60), _stamp(mod, 60)))
     reading = mod.read(register, book)
@@ -189,7 +189,7 @@ def test_a_memory_file_newer_than_the_row_still_reads_changed_beside_the_bookmar
     """
     root = Path(_root(tmp_path, "holder-with-news"))
     newer = _write_memory(root, ".emrg/memory/MEMORY.md", _stamp(mod, 60))
-    register = _projects(tmp_path / "projects.yml",
+    register = _projects(tmp_path / "agents.yml",
                          [{"name": "holder-with-news", "path": str(root)}])
     book = _bookmark(root / ".emrg/memory/bookmark.md", [("`holder-with-news`", BASE)])
     os.utime(book, (_stamp(mod, 30), _stamp(mod, 30)))
@@ -218,7 +218,7 @@ def test_a_row_stamped_later_than_the_clock_is_unmeasurable(mod, tmp_path, monke
     taken = datetime.strptime(BASE, mod.STAMP_FORMAT)
     monkeypatch.setattr(mod, "now", lambda: taken)
     ahead = (taken + timedelta(seconds=1)).strftime(mod.STAMP_FORMAT)
-    register = _projects(tmp_path / "projects.yml", [{"name": "ahead", "path": root}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "ahead", "path": root}])
     book = _bookmark(tmp_path / "ahead.md", [("`ahead`", ahead)])
     with pytest.raises(mod.Unmeasurable) as excinfo:
         mod.read(register, book)
@@ -241,7 +241,7 @@ def test_a_row_stamped_at_the_clock_is_read_normally(mod, tmp_path, monkeypatch)
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
     taken = datetime.strptime(BASE, mod.STAMP_FORMAT)
     monkeypatch.setattr(mod, "now", lambda: taken)
-    register = _projects(tmp_path / "projects.yml", [{"name": "at-the-clock", "path": root}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "at-the-clock", "path": root}])
     book = _bookmark(tmp_path / "at.md", [("`at-the-clock`", BASE)])
     reading = mod.read(register, book)
     assert reading["states"][0]["state"] == "unchanged"
@@ -350,7 +350,7 @@ def test_a_project_whose_name_looks_numeric_still_matches_its_row(mod, tmp_path)
     """
     root = _root(tmp_path, "numeric")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
-    register = tmp_path / "projects.yml"
+    register = tmp_path / "agents.yml"
     register.write_text(f"- name: 1\n  path: '{root}'\n", encoding="utf-8")
     book = _bookmark(tmp_path / "bookmark.md", [("`1`", BASE)])
     reading = mod.read(register, book)
@@ -387,7 +387,7 @@ def test_a_row_is_found_in_a_table_of_any_width(mod, tmp_path):
     narrow = _root(tmp_path, "narrow")
     for root in (wide, narrow):
         _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 60))
-    register = _projects(tmp_path / "projects.yml", [
+    register = _projects(tmp_path / "agents.yml", [
         {"name": "wide", "path": wide}, {"name": "narrow", "path": narrow}])
 
     # The same two rows, in the two tables the two installations write. The wide one puts
@@ -422,7 +422,7 @@ def test_a_row_that_carries_no_stamp_is_unmeasurable_rather_than_dropped(mod, tm
     original defect - so it is exit 2, and the message names the line it could not read.
     """
     root = _root(tmp_path, "unreadable")
-    register = _projects(tmp_path / "projects.yml", [{"name": "unreadable", "path": root}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "unreadable", "path": root}])
     book = _bookmark(tmp_path / "bookmark.md", [("`unreadable`", "read on Tuesday")])
     with pytest.raises(mod.Unmeasurable) as excinfo:
         mod.read(register, book)
@@ -441,7 +441,7 @@ def test_a_header_written_with_a_code_span_is_not_a_body_row(mod, tmp_path):
     """
     root = _root(tmp_path, "spanned")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 60))
-    register = _projects(tmp_path / "projects.yml", [{"name": "spanned", "path": root}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "spanned", "path": root}])
     book = tmp_path / "bookmark.md"
     book.write_text("\n".join([
         "# Bookmark", "",
@@ -466,7 +466,7 @@ def test_a_bookmark_in_another_shape_is_unmeasurable_rather_than_empty(mod, tmp_
     bookmark and a prose-only bookmark both answered `0 row(s)` with a fault per project.
     """
     root = _root(tmp_path, "unlisted")
-    register = _projects(tmp_path / "projects.yml", [{"name": "unlisted", "path": root}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "unlisted", "path": root}])
     for shape, text in (
             ("one line per project",
              f"# Rotation bookmark\n\n- `unlisted` {BASE} (cyc20261020-214924)\n"),
@@ -489,7 +489,7 @@ def test_a_body_row_that_names_its_project_in_no_code_span_is_unmeasurable(mod, 
     refusals are the same defect - a shape the reader does not know answered as an absence.
     """
     root = _root(tmp_path, "plain")
-    register = _projects(tmp_path / "projects.yml", [{"name": "plain", "path": root}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "plain", "path": root}])
     book = tmp_path / "bookmark.md"
     book.write_text("\n".join([
         "# Bookmark", "",
@@ -514,7 +514,7 @@ def test_a_bookmark_that_really_is_empty_still_reports_every_project_never_visit
     rotation would never start.
     """
     root = _root(tmp_path, "fresh")
-    register = _projects(tmp_path / "projects.yml", [{"name": "fresh", "path": root}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "fresh", "path": root}])
     book = tmp_path / "bookmark.md"
     book.write_text("\n".join([
         "# Bookmark", "",
@@ -557,7 +557,7 @@ def test_a_stamp_that_does_not_parse_is_unmeasurable_never_unchanged(mod, tmp_pa
 
 def test_no_register_and_no_bookmark_are_unmeasurable(mod, tmp_path):
     for subject in ("register", "bookmark"):
-        register = _projects(tmp_path / "projects.yml", [{"name": "x", "path": str(tmp_path)}])
+        register = _projects(tmp_path / "agents.yml", [{"name": "x", "path": str(tmp_path)}])
         book = _bookmark(tmp_path / "bookmark.md", [("`x`", BASE)])
         if subject == "register":
             register.unlink()
@@ -572,7 +572,7 @@ def test_the_bookmark_is_not_rewritten(mod, tmp_path):
     """It measures and never repairs: the bytes are the same after a run."""
     root = _root(tmp_path, "stable")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 4))
-    register = _projects(tmp_path / "projects.yml", [{"name": "stable", "path": root}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "stable", "path": root}])
     book = _bookmark(tmp_path / "bookmark.md", [("`stable`", BASE)])
     before = book.read_bytes()
     mod.read(register, book)
@@ -605,7 +605,7 @@ def test_the_exit_codes_are_0_1_and_2_and_2_is_never_a_pass(mod, tmp_path):
     """The contract a caller reads: clean, a coverage fault, unmeasurable."""
     root = _root(tmp_path, "codes")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
-    register = _projects(tmp_path / "projects.yml", [{"name": "codes", "path": root}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "codes", "path": root}])
     clean = _bookmark(tmp_path / "clean.md", [("`codes`", BASE)])
     faulty = _bookmark(tmp_path / "faulty.md", [("`codes`", BASE), ("`ghost`", BASE)])
     assert mod.main(["--projects", str(register), "--bookmark", str(clean)]) == 0
@@ -617,7 +617,7 @@ def test_the_exit_codes_are_0_1_and_2_and_2_is_never_a_pass(mod, tmp_path):
 def test_json_is_one_document_that_names_its_subjects(mod, tmp_path, capsys):
     root = _root(tmp_path, "documented")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 1))
-    register = _projects(tmp_path / "projects.yml", [{"name": "documented", "path": root}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "documented", "path": root}])
     book = _bookmark(tmp_path / "bookmark.md", [("`documented`", BASE)])
     assert mod.main(["--projects", str(register), "--bookmark", str(book), "--json"]) == 0
     document = json.loads(capsys.readouterr().out)
@@ -657,7 +657,7 @@ def test_a_second_cycle_section_is_a_fault_the_rows_cannot_show(mod, tmp_path):
     """
     root = _root(tmp_path, "growing")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
-    register = _projects(tmp_path / "projects.yml", [{"name": "growing", "path": root}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "growing", "path": root}])
     one = _sectioned(tmp_path / "one.md", [("`growing`", BASE)], 1)
     two = _sectioned(tmp_path / "two.md", [("`growing`", BASE)], 2)
 
@@ -686,7 +686,7 @@ def test_one_cycle_section_is_the_contract_and_none_is_legitimate(mod, tmp_path)
     """
     root = _root(tmp_path, "shapes")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
-    register = _projects(tmp_path / "projects.yml", [{"name": "shapes", "path": root}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "shapes", "path": root}])
     bare = _bookmark(tmp_path / "bare.md", [("`shapes`", BASE)])
     noted = tmp_path / "noted.md"
     noted.write_text("# Bookmark\n\n## Notes\n\n- the qualifier matters\n\n"
@@ -710,7 +710,7 @@ def test_a_bookmark_truncated_at_its_section_is_diagnosed_as_truncation(mod, tmp
     remedies, so the section-carrying case gets its own sentence, and the table-less file
     with no section keeps the original one.
     """
-    register = _projects(tmp_path / "projects.yml", [{"name": "cut", "path": str(tmp_path)}])
+    register = _projects(tmp_path / "agents.yml", [{"name": "cut", "path": str(tmp_path)}])
     cut = tmp_path / "cut.md"
     cut.write_text(f"# Bookmark\n\n{SECTION}\n\nthe rewrite stopped here\n", encoding="utf-8")
     with pytest.raises(mod.Unmeasurable) as excinfo:

@@ -205,7 +205,7 @@ def _iter_nested_sessions(root: Path):
 
     Recursively walks ``root`` (pruning heavy subtrees) so unregistered
     projects under ~/.emrg (e.g. ~/.emrg itself, ~/.emrg/source) are covered,
-    not just paths listed in projects.yml.
+    not just paths listed in agents.yml.
     """
     for dirpath, dirnames, _ in os.walk(root, followlinks=False):
         dirnames[:] = [d for d in dirnames if d not in _PRUNE_DIRS]

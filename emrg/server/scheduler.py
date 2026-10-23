@@ -6,7 +6,7 @@ instead of holding a copy. `reconcile()` starts a handler for an enabled record
 that has none and can do nothing else, so a write cannot disturb a running cycle
 (rant 2026-09-28T09:54:10).
 
-projects.yml remains for project tracking (_touch_project only).
+agents.yml remains for project tracking (_touch_project only).
 
 Task config schema:
   name, type, enabled, interval — common base fields.
@@ -15,7 +15,7 @@ Task config schema:
     clock and whatever its zone does with DST. Weekdays only: no holidays, no make-up
     workdays.
   config — type-specific config, and the mapping the templates see as ``task``. For
-    evolution: config.project links to projects.yml name.
+    evolution: config.project links to agents.yml name.
   sandbox — optional; also accepted under config, where the record-level value wins.
   extra_prompt — optional; also accepted at the record's top level, where config wins
     (the templates read it as ``task.extra_prompt``; see ``_template_task_context``).
@@ -36,7 +36,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import yaml
 
-from emrg.config import config_dir
+from emrg.config import agents_file, config_dir
 from emrg.connect import connect_to_server
 from emrg.memory import NotARegularFile
 from emrg.tools.base import non_regular_kind
@@ -195,7 +195,7 @@ TASK_TEMPLATES: dict[str, str] = {
 # 超长——那些会逃出目录或造出非法文件名。大小写不在其中。
 #
 # 原先只收小写，于是一条**已经在 tasks.yml 里**的记录被加载器每个 tick 拒绝：
-# `OfficeCLI-opensource-task`（宿主照 projects.yml 里真实的项目名 `OfficeCLI` 命名）。
+# `OfficeCLI-opensource-task`（宿主照 agents.yml 里真实的项目名 `OfficeCLI` 命名）。
 # 实测 2026-09-30：`~/.emrg/emrgd.log` 里同一条错误 3963 行，06:51:45 首发、11:19:11
 # 仍在发，任务整上午一次没跑——而记录里仍写着 `enabled: true`，因为任务列表就是从
 # 这个文件建的，一个被拒的任务看起来和正在跑的一模一样。同一处校验还挡着 CRUD 的
@@ -933,8 +933,8 @@ def _resolve_task_template(task_type: str) -> Path:
 
 
 def _resolve_project_path(name: str) -> str | None:
-    """Resolve a project name to its path from projects.yml."""
-    projects_file = config_dir() / "projects.yml"
+    """Resolve a project name to its path from agents.yml."""
+    projects_file = agents_file(config_dir())
     if not projects_file.exists():
         return None
     try:
@@ -950,14 +950,14 @@ def _resolve_project_path(name: str) -> str | None:
 
 
 def _load_project_config(name: str, source_dir: str) -> dict:
-    """Return the full projects.yml entry matching the current project.
+    """Return the full agents.yml entry matching the current project.
 
     Matches by ``name`` first, then by ``path`` against ``source_dir``.
     Returns an empty dict when no match is found. Custom fields added by
-    the user in projects.yml are preserved, so templates can reference
+    the user in agents.yml are preserved, so templates can reference
     them via ``{{ project.<field> }}`` without code changes.
     """
-    projects_file = config_dir() / "projects.yml"
+    projects_file = agents_file(config_dir())
     if not projects_file.exists():
         return {}
     try:
@@ -3313,7 +3313,7 @@ class TaskHandler:
         context renders as an empty string instead of raising (the old
         ``str.format()`` crashed with KeyError on missing placeholders).
         Templates also receive ``task`` (the tasks.yml config dict) and
-        ``project`` (the matching projects.yml entry) so users can reference
+        ``project`` (the matching agents.yml entry) so users can reference
         custom fields via ``{{ task.x }}`` / ``{{ project.x }}`` without
         code changes.
         """
@@ -3632,21 +3632,21 @@ class TaskScheduler:
         write_table(records, self._tasks_file)
 
     def _ensure_emrg_project_entry(self) -> None:
-        """Ensure projects.yml has an emrg entry.
+        """Ensure agents.yml has an emrg entry.
 
         Not a task seeder any more (design decision D2, rant 2026-09-28T09:54:10): the
         default table is seeded by `read_table` when *the file* is missing, and a record
         deleted from a file that exists is terminal — re-adding it here would resurrect
         exactly what the host deleted.
 
-        What is still needed is the project entry (rant 02:58): if projects.yml lacks
+        What is still needed is the project entry (rant 02:58): if agents.yml lacks
         `emrg`, `_resolve_project_path("emrg")` returns None and the handler's
         `_source_dir` degenerates to the relative string "emrg" (a dangling cwd). The
         path is fixed to ~/.emrg/evolution/emrg; an existing entry is preserved as-is
         (dev machines may configure a custom path).
         """
-        # projects.yml — add name=emrg entry if missing (preserve existing).
-        projects_file = config_dir() / "projects.yml"
+        # agents.yml — add name=emrg entry if missing (preserve existing).
+        projects_file = agents_file(config_dir())
         try:
             entries: list[dict] = []
             if projects_file.exists():
@@ -3661,12 +3661,12 @@ class TaskScheduler:
                 })
                 atomic_write_yaml(entries, projects_file, prefix=".projects_")
                 logger.info(
-                    "TaskScheduler: self-heal — added emrg entry to projects.yml"
+                    "TaskScheduler: self-heal — added emrg entry to agents.yml"
                 )
             else:
                 # Repair a stale emrg entry whose path no longer exists
                 # (2026-08-12 incident: a pytest temp dir leaked into
-                # projects.yml by a test run; the dir is deleted after the
+                # agents.yml by a test run; the dir is deleted after the
                 # suite, leaving the entry pointing at a dead path forever —
                 # list_projects/GUI pickers show a wrong path and the handler
                 # re-resolves a dangling dir every cycle). Dev machines with a
@@ -3687,7 +3687,7 @@ class TaskScheduler:
                     break
         except (yaml.YAMLError, OSError) as e:
             logger.warning(
-                "TaskScheduler: projects.yml self-heal failed: %s", e
+                "TaskScheduler: agents.yml self-heal failed: %s", e
             )
 
     # ── Task CRUD + hot reload (rant 2026-08-12T18:23:15 P2) ────────
@@ -3703,7 +3703,7 @@ class TaskScheduler:
         if task_type not in TASK_TEMPLATES and task_type not in _custom_templates():
             return f"unknown task type {task_type!r} (not builtin, no custom template)"
         if not project or _resolve_project_path(project) is None:
-            return f"project {project!r} is not registered in projects.yml"
+            return f"project {project!r} is not registered in agents.yml"
         if not isinstance(interval, int) or isinstance(interval, bool) or interval < MIN_INTERVAL:
             return f"interval must be an integer >= {MIN_INTERVAL}"
         # The same validator the loader runs: one shape, one set of messages.

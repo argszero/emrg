@@ -162,7 +162,7 @@ class SubmitRantTool(ToolExecutor):
                         "type": "string",
                         "description": (
                             "REQUIRED for submit — target project name = the "
-                            "short `name` registered in ~/.emrg/projects.yml "
+                            "short `name` registered in ~/.emrg/agents.yml "
                             "(e.g. 'emrg', 'aitokenpool') — NOT the GitHub "
                             "owner/repo form (rant 2026-08-24T10:54:04). If "
                             "you cannot determine which project the rant "
@@ -296,7 +296,7 @@ class SubmitRantTool(ToolExecutor):
             )
         target = f" ({project})" if project else ""
         # Rant 2026-08-24T10:54:04: project must be the short name registered
-        # in ~/.emrg/projects.yml — not the GitHub owner/repo form. When the
+        # in ~/.emrg/agents.yml — not the GitHub owner/repo form. When the
         # given name is not registered, append a non-blocking warning with the
         # registered candidates so a copy-pasted wrong name is caught at
         # submit time instead of requiring a manual re-submit + void.
@@ -305,7 +305,7 @@ class SubmitRantTool(ToolExecutor):
             candidates = " | ".join(sorted(registered))
             warning = (
                 f"\n⚠ project {project!r} is not a registered name in "
-                f"~/.emrg/projects.yml (registered: {candidates}) — use the "
+                f"~/.emrg/agents.yml (registered: {candidates}) — use the "
                 f"short `name` (e.g. 'emrg' or 'aitokenpool')."
             )
         else:
@@ -316,7 +316,7 @@ class SubmitRantTool(ToolExecutor):
         )
 
     def _registered_project_names(self) -> list[str]:
-        """Short names registered in ~/.emrg/projects.yml (config dir).
+        """Short names registered in ~/.emrg/agents.yml (config dir).
 
         The daemon registers projects there on first use; the list is the
         authoritative source for the rant ``project`` field. Any read error
@@ -331,7 +331,9 @@ class SubmitRantTool(ToolExecutor):
         try:
             import yaml
 
-            p = self._rants_log().parent / "projects.yml"
+            from emrg.config import agents_file
+
+            p = agents_file(self._rants_log().parent)
             try:
                 kind = non_regular_kind(p)
             except OSError:

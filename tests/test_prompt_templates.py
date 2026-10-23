@@ -80,7 +80,7 @@ def _write_projects_yml(tmp_path: Path, name: str, entry: dict) -> Path:
     project_dir.mkdir(exist_ok=True)
     row = {"path": str(project_dir)}
     row.update(entry)
-    (tmp_path / "projects.yml").write_text(
+    (tmp_path / "agents.yml").write_text(
         yaml.safe_dump([row]), encoding="utf-8"
     )
     return project_dir

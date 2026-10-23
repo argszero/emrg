@@ -660,7 +660,7 @@ def _format_tool_input(arguments: dict) -> list[str]:
 class ProjectSelector(Widget):
     """Interactive project picker — arrow-key navigation with highlight.
 
-    Renders a list of projects from projects.yml with the selected one in
+    Renders a list of projects from agents.yml with the selected one in
     reverse video. Used by /rant when invoked without @project.
     """
 

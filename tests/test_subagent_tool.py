@@ -64,7 +64,7 @@ def _server(tmp_path, monkeypatch) -> EmrgServer:
     monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH",
                         tmp_path / "planted-fire-round-complete")
     server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
-    server._projects_log = Path(tempfile.mkdtemp()) / "projects.yml"
+    server._projects_log = Path(tempfile.mkdtemp()) / "agents.yml"
     # `_broadcast` is left real: with no connections it sends nowhere, and it is the
     # one place that records a turn's terminal frame. Stubbing it made every child
     # turn report "ended without a terminal frame", which is the stub talking.
