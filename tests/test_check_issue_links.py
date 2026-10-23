@@ -2310,13 +2310,14 @@ def test_a_near_match_names_the_ledgers_own_spelling(mod, monkeypatch, capsys, t
     assert RANT_TS in detail and "write it verbatim" in detail, detail
 
 
-def test_two_unlabelled_issues_on_one_origin_are_a_duplicate(
+def test_two_issues_on_one_origin_are_a_duplicate(
     mod, monkeypatch, capsys, tmp_path
 ) -> None:
-    """One rant, one issue: two unlabelled claims of the same handle cannot be told apart.
+    """One rant, one issue: a second claim of the same handle cannot be told from a duplicate.
 
     Both links are clean here, which is the point — without the origin clause this queue
-    reads `OK`, so the row's state is entirely the origin reading's verdict.
+    reads `OK`, so the row's state is entirely the origin reading's verdict. Neither row is
+    spared, because the reading cannot know which of the two a reader meant.
     """
     _install(
         mod,
@@ -2329,7 +2330,10 @@ def test_two_unlabelled_issues_on_one_origin_are_a_duplicate(
     assert rc == 1, out
     for subject in ("#10 issue ORIGIN-DUPLICATE", "#11 issue ORIGIN-DUPLICATE"):
         detail = _detail(out, subject)
-        assert RANT_TS in detail and "Part:" in detail, detail
+        assert RANT_TS in detail, detail
+        assert "Fold them into the one issue" in detail, (
+            "the remedy is folding the claims into one issue, not labelling the parts"
+        )
 
 
 def test_one_issue_writing_its_origin_twice_is_not_a_duplicate(
@@ -2341,8 +2345,8 @@ def test_one_issue_writing_its_origin_twice_is_not_a_duplicate(
     section, or because an edit appended where it meant to replace — and that is one issue
     declaring one origin. The rule it is measured against says "two or more open issues", so
     a single issue can never be a duplicate of itself; grouping by occurrence made this queue
-    fail with a row reading *"#10 name the same rant origin ... and #10 #10 carry no
-    `Part: n/N`"*, three wrong numbers in the sentence a reader acts on.
+    fail with a row that named the same number twice, two wrong numbers in the sentence a
+    reader acts on.
 
     The queue is otherwise clean (`_linked_issues` holds every link `ok` and the ledger holds
     the timestamp), so `OK` here is the whole verdict: nothing but the origin reading can
@@ -2363,12 +2367,13 @@ def test_one_issue_writing_its_origin_twice_is_not_a_duplicate(
     assert "DUPLICATE" not in out, out
 
 
-def test_a_labelled_split_of_one_rant_is_allowed(mod, monkeypatch, capsys, tmp_path) -> None:
-    """R5's escape hatch: a rant carried by two issues, each saying which part it is.
+def test_a_labelled_split_of_one_rant_is_a_fault_too(mod, monkeypatch, capsys, tmp_path) -> None:
+    """The marker that used to license a split no longer answers the reading.
 
-    Without this the reading would forbid the split the design explicitly permits when a
-    rant's requirements are independent — and a rule that cannot be satisfied is one a cycle
-    answers by editing the reading instead of the work.
+    A rant carried by two issues is one defect at either joint — two issues where one was
+    owed, or one issue owed two PRs later. Labelling the parts was how the old reading told a
+    deliberate split from a duplicate claim, so with splitting gone the label has no subject
+    left: the same two issues must fault exactly as the unlabelled pair does.
     """
     _install(
         mod,
@@ -2383,17 +2388,19 @@ def test_a_labelled_split_of_one_rant_is_allowed(mod, monkeypatch, capsys, tmp_p
 
     rc, out = _run(mod, capsys, ["--rants", str(_ledger(tmp_path, RANT_TS))])
 
-    assert rc == 0, out
-    assert "OK" in out, out
+    assert rc == 1, out
+    for subject in ("#10 issue ORIGIN-DUPLICATE", "#11 issue ORIGIN-DUPLICATE"):
+        assert subject in out, out
 
 
 def test_one_labelled_and_one_unlabelled_part_is_still_a_duplicate(
     mod, monkeypatch, capsys, tmp_path
 ) -> None:
-    """The escape hatch has to be used by **every** part, not by one of them.
+    """A half-labelled pair was the shape that made the old rule depend on the reading order.
 
-    Otherwise "labelled" would depend on which issue a reader looked at first, and the
-    unlabelled one would still be indistinguishable from a duplicate claim.
+    It faults on both sides now, and the point of keeping the arm is that it holds the same
+    property for the new rule: neither claimant is excused, so the verdict cannot depend on
+    which issue a reader reached first.
     """
     _install(
         mod,
@@ -2410,7 +2417,9 @@ def test_one_labelled_and_one_unlabelled_part_is_still_a_duplicate(
 
     assert rc == 1, out
     assert "#11 issue ORIGIN-DUPLICATE" in out, out
-    assert "#10 issue ORIGIN-DUPLICATE" not in out, out
+    assert "#10 issue ORIGIN-DUPLICATE" in out, (
+        "the labelled half is not spared any more - see the docstring"
+    )
 
 
 def test_a_queue_that_declares_no_origin_never_reads_the_ledger(
