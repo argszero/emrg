@@ -624,3 +624,105 @@ def test_json_is_one_document_that_names_its_subjects(mod, tmp_path, capsys):
     assert document["project_count"] == 1
     assert document["states"][0]["state"] == "changed"
     assert document["projects_file"] == str(register)
+
+
+# --------------------------------------------------------------------------- its structure
+
+#: The first words of a bookmark's per-cycle narration heading, as the file spells them.
+#: The reader matches the heading and nothing else, so the fixture spells it, not a stand-in.
+SECTION = "## Cycle cyc20261020-160624"
+
+
+def _sectioned(path: Path, rows: list[tuple[str, str]], sections: int) -> Path:
+    """A bookmark carrying ``sections`` cycle headings above its table."""
+    lines = ["# Bookmark", ""]
+    for n in range(sections):
+        lines += [f"{SECTION}-{n}", "", "one line of narration", ""]
+    lines += ["| project | newest read | files |", "| --- | --- | --- |"]
+    lines += [f"| {key} | {value} | 0 |" for key, value in rows]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def test_a_second_cycle_section_is_a_fault_the_rows_cannot_show(mod, tmp_path):
+    """The arm measured on 2026-10-23, before this reading existed.
+
+    A second section appended to the real bookmark answered **rc=0, "32 of 32", entirely
+    green**: every row still parses, so the coverage reading - the one this tool was
+    written for - has nothing to say about growth above the table. The file's own prose
+    forbids it ("never append a second entry") and, measured 2026-10-21, eight of them had
+    accumulated over 359 lines. So the fault is asserted here **beside** an empty
+    `faults` list: the two readings are different subjects, and a fix for one must not be
+    read as a fix for the other.
+    """
+    root = _root(tmp_path, "growing")
+    _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
+    register = _projects(tmp_path / "projects.yml", [{"name": "growing", "path": root}])
+    one = _sectioned(tmp_path / "one.md", [("`growing`", BASE)], 1)
+    two = _sectioned(tmp_path / "two.md", [("`growing`", BASE)], 2)
+
+    single = mod.read(register, one)
+    assert single["structure"] == [], single["structure"]
+    assert single["cycle_sections"] == 1
+
+    doubled = mod.read(register, two)
+    assert doubled["faults"] == [], doubled["faults"]   # every row still parses...
+    assert doubled["cycle_sections"] == 2
+    assert len(doubled["structure"]) == 1, doubled["structure"]   # ...and the file is wrong
+    assert "2 cycle sections" in doubled["structure"][0]
+
+    assert "structure faults: 1" in mod.render(doubled, False)
+    assert mod.main(["--projects", str(register), "--bookmark", str(two)]) == 1
+    assert mod.main(["--projects", str(register), "--bookmark", str(one)]) == 0
+
+
+def test_one_cycle_section_is_the_contract_and_none_is_legitimate(mod, tmp_path):
+    """The other two directions: the rule is *at most one*, not *exactly one*.
+
+    A bookmark that is only a title and a table is what every fixture here writes and what
+    a first-ever bookmark looks like, so reading it as a fault would redden the whole file
+    and teach the writer to ignore the line. A `##` heading that is not a cycle section is
+    a different subject - the file's rule is about its cycle narration, not about prose.
+    """
+    root = _root(tmp_path, "shapes")
+    _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
+    register = _projects(tmp_path / "projects.yml", [{"name": "shapes", "path": root}])
+    bare = _bookmark(tmp_path / "bare.md", [("`shapes`", BASE)])
+    noted = tmp_path / "noted.md"
+    noted.write_text("# Bookmark\n\n## Notes\n\n- the qualifier matters\n\n"
+                     "| project | newest read | files |\n| --- | --- | --- |\n"
+                     f"| `shapes` | {BASE} | 0 |\n", encoding="utf-8")
+
+    for path in (bare, noted):
+        reading = mod.read(register, path)
+        assert reading["structure"] == [], (path.name, reading["structure"])
+        assert reading["cycle_sections"] == 0, path.name
+        assert "structure: 0 cycle section(s)" in mod.render(reading, False), path.name
+        assert mod.main(["--projects", str(register), "--bookmark", str(path)]) == 0
+
+
+def test_a_bookmark_truncated_at_its_section_is_diagnosed_as_truncation(mod, tmp_path):
+    """A rewrite that ran past the table header, measured 2026-10-22: every row gone.
+
+    Before this, the reader answered "a bookmark in another shape" - the sentence for a
+    format it does not recognise - which sends the writer to look for a different file
+    format instead of at the rewrite that damaged this one. The two causes need different
+    remedies, so the section-carrying case gets its own sentence, and the table-less file
+    with no section keeps the original one.
+    """
+    register = _projects(tmp_path / "projects.yml", [{"name": "cut", "path": str(tmp_path)}])
+    cut = tmp_path / "cut.md"
+    cut.write_text(f"# Bookmark\n\n{SECTION}\n\nthe rewrite stopped here\n", encoding="utf-8")
+    with pytest.raises(mod.Unmeasurable) as excinfo:
+        mod.read(register, cut)
+    message = str(excinfo.value)
+    assert "carries no `| ... |` row" in message
+    assert "deleted every row" in message              # names the damage, not the format
+    assert "Restore the table" in message              # and what to do about it
+    assert "another shape" not in message
+
+    shapeless = tmp_path / "shapeless.md"
+    shapeless.write_text("# Bookmark\n\nnothing tabular here\n", encoding="utf-8")
+    with pytest.raises(mod.Unmeasurable) as excinfo:
+        mod.read(register, shapeless)
+    assert "another shape" in str(excinfo.value)

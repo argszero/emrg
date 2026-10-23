@@ -228,6 +228,17 @@ def _value_of(cells: list[str]) -> str | None:
     return None
 
 
+#: The heading that opens a bookmark's per-cycle narration section.
+#:
+#: The bookmark keeps **exactly one** such section, replaced in place each cycle. That is
+#: the file's own rule ("Update this file in place every cycle - never append a second
+#: entry") and it has a measured reason: 2026-10-21 this file had grown to 359 lines
+#: carrying **eight** sections, one of them duplicated. No row is harmed by a second
+#: section, which is why nothing noticed - every row still parses, so the coverage reading
+#: answers "32 of 32" while the file it is embedded from grows every cycle.
+CYCLE_SECTION = re.compile(r"^##\s+Cycle\b")
+
+
 def parse_bookmark(path: Path) -> list[dict]:
     """Every body row of the bookmark's table, in file order, as key/value pairs.
 
@@ -286,11 +297,30 @@ def parse_bookmark(path: Path) -> list[dict]:
         hint = key_cell.group("hint")
         rows.append({"key": f"{key} ({hint})" if hint else key, "value": value})
     if not saw_table:
+        sections = [line.strip() for line in lines if CYCLE_SECTION.match(line)]
+        if sections:
+            # The shape a section rewrite leaves when it runs past the table header
+            # instead of stopping at it. It is *this* file's own damage rather than an
+            # unfamiliar format, and the two need different remedies, so they get
+            # different sentences: measured 2026-10-22, a write that looked complete
+            # deleted every row, and the reader could then only answer `not measurable`.
+            named = ", ".join(sections[:3]) + (", and more" if len(sections) > 3 else "")
+            detail = (
+                f"the file opens a cycle section ({named}) and carries no `| ... |` row "
+                f"anywhere - the shape a section rewrite leaves when it runs past the table "
+                f"header instead of stopping at it, which on 2026-10-22 deleted every row. "
+                f"Restore the table, and replace a section from its `##` heading to the next "
+                f"`##` heading or the table header, never to end of file"
+            )
+        else:
+            detail = (
+                "not one of them is a `| ... |` row - so there are no rows here to read: a "
+                "bookmark in another shape is not an empty bookmark, and reading it as one "
+                "would report every registered project as never visited"
+            )
         raise Unmeasurable(
             f"the bookmark at {path} carries no markdown table - {len(lines)} line(s) read "
-            f"and not one of them is a `| ... |` row - so there are no rows here to read: a "
-            f"bookmark in another shape is not an empty bookmark, and reading it as one "
-            f"would report every registered project as never visited"
+            f"and {detail}"
         )
     if keyless:
         raise Unmeasurable(
@@ -307,6 +337,56 @@ def parse_bookmark(path: Path) -> list[dict]:
             + "; ".join(unreadable)
         )
     return rows
+
+
+def cycle_sections(path: Path) -> list[str]:
+    """The `## Cycle ...` headings in ``path``, in file order - empty when it cannot be read.
+
+    An absent or unreadable bookmark answers `[]` here rather than raising: `parse_bookmark`
+    already names that absence with its own sentence, and a structure reading that threw a
+    second time would replace a precise complaint with a vaguer one.
+
+    :param path: the bookmark to read.
+    :returns: the heading lines, stripped, in the order the file carries them.
+    """
+    if not path.is_file():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return []
+    return [line.strip() for line in text.splitlines() if CYCLE_SECTION.match(line)]
+
+
+def structure_faults(headings: list[str]) -> list[str]:
+    """The faults in the bookmark's structure **above** its table, not in its rows.
+
+    A separate list from the coverage faults because they are a different subject with a
+    different remedy: a coverage fault is repaired by writing a row, this one by writing a
+    *section boundary*. Mixing them was rejected for the reason the file itself states -
+    the reader's remedy sentence describes rows, and a structural fault given that remedy
+    sends the writer to the wrong place.
+
+    Deliberately **not** a refusal: with a second section appended every row still parses
+    and the rotation reading is still exactly right, so refusing would throw away a valid
+    measurement to punish a file-shape fault. The reading survives, the exit code does not.
+
+    A bookmark carrying **no** section is not a fault - a minimal or first-ever bookmark is
+    only a table, which is the shape the tests' fixtures use.
+
+    :param headings: the section headings, from :func:`cycle_sections`.
+    :returns: one sentence per fault, empty when the structure is the file's own contract.
+    """
+    if len(headings) < 2:
+        return []
+    named = ", ".join(headings[:5]) + (f", and {len(headings) - 5} more" if len(headings) > 5 else "")
+    return [
+        f"the bookmark carries {len(headings)} cycle sections ({named}): it keeps exactly one, "
+        f"replaced in place - a second section is the growth the file's own rule exists to "
+        f"avoid (measured 2026-10-21: 359 lines, eight sections, one duplicated), and this "
+        f"file is embedded in every cycle's prompt, so each appended section is paid for on "
+        f"every round that reads it"
+    ]
 
 
 def _segments(path: str) -> list[str]:
@@ -519,6 +599,8 @@ def read(projects_path: Path, bookmark_path: Path) -> dict:
     states = [project_state(p, by_path.get(p.get("path") or p["name"]), bookmark_path)
               for p in projects]
     faults = []
+    sections = cycle_sections(bookmark_path)
+    structure = structure_faults(sections)
     for state in states:
         if state["state"] == "no bookmark row":
             faults.append(f"{state['name']} ({state['path']}) has a line in the register and none in "
@@ -544,6 +626,8 @@ def read(projects_path: Path, bookmark_path: Path) -> dict:
         "row_count": len(rows),
         "states": states,
         "faults": faults,
+        "cycle_sections": len(sections),
+        "structure": structure,
     }
 
 
@@ -580,6 +664,14 @@ def render(reading: dict, show_all: bool) -> str:
     else:
         out.append(f"coverage: every project has a row and every row names a project "
                    f"({reading['project_count']} of {reading['project_count']})")
+    if reading["structure"]:
+        out.append(f"structure faults: {len(reading['structure'])}")
+        out.extend(f"  {fault}" for fault in reading["structure"])
+        out.append("the rows above are still readable - this is the prose above them: keep one "
+                   "cycle section and replace it in place, never append a second")
+    else:
+        out.append(f"structure: {reading['cycle_sections']} cycle section(s) above the table - "
+                   f"the file keeps at most one, replaced in place")
     return "\n".join(out)
 
 
@@ -606,7 +698,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(reading, indent=2, ensure_ascii=False))
     else:
         print(render(reading, args.all))
-    return 1 if reading["faults"] else 0
+    return 1 if (reading["faults"] or reading["structure"]) else 0
 
 
 if __name__ == "__main__":
