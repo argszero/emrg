@@ -1591,6 +1591,33 @@ def test_the_discriminator_is_gits_answer_not_the_token_shape(mod):
     )
 
 
+def test_the_three_answers_are_told_apart(mod):
+    """`token_kinds` gives the three answers `named_trees` had to answer "no" to.
+
+    `named_trees` answers one question — is this token a tree? — and answers "no" to a
+    commit and to a token that is not a git object at all. A consumer holding only that
+    answer could not tell those apart, and one did: `check-merge-landed.py` counted a
+    body naming the head as a token its clone could not resolve (#2555). This is the
+    reading those consumers ask instead, and it must keep all three answers — a
+    classifier that collapsed them again would put the defect back without touching the
+    sentence that reported it.
+    """
+    tree = _tree_of()
+    head = _commit_of()
+    invented = "0123456789abcdef0123456789abcdef01234567"
+
+    kinds = dict(mod.token_kinds(f"{CYCLE} — {tree} on {head}, absent {invented}"))
+
+    assert kinds[tree] == "tree"
+    assert kinds[head] == "commit", (
+        "the head resolves to an object; it is not a tree this clone lacks"
+    )
+    assert kinds[invented] == mod.MISSING, "a token this clone lacks has no git kind"
+    assert mod.MISSING != "tree", (
+        "the unresolvable answer must be spelled apart from the kind that IS a claim"
+    )
+
+
 def test_a_tree_named_twice_is_one_claim(mod):
     """De-duplicated, so a body that quotes a tree twice is not reported as two trees."""
     tree = _tree_of()

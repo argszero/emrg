@@ -344,6 +344,76 @@ def test_a_claim_this_clone_cannot_resolve_is_not_read_as_no_claim(
     )
 
 
+def test_a_body_naming_the_revision_it_read_is_not_a_clone_problem(
+    mod, merged_repo, monkeypatch
+):
+    """A commit token is a reference to what the review read, not an unreadable tree.
+
+    The most ordinary vote body there is names the revision it read — "I read the diff
+    at <sha>" — and that sha answers `commit`, not `tree`. Counting such a body as a
+    token the clone could not resolve told the voter its honest sentence was a shallow
+    clone's fault, and sent a reader to repair an environment that had just resolved
+    every token in the body: measured on #2550, three review bodies naming their head
+    produced "cannot resolve to a tree", aimed at a full clone (#2555).
+
+    Both halves are pinned — the reason names the revision, and it does not name the
+    clone — because the absent-tree case beside this one keeps the other sentence, and
+    a tool that gave both the same one would pass either test alone.
+    """
+    fixture = merged_repo
+    fake = FakeGh(
+        _view(fixture["merge_commit"]),
+        [_review(f"✅ LGTM — cycle cyc20260925-174000\n\nI read the diff at {fixture['head']}")],
+    )
+    _install(mod, monkeypatch, fake)
+
+    verdict = mod.check_pr(1613, "argszero/emrg")
+
+    assert verdict.reading == mod.UNCHECKED, "nothing was compared, and that stays true"
+    assert "name a revision but no tree" in verdict.reason, verdict.reason
+    assert "cannot resolve to a tree" not in verdict.reason, (
+        "this clone resolved the token; saying it could not is the defect, and it sends "
+        "its reader to deepen a clone that is already complete"
+    )
+    assert "check-merge-plan-suite.py" in verdict.reason, (
+        "the cause has a remedy and the remedy has to be in the sentence: name the "
+        "landing tree this script reports"
+    )
+
+
+def test_a_revision_beside_a_token_that_resolves_to_nothing_is_still_a_revision(
+    mod, merged_repo, monkeypatch
+):
+    """The classification is per body, not per token — the case a real merge measured.
+
+    Every review body on #2550 names the head **and** a CI run id. A run id matches
+    `_HEX_TOKEN` (eleven digits) and resolves to nothing, so a rule keyed on "did any
+    token fail" put all three bodies in the shallow-clone bucket and the true sentence
+    never printed at all. The question the two situations turn on is whether the body
+    named **any** object this clone can read: this one names the head, so it is a
+    reference, and the stray token changes nothing about that.
+    """
+    fixture = merged_repo
+    fake = FakeGh(
+        _view(fixture["merge_commit"]),
+        [
+            _review(
+                "✅ LGTM — cycle cyc20260925-174000\n\n"
+                f"read at {fixture['head']}, run 39961774876: test 3m41s"
+            )
+        ],
+    )
+    _install(mod, monkeypatch, fake)
+
+    verdict = mod.check_pr(1613, "argszero/emrg")
+
+    assert verdict.reading == mod.UNCHECKED
+    assert "name a revision but no tree" in verdict.reason, verdict.reason
+    assert "cannot resolve to a tree" not in verdict.reason, (
+        "one unresolvable token must not reclassify a body that named a readable object"
+    )
+
+
 def test_the_same_tree_named_by_a_later_review_still_counts(mod, merged_repo, monkeypatch):
     """Any page of reviews counts, so a claim on the newest one is not missed."""
     fixture = merged_repo

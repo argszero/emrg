@@ -413,6 +413,40 @@ def _merge_run(
 #: ambiguity. Uppercase is accepted because a SHA has no case.
 _HEX_TOKEN = re.compile(r"[0-9a-fA-F]{7,40}")
 
+#: What a token gets when this clone cannot resolve it at all. Not a git object kind,
+#: which is exactly why it is spelled apart from the words `cat-file -t` answers.
+MISSING = "missing"
+
+
+def token_kinds(body: str) -> list[tuple[str, str]]:
+    """Every hex token the body names, paired with what this clone says it is.
+
+    ``kind`` is `git cat-file -t`'s own answer — ``tree``, ``commit``, ``blob``,
+    ``tag`` — or :data:`MISSING` when the clone cannot resolve the token at all.
+    Tokens keep the abbreviation they were written with and appear once, in body
+    order: a caller asking "what is this token" is not asking for its full spelling.
+
+    **The three answers exist to be told apart**, and the comment above `_HEX_TOKEN`
+    has named them since they were measured: over that sample the tokens split 11
+    trees / 12 commits / 1 not-an-object. A token that resolves to a **commit** is an
+    ordinary reference to a revision a review read — "I read the diff at ``ed5aabe9``"
+    is what a review of a revision contains — and it is *not* a claim that a merge
+    lands that tree. A reader that could only ask "is this a tree?" had nowhere to put
+    that answer, and one did: `check-merge-landed.py` counted such a body as a token
+    its clone could not resolve, and told the voter its honest sentence was a shallow
+    clone's fault (#2555).
+
+    The `MISSING` answer is **not** a claim that the token named a tree. It cannot tell
+    a tree this clone lacks from a token that was never a git object — a CI run id
+    matches the pattern and resolves to nothing — so a caller reporting it says what it
+    knows (the token did not resolve) and not what it guesses.
+    """
+    out: list[tuple[str, str]] = []
+    for token in dict.fromkeys(_HEX_TOKEN.findall(body)):
+        got = _git("cat-file", "-t", token)
+        out.append((token, got.stdout.strip() if got.returncode == 0 else MISSING))
+    return out
+
 
 def named_trees(body: str) -> list[str]:
     """Every git **tree** the body names, as full SHAs, de-duplicated in order.
@@ -421,11 +455,16 @@ def named_trees(body: str) -> list[str]:
     `tree` is a claim about a merge. An abbreviated SHA is resolved to the full
     one so that a body naming `9188c497904b` and one naming the 40-char form are
     compared as the same tree rather than as a hit and a miss.
+
+    Deliberately **not** widened to accept a commit: resolving `ed5aabe9^{tree}`
+    would turn "I read this revision" into "merging lands that tree", and a vote
+    whose base moved after it was cast would then be refused for a tree it never
+    claimed. What the extra answers are for is telling the situations apart when a
+    body names no tree — :func:`token_kinds`.
     """
     out: list[str] = []
-    for token in dict.fromkeys(_HEX_TOKEN.findall(body)):
-        kind = _git("cat-file", "-t", token)
-        if kind.returncode != 0 or kind.stdout.strip() != "tree":
+    for token, kind in token_kinds(body):
+        if kind != "tree":
             continue
         resolved = _git("rev-parse", f"{token}^{{tree}}")
         sha = resolved.stdout.strip()
