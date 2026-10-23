@@ -247,6 +247,41 @@ def agents_file(base: Path | None = None) -> Path:
     return directory / "agents.yml"
 
 
+def register_for_reading(base: Path | None = None) -> Path:
+    """Returns the register a *reader* should open (#2545).
+
+    :func:`agents_file` names where the register belongs; this answers where it
+    actually is. :func:`migrate_legacy_registry` moves a register still at the
+    pre-rename name, and it is documented to leave the file exactly where it is
+    when the move cannot happen — a read-only home, a permission boundary, a
+    concurrent caller that got there first. A checkout also runs ahead of the
+    daemon that still holds the register at the old name. In both states
+    :func:`agents_file` names a file that does not exist, and a reader asking
+    only that one answers an **empty register** while the real one sits one
+    filename away — silently, because "nothing there" and "it is at the other
+    name" print the same.
+
+    The new name governs whenever it exists, so a legacy file that an older
+    daemon re-created cannot shadow the current register. When neither name
+    exists the new one comes back: the absent file the caller would have opened
+    anyway.
+
+    **Why this is not folded into** :func:`agents_file`: the migration takes
+    that function's answer as its move *target*, so a fallback inside it would
+    hand the migration the legacy path as the target, ``target.exists()`` would
+    be true, and the move would answer ``False`` on every host for ever — the
+    register would never reach the new name at all.
+
+    Reading never moves anything: this stats the two names and opens neither.
+    """
+    directory = config_dir() if base is None else base
+    current = agents_file(directory)
+    if current.exists():
+        return current
+    legacy = directory / _LEGACY_AGENTS_NAME
+    return legacy if legacy.exists() else current
+
+
 def migrate_legacy_registry(base: Path | None = None) -> bool:
     """Move a register still at the pre-rename name onto the new one.
 

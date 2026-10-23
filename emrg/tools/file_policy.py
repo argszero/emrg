@@ -47,8 +47,9 @@ WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 
 #: Daemon state files a sandboxed tool call must never write, at any tier. Each is
 #: a file the host owns and the daemon reads at startup. The agent registry is
-#: not spelled here: its path is derived (:func:`emrg.config.agents_file`), so it
-#: joins this list where names become paths.
+#: not spelled here: its path is derived (:func:`emrg.config.register_for_reading`,
+#: which answers whichever name the register currently holds, #2545), so it joins
+#: this list where names become paths.
 PROTECTED_FILES = (
     "~/.emrg/config.toml",
     "~/.emrg/emrgd.token",
@@ -62,10 +63,10 @@ def protected_paths() -> list[str]:
     # Imported at call time, not module scope: `emrg.config` imports
     # `emrg.tools.base`, and this module is reached from the tool packages that
     # sit beside it (#2521).
-    from emrg.config import agents_file
+    from emrg.config import register_for_reading
 
     out: list[str] = []
-    for p in (*PROTECTED_FILES, str(agents_file())):
+    for p in (*PROTECTED_FILES, str(register_for_reading())):
         try:
             out.append(os.path.realpath(os.path.expanduser(p)))
         except OSError:

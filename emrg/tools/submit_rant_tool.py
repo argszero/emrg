@@ -316,10 +316,14 @@ class SubmitRantTool(ToolExecutor):
         )
 
     def _registered_agent_names(self) -> list[str]:
-        """Short names registered in ~/.emrg/agents.yml (config dir).
+        """Short names registered in the register (config dir).
 
         The daemon registers a directory there on first use; the list is the
-        authoritative source for the rant ``agent`` field. Any read error
+        authoritative source for the rant ``agent`` field. The path is asked of
+        :func:`emrg.config.register_for_reading`, which answers the pre-rename
+        name while that is the file that holds the register (#2545) — a reader
+        that asked only for the new name saw an empty register, and the warning
+        below is gated on a non-empty list, so it never fired. Any read error
         degrades to "no candidates" (validation is advisory, never blocking).
 
         The subject's kind is asked before it is opened: `exists()` is true for a FIFO, and
@@ -331,9 +335,9 @@ class SubmitRantTool(ToolExecutor):
         try:
             import yaml
 
-            from emrg.config import agents_file
+            from emrg.config import register_for_reading
 
-            p = agents_file(self._rants_log().parent)
+            p = register_for_reading(self._rants_log().parent)
             try:
                 kind = non_regular_kind(p)
             except OSError:
