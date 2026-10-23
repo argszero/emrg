@@ -1892,6 +1892,55 @@ def test_ensure_emrg_agent_entry_other_entries_preserved(tmp_path):
     assert "emrg" in names
     assert len(names) == 2
 
+
+def test_ensure_emrg_agent_entry_declines_when_the_register_is_at_the_legacy_name(tmp_path):
+    """The read half and the write half must address the same file.
+
+    A register still at the pre-rename name is a state the move can be stuck in
+    (a read-only home, a permission boundary, a concurrent caller) and the state
+    `register_for_reading` exists for. Asking `agents_file` alone here did not
+    read that register — `AgentRegistry._read` maps a missing file to `[]` — so
+    the emrg row looked absent, and the upsert created a *second* register under
+    the new name holding only that row. Worse than the write itself: the new file
+    is the one `register_for_reading` prefers from then on, so the entries left
+    at the old name disappeared from every reader at once.
+
+    The emrg row here is deliberately a dead path, which is the shape that gets
+    past the "an existing entry with a live directory is left alone" early return
+    and really reaches the write.
+    """
+    from emrg.config import register_for_reading
+    from emrg.server import scheduler as mod
+    from emrg.server.scheduler import TaskScheduler
+
+    legacy = tmp_path / "projects.yml"
+    before = yaml.safe_dump([
+        {"name": "emrg", "path": str(tmp_path / "gone" / "emrg")},  # dead on purpose
+        {"name": "other", "path": str(tmp_path / "other")},
+    ])
+    legacy.write_text(before, encoding="utf-8")
+
+    sched = TaskScheduler(InstanceIdentity())
+
+    orig_config = mod.config_dir
+    try:
+        mod.config_dir = lambda: tmp_path
+        sched._ensure_emrg_agent_entry()
+    finally:
+        mod.config_dir = orig_config
+
+    assert not (tmp_path / "agents.yml").exists(), (
+        "a second register was created: the write half did not address the file "
+        "the read half had just read"
+    )
+    assert legacy.read_text(encoding="utf-8") == before, "the legacy register is untouched"
+    register = register_for_reading(tmp_path)
+    assert register == legacy
+    assert [e["name"] for e in yaml.safe_load(register.read_text(encoding="utf-8"))] == [
+        "emrg", "other",
+    ], "every entry the register held is still there"
+
+
 # ── TaskHandler cycle truncation detection ──────────────────
 # mem-repo lesson (tool-call truncation must be flagged, not silently
 # treated as a successful/empty cycle — #523 applied it to the chat UI;
