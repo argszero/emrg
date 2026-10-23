@@ -35,6 +35,7 @@ from typing import ClassVar, Optional
 # restated: the boundary is one fact, and a second spelling of it is a second boundary
 # that can drift. `emrg.tools.base` imports only `emrg.server.tool_types`, so this adds
 # no cycle — measured by importing this module from a fresh interpreter.
+from emrg.agent import as_agent
 from emrg.tools.base import non_regular_kind
 
 logger = logging.getLogger(__name__)
@@ -1434,7 +1435,7 @@ class ProjectMemoryStore(MemoryStore):
     """Project-level memory: ``<cwd>/.emrg/memory/`` — shared across all sessions."""
 
     def __init__(self, cwd: Path):
-        super().__init__(cwd / ".emrg" / "memory", scope="project")
+        super().__init__(as_agent(cwd).memory_dir, scope="project")
 
 
 class SessionMemoryStore(MemoryStore):

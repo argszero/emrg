@@ -44,6 +44,7 @@ import jinja2
 import pytest
 import yaml
 
+from emrg.agent import Agent
 from emrg.protocol import InstanceIdentity
 from emrg.sandbox.policy import SandboxPolicy
 from emrg.sandbox.roots import canonical_path, writable_roots
@@ -618,12 +619,19 @@ def test_prompt_memory_writes_land_where_the_daemon_loads_them(tmp_path, monkeyp
     # (3) That workspace's `.emrg/memory` is what the daemon embeds as project memory.
     memory_root.mkdir(parents=True, exist_ok=True)
     (memory_root / "MEMORY.md").write_text("# Index\n", encoding="utf-8")
-    # `_collect_memory_data` touches only `session.cwd` and `session.memory_dir`, and
-    # reaches the module-level `INDEX_SIZE_WARN` through a method — so an uninitialised
-    # instance is enough, and no daemon, socket or event loop is started to measure this.
+    # `_collect_memory_data` reads the session's Agent (for the project half) and
+    # `session.memory_dir` (for the session half), and reaches the module-level
+    # `INDEX_SIZE_WARN` through a method — so an uninitialised instance is enough, and no
+    # daemon, socket or event loop is started to measure this. The stand-in carries an
+    # `Agent` rather than a bare path because that is what a session holds: its `cwd`
+    # *is* the Agent's `base_dir`, so the two facts below cannot disagree.
     daemon = EmrgServer.__new__(EmrgServer)
     data = daemon._collect_memory_data(
-        SimpleNamespace(cwd=source_dir, memory_dir=tmp_path / "session-memory")
+        SimpleNamespace(
+            agent=Agent(source_dir),
+            cwd=source_dir,
+            memory_dir=tmp_path / "session-memory",
+        )
     )
     assert data, (
         "the daemon embedded no project index for a session whose cwd carries one — "

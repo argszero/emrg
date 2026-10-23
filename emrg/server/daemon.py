@@ -2845,7 +2845,7 @@ class EmrgServer:
         """Read memory indexes, return structured data for template."""
         data: dict[str, Any] = {"has_memories": False}
 
-        project_dir = session.cwd / ".emrg" / "memory"
+        project_dir = session.agent.memory_dir
         pindex_path = project_dir / "MEMORY.md"
         if pindex_path.exists():
             data["project_memory_index"] = self._index_for_prompt(pindex_path)
@@ -8387,7 +8387,7 @@ class EmrgServer:
                 # de-duplication that existed only to keep it from being named twice
                 # went with it.
                 subjects = [
-                    session.cwd / ".emrg" / "memory" / "MEMORY.md",
+                    session.agent.memory_dir / "MEMORY.md",
                     store.index_path,
                 ]
                 hygiene_note += _memory_index_compaction_note(subjects)

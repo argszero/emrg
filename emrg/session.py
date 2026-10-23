@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
+from emrg.agent import Agent, as_agent
 from emrg.memory import NotARegularFile, SessionMemoryStore
 from emrg.sandbox.grants import GRANT_REGISTRY, RootGrant
 from emrg.sandbox.policy import SANDBOX_MODES
@@ -53,7 +54,7 @@ def generate_session_id(cwd: Path) -> str:
     """
     now = datetime.now()
     prefix = f"s_{now.strftime('%y%m%d_%H%M')}_"
-    sessions_dir = cwd / ".emrg" / "sessions"
+    sessions_dir = as_agent(cwd).sessions_dir
     for _ in range(100):
         suffix = secrets.token_hex(4)
         sid = prefix + suffix
@@ -354,17 +355,28 @@ def session_dir(cwd: Path, session_id: str) -> Path:
     The id is not validated here — ``is_safe_session_id`` decides that, and its caller
     decides whether an unsafe id is refused or merely not a directory (see its
     docstring for what an unchecked id did).
+
+    The expression itself belongs to ``Agent.sessions_dir``: this function is the
+    signature the callers already use, not a second convention beside the Agent's.
     """
-    return Path(cwd) / ".emrg" / "sessions" / session_id
+    return as_agent(cwd).sessions_dir / session_id
 
 
 class Session:
-    """Manages a single conversation session on disk."""
+    """Manages a single conversation session on disk.
 
-    def __init__(self, session_id: str, cwd: Path) -> None:
+    A session runs *in* an Agent — one directory. Every path it keeps is derived from
+    that Agent, so the session never spells a ``.emrg`` path itself: a second derivation
+    is a second convention, waiting to disagree with the first.
+    """
+
+    def __init__(self, session_id: str, agent: Agent | Path | str) -> None:
         self.session_id = session_id
-        self.cwd = cwd
-        self._dir = session_dir(cwd, session_id)
+        # A caller may still hand over the path — every factory below does — and the
+        # wrapping happens here rather than at each of them, so exactly one place knows
+        # that a path means an Agent.
+        self._agent = as_agent(agent)
+        self._dir = session_dir(self._agent, session_id)
         self._dir.mkdir(parents=True, exist_ok=True)
 
         # Initialize memory subdirectory
@@ -469,6 +481,25 @@ class Session:
         filepath.write_bytes(data)
         logger.info("image saved: %s (%d bytes)", filename, len(data))
         return filename
+
+    # ── Identity ──────────────────────────────────────────────
+
+    @property
+    def agent(self) -> Agent:
+        """The Agent — the directory — this session runs in."""
+        return self._agent
+
+    @property
+    def cwd(self) -> Path:
+        """The directory this session runs in: ``agent.base_dir``, read-only.
+
+        A property rather than a field because the directory is decided once, when the
+        session is built: a second assignment could put a session's files and its
+        ``cwd`` in different places with nothing recording which one is right. The value
+        is answered verbatim — a caller that passed a string reads that string back —
+        so every existing reader of ``session.cwd`` is unchanged.
+        """
+        return self._agent.base_dir
 
     # ── Factory methods ───────────────────────────────────────
 
@@ -1238,7 +1269,7 @@ class Session:
             session_id, created_at, updated_at, cwd, message_count,
             compact_count, last_compact_at, title (if set)
         """
-        sessions_dir = cwd / ".emrg" / "sessions"
+        sessions_dir = as_agent(cwd).sessions_dir
         if not sessions_dir.exists():
             return []
 
