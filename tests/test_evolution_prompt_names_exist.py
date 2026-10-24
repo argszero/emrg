@@ -61,7 +61,13 @@ def the_sentence(text: str) -> str:
 
 
 def faults(text: str) -> list[str]:
-    """Everything wrong with the example, each fault a sentence a reader can act on."""
+    """Everything wrong with the example, each fault a sentence a reader can act on.
+
+    Faults accumulate rather than short-circuiting on the first, because the two readings fail
+    together on the defect this file was written for: the retired three named no file, so a
+    guard that returned at the file check would report "0 Python files" and never say
+    `_check_sandbox` — naming the symptom while the cause went unstated.
+    """
     try:
         sentence = the_sentence(text)
     except ValueError:
@@ -71,18 +77,27 @@ def faults(text: str) -> list[str]:
             "re-anchored here in the same change — a guard reading nothing is not a pass"
         ]
 
+    found: list[str] = []
+    retired = [name for name in RETIRED_NAMES if name in text]
+    if retired:
+        found.append(
+            f"the template still carries the retired name(s) {retired}: those gates were "
+            "deleted, so naming them sends a reader looking for code that is not in the tree"
+        )
+
     tokens = _TOKEN.findall(sentence)
     modules = [token for token in tokens if token.endswith(".py")]
-    found: list[str] = []
     if len(modules) != 1:
-        return [
+        found.append(
             f"the example names {len(modules)} Python file(s) {modules!r}: it must name exactly "
             "one, because that file is where every identifier beside it is looked up"
-        ]
+        )
+        return found
 
     module = REPO_ROOT / modules[0]
     if not module.is_file():
-        return [f"the example names {modules[0]!r}, which is not a file in this tree"]
+        found.append(f"the example names {modules[0]!r}, which is not a file in this tree")
+        return found
 
     defined = {
         node.name
@@ -100,13 +115,6 @@ def faults(text: str) -> list[str]:
         for name in identifiers
         if name not in defined
     )
-
-    retired = [name for name in RETIRED_NAMES if name in text]
-    if retired:
-        found.append(
-            f"the template still carries the retired name(s) {retired}: those gates were "
-            "deleted, so naming them sends a reader looking for code that is not in the tree"
-        )
     return found
 
 
