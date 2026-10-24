@@ -2193,6 +2193,80 @@ def test_the_inbound_pin_answers_both_ways():
         )
 
 
+# --------------------------------------------------------------- the reader, not the writer
+#
+# Both criteria the file used to state were tests of the sender, and it stated them twice:
+# "deleting every promotional trace from the reply leaves it complete and natural" (red line 4)
+# and "deleting the identity sentence leaves the reply complete" (Step 2).
+#
+# Why neither can be the gate: deleting one sentence from a competent paragraph leaves a
+# competent paragraph, so the test is satisfied by any well-written text at all. It measures a
+# property of the writer, on the writer's own output, and is silent about the thread the text
+# enters — which is the only thing that decides whether a reply was wanted. The failures it does
+# catch are failures of wording, and the red lines above already own those.
+#
+# What the record of this account's outreach shows, and what no reading of the text alone can
+# see: threads that drew no answer at all, and pull requests that landed with no review. A merge
+# without objection says the change did not conflict; it does not say the author wanted it.
+#
+# The replacement states one question, answerable before typing, at both sites, and gives the
+# pull-request lane an owner inside red line 1 instead of adding a rule: the heading above that
+# list counts them ("7 rules"), and a rule nobody counts is a rule that drifts from the count.
+#
+# Pinned as verbatim phrases for the reason the pins above state. The retired pair is pinned the
+# other way round, as strings the file must no longer carry — a rewrite that restores one of them
+# in a different paragraph is the same defect, and a single keyword would miss it.
+
+PROMOTE_READERS_TEST_PHRASES = (
+    "The test is the reader's, not yours",
+    "cannot be written from the thread",
+    "a defect the project has itself named",
+    "reproduced locally with that reproduction attached",
+    "does not license a second attempt at it",
+    "the shape a machine writes",
+    "read from them rather than estimated",
+)
+
+PROMOTE_RETIRED_SENDER_TESTS = (
+    "deleting every promotional trace",
+    "deleting the identity sentence",
+)
+
+
+def test_the_promote_prompt_gates_a_reply_on_the_reader_and_not_on_its_own_wording():
+    """The gate the template states must be a question about the thread, not about the prose.
+
+    What this measures and what it does not: it pins that the rule is still **stated**, and that
+    the sender-side test has not come back. Whether a round asked the question before typing is
+    that round's own closing summary — no text assertion can answer it.
+    """
+    text = _PROMOTE_TEMPLATE.read_text(encoding="utf-8")
+    missing = _missing_phrases(text, PROMOTE_READERS_TEST_PHRASES)
+    assert not missing, (
+        "the promote template no longer gates a reply on the reader: "
+        f"{missing}. A criterion the sender satisfies by writing well is satisfied by any "
+        "well-written text, so a reply nobody was waiting for passes it."
+    )
+    restored = [phrase for phrase in PROMOTE_RETIRED_SENDER_TESTS if phrase in text]
+    assert not restored, (
+        f"the sender-side criterion is back in the promote template: {restored}. Deleting one "
+        "sentence from a competent paragraph leaves a competent paragraph, so that test cannot "
+        "tell a reply that answered a thread from a reply that invented one."
+    )
+
+
+def test_the_readers_test_pin_answers_both_ways():
+    """The control: removing one phrase makes exactly that phrase read as missing."""
+    text = _PROMOTE_TEMPLATE.read_text(encoding="utf-8")
+    for phrase in PROMOTE_READERS_TEST_PHRASES:
+        stripped = text.replace(phrase, "")
+        assert stripped != text, f"{phrase!r} is pinned but absent, so this arm measured nothing"
+        assert _missing_phrases(stripped, PROMOTE_READERS_TEST_PHRASES) == [phrase], (
+            f"removing {phrase!r} did not make exactly that phrase read as missing, so this "
+            "pin would not notice its own rule being deleted"
+        )
+
+
 # ── the ios-app template's app layout ───────────────────────────────────────────────────────
 #
 # The layout is not decoration: §3's inception step and §4's attribution rule both assume it.
