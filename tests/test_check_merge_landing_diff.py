@@ -450,7 +450,11 @@ def test_main_exit_codes(mod, tmp_path, monkeypatch, capsys) -> None:
     monkeypatch.chdir(repo)
     monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
     assert mod.main(["1", "--base", base]) == 1
-    assert "reads backwards" in capsys.readouterr().err
+    # `out`, not `err`: the hazard verdict is a verdict, and both of this tool's
+    # verdicts travel on stdout now (#2560). Split across two streams the hazard half
+    # was flushed first whenever they were combined, so its reader met the warning
+    # before the change it warned about. `err` keeps what could not be measured.
+    assert "reads backwards" in capsys.readouterr().out
 
     repo2, base2, head2 = _fresh_repo(tmp_path)
     monkeypatch.chdir(repo2)
@@ -1551,3 +1555,59 @@ def test_the_paths_that_read_backwards_carry_no_counts(
     change, _, backwards = report.partition("  reads backwards:")
     assert "(+" in change
     assert "(+" not in backwards
+
+
+# --- where the hazard warning sends its reader ----------------------------------
+
+
+def test_the_hazard_explanation_is_printed_after_the_change_it_warns_about(
+    mod, tmp_path, monkeypatch, capsys
+) -> None:
+    """The warning must arrive in the same stream as the block, and after it (#2560).
+
+    The warning tells its reader that the landing change "is printed above it". That
+    is a claim about position, and position across two streams is decided by
+    buffering rather than by program order: the landing change goes to stdout, the
+    warning went to stderr, and a reader who combines them (`2>&1`, which is how a
+    cycle reads a tool) can get the warning first. Measured on master `5c6b832d`:
+    `check-merge-landing-diff.py 2558 2>&1 | head` printed "reads backwards: … The
+    landing change is printed above it" and then the landing block below it.
+
+    So the assertion is not "the pair reads well" but "the explanation is in
+    *stdout*, after the landing block" — a property of one string, which no
+    buffering can invert. Against the tool as it stood this fails, because the
+    explanation was only ever on stderr.
+    """
+    repo, base, head = _behind_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+
+    assert mod.main(["1", "--base", base]) == 1
+    out, err = capsys.readouterr()
+
+    landing = out.find("landing tree")
+    assert landing != -1, f"no landing block in stdout: {out!r}"
+    explanation = out.find("reading hazard")
+    assert explanation != -1, (
+        "the explanation a reader needs is not in stdout, so its position relative to "
+        f"the landing change is decided by which stream flushes first: {out!r}"
+    )
+    assert landing < explanation, (
+        "the warning is printed before the change it points at, which is what makes "
+        f"'printed above it' false: {out!r}"
+    )
+    assert "landing change above" in out, (
+        "the pointer has to name the direction the reader can see"
+    )
+    # Both verdicts travel on one stream, so neither can be flushed ahead of the
+    # reports it summarises, and stderr keeps only what could not be measured.
+    summary = out.find("nothing the PR")
+    assert summary != -1 or out.rfind("reads backwards") > explanation, (
+        f"the cross-PR summary is missing from stdout: {out!r}"
+    )
+    assert "printed above" not in out, (
+        f"a positional claim about the other stream survives: {out!r}"
+    )
+    assert err.strip() == "", (
+        f"stderr carried a verdict, so its position is again decided by buffering: {err!r}"
+    )
