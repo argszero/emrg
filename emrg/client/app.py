@@ -32,7 +32,7 @@ from emrg.session import generate_session_id, session_dir
 # importable from outside the daemon: this is the client's own log surface, and a window
 # applied there before the rule sees the text is the defect that module exists to prevent.
 from emrg.server.redaction import redact_string
-from emrg.skills.loader import load_skills
+from emrg.skills.loader import load_skills_with_shadows
 # The "is this path a regular file" rule is the tool layer's, reached at a path — the same
 # import `emrg/client/daemon_manager.py` makes for the same reason (`#2062`, `#2081`).
 from emrg.tools.base import non_regular_kind
@@ -43,6 +43,46 @@ from emrg.tools.shell_dialects import SHELL_TOOL_NAMES
 from emrg.server.redaction import redact_string
 
 logger = logging.getLogger(__name__)
+
+
+def skills_listing(agent_dir: Path | None) -> list[str]:
+    """The host's `/skills` screen: what is offered, and what a name collision displaced.
+
+    Returns the lines to print, or an empty list when this tree has no skill at all — the
+    caller keeps its own "no skills loaded" message, which is advice rather than a list.
+
+    Two things this must not do. It must not ask the loader for the list with the shadows
+    dropped: ``load_skills(...)`` is ``load_skills_with_shadows(...)[0]``, so a host whose
+    user-root ``foo`` was displaced by an agent-root ``foo`` was shown one ``foo`` labelled
+    ``agent`` and nothing saying the other declaration existed (#2569). And it must not
+    change what a tree *without* a collision shows: the shadow paragraph appears only
+    where a declaration was actually displaced, so every other host reads today's list.
+
+    The per-shadow line is worded as the loader and ``system.j2`` word it, because those
+    two already print this pair to the model — a test compares all three carriers, so the
+    host's screen cannot drift into a third account of the same fact.
+    """
+    skills, shadows = load_skills_with_shadows(agent_dir)
+    if not skills:
+        return []
+    lines = ["**Loaded Skills:**", ""]
+    for s in skills:
+        lines.append(f"- **{s.name}** ({s.source}) — {s.description}")
+    if shadows:
+        lines.append("")
+        lines.append(
+            f"**Shadowed names.** {len(shadows)} declaration(s) name a skill that another "
+            "declaration already names, so they are not offered under it. The file in effect "
+            "is listed above; the declaration that lost the name is named here. Renaming one "
+            "of the two declarations, or giving it a distinct `name:`, settles it."
+        )
+        for shadow in shadows:
+            lines.append(
+                f"- **{shadow.name}**: in effect - {shadow.kept.source}, "
+                f"`{shadow.kept.path}`; shadowed - {shadow.dropped.source}, "
+                f"`{shadow.dropped.path}`"
+            )
+    return lines
 
 
 def _rows_for_log(rows, width: int) -> str:
@@ -3435,11 +3475,8 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     else:
                         # The session's directory, not this process's: the agent
                         # skills a session has are the ones under its own root.
-                        skills = load_skills(Path(cwd) if cwd else None)
-                        if skills:
-                            lines = ["**Loaded Skills:**", ""]
-                            for s in skills:
-                                lines.append(f"- **{s.name}** ({s.source}) — {s.description}")
+                        lines = skills_listing(Path(cwd) if cwd else None)
+                        if lines:
                             chat.add("system", "\n".join(lines))
                         else:
                             chat.add("system", "No skills loaded. Add .md files to ~/.emrg/skills/ or .emrg/skills/")
