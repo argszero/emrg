@@ -171,7 +171,7 @@ from emrg.tools.grep_tool import GrepTool
 from emrg.tools.submit_rant_tool import SubmitRantTool
 from emrg.tools.subagent_tool import SubagentTool
 from emrg.tools.boss_tool import BUSY_MARKER, REASK_WINDOW_S, BossTool
-from emrg.skills.loader import load_skills
+from emrg.skills.loader import load_skills, load_skills_with_shadows
 from emrg.skills.registry import ensure_catalog_file, load_catalog_skills, skill_is_managed
 from emrg.server.rants import append_rant, list_rants
 from emrg.server.scheduler import (
@@ -2514,12 +2514,29 @@ class EmrgServer:
         # edited or deleted on disk has to reach the next prompt without a daemon
         # restart, and a session's agent skills are the ones under its own root
         # rather than under the directory the daemon was started in.
-        skills = load_skills(session.cwd if session else None)
+        skills, skill_shadows = load_skills_with_shadows(session.cwd if session else None)
         if skills:
             ctx["skills"] = [
                 {"name": s.name, "source": s.source, "path": s.path,
                  "description": s.description}
                 for s in skills
+            ]
+        # A declaration that loses its name to another is named **here**, where the
+        # prompt is built, and not only in the loader's log: this deployment discards
+        # the server's stderr (`stderr=DEVNULL`), so a `logger.debug` line reaches no
+        # one, and a host who installs a skill and never sees it offered has no reading
+        # that says why (issue #2563). Set only when there is something to say, so a
+        # tree with no collision renders the byte-identical prefix it rendered before.
+        if skill_shadows:
+            ctx["skill_shadows"] = [
+                {
+                    "name": shadow.name,
+                    "kept_source": shadow.kept.source,
+                    "kept_path": str(shadow.kept.path),
+                    "dropped_source": shadow.dropped.source,
+                    "dropped_path": str(shadow.dropped.path),
+                }
+                for shadow in skill_shadows
             ]
 
         # ── Memory ──

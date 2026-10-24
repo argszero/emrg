@@ -31,7 +31,12 @@ from emrg.server.daemon import EmrgServer
 from emrg.session import Session
 from emrg.skills import loader as loader_mod
 from emrg.skills import registry as registry_mod
-from emrg.skills.loader import _agent_root, load_skills
+from emrg.skills.loader import (
+    _agent_root,
+    build_skills_context,
+    load_skills,
+    load_skills_with_shadows,
+)
 
 SKILL_TEXT = "---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n\n{body}\n"
 
@@ -207,6 +212,49 @@ def test_a_skill_installed_after_the_daemon_started_reaches_the_next_prompt(root
 
     after = server._build_system_prompt(Session.create_with_id("skills-late-b", agent))
     assert "late-skill" in after, "a skill on disk did not reach the next prompt"
+
+
+def test_the_prompt_names_a_declaration_that_lost_its_name(roots, tmp_path):
+    """A collision is stated where host and agent both read what skills exist.
+
+    The loader's only trace of a declaration that lost its name was a `logger.debug`
+    line, and the server runs with `stderr=DEVNULL` — so the loss reached nobody, and a
+    host who installed a skill and never saw it offered had no reading that said why.
+    The prompt is the surface the requirement names (issue #2563).
+    """
+    user_root, agent = roots
+    (user_root / "a.md").write_text(_skill("dup", "from a"), encoding="utf-8")
+    (user_root / "z.md").write_text(_skill("dup", "from z"), encoding="utf-8")
+
+    server = _server(tmp_path)
+    rendered = server._build_system_prompt(Session.create_with_id("skills-dup", agent))
+
+    assert "from z" in rendered, "the declaration in effect is missing from the prompt"
+    assert "Shadowed names" in rendered, "the prompt says nothing about the collision"
+    assert "a.md" in rendered, "the declaration that lost the name is not named"
+
+
+def test_both_carriers_of_the_collision_rule_name_the_same_two_files(roots, tmp_path):
+    """`system.j2` and `build_skills_context` carry one rule; neither may drift.
+
+    Two renderers of one sentence is two chances to disagree, and the prompt is the one
+    that ships while the helper is the one the loader's tests read. This compares them,
+    so a change to either that stops naming the loser reddens here.
+    """
+    user_root, agent = roots
+    (user_root / "a.md").write_text(_skill("dup", "from a"), encoding="utf-8")
+    (user_root / "z.md").write_text(_skill("dup", "from z"), encoding="utf-8")
+
+    skills, shadows = load_skills_with_shadows(agent_dir=agent)
+    from_prompt = _server(tmp_path)._build_system_prompt(
+        Session.create_with_id("skills-dup-carriers", agent)
+    )
+    from_helper = build_skills_context(skills, shadows)
+
+    for rendered, carrier in ((from_prompt, "system.j2"), (from_helper, "build_skills_context")):
+        assert "Shadowed names" in rendered, f"{carrier} does not name the collision"
+        assert "a.md" in rendered, f"{carrier} omits the declaration that lost the name"
+        assert "z.md" in rendered, f"{carrier} omits the declaration in effect"
 
 
 def test_the_daemon_keeps_no_skills_snapshot(tmp_path):
