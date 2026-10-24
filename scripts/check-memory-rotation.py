@@ -62,7 +62,12 @@ agent's own memory root, so counting it would make that agent's newest file the 
 itself: the row could never be current, and every run would report the agent changed on
 the strength of the file that asks the question (issue #2422). It is excluded from the
 scan wherever it sits - inside a scanned root, or outside every root, where the exclusion
-is a no-op - and that exclusion is a stated rule rather than an invisible subtraction.
+is a no-op - and that exclusion is a stated rule rather than an invisible subtraction. The
+rule is an **identity** one, asked of the tree's single home for it
+(`emrg/tools/file_policy.same_file`) instead of being spelled a second time here: two
+spellings of one file are one file, and a comparison of resolved strings cannot say so - the
+bookmark was excluded under the spelling the walk used and counted as that agent's memory
+under a spelling one volume folds away (issue #2559).
 
 Each agent lands in exactly one state:
 
@@ -123,6 +128,18 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
+
+#: This file's own tree, put on `sys.path` before the one import it takes from the package.
+#: The insert is unconditional and comes first for the reason `check-memory-index.py`
+#: documents at length: this environment's `PYTHONPATH` can carry the **installed** package
+#: ahead of the checkout, and the rule this file asks for has to be the rule of the tree the
+#: file ships in rather than of a version behind it.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
+# The home of "are these two paths one file". Imported rather than re-spelled: the rule is
+# stated once for the whole tree, and a second spelling of it is what produced issue #2559.
+from emrg.tools.file_policy import same_file  # noqa: E402
 
 #: The one stamp format a bookmark row may carry, and the one the shell form parses.
 #: Spelled as a constant because the comparison below is the only reader of it: a
@@ -542,11 +559,19 @@ def memory_roots(root: Path) -> list[Path]:
 
 
 def _same_file(a: Path, b: Path) -> bool:
-    """Whether two paths name one file, through symlinks and a relative spelling alike."""
-    try:
-        return os.path.realpath(a) == os.path.realpath(b)
-    except OSError:  # pragma: no cover - realpath does not raise for a missing tail
-        return False
+    """Whether two paths name one file, asked as identity rather than as spelling.
+
+    The question has one home for the whole tree - `emrg.tools.file_policy.same_file`, which
+    compares `st_dev`/`st_ino` (the file-id pair on Windows) - and this asks it. It used to
+    compare `os.path.realpath` **strings**, and `realpath` returns the spelling it was handed
+    for every component that exists: on a volume that folds case, one file has two spellings,
+    so the bookmark was excluded under the walk's spelling and counted as the holding agent's
+    own memory under another (issue #2559).
+
+    A path with no inode has no identity to compare, so the answer is False - the direction
+    that matters here: excluding a path that does not exist would hide a real memory file.
+    """
+    return same_file(str(a), str(b))
 
 
 def memory_files(root: Path, exclude: Path | None = None) -> list[Path]:

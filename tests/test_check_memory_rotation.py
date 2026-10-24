@@ -37,8 +37,10 @@ report exists to show.
 Loading
 -------
 By path (`spec_from_file_location`), the shape `test_check_memory_index.py` uses: the
-filename is not importable by name (the dash), and the module stands alone - it imports
-nothing from the package, so there is no tree to put on `sys.path`.
+filename is not importable by name (the dash). The module puts **its own tree** on
+`sys.path` before the one import it takes from the package - `emrg.tools.file_policy`, the
+home of "are these two paths one file" (#2559) - so loading it by path needs nothing from
+this harness, and the rule it applies is the tree's rather than a copy kept here.
 """
 
 from __future__ import annotations
@@ -184,6 +186,73 @@ def test_the_bookmark_does_not_count_as_memory_of_the_agent_that_holds_it(mod, t
     reading = mod.read(register, book)
     assert reading["states"][0]["state"] == "unchanged", reading["states"][0]
     assert mod.main(["--agents", str(register), "--bookmark", str(book)]) == 0
+
+
+def test_the_bookmark_is_excluded_under_a_second_name_for_it(mod, tmp_path):
+    """The exclusion is by identity, so the name the clock is reached by does not matter.
+
+    A hard link asks the question with case folding taken out: two names, one inode, and
+    `realpath` returns each name as written - so the string comparison this replaces
+    answered "not the bookmark" and the clock counted as the reading's own subject, which
+    is the state #2422 removed (issue #2559). No volume can help here, a hard link is one
+    file on every filesystem this repo runs on.
+
+    The bookmark's mtime is newer than its own row, and the agent's memory file is not, so
+    "the bookmark was counted" is visible in the state itself and not only in a count.
+    """
+    root = Path(_root(tmp_path, "clock-by-another-name"))
+    _write_memory(root, ".emrg/memory/MEMORY.md", _stamp(mod))
+    book = _bookmark(root / ".emrg/memory/bookmark.md", [("`clock-by-another-name`", BASE)])
+    os.utime(book, (_stamp(mod, 60), _stamp(mod, 60)))
+    alias = tmp_path / "the-clock-by-another-name.md"
+    os.link(book, alias)
+    register = _agents(
+        tmp_path / "agents.yml",
+        [{"name": "clock-by-another-name", "path": str(root)}],
+    )
+
+    reading = mod.read(register, alias)
+
+    assert reading["states"][0]["state"] == "unchanged", reading["states"][0]
+
+
+def test_the_bookmark_is_excluded_through_a_case_variant_spelling(mod, tmp_path):
+    """The same question on the volume the defect was reported against.
+
+    The volume is asked rather than assumed: where it keeps the two spellings apart they
+    are two files and the old answer was already right, so the arm is skipped **with its
+    reason** instead of passing without measuring (measured on this host: `samefile` on the
+    pair answers True, `realpath` on the pair answers two different strings).
+    """
+    root = Path(_root(tmp_path, "clock-in-caps"))
+    _write_memory(root, ".emrg/memory/MEMORY.md", _stamp(mod))
+    book = _bookmark(root / ".emrg/memory/bookmark.md", [("`clock-in-caps`", BASE)])
+    os.utime(book, (_stamp(mod, 60), _stamp(mod, 60)))
+    variant = book.with_name(book.name.upper())
+    if not mod.same_file(str(variant), str(book)):
+        pytest.skip("this volume keeps BOOKMARK.md and bookmark.md apart as two files")
+    register = _agents(tmp_path / "agents.yml", [{"name": "clock-in-caps", "path": str(root)}])
+
+    reading = mod.read(register, variant)
+
+    assert reading["states"][0]["state"] == "unchanged", reading["states"][0]
+
+
+def test_an_exclusion_that_names_nothing_hides_nothing(mod, tmp_path):
+    """The other direction of an identity test: a path with no inode is not the bookmark.
+
+    An exclusion that answered True for a path that is not there would remove whichever
+    memory file it was compared with, so this asserts the whole scan survives it. Every
+    file here is real, and the exclusion names one that is not.
+    """
+    root = Path(_root(tmp_path, "absent-exclusion"))
+    _write_memory(root, ".emrg/memory/MEMORY.md", _stamp(mod))
+    _write_memory(root, ".emrg/memory/bookmark.md", _stamp(mod))
+    absent = tmp_path / "no-such-file-here.md"
+
+    found = {path.name for path in mod.memory_files(root, absent)}
+
+    assert found == {"MEMORY.md", "bookmark.md"}, sorted(found)
 
 
 def test_a_memory_file_newer_than_the_row_still_reads_changed_beside_the_bookmark(mod, tmp_path):
