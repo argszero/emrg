@@ -59,6 +59,26 @@ class Skill:
     source: str         # "user" or "agent"
 
 
+@dataclass
+class SkillShadow:
+    """One declaration of a name that another declaration had already taken.
+
+    The two layers of this loader key a skill by different things: `_skill_files_in`
+    selects candidate *files* by filename, while `_skills_under` files the parsed
+    result under the **declared** `name:`. Two files that declare one name therefore
+    meet only in the second layer, and the one that arrives later replaces the one
+    before it — within a root "later" means "sorts later by filename", which nothing
+    here ever promised, and across roots it is the documented rule that the agent's
+    copy beats the user's. Either way a declaration stops being offered, so the loss
+    is recorded here rather than left to a `logger.debug` line the deployment discards
+    (`stderr=DEVNULL`), which is the shape of a report saying "clean" about a tree it
+    could not read.
+    """
+    name: str           # the declared name both skills claim
+    kept: Skill         # the declaration that is offered
+    dropped: Skill      # the declaration that lost the name
+
+
 def _parse_frontmatter(text: str) -> dict[str, str]:
     """Parse simple key: value YAML frontmatter.
 
@@ -232,13 +252,50 @@ def _skill_files_in(root: Path) -> list[Path]:
     return [candidates[name] for name in sorted(candidates)]
 
 
-def _skills_under(root: Path, source: str, into: dict[str, Skill]) -> None:
-    """Read one root into ``into``, the later root winning on a shared name."""
+def _skills_under(
+    root: Path, source: str, into: dict[str, Skill], shadows: list[SkillShadow]
+) -> None:
+    """Read one root into ``into``, the later root winning on a shared name.
+
+    A skill that arrives under a name already taken replaces the earlier one **and**
+    records the pair in ``shadows``: the losing declaration is a fact about this tree,
+    and the caller that renders the prompt is the only reader able to say so.
+    """
     for skill_file in _skill_files_in(root):
         skill = _parse_skill_file(skill_file, source)
         if skill:
+            previous = into.get(skill.name)
+            if previous is not None:
+                shadows.append(SkillShadow(name=skill.name, kept=skill, dropped=previous))
             into[skill.name] = skill
             logger.debug("skill loaded: %s (%s) from %s", skill.name, source, skill_file)
+
+
+def load_skills_with_shadows(
+    agent_dir: Optional[Path] = None,
+) -> tuple[list[Skill], list[SkillShadow]]:
+    """Load every skill, plus every declaration that lost its name to another.
+
+    The same read `load_skills` makes — the same two roots, the same live re-read, the
+    same documented precedence (a name carried by both roots: the agent's copy wins) —
+    with the merge's discarded half returned instead of dropped. Only a caller that
+    renders a prompt has to think about the second list; everything that just asks
+    "which skills are there" keeps calling `load_skills`.
+    """
+    start = Path(agent_dir) if agent_dir is not None else Path.cwd()
+    agent_root = _agent_root(start)
+
+    all_skills: dict[str, Skill] = {}
+    shadows: list[SkillShadow] = []
+    user_root = _user_skills_root()
+    if user_root.is_dir():
+        _skills_under(user_root, "user", all_skills, shadows)
+
+    agent_skills_root = agent_root / ".emrg" / "skills"
+    if agent_skills_root.is_dir():
+        _skills_under(agent_skills_root, "agent", all_skills, shadows)
+
+    return sorted(all_skills.values(), key=lambda s: s.name), shadows
 
 
 def load_skills(agent_dir: Optional[Path] = None) -> list[Skill]:
@@ -259,27 +316,26 @@ def load_skills(agent_dir: Optional[Path] = None) -> list[Skill]:
     for three skills), and the result is a deterministic function of the files — an
     unchanged tree renders a byte-identical prompt prefix, so the provider's cache
     still matches.
+
+    What a name collision discards is not returned here; `load_skills_with_shadows`
+    answers that, and a prompt-reading caller wants it (issue #2563).
     """
-    start = Path(agent_dir) if agent_dir is not None else Path.cwd()
-    agent_root = _agent_root(start)
-
-    all_skills: dict[str, Skill] = {}
-    user_root = _user_skills_root()
-    if user_root.is_dir():
-        _skills_under(user_root, "user", all_skills)
-
-    agent_skills_root = agent_root / ".emrg" / "skills"
-    if agent_skills_root.is_dir():
-        _skills_under(agent_skills_root, "agent", all_skills)
-
-    return sorted(all_skills.values(), key=lambda s: s.name)
+    return load_skills_with_shadows(agent_dir)[0]
 
 
-def build_skills_context(skills: list[Skill]) -> str:
+def build_skills_context(
+    skills: list[Skill], shadows: Optional[list[SkillShadow]] = None
+) -> str:
     """Build the skill summary text for the system prompt.
 
     Only includes name + description — the full body is loaded
     on-demand by the LLM using the read tool (progressive disclosure).
+
+    ``shadows`` are the declarations a name collision discarded. They are rendered
+    rather than swallowed: a skill that is absent from this list has to have a reason
+    a reader can find, and the one trace the loader used to leave is a `logger.debug`
+    line whose stream this deployment throws away. The same wording is rendered by
+    `system.j2` at the other carrier of this rule — a test compares the two.
     """
     if not skills:
         return ""
@@ -296,5 +352,21 @@ def build_skills_context(skills: list[Skill]) -> str:
     ]
     for s in skills:
         lines.append(f"- **{s.name}** ({s.source}, `{s.path}`): {s.description}")
+
+    if shadows:
+        lines.append("")
+        lines.append(
+            f"**Shadowed names.** {len(shadows)} declaration(s) name a skill that "
+            "another declaration already names, so they are not offered under it. The "
+            "file in effect is listed above; the declaration that lost the name is named "
+            "here, because a skill missing from this list must have a reason rather than "
+            "silence."
+        )
+        for shadow in shadows:
+            lines.append(
+                f"- **{shadow.name}**: in effect - {shadow.kept.source}, "
+                f"`{shadow.kept.path}`; shadowed - {shadow.dropped.source}, "
+                f"`{shadow.dropped.path}`"
+            )
 
     return "\n".join(lines)

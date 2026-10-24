@@ -31,6 +31,13 @@ Each skill is a file of instructions. When one bears on what the host asked, rea
 
 - **{{ skill.name }}** ({{ skill.source }}, `{{ skill.path }}`): {{ skill.description }}
 {% endfor %}
+{% if skill_shadows %}
+
+**Shadowed names.** {{ skill_shadows|length }} declaration(s) name a skill that another declaration already names, so they are not offered under it. The file in effect is listed above; the declaration that lost the name is named here, because a skill missing from this list must have a reason rather than silence. Renaming one of the two declarations, or giving it a distinct `name:`, settles it.
+{% for shadow in skill_shadows %}
+- **{{ shadow.name }}**: in effect - {{ shadow.kept_source }}, `{{ shadow.kept_path }}`; shadowed - {{ shadow.dropped_source }}, `{{ shadow.dropped_path }}`
+{% endfor %}
+{% endif %}
 {% endif %}
 
 ## How you work

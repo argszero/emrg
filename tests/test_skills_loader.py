@@ -7,13 +7,20 @@ import pytest
 from pathlib import Path
 
 from tests.bounded_read import DEADLINE_SECONDS, within
+from emrg.skills import loader as loader_mod
 from emrg.skills.loader import (
     Skill,
     _parse_frontmatter,
     _parse_skill_file,
     build_skills_context,
     load_skills,
+    load_skills_with_shadows,
 )
+
+
+def _skill_md(name: str, description: str) -> str:
+    """A minimal well-formed skill file declaring ``name``."""
+    return f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n\nbody\n"
 
 
 class TestParseFrontmatter:
@@ -231,6 +238,122 @@ class TestBuildSkillsContext:
         result = build_skills_context([skill])
         assert "read tool" in result
         assert "follow its instructions" in result
+
+
+class TestADeclarationThatLosesItsName:
+    """Two declarations of one name: the loser is named, not swallowed (issue #2563).
+
+    The loader's two layers key a skill by different things — `_skill_files_in` selects
+    candidate *files* by filename, `_skills_under` files the parsed result under the
+    **declared** `name:` — so two files that declare one name meet only in the merge,
+    where the later arrival replaces the earlier one. Within a root "later" means
+    "sorts later by filename", a rule nothing in the module promises; across roots it
+    is the documented precedence that the agent's copy beats the user's.
+
+    Either way one declaration stops being offered, and the only trace used to be a
+    `logger.debug` line whose stream this deployment discards (`stderr=DEVNULL`), so
+    the loss reached no reader. Each test below pins the skill that *does* load as
+    well: naming a loser must not be bought by dropping the winner, and a collision
+    must not turn into a crash.
+    """
+
+    @staticmethod
+    def _roots(tmp_path, monkeypatch):
+        """A user root and an agent root, both off the real home."""
+        home = tmp_path / "home" / ".emrg"
+        (home / "skills").mkdir(parents=True)
+        monkeypatch.setattr(loader_mod, "config_dir", lambda: home)
+        agent = tmp_path / "agent"
+        (agent / ".emrg" / "skills").mkdir(parents=True)
+        return home / "skills", agent
+
+    def test_two_flat_files_declaring_one_name_report_the_one_that_lost_it(
+        self, tmp_path, monkeypatch
+    ):
+        """Flat/flat in one root: both declare `dup`, and `a.md` is named as the loser."""
+        user, agent = self._roots(tmp_path, monkeypatch)
+        (user / "a.md").write_text(_skill_md("dup", "from a"), encoding="utf-8")
+        (user / "z.md").write_text(_skill_md("dup", "from z"), encoding="utf-8")
+
+        skills, shadows = load_skills_with_shadows(agent_dir=agent)
+
+        assert [s.name for s in skills] == ["dup"], "one name must still load as one skill"
+        assert skills[0].description == "from z", (
+            "which declaration wins is not this fix's business — it stays the one "
+            f"filename order picks, and it changed: {skills[0].description!r}"
+        )
+        assert [(s.name, s.dropped.path.name, s.kept.path.name) for s in shadows] == [
+            ("dup", "a.md", "z.md")
+        ], shadows
+
+    def test_two_bundles_declaring_one_name_report_the_one_that_lost_it(
+        self, tmp_path, monkeypatch
+    ):
+        """Bundle/bundle in one root: `alpha/` is named as the loser of `shared-name`."""
+        user, agent = self._roots(tmp_path, monkeypatch)
+        for bundle in ("alpha", "beta"):
+            (user / bundle).mkdir()
+            (user / bundle / "SKILL.md").write_text(
+                _skill_md("shared-name", f"from {bundle}"), encoding="utf-8"
+            )
+
+        skills, shadows = load_skills_with_shadows(agent_dir=agent)
+
+        assert [s.name for s in skills] == ["shared-name"]
+        assert skills[0].description == "from beta", skills[0].description
+        assert [(s.dropped.path.parent.name, s.kept.path.parent.name) for s in shadows] == [
+            ("alpha", "beta")
+        ], shadows
+
+    def test_the_agent_copy_shadows_the_user_copy_and_says_which_it_beat(
+        self, tmp_path, monkeypatch
+    ):
+        """User/agent: the documented precedence keeps its answer, and is now reportable.
+
+        The answer is unchanged — this is the one case the module already stated, so a
+        fix that moved it would be a regression dressed as a repair. What is new is
+        that the user's shadowed copy is named rather than dropped.
+        """
+        user, agent = self._roots(tmp_path, monkeypatch)
+        (user / "deploy.md").write_text(_skill_md("deploy", "the user copy"), encoding="utf-8")
+        (agent / ".emrg" / "skills" / "deploy.md").write_text(
+            _skill_md("deploy", "the agent copy"), encoding="utf-8"
+        )
+
+        skills, shadows = load_skills_with_shadows(agent_dir=agent)
+
+        assert len(skills) == 1, skills
+        assert skills[0].source == "agent", "the documented cross-root precedence changed"
+        assert skills[0].description == "the agent copy"
+        assert [(s.kept.source, s.dropped.source) for s in shadows] == [("agent", "user")]
+
+    def test_distinct_names_report_no_shadow(self, tmp_path, monkeypatch):
+        """The control: a report that invents a loser where there is none is the mirror fault."""
+        user, agent = self._roots(tmp_path, monkeypatch)
+        (user / "one.md").write_text(_skill_md("one", "first"), encoding="utf-8")
+        (user / "two.md").write_text(_skill_md("two", "second"), encoding="utf-8")
+
+        skills, shadows = load_skills_with_shadows(agent_dir=agent)
+
+        assert [s.name for s in skills] == ["one", "two"]
+        assert shadows == [], shadows
+
+    def test_the_context_names_the_loser_and_is_unchanged_without_one(
+        self, tmp_path, monkeypatch
+    ):
+        """The rendered summary names both files, and adds nothing when nothing collided."""
+        user, agent = self._roots(tmp_path, monkeypatch)
+        (user / "a.md").write_text(_skill_md("dup", "from a"), encoding="utf-8")
+        (user / "z.md").write_text(_skill_md("dup", "from z"), encoding="utf-8")
+
+        skills, shadows = load_skills_with_shadows(agent_dir=agent)
+        rendered = build_skills_context(skills, shadows)
+
+        assert "Shadowed names" in rendered
+        assert "a.md" in rendered, "the declaration that lost the name is not in the summary"
+        assert "z.md" in rendered, "the declaration in effect is not in the summary"
+        assert "Shadowed names" not in build_skills_context(skills, [])
+        assert build_skills_context(skills) == build_skills_context(skills, [])
 
 
 class TestASkillDirectoryWalkedByKind:
