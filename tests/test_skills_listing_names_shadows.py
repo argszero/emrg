@@ -138,3 +138,38 @@ def test_the_client_has_no_route_to_the_list_with_the_shadows_dropped():
         "`load_skills_with_shadows()[0]`, so the /skills screen can go back to hiding the "
         "declaration a collision displaced (#2569)"
     )
+
+
+def test_only_the_renderer_reaches_the_loader():
+    """The seam, not just the renderer: nothing else in the client may slice the pair.
+
+    The `hasattr` test above pins the *import*; it cannot see a call site that keeps the
+    import and inlines `load_skills_with_shadows(...)[0]`, which hides a displaced
+    declaration from the host's screen while every behaviour test stays green (measured
+    as a surviving arm before this test existed). Read through the AST rather than as a
+    substring, so a docstring naming the call is not mistaken for a call.
+    """
+    import ast
+    import inspect
+
+    import emrg.client.app as app_mod
+
+    offenders = []
+    for node in ast.walk(ast.parse(inspect.getsource(app_mod))):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name == "skills_listing":
+            continue
+        for inner in ast.walk(node):
+            if not isinstance(inner, ast.Call):
+                continue
+            name = getattr(inner.func, "id", None) or getattr(inner.func, "attr", None)
+            if name == "load_skills_with_shadows":
+                offenders.append(node.name)
+
+    assert not offenders, (
+        "the loader's pair is read outside `skills_listing`, in "
+        f"{sorted(set(offenders))}: `load_skills_with_shadows(...)[0]` at a call site "
+        "drops the declarations a collision displaced, which is the silence #2569 is "
+        "about — render the screen through `skills_listing` instead"
+    )
