@@ -125,20 +125,33 @@ def test_the_pin_answers_both_ways() -> None:
 
     Each arm first asserts the mutation landed: an arm that did not change the text measures
     the control, and its "pass" is the control's verdict reported under another name.
+
+    The subject of each arm is **read from the example**, never spelled here. An earlier
+    version named `same_file` and `emrg/tools/file_policy.py` literally, so the day someone
+    reworded the example legitimately the arms failed reporting "measured nothing" — a control
+    that breaks on a correct change teaches the next reader to loosen it.
     """
     text = TEMPLATE.read_text(encoding="utf-8")
+    tokens = _TOKEN.findall(the_sentence(text))
+    modules = [token for token in tokens if token.endswith(".py")]
+    identifiers = [token for token in tokens if _IDENTIFIER.match(token)]
+    assert len(modules) == 1 and identifiers, (
+        f"the control needs one file and at least one identifier in the example; the sentence "
+        f"names {tokens!r}"
+    )
+    module, subject = modules[0], identifiers[0]
 
-    # Arm 1 — one identifier renamed, everything else intact.
-    renamed = text.replace("`same_file`", "`a_name_no_module_defines`")
-    assert renamed != text, "`same_file` is not in the template, so arm 1 measured nothing"
+    # Arm 1 — one identifier renamed, everything around it intact.
+    renamed = text.replace(f"`{subject}`", "`a_name_no_module_defines`")
+    assert renamed != text, f"`{subject}` is in the example, so arm 1 measured nothing"
     assert faults(renamed) == [
-        "emrg/tools/file_policy.py defines no 'a_name_no_module_defines', so the example names "
-        "code that cannot be called"
+        f"{module} defines no 'a_name_no_module_defines', so the example names code that "
+        "cannot be called"
     ], faults(renamed)
 
     # Arm 2 — the file the sentence points at is gone.
-    moved = text.replace("emrg/tools/file_policy.py", "emrg/tools/gone_away.py")
-    assert moved != text, "the example names no file to move, so arm 2 measured nothing"
+    moved = text.replace(module, "emrg/tools/gone_away.py")
+    assert moved != text, f"the example names {module!r} nothing to move, so arm 2 measured nothing"
     assert faults(moved) == [
         "the example names 'emrg/tools/gone_away.py', which is not a file in this tree"
     ], faults(moved)
