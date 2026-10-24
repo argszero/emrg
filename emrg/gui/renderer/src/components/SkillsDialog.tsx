@@ -1,5 +1,5 @@
 import { useI18n } from "../lib/i18n";
-import { skillRowView, type SkillRow } from "../lib/dialogLists";
+import { skillRowView, skillShadowView, type SkillRow, type SkillShadowRow } from "../lib/dialogLists";
 import { Dialog } from "./Dialog";
 import { DialogActions } from "./HelpDialog";
 
@@ -12,11 +12,19 @@ export interface SkillsDialogProps {
   open: boolean;
   /** null = loading；[] = 空；有值 = 列表 */
   skills?: SkillRow[] | null;
+  /** 同名冲突里被顶替的声明 —— 每项点名「生效的那份」与「落败的那份」，各带 source 与 path */
+  shadows?: SkillShadowRow[];
   error?: string | null;
   onDismiss?: () => void;
 }
 
-export function SkillsDialog({ open, skills = null, error = null, onDismiss }: SkillsDialogProps) {
+export function SkillsDialog({
+  open,
+  skills = null,
+  shadows = [],
+  error = null,
+  onDismiss,
+}: SkillsDialogProps) {
   const { t } = useI18n();
   const unnamed = t("app.unnamed");
 
@@ -50,6 +58,24 @@ export function SkillsDialog({ open, skills = null, error = null, onDismiss }: S
           })
         )}
       </div>
+      {!error && skills !== null && shadows.length > 0 ? (
+        <div className="help-list" data-testid="skills-shadows">
+          <div className="help-row" data-testid="skills-shadows-title">
+            <span className="help-cmd">{t("skills.shadows")}</span>
+          </div>
+          {shadows.map((s, i) => {
+            const v = skillShadowView(s, unnamed);
+            return (
+              <div className="help-row" key={`${v.name}-${i}`} data-testid="skill-shadow-row">
+                <span className="help-cmd">{v.name}</span>
+                <span className="help-hint">
+                  {t("skills.shadowRow", { kept: v.kept, dropped: v.dropped })}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
       <DialogActions onDismiss={onDismiss} />
     </Dialog>
   );

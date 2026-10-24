@@ -80,7 +80,10 @@ function mockEmrg(over: Record<string, unknown> = {}) {
     rewindSession: fn("rewindSession", { ok: true }),
     listMemories: fn("listMemories", [{ id: "m1", title: "记忆一", summary: "摘要内容" }]),
     readMemory: fn("readMemory", { id: "m1", title: "记忆一", content: "详情正文" }),
-    listSkills: fn("listSkills", [{ name: "browser-harness", description: "web automation", source: "user" }]),
+    listSkills: fn("listSkills", {
+      skills: [{ name: "browser-harness", description: "web automation", source: "user" }],
+      shadows: [],
+    }),
     removeAgent: fn("removeAgent", { ok: true }),
     ...over,
   };
@@ -181,6 +184,31 @@ describe("DialogHost (Batch 5 slice 4)", () => {
     ref.current?.openSkills();
     await waitFor(() => expect(screen.getByTestId("skills-dialog")).toBeInTheDocument());
     await waitFor(() => expect(screen.getByText("browser-harness")).toBeInTheDocument());
+  });
+
+  it("/skills asks the daemon for the session's own tree and names the displaced declaration", async () => {
+    // Issue #2569 criterion 1 for this surface: the screen names both declarations of a
+    // name two roots claimed — the one in effect and the one that lost, each with its
+    // source and its path. And criterion 2's direction of travel: the question goes to
+    // the daemon *with the session id*, because the agent root is the session's own
+    // directory resolved to its nearest `.git` ancestor — not a constant this process
+    // could pick.
+    const listSkills = vi.fn().mockResolvedValue({
+      skills: [{ name: "foo", description: "the agent's copy", source: "agent" }],
+      shadows: [
+        {
+          name: "foo",
+          kept: { source: "agent", path: "/repo/.emrg/skills/foo.md" },
+          dropped: { source: "user", path: "/home/u/.emrg/skills/foo.md" },
+        },
+      ],
+    });
+    const { ref } = setup({ sid: "s1", over: { listSkills } });
+    ref.current?.openSkills();
+    await waitFor(() => expect(screen.getByTestId("skill-shadow-row")).toBeInTheDocument());
+    expect(screen.getByTestId("skill-shadow-row").textContent).toContain("/repo/.emrg/skills/foo.md");
+    expect(screen.getByTestId("skill-shadow-row").textContent).toContain("/home/u/.emrg/skills/foo.md");
+    expect(listSkills).toHaveBeenCalledWith({ sessionId: "s1" });
   });
 
   it("/rewind 无激活会话 → needSession 提示且不弹框", async () => {

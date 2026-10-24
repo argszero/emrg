@@ -3295,6 +3295,20 @@ class EmrgServer:
                 logger.exception("list_rants: failed to read %s", self._rants_log)
                 await self._send(ws, {"type": "rants_list", "rants": [], "error": str(e)})
 
+        elif msg_type == "list_skills":
+            # The session's own skills *and* the declarations a name collision displaced
+            # (issue #2569, criterion 2). This is the one reader both clients share: the
+            # GUI asked its own question in JavaScript until this existed, scanning two
+            # hard-coded roots and showing a collision twice.
+            #
+            # `cwd` is the **session's** directory when the request has one, because the
+            # loader resolves it to the nearest ancestor carrying `.git` (`_agent_root`) —
+            # the same resolution the prompt path uses. It is absent only for a caller
+            # with no session at all, and then the loader's own documented fallback
+            # applies; what must not happen at either end is a *default root* standing in
+            # for the session's, which is the mismatch #2563 removed from the prompt path.
+            await self._handle_list_skills(msg.get("cwd") or "", ws)
+
         elif msg_type == "skills_available":
             # Installable-skills catalog (rant 2026-08-08T10:14:29): list
             # catalog skills with installed/managed status.
@@ -6615,6 +6629,46 @@ class EmrgServer:
         await self._send(ws, {
             "type": "sessions_list",
             "sessions": sessions,
+        })
+
+    async def _handle_list_skills(self, cwd: str, ws) -> None:
+        """Answer "which skills does this session have, and which lost a name".
+
+        Both halves come from `load_skills_with_shadows`, so root resolution, the
+        precedence between them and bundled-skill discovery stay the loader's business
+        and no client re-derives them (issue #2569, criterion 2). A tree without a
+        collision answers the same list it always did, with `shadows` empty — that is
+        criterion 4, and it is a property of the reply rather than of a renderer.
+
+        Read live, not from a snapshot: the same reason the prompt reads them live, so a
+        skill installed while the app is open appears on the next open of the dialog.
+        """
+        # No cwd is "a caller with no session", and the loader already owns what
+        # that means (`agent_dir=None` → its own documented fallback). Passing a
+        # resolved-here default instead would be the second rule #2563 removed.
+        skills, shadows = load_skills_with_shadows(Path(cwd) if cwd else None)
+        await self._send(ws, {
+            "type": "skills_list",
+            "skills": [
+                {
+                    "name": skill.name,
+                    "description": skill.description,
+                    "source": skill.source,
+                    "path": str(skill.path),
+                }
+                for skill in skills
+            ],
+            "shadows": [
+                {
+                    "name": shadow.name,
+                    "kept": {"source": shadow.kept.source, "path": str(shadow.kept.path)},
+                    "dropped": {
+                        "source": shadow.dropped.source,
+                        "path": str(shadow.dropped.path),
+                    },
+                }
+                for shadow in shadows
+            ],
         })
 
     async def _handle_list_agents(

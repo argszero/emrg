@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useReducer, useState } from "react";
 import { useI18n } from "../lib/i18n";
 import { COMMANDS, hintText } from "../lib/commands";
-import { helpRows, type MemoryRow, type SkillRow } from "../lib/dialogLists";
+import { helpRows, type MemoryRow, type SkillRow, type SkillShadowRow } from "../lib/dialogLists";
 import { rewindPointRow, type RewindPoint } from "../lib/rewind";
 import {
   isProtectedAgent,
@@ -60,7 +60,10 @@ interface EmrgBridge {
     title?: string;
     content?: string;
   }>;
-  listSkills(): Promise<SkillRow[]>;
+  listSkills(p?: { sessionId?: string | null }): Promise<{
+    skills: SkillRow[];
+    shadows: SkillShadowRow[];
+  }>;
   removeAgent(p: { name: string; path: string }): Promise<{ ok: boolean; error?: string }>;
 }
 
@@ -157,6 +160,7 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
   const [memoryError, setMemoryError] = useState<string | null>(null);
   const [skills, setSkills] = useState<SkillRow[] | null>(null);
   const [skillsError, setSkillsError] = useState<string | null>(null);
+  const [skillShadows, setSkillShadows] = useState<SkillShadowRow[]>([]);
   const [points, setPoints] = useState<RewindPoint[] | null>(null);
   const [rewindError, setRewindError] = useState<string | null>(null);
 
@@ -221,9 +225,14 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
     let cancelled = false;
     setSkills(null);
     setSkillsError(null);
-    b.listSkills()
-      .then((rows) => {
-        if (!cancelled) setSkills(rows);
+    setSkillShadows([]);
+    // 会话自己的目录决定了 agent 根（loader 上溯到最近的 .git 祖先），所以 sid 进依赖：
+    // 换会话就是换一棵技能树，不能沿用上一个会话的答案。
+    b.listSkills({ sessionId: sid })
+      .then((r) => {
+        if (cancelled) return;
+        setSkills(r.skills);
+        setSkillShadows(r.shadows);
       })
       .catch((e) => {
         if (!cancelled) setSkillsError((e as Error)?.message ?? String(e));
@@ -231,7 +240,7 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
     return () => {
       cancelled = true;
     };
-  }, [listDialog.skills]);
+  }, [listDialog.skills, sid]);
 
   // rewind（/rewind — 需要激活会话）
   useEffect(() => {
@@ -492,7 +501,13 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
         }}
         onDismiss={() => closeDialog("memory")}
       />
-      <SkillsDialog open={listDialog.skills} skills={skills} error={skillsError} onDismiss={() => closeDialog("skills")} />
+      <SkillsDialog
+        open={listDialog.skills}
+        skills={skills}
+        shadows={skillShadows}
+        error={skillsError}
+        onDismiss={() => closeDialog("skills")}
+      />
       <RewindDialog
         open={listDialog.rewind}
         points={points}

@@ -321,3 +321,77 @@ def test_skills_available_answers_from_disk_not_a_start_time_snapshot(roots, tmp
     assert [e["installed"] for e in entries if e["name"] == "installable-one"] == [True], (
         "skills_available still reports a skill installed after start as missing"
     )
+
+
+# ── list_skills: one frame carries both halves ─────────────────────
+
+
+def _collision_tree(roots):
+    """A user copy and a agent copy of one name, plus a skill only the agent has."""
+    user_root, agent = roots
+    (user_root / "dup.md").write_text(_skill("dup", "the user's copy"), encoding="utf-8")
+    (agent / ".emrg" / "skills" / "dup.md").write_text(
+        _skill("dup", "the agent's copy"), encoding="utf-8"
+    )
+    (agent / ".emrg" / "skills" / "only-agent.md").write_text(
+        _skill("only-agent"), encoding="utf-8"
+    )
+    return user_root, agent
+
+
+def test_list_skills_answers_the_sessions_tree_and_the_name_it_displaced(roots, tmp_path):
+    """The GUI's /skills question, answered by the loader rather than re-derived (issue #2569).
+
+    Criterion 2 is the direction of travel: the client asks the daemon with *its session's*
+    directory and renders what comes back, so the agent root is the loader's `_agent_root`
+    resolution instead of a constant, and a name two roots both declare is no longer two
+    rows that both look in effect.
+    """
+    user_root, agent = _collision_tree(roots)
+    server = _server(tmp_path)
+
+    frames = _drive(server, {"type": "list_skills", "cwd": str(agent)})
+
+    assert len(frames) == 1, frames
+    frame = frames[0]
+    assert frame["type"] == "skills_list", frame
+    by_name = {s["name"]: s for s in frame["skills"]}
+    # `skill-catalog` is in this tree because a fresh config dir is seeded with the
+    # registry's baseline catalog (`registry.py`), so the assertion names the two
+    # skills this test wrote rather than the whole set.
+    assert {"dup", "only-agent"} <= set(by_name), sorted(by_name)
+    assert by_name["dup"]["source"] == "agent"
+    assert by_name["dup"]["path"].endswith("dup.md")
+    assert by_name["dup"]["description"] == "the agent's copy"
+
+    assert len(frame["shadows"]) == 1, frame["shadows"]
+    shadow = frame["shadows"][0]
+    assert shadow["name"] == "dup"
+    assert shadow["kept"]["source"] == "agent"
+    assert shadow["kept"]["path"].endswith("dup.md")
+    assert shadow["dropped"]["source"] == "user"
+    assert shadow["dropped"]["path"].endswith("dup.md")
+    assert str(user_root) in shadow["dropped"]["path"]
+    assert str(agent) in shadow["kept"]["path"]
+
+
+def test_list_skills_without_a_cwd_is_a_caller_with_no_session(roots, tmp_path):
+    """`cwd` is optional, and absent means "no session" — the loader's own fallback, not a default root.
+
+    The wrong answer here is a root this handler invents: a default would make a session-less
+    caller read some other agent's skills, which is the mismatch #2563 took out of the prompt
+    path. So the frame must still arrive, in the same shape, with nothing invented.
+    """
+    _collision_tree(roots)
+    server = _server(tmp_path)
+
+    frames = _drive(server, {"type": "list_skills"})
+
+    assert len(frames) == 1, frames
+    frame = frames[0]
+    assert frame["type"] == "skills_list", frame
+    assert "error" not in frame, frame
+    assert isinstance(frame["skills"], list)
+    assert isinstance(frame["shadows"], list)
+    for shadow in frame["shadows"]:
+        assert set(shadow) == {"name", "kept", "dropped"}, shadow

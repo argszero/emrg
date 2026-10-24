@@ -132,6 +132,9 @@ const RESPONSE_TYPES = {
   list_tasks: "tasks_list",
   list_rants: "rants_list",
   list_memories: "memories_list",
+  // issue #2569 criterion 2：/skills 由 daemon 回答（list_skills → skills_list），
+  // 技能与「被同名声明顶替的那一份」在同一帧里回来。
+  list_skills: "skills_list",
   resume_session: "resume_result",
   // issue #2484：`resolve_session_cwd` 由 daemon 以 `session_cwd_result` 回答
   // （daemon.py `_process_message`）。缺这一行，GUI 连"会话到底在哪个项目"都问不出去。

@@ -29,7 +29,7 @@ function mockEmrg() {
   const listTasks = vi.fn().mockResolvedValue([{ name: "evo", type: "evolution", enabled: true, session_id: "evo", agent_path: "/p/emrg" }]);
   const listRants = vi.fn().mockResolvedValue([{ timestamp: "2026-08-26T12:00:00+08:00", agent: "emrg", status: "pending", message: "x" }]);
   const listMemories = vi.fn().mockResolvedValue([]);
-  const listSkills = vi.fn().mockResolvedValue([]);
+  const listSkills = vi.fn().mockResolvedValue({ skills: [], shadows: [] });
   const listHistory = vi.fn().mockResolvedValue({ messages: [] });
   // Issue #2349 part 2/2: the prompts the host typed in this session, as the daemon
   // holds them (oldest first) — the list the composer's ↑ walks.
