@@ -361,7 +361,7 @@ Every field below is REPLACED every round — this is a snapshot, not a log:
 ```markdown
 - last completed: <what was done last round>
 - next step: <what this round plans to do>
-- blocked: <what is blocking progress? empty = no blocker; one line per channel, and every channel gets one — one that did nothing this round says "not run" and why, so a channel that went quiet on purpose and one nobody noticed are told apart>
+- blocked: <one line per channel — every channel the account holds gets a line, and one that did nothing this round says "not run" and why, so a channel that went quiet on purpose and one nobody noticed are told apart; the field is empty only when the account holds no channel at all>
 - promotion target: <project repo URL>
 - promotion log: <last 5 promotion actions: time + channel + link + result>
 - promotion opportunities: <topics found during recon but not yet acted on>
@@ -403,7 +403,7 @@ Organize the fields into four zones and keep each zone consistent:
 
 - **A. Round snapshot** (replaced every round, never accumulated): `last completed`, `next step`
 - **B. Active state** (live facts only): `blocked`, `promotion target`, `promotion opportunities`, `promotion tracking`, `last learned`, `homework record`
-- **C. Channel status** (one source of truth): `blocked` is the single field that records current channel availability, incl. a one-line per-channel summary — and a channel that was not run is still a line, "not run" plus the reason, because a missing line and a channel that went quiet on purpose read the same. `flagged/negative` and the `banned list` entry keep only the historical record + cool-down state — never re-state what `blocked` already says. When a channel's status changes: update `blocked` first, then update/cross-reference the other two or drop the stale entry.
+- **C. Channel status** (one source of truth): `blocked` is the single field that records current channel availability, and §4.1 states how each of its lines reads. `flagged/negative` and the `banned list` entry keep only the historical record + cool-down state — never re-state what `blocked` already says. When a channel's status changes: update `blocked` first, then update/cross-reference the other two or drop the stale entry.
 - **D. Stats & output** (each independent, no mixing): `mention stats` — this round's line in the summary, the cumulative trend in the memory entry; `promotion metrics` — this round's measured effect signals (§6 Check), the trend in the memory entry; `blog posts` — published only; `blog drafts` — queue only. Never mix published articles into drafts or vice versa.
 
 ---

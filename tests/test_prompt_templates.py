@@ -2642,3 +2642,89 @@ def test_the_reflection_count_pin_reads_its_own_section_and_both_directions() ->
     assert len(_reflection_questions(_reflection_section(after))) == listed, (
         "a numbered item added past the reflection section entered its count"
     )
+
+
+# ── the `blocked` field states one availability rule, in the field that owns it ───────────
+#
+# The round snapshot's `blocked` field used to carry two clauses about one string: "empty = no
+# blocker", and "every channel gets one". An account that holds a channel owes that channel a
+# line every round, so the field could be empty only for an account holding none — a round
+# obeying the first clause wrote nothing, a round obeying the second never wrote an empty field,
+# and no reading of the line satisfied both. The rule then had a second home as well: the §4.4
+# zone list restated how the field reads, a dozen lines under the template's own rule that a
+# fact lives in exactly one place, because a fact written twice eventually disagrees with itself.
+#
+# The two halves are pinned separately, each against the place that owns it, so that neither can
+# regress behind the other's assertion: the field states the rule and the one state that leaves
+# it empty, and the zone list names the owner without restating how the field reads.
+
+_BLOCKED_FIELD = re.compile(r"^- blocked: <(.*)>$", re.M)
+_CHANNEL_STATUS_ZONE = re.compile(r"^- \*\*C\. Channel status\*\*.*$", re.M)
+
+
+def _blocked_field(text: str) -> str:
+    """The `blocked` field's own spec, or a failure to measure rather than an empty string."""
+    found = _BLOCKED_FIELD.search(text)
+    assert found, (
+        "the round snapshot carries no `blocked` field spec, so a reading of what it owes "
+        "would be comparing against nothing"
+    )
+    return found.group(1)
+
+
+def _channel_status_zone(text: str) -> str:
+    """The §4.4 bullet that names which field owns channel status."""
+    found = _CHANNEL_STATUS_ZONE.search(text)
+    assert found, (
+        "the §4.4 zone list has no channel-status bullet, so nothing says which field owns "
+        "that fact"
+    )
+    return found.group(0)
+
+
+def test_the_blocked_field_states_one_rule_a_round_can_obey() -> None:
+    """A line per channel, and the one state that leaves the field empty."""
+    field = _blocked_field(_PROMOTE_TEMPLATE.read_text(encoding="utf-8"))
+
+    assert "every channel the account holds gets a line" in field, (
+        "the field no longer owes a line per channel, which is the rule the zone list points "
+        "at and the reason a silent channel is told apart from one nobody noticed"
+    )
+    assert '"not run"' in field, (
+        "the field no longer says what a channel that did nothing this round writes, so a "
+        "round has to invent the wording and the next round cannot read it"
+    )
+    assert "empty only when the account holds no channel at all" in field, (
+        "the field states no satisfiable condition for being empty; an account holding one "
+        "channel owes it a line, so a clause that empties the field for any other reason can "
+        "never be obeyed alongside the per-channel rule"
+    )
+    assert "empty = no blocker" not in field, (
+        "the unsatisfiable clause is back: it empties the field on a round that holds a "
+        "channel, which the same sentence forbids — two instructions, one string"
+    )
+
+
+def test_the_not_run_rule_has_one_home_and_the_zone_list_points_at_it() -> None:
+    """`"not run"` is defined once, and the zone list says who owns it rather than restating it."""
+    text = _PROMOTE_TEMPLATE.read_text(encoding="utf-8")
+    occurrences = text.count('"not run"')
+    assert occurrences == 1, (
+        f'`"not run"` is defined {occurrences} times; the template states its own rule that a '
+        "fact lives in exactly one place, and a fact stated twice is how a reader ends up "
+        "holding two answers with no way to choose between them"
+    )
+
+    zone = _channel_status_zone(text)
+    assert "`blocked` is the single field that records current channel availability" in zone, (
+        "the zone list no longer says which field owns channel availability, so the ownership "
+        "it exists to record is gone even though the field still exists"
+    )
+    assert '"not run"' not in zone, (
+        "the zone list restates how the field reads; it must point at the field that defines "
+        'the wording instead, or the two copies drift apart'
+    )
+    assert "§4.1" in zone, (
+        "the zone list names the owner but not where its lines are defined, so a reader who "
+        "follows it still has to search"
+    )
