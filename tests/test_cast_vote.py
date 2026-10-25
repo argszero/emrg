@@ -1896,3 +1896,65 @@ def test_the_boundary_leaves_a_well_formed_body_alone(mod, monkeypatch, capsys, 
     err = capsys.readouterr().err
     assert rc == 0, err
     assert gh.calls, "a well-formed body is still posted"
+
+
+# ── the pre-flight answers the window question too ─────────────────────────
+#
+# `--dry-run` is the step a cycle spends before an expensive landing measurement, so
+# every refusal that decides whether a vote is worth casting has to be reportable from
+# it. The landing-tree claim already has that pin
+# (`test_a_dry_run_refuses_a_wrong_tree_claim_too`); the own-window clause has only the
+# posting-path tests above, which prove the refusal at the gate rather than at the
+# pre-flight.
+#
+# The invariant is the **order** in `main`: `own_head_window` is called before the
+# dry-run return. An edit that moves that return above the window check — or moves the
+# window check below it, on the reading that a window is a posting concern — leaves every
+# other test in this file green while the pre-flight begins answering "would cast" for a
+# head it must refuse. The cost of that silence is the order `--dry-run` exists to
+# invert: the landing run is spent, and the refusal arrives at the moment the vote would
+# have been spent.
+
+
+def test_a_dry_run_refuses_a_head_inside_this_cycles_run(mod, monkeypatch, capsys, body_file):
+    """The pre-flight gives the same answer as the gate for the same head."""
+    pushed = _push(2026, 9, 16, 2, 1, 49)  # `CYCLE`'s own start, in the host's zone
+    counter = FakeCounter(verdict_with(push_time=pushed))
+    gh = FakeGh()
+    rc = _run(
+        mod,
+        monkeypatch,
+        counter,
+        gh,
+        ["1255", "--body-file", body_file(f"{CYCLE} — ✅ LGTM"), "--dry-run"],
+    )
+    captured = capsys.readouterr()
+    assert rc == 2, "a head inside this cycle's run is not one this cycle may vote on"
+    assert gh.calls == [], "a dry run posts nothing - and posting to refuse is not a refusal"
+    assert "inside the run this cycle treats as its own" in captured.err, captured.err
+    assert pushed in captured.err, "the refusal has to name the push time it decided from"
+    assert "dry run" not in captured.out, (
+        "the refusal comes before the dry-run line, so the pre-flight never reads as a pass"
+    )
+
+
+def test_a_dry_run_passes_a_head_pushed_before_the_window(mod, monkeypatch, capsys, body_file):
+    """The control: the pre-flight answers the window question in both directions.
+
+    Without this arm a pre-flight that refused every head would satisfy the test above -
+    which is the failure mode the clause's own negative control exists for, one level up.
+    """
+    counter = FakeCounter(verdict_with(push_time=PUSHED_BEFORE_THE_WINDOW))
+    gh = FakeGh()
+    rc = _run(
+        mod,
+        monkeypatch,
+        counter,
+        gh,
+        ["1255", "--body-file", body_file(f"{CYCLE} — ✅ LGTM"), "--dry-run"],
+    )
+    out = capsys.readouterr().out
+    assert rc == 0, "a push before this cycle's own run is not this cycle's work"
+    assert gh.calls == []
+    assert len(counter.calls) == 1, "the count is still read - that is the check being made"
+    assert "dry run" in out and CYCLE in out and "counted" not in out
