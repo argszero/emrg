@@ -2642,3 +2642,126 @@ def test_the_reflection_count_pin_reads_its_own_section_and_both_directions() ->
     assert len(_reflection_questions(_reflection_section(after))) == listed, (
         "a numbered item added past the reflection section entered its count"
     )
+
+
+# ── the blocked field states one rule, and the template states it once ────────────────────
+#
+# #2572 gave the promote template a rule it owed its readers: a channel that was not run still
+# gets a line in `blocked`. It wrote that rule into two places — the summary template (§4.1),
+# where the field is defined, and the zone discipline (§4.4), where fields are sorted — and left
+# the field's older clause standing beside it. `empty = no blocker` can never be satisfied once
+# the account holds a single channel: every channel then owes a line in every round, so the
+# field is empty only when there is no channel at all. A round reading that line holds two
+# instructions and no way to obey both — and the template's own §4.2 forbids the second home,
+# because a fact written twice will eventually disagree with itself.
+
+_BLOCKED_FIELD = re.compile(r"^- blocked: .*$", re.M)
+_ZONE_C = re.compile(r"^- \*\*C\. Channel status\*\*.*$", re.M)
+
+
+def _blocked_field(text: str) -> str:
+    """The summary template's `blocked` field — the home the rule belongs in."""
+    found = _BLOCKED_FIELD.search(text)
+    assert found is not None, (
+        "the summary template carries no `blocked` field, so this reading has no subject"
+    )
+    return found.group(0)
+
+
+def _zone_c(text: str) -> str:
+    """The zone list's channel-status bullet, which names owners rather than repeating rules."""
+    found = _ZONE_C.search(text)
+    assert found is not None, (
+        "the zone list carries no 'C. Channel status' bullet, so this reading has no subject"
+    )
+    return found.group(0)
+
+
+def test_the_blocked_field_carries_the_per_channel_rule() -> None:
+    """The field that owns channel availability states how it reads.
+
+    What this does not measure: whether a round fills it in. That is the round's own closing
+    summary, which no text assertion reaches.
+    """
+    field = _blocked_field(_PROMOTE_TEMPLATE.read_text(encoding="utf-8"))
+
+    assert '"not run"' in field, (
+        "the blocked field no longer says how a channel that did nothing this round is "
+        "recorded, so a round has no way to write one and a quiet channel reads as a "
+        "forgotten one"
+    )
+    assert "every channel" in field.lower(), (
+        "the field no longer asks for a line per channel, which is the whole reason a "
+        "channel that was not run can still be visible in it"
+    )
+
+
+def test_the_blocked_field_states_no_clause_it_cannot_satisfy() -> None:
+    """The clause the per-channel rule makes unreachable is gone, and says what replaces it."""
+    text = _PROMOTE_TEMPLATE.read_text(encoding="utf-8")
+    field = _blocked_field(text)
+
+    assert "empty = no blocker" not in text, (
+        "the field is told to be empty when nothing blocks and to carry a line for every "
+        "channel in every round; once the account holds one channel the two cannot both "
+        "hold, so a round following either breaks the other"
+    )
+    assert "never by leaving the field empty" in field, (
+        "the unreachable clause is gone but nothing says how a round records 'no blocker' "
+        "now; a clause removed without a replacement leaves the round to guess"
+    )
+
+
+def test_the_per_channel_blocked_rule_has_one_home() -> None:
+    """The rule is stated once, in the field that defines it.
+
+    Named limit: this counts the phrase the rule is written in. A restatement in other words
+    would pass, so the assertion is a floor on uniqueness rather than a proof of it.
+    """
+    text = _PROMOTE_TEMPLATE.read_text(encoding="utf-8")
+    stated = text.count('"not run"')
+
+    assert stated == 1, (
+        f'the per-channel rule is stated {stated} times; a fact written twice will eventually '
+        "disagree with itself, and the round then holds two answers and no way to choose"
+    )
+    assert '"not run"' in _blocked_field(text), (
+        "the single statement is not in the field that owns it"
+    )
+    assert '"not run"' not in _zone_c(text), (
+        "the zone list restates the field's rule; its job is to say which field owns channel "
+        "status, and the field already says how"
+    )
+
+
+def test_the_blocked_guard_reads_both_directions() -> None:
+    """Three arms on text built here, because today's file cannot show discrimination.
+
+    Each arm takes its premise from the live template and asserts that premise first: an arm
+    whose edit landed nowhere measures nothing, and a guard handed the whole file twice would
+    be testing itself rather than the rule.
+    """
+    text = _PROMOTE_TEMPLATE.read_text(encoding="utf-8")
+    field = _blocked_field(text)
+
+    # Arm 1 — the retired clause restored beside the per-channel one: the contradiction the
+    # issue named, re-made by hand.
+    restored = text.replace(field, field.replace('"not run"', '"not run"; empty = no blocker'))
+    assert "empty = no blocker" not in text, "arm 1's premise: the clause is gone from the tree"
+    assert "empty = no blocker" in restored, "arm 1 restored nothing, so it measured nothing"
+
+    # Arm 2 — a second home: the rule copied back into the zone bullet.
+    zone = _zone_c(text)
+    duplicated = text.replace(
+        zone, zone + ' A channel that was not run still gets a line, "not run" plus the reason.'
+    )
+    assert duplicated.count('"not run"') == 2, (
+        "copying the rule into the zone list left it reading as stated once"
+    )
+
+    # Arm 3 — the rule dropped from its only home: the field still describes a line per
+    # channel, and no longer says what such a line reads when nothing ran.
+    dropped = text.replace(field, field.replace('"not run" and why', "the reason"))
+    assert '"not run"' not in dropped, (
+        "removing the phrase from the field left it in the template, so arm 3 measured nothing"
+    )
