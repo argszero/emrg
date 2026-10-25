@@ -375,15 +375,24 @@ def test_list_skills_answers_the_sessions_tree_and_the_name_it_displaced(roots, 
     assert str(agent) in shadow["kept"]["path"]
 
 
-def test_list_skills_without_a_cwd_is_a_caller_with_no_session(roots, tmp_path):
-    """`cwd` is optional, and absent means "no session" — the loader's own fallback, not a default root.
+def test_list_skills_without_a_cwd_is_read_where_the_loader_puts_a_session_less_caller(
+    roots, tmp_path, monkeypatch
+):
+    """`cwd` absent means "no session", and the directory that gets read is the loader's choice.
 
-    The wrong answer here is a root this handler invents: a default would make a session-less
-    caller read some other agent's skills, which is the mismatch #2563 took out of the prompt
-    path. So the frame must still arrive, in the same shape, with nothing invented.
+    The fault this pins is a **root the handler invents**: a constant standing in for the
+    session's directory makes a session-less caller read some other agent's tree, which is the
+    mismatch #2563 took out of the prompt path. So the fixture goes *at* the loader's own
+    documented fallback — `agent_dir=None` reads the process's cwd — and the reply has to be the
+    fixture's: its agent skill, its collision, in the frame shape a client already handles.
+
+    Asserting only the shape is what a default root survives: measured at `55430c4d`, replacing
+    `None` with `Path.home() / ".emrg"` left this test **green**, because an invented root still
+    answers a list, an empty `shadows`, and the keys a loop over no shadows never reads.
     """
-    _collision_tree(roots)
+    user_root, agent = _collision_tree(roots)
     server = _server(tmp_path)
+    monkeypatch.chdir(agent)  # the loader's fallback for "no session": `Path.cwd()`
 
     frames = _drive(server, {"type": "list_skills"})
 
@@ -391,7 +400,13 @@ def test_list_skills_without_a_cwd_is_a_caller_with_no_session(roots, tmp_path):
     frame = frames[0]
     assert frame["type"] == "skills_list", frame
     assert "error" not in frame, frame
-    assert isinstance(frame["skills"], list)
-    assert isinstance(frame["shadows"], list)
-    for shadow in frame["shadows"]:
-        assert set(shadow) == {"name", "kept", "dropped"}, shadow
+
+    by_name = {s["name"]: s for s in frame["skills"]}
+    assert {"dup", "only-agent"} <= set(by_name), sorted(by_name)
+    assert by_name["dup"]["source"] == "agent", "the agent's copy is the one in effect"
+    assert [s["name"] for s in frame["shadows"]] == ["dup"], frame["shadows"]
+    shadow = frame["shadows"][0]
+    assert set(shadow) == {"name", "kept", "dropped"}, shadow
+    assert shadow["kept"]["source"] == "agent" and shadow["dropped"]["source"] == "user", shadow
+    assert str(user_root) in shadow["dropped"]["path"], shadow
+    assert str(agent) in shadow["kept"]["path"], shadow
