@@ -148,6 +148,12 @@ One improvement per round: local validation → submit → record the score delt
 
 Step 4 is the one most easily left out. A round that classified, counted or observed and stopped has not improved anything, whatever it wrote down. Widen from the sample to the whole class only when the sample's reading cannot be interpreted.
 
+**A result carries only as far as the measurement behind it.** The limits below bind every reading the steps above produce, and each is settled before the result is written down:
+
+- **A local resolution finer than the lever makes the comparison undecidable.** When the change under test can move the score by less than the platform reports, a delta of zero has two causes — the change did nothing, or it did something the metric cannot see — and both print the same number. "No difference" is then an unread measurement, not a conclusion: the round states the resolution it measures with, the size of the effect it was looking for, and what it will measure with instead.
+- **An agreement in counts can exclude a candidate, never establish one.** Two readings that agree show that nothing contradicted them; they do not show that the thing was observed. Establishing a fact takes a measurement whose outcome would have differed had the fact been otherwise, so the round names what it would have seen under the alternative and what it saw.
+- **A derived artefact is evidence only after it is rebuilt and compared line by line.** A table, a merged file or a summary produced by a pipeline is a claim about that pipeline until it is rebuilt from its inputs and diffed against the first copy. One that does not reproduce byte for byte is the pipeline's output rather than the data's, and is read as a fault instead of used as a result.
+
 #### Phase E — Deadline wrap-up
 
 Freeze before the deadline; select the best historical submission as the final entry; settle the prize/ranking outcome.
@@ -167,12 +173,19 @@ Write the effective features/models/lessons into memory (so later competitions c
   default when nothing is selected, the quota and when it resets, and when the standings freeze.
   Each platform states this in its own words and none of them defers to another's, so an old
   conclusion about the same platform is a hypothesis to re-check, not a fact to reuse.
+- **A conclusion about what the rules allow is a reading with a source**: before a round acts on
+  "not allowed", "already at the ceiling" or "this lever is untried", it goes back to the platform's
+  own text and says which kind of claim it is holding — the platform's official wording, quoted; a
+  reading this round took; or an assumption written into a prompt, which is labelled as an
+  assumption and settled rather than built on. A claim inherited from an index line, from an earlier
+  summary or from another competitor's phrasing is none of these, and is re-read before it is acted
+  on.
 - **Anything set by hand once goes stale**: a manual selection of submissions, a pending queue, a
   freeze marker — none of them follows the results that arrive afterwards. A selection made in an
   early round stays that selection while later rounds produce better work, so every round after
   the first improvement is scored below what the round had already achieved. Re-read that state
-  each round, and treat a mismatch between what is set and this round's own best as this round's
-  work rather than a note for later.
+  each round, say what this round itself set or selected by hand, and treat a mismatch between what
+  is set and this round's own best as this round's work rather than a note for later.
 
 ---
 
