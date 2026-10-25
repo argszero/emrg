@@ -2385,3 +2385,151 @@ def test_the_ios_repository_identity_pin_answers_both_ways():
         "flipping 'private' to 'public' did not make the privacy rule read as missing, so the pin "
         "asserts a word rather than the requirement"
     )
+
+
+# ── the method the template owed its readers ────────────────────────────────────────────────
+#
+# An installation's `extra_prompt` carried eleven rules as general method. Read against the
+# template they divide three ways: two the template already states (the audience-first chain in
+# Mission & Values, and `One topic, one channel` in Blog Publishing), and nine it did not. The
+# two are *not* restated here — a rule written twice is two answers that will disagree, which is
+# the rule this block pins in the first place.
+#
+# Every pin names the section that owns the subject, and the section is checked rather than
+# assumed. A presence pin owns presence: a phrase moved into an appendix leaves every `in text`
+# assertion green while the rule has left the place a reader looks for it — so the reading below
+# locates each phrase and compares the heading above it. The control moves one phrase to the end
+# of the file and requires the positional reading to notice, which is the arm a presence-only
+# guard cannot have.
+
+#: (phrase the rule is stated as, heading that owns its subject).
+PROMOTE_METHOD_RULES = (
+    (
+        "Discovery is active, and it is a reading rather than an assumption",
+        "#### 0.3 Confirm promotion channel availability",
+    ),
+    (
+        "Stretching the form to take it",
+        "#### The form comes from the channel, not from the subject",
+    ),
+    (
+        "a small, exact pull request outranks a comment",
+        "#### Standing is earned by participating",
+    ),
+    (
+        "Read the target's own rules before the first action there",
+        "#### Standing is earned by participating",
+    ),
+    (
+        "A rule that refuses the path is the answer, not a detour",
+        "#### Standing is earned by participating",
+    ),
+    (
+        "The order is persona → research → experiment → write",
+        "### 2.y Blog Publishing (deep content output)",
+    ),
+    (
+        "one that did nothing this round says \"not run\" and why",
+        "#### 4.1 The round snapshot (what the next round reads)",
+    ),
+    (
+        "A channel's entry is one entry per channel, with a fixed set of parts",
+        "#### 4.2 Durable facts (memory entries, not the summary)",
+    ),
+    (
+        "Did any channel's readers grow, and if not, why?",
+        "### 5. Reflection (answered in the closing summary, mandatory every round)",
+    ),
+    (
+        "a command's output from this round",
+        "### 6. Effect Measurement & Method Review (PDCA Check & Act)",
+    ),
+    (
+        "A method under review is a hypothesis, not a fixture",
+        "### 6. Effect Measurement & Method Review (PDCA Check & Act)",
+    ),
+)
+
+#: Rules the template already carried, each exactly once. A later edit that adds one of these as
+#: a second statement is the duplicate this block exists to refuse, so their count is pinned too.
+PROMOTE_RULES_ALREADY_STATED = (
+    "audience and reputation first",
+    "One topic, one channel",
+)
+
+
+def _heading_above(text: str, phrase: str) -> str | None:
+    """The nearest heading before `phrase`, or `None` when it does not appear at all.
+
+    A reading of *position*, which `phrase in text` cannot give: the same sentence in two places
+    is now two facts to keep in step, and one of them will be the one a reader does not open.
+    """
+    heading = None
+    for line in text.splitlines():
+        if line.startswith(("## ", "### ", "#### ")):
+            heading = line.strip()
+        if phrase in line:
+            return heading
+    return None
+
+
+def _heading_matches(found: str | None, expected: str) -> bool:
+    """Compare a heading by its first clause, so a parenthetical may change and the pin holds."""
+    if found is None:
+        return False
+    return found.split(" (")[0].strip() == expected.split(" (")[0].strip()
+
+
+def test_the_promote_prompt_carries_the_method_it_was_missing() -> None:
+    """Each rule is stated once, in the section that owns its subject.
+
+    What this measures and what it does not: it pins that the rules are **stated where a reader
+    looks for them**. Whether a round obeyed them is that round's own closing summary, which no
+    text assertion can answer.
+    """
+    text = _PROMOTE_TEMPLATE.read_text(encoding="utf-8")
+
+    assert "#### What NOT to do" in text, (
+        "the channels section lost the block these rules were written against, so a positional "
+        "reading below would compare against nothing"
+    )
+
+    for phrase, expected in PROMOTE_METHOD_RULES:
+        found = _heading_above(text, phrase)
+        assert _heading_matches(found, expected), (
+            f"the promote template no longer states {phrase!r} under {expected!r} "
+            f"(found: {found!r}). A rule stated nowhere, or stated in a section that does not "
+            "own its subject, is one a round reads past."
+        )
+        assert text.count(phrase) == 1, (
+            f"{phrase!r} appears {text.count(phrase)} times — a rule written twice is two "
+            "answers that will disagree, and the reader has no way to pick one"
+        )
+
+    for phrase in PROMOTE_RULES_ALREADY_STATED:
+        assert text.count(phrase) == 1, (
+            f"{phrase!r} appears {text.count(phrase)} times. The template already stated this "
+            "rule before the method was added; a second copy is the duplicate the same work "
+            "refuses, and it is the copy that will drift."
+        )
+
+
+def test_the_promote_method_pin_reads_position_and_absence() -> None:
+    """The controls: a deleted rule and a moved rule must each redden, and they are not the
+    same arm — deletion is what a rewrite does, relocation is what a busy edit does."""
+    text = _PROMOTE_TEMPLATE.read_text(encoding="utf-8")
+    phrase, expected = PROMOTE_METHOD_RULES[0]
+
+    deleted = text.replace(phrase, "")
+    assert deleted != text, f"{phrase!r} is pinned but absent, so this arm measured nothing"
+    assert _heading_above(deleted, phrase) is None, (
+        "a deleted rule still reads as present, so the pin would not notice its own rule going"
+    )
+
+    moved = text.replace(phrase, "").rstrip() + f"\n\n{phrase}\n"
+    found = _heading_above(moved, phrase)
+    assert found is not None, "the relocation arm lost the phrase it moved, not the position"
+    assert not _heading_matches(found, expected), (
+        f"moving {phrase!r} to the end of the file left it reading as {expected!r} — the pin is "
+        "reading presence, not position"
+    )
