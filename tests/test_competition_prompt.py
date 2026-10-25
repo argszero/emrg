@@ -1158,3 +1158,203 @@ def test_a_best_score_is_a_reading_and_a_round_brings_an_untried_attempt(rendere
         "counts as iteration"
     )
     assert "has recorded a reading without iterating" in rendered
+
+
+# --- the general rules the template used to leave to an installation's extra_prompt ----------------
+#
+# `competition_prompt.md` keeps a slot for the installation's own additions, and the rules reported
+# missing from that slot do not split evenly. Measured on this file before the change, three of them
+# were already stated in the body under other words — the scoring rule is re-read each round (§2),
+# the round's unit of work is the *set* of active competitions (§1), and the browser is for
+# login-walled pages while anything genuinely public is read over plain HTTP/API (§0.1) — and four
+# were absent: a claim's provenance, two limits on what a measurement can carry, and the hand-set
+# state a round has to name. Those four are added here; the three that already stood gain a pin
+# where they had none.
+#
+# Each is asserted against the section that owns its subject rather than against the whole document,
+# for the reason §4's and §0.0's guards already give: this file discusses scoring, measurement and
+# provenance in several places, so a whole-document substring check stays green after the section
+# itself is deleted — a failure to measure rather than a pass.
+
+
+def _flat(text: str) -> str:
+    """One space for every run of whitespace, so a reflow is not a missing rule."""
+    return re.sub(r"\s+", " ", text)
+
+
+def _section(text: str, heading: str, end: str) -> str:
+    """One section's body, or a failure to measure.
+
+    Fails rather than returning `""`: a guard whose subject is gone has to say so, because an empty
+    block turns every `in` assertion built on it into a report about wording.
+    """
+    parts = text.split(heading, 1)
+    assert len(parts) == 2, f"{heading!r} is gone from the competition prompt"
+    body = parts[1].split(end, 1)[0]
+    assert body.strip(), f"{heading!r} is there but its body is empty"
+    return body
+
+
+def _goal_line(text: str) -> str:
+    return _section(text, "### 2. Goal line and prize reading", "\n---")
+
+
+def _phase_d(text: str) -> str:
+    return _section(text, "#### Phase D — Iteration", "#### Phase E")
+
+
+def _environment(text: str) -> str:
+    return _section(text, "#### 0.1 Environment verification", "\n#### 0.2")
+
+
+def test_a_claim_about_the_rules_carries_its_provenance(rendered):
+    """§2: a "not allowed / at the ceiling / untried" claim is read from the rules, with a source.
+
+    The three kinds are the ones a round can actually hold — official wording quoted, a reading it
+    took, its own assumption labelled as one. The rule exists because the fourth thing a round
+    reaches for (an index line, an earlier summary, another competitor's phrasing) is none of them
+    and reads exactly like evidence. It is a claim about the *rules*, so it is answered where the
+    rules are written, which is §2 rather than the offline gate.
+
+    Asserted on both readings for the reason `test_the_scoring_rule_is_read_each_round` gives: a
+    `{# … #}` keeps every word in the file and sends the round none of them.
+    """
+    for label, text in (("source", PROMPT.read_text(encoding="utf-8")), ("render", rendered)):
+        block = _flat(_goal_line(text))
+        for phrase, why in (
+            ("A conclusion about what the rules allow is a reading with a source",
+             "the provenance rule itself"),
+            ("the platform's official wording, quoted",
+             "the only kind a later round or the host can check by re-reading the rules"),
+            ("a reading this round took",
+             "the middle kind — the round's own measurement rather than someone's memory"),
+            ("an assumption written into a prompt",
+             "the kind that reads like a rule and has nothing behind it"),
+            ("from an earlier summary or from another competitor's phrasing",
+             "the sources that are not evidence, named so the rule cannot be read as accepting them"),
+            ("is re-read before it is acted on",
+             "what a round does with an inherited claim: re-read it, not act on it"),
+        ):
+            assert phrase in block, (
+                f"the {label} of §2 does not carry {why}; {phrase!r} is missing, so a round is "
+                f"left to inherit 'we are not allowed' from whatever it read last"
+            )
+
+
+def test_a_resolution_finer_than_the_lever_leaves_the_comparison_undecidable(rendered):
+    """Phase D: a zero delta is undecidable when the metric is coarser than the effect.
+
+    Phase D's probe-and-floor passage argues one instance of this — a zero delta read against a
+    best score — so the general rule was absent, and a round working a coarse platform metric could
+    write "no difference" as a conclusion. The two causes of a zero (nothing changed; the change is
+    below what the platform reports) print the same number, and only the stated resolution
+    separates them.
+    """
+    for label, text in (("source", PROMPT.read_text(encoding="utf-8")), ("render", rendered)):
+        block = _flat(_phase_d(text))
+        for phrase in (
+            "A local resolution finer than the lever makes the comparison undecidable",
+            "a delta of zero has two causes",
+            "an unread measurement, not a conclusion",
+            "the size of the effect it was looking for",
+            "the resolution it measures with",
+        ):
+            assert phrase in block, (
+                f"the {label} of Phase D does not carry {phrase!r}: a zero delta reads as a "
+                f"result whatever the platform's resolution is"
+            )
+
+
+def test_an_agreement_in_counts_cannot_establish_a_candidate(rendered):
+    """Phase D: agreement is a *non-contradiction*, and the rule says what would establish a fact.
+
+    Counting is the cheapest reading available and the most tempting to stop at: two instruments
+    that agree are read as confirmation, when all they show is that neither contradicted the other.
+    The rule names the test that distinguishes the two — an outcome that would have differed had
+    the fact been otherwise — so "the counts match" cannot be written as evidence for a candidate.
+    """
+    for label, text in (("source", PROMPT.read_text(encoding="utf-8")), ("render", rendered)):
+        block = _flat(_phase_d(text))
+        for phrase in (
+            "An agreement in counts can exclude a candidate, never establish one",
+            "they do not show that the thing was observed",
+            "would have differed had the fact been otherwise",
+            "names what it would have seen under the alternative",
+        ):
+            assert phrase in block, (
+                f"the {label} of Phase D does not carry {phrase!r}: agreeing counts are read as "
+                f"confirmation of the candidate they were supposed to exclude"
+            )
+
+
+def test_a_derived_artefact_is_evidence_only_once_it_is_rebuilt(rendered):
+    """Phase D: a pipeline's product is a claim about the pipeline until it is rebuilt.
+
+    A submission table, a merged file or a generated summary is derived, and a derived thing
+    carries whatever the code that produced it carries. Rebuilding it from its inputs and diffing
+    the two line by line is what turns it into evidence; without that step a stale artefact is
+    indistinguishable from a fresh one in every reading a round takes of it.
+    """
+    for label, text in (("source", PROMPT.read_text(encoding="utf-8")), ("render", rendered)):
+        block = _flat(_phase_d(text))
+        for phrase in (
+            "A derived artefact is evidence only after it is rebuilt and compared line by line",
+            "rebuilt from its inputs and diffed against the first copy",
+            "does not reproduce byte for byte",
+            "the pipeline's output rather than the data's",
+        ):
+            assert phrase in block, (
+                f"the {label} of Phase D does not carry {phrase!r}: a derived artefact is used as "
+                f"a reading of the data without anything having rebuilt it"
+            )
+
+
+def test_the_round_names_the_state_it_set_by_hand(rendered):
+    """§2: re-reading the hand-made state is not enough — the round says what it made by hand.
+
+    The rule already asked the round to re-read a manual selection, a pending queue or a freeze
+    marker. A round satisfied that by reading the selection it had made, without ever saying it had
+    made one, so the half that decays in silence had no place in the summary and nothing after the
+    fact could date the decision.
+
+    The reverse pin is the retired sentence itself: the version that asked only for a re-read must
+    not stand beside the one that also asks for the naming, because two versions of one instruction
+    leave the round picking the weaker.
+    """
+    source = PROMPT.read_text(encoding="utf-8")
+    for label, text in (("source", source), ("render", rendered)):
+        assert "say what this round itself set or selected by hand" in _flat(_goal_line(text)), (
+            f"the {label} of §2 does not ask the round to name the state it set by hand, so a "
+            f"manual selection is re-read but never reported as this round's own act"
+        )
+    assert "Re-read that state each round, and treat a mismatch" not in _flat(source), (
+        "the sentence that asked only for a re-read is back beside the one that also asks the "
+        "round to name what it set by hand — two versions of one instruction, and the weaker one "
+        "is what a round will follow"
+    )
+
+
+def test_the_browser_is_scoped_to_login_walls(rendered):
+    """§0.1's two halves, pinned where a round reads them — there was no guard on either.
+
+    "Browser first" and "prefer the cheaper path when it is genuinely public" are one instruction
+    only while both stand. The heading alone reads as a mandate to drive a browser at a public
+    leaderboard; the exemption alone reads as a licence to skip a login-walled rules page, which
+    §3.5 turns into a rejection of the competition. Nothing pinned either half, so this scope could
+    be re-settled by deleting one sentence in silence.
+    """
+    for label, text in (("source", PROMPT.read_text(encoding="utf-8")), ("render", rendered)):
+        block = _flat(_environment(text))
+        for phrase, why in (
+            ("Browser first", "the default route, which is where the login state lives"),
+            ("the login state exists only in the real browser",
+             "the reason the browser is the default at all"),
+            ("does **not** need the browser",
+             "the exemption that keeps the heading from reading as a mandate"),
+            ("prefer the cheaper path when it is genuinely public",
+             "the rule the exemption rests on: public means HTTP/API, not a browser"),
+        ):
+            assert phrase in block, (
+                f"the {label} of §0.1 does not carry {why}; {phrase!r} is missing, so 'browser "
+                f"first' and the cheaper path are no longer one instruction"
+            )
