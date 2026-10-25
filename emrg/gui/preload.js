@@ -49,7 +49,9 @@ const api = {
   closePreview: (payload) => ipcRenderer.invoke("emrg:closePreview", payload), // P2.3：关闭/切走 HTML 预览
   panelResized: (payload) => ipcRenderer.invoke("emrg:panelResized", payload), // P2.3：面板布局上报 → bounds 同步
   getPreviewState: () => ipcRenderer.invoke("emrg:getPreviewState"), // P2.3：renderer 崩溃恢复拉取
-  listSkills: () => ipcRenderer.invoke("emrg:listSkills"),
+  // `{ sessionId }` 决定 daemon 读哪个会话的技能树 —— 缺了参数，主进程只能当"没有会话"，
+  // 于是每个会话看到的都是同一个根（issue #2569 判据 2）。
+  listSkills: (p) => ipcRenderer.invoke("emrg:listSkills", p),
   listAgents: () => ipcRenderer.invoke("emrg:listAgents"),
   listAgentSessions: (payload) => ipcRenderer.invoke("emrg:listAgentSessions", payload),
   registerAgent: (payload) => ipcRenderer.invoke("emrg:registerAgent", payload),

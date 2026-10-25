@@ -58,6 +58,29 @@ describe("SkillsDialog", () => {
     expect(screen.getByTestId("skills-error")).toHaveTextContent("加载技能失败：fail");
   });
 
+  it("同名冲突 → 被顶替的那份被点名，两侧各带 source 与 path", () => {
+    // 判据 1 在这一面：撞名的两份声明都要出现在这里 —— 生效的那份与落败的那份，
+    // 各带 source 和 path。只列赢家等于把「你的另一份为什么没生效」藏起来。
+    setup({
+      shadows: [
+        {
+          name: "foo",
+          kept: { source: "agent", path: "/repo/.emrg/skills/foo.md" },
+          dropped: { source: "user", path: "/home/u/.emrg/skills/foo.md" },
+        },
+      ],
+    });
+    expect(screen.getByTestId("skill-shadow-row")).toHaveTextContent("foo");
+    expect(screen.getByTestId("skill-shadow-row")).toHaveTextContent("/repo/.emrg/skills/foo.md");
+    expect(screen.getByTestId("skill-shadow-row")).toHaveTextContent("/home/u/.emrg/skills/foo.md");
+  });
+
+  it("无同名冲突 → 版面与今天一致，不多出一块空区", () => {
+    // 判据 4 是「同样的树答同样的列表」，在这一面就是：没有冲突就不出现影子区。
+    setup();
+    expect(screen.queryByTestId("skills-shadows")).toBeNull();
+  });
+
   it("关闭按钮 → onDismiss", async () => {
     const onDismiss = vi.fn();
     setup({ onDismiss });

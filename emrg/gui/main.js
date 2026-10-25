@@ -858,29 +858,22 @@ vision = false
       path: previewVisible && previewPath ? previewPath : null,
     }));
 
-    ipcMain.handle("emrg:listSkills", async () => {
-      // GUI / 指令 P3：/skills — 读取技能列表（TUI 本地 load_skills 等价物，daemon 无协议）
-      // 技能在 ~/.emrg/skills/*.md（user）与 <projectDir>/.emrg/skills/*.md（agent）
-      const skills = [];
-      const dirs = [
-        { dir: path.join(os.homedir(), ".emrg", "skills"), source: "user" },
-        { dir: path.join(DEFAULT_CWD, ".emrg", "skills"), source: "agent" },
-      ];
-      for (const { dir, source } of dirs) {
-        let files = [];
-        try { files = fs.readdirSync(dir).filter((f) => f.endsWith(".md")); } catch { continue; }
-        for (const f of files) {
-          try {
-            const text = fs.readFileSync(path.join(dir, f), "utf8");
-            const m = text.match(/^---\n([\s\S]*?)\n---/);
-            const meta = m ? m[1] : "";
-            const name = (meta.match(/^name:\s*(.+)$/m) || [])[1]?.trim() || f.replace(/\.md$/, "");
-            const desc = (meta.match(/^description:\s*(.+)$/m) || [])[1]?.trim() || "";
-            skills.push({ name, description: desc, source });
-          } catch { /* 单个技能读取失败跳过 */ }
-        }
-      }
-      return skills;
+    ipcMain.handle("emrg:listSkills", async (_e, { sessionId } = {}) => {
+      // GUI / 指令 P3：/skills — daemon 回答（list_skills → skills_list）。
+      //
+      // #2569 判据 2 之前这里自己扫目录：`~/.emrg/skills` 与 `DEFAULT_CWD/.emrg/skills`
+      // 两条根由 JS 硬编码，frontmatter 用自己的正则解析。由此三个偏差：agent 根该由
+      // loader 解析到「最近的带 .git 祖先」（`_agent_root`），固定常量让 cwd 不同的会话
+      // 列出错的根；同名声明被两条根各推一行、看起来同样生效；`<dir>/<name>/SKILL.md`
+      // 形态的 bundled 技能被 `.md` 过滤整类跳过。
+      //
+      // 这里**刻意不留兜底**：没有「daemon 不答就自己扫」的分支 —— 兜底就是第二份实现
+      // 复活的地方。会话目录解析不到、连接不在、或命令超时，都落到对话框已有的错误行。
+      // 无会话时传空 cwd：那是「没有会话的调用者」，由 loader 自己的契约决定怎么读，
+      // 而不是由 GUI 猜一个默认根。
+      const cwd = resolveSessionCwd(sessionId);
+      const frame = await requireConn().sendCommandAndWait("list_skills", { cwd: cwd || "" }, 5000);
+      return { skills: frame.skills || [], shadows: frame.shadows || [] };
     });
 
     ipcMain.handle("emrg:listAgents", async () => {

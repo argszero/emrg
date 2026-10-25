@@ -3,9 +3,11 @@ import {
   helpRows,
   memoryRowView,
   skillRowView,
+  skillShadowView,
   truncate,
   type MemoryRow,
   type SkillRow,
+  type SkillShadowRow,
 } from "./dialogLists";
 
 /**
@@ -71,5 +73,24 @@ describe("helpRows", () => {
       { cmd: "/help", hint: "hint:/help" },
       { cmd: "/clear", hint: "hint:/clear" },
     ]);
+  });
+});
+
+describe("skillShadowView", () => {
+  it("names both sides with source and path — a row that names only the winner says nothing", () => {
+    const row: SkillShadowRow = {
+      name: "foo",
+      kept: { source: "agent", path: "/repo/.emrg/skills/foo.md" },
+      dropped: { source: "user", path: "/home/u/.emrg/skills/foo.md" },
+    };
+    expect(skillShadowView(row, "unnamed")).toEqual({
+      name: "foo",
+      kept: "agent, /repo/.emrg/skills/foo.md",
+      dropped: "user, /home/u/.emrg/skills/foo.md",
+    });
+  });
+
+  it("falls back to the unnamed text rather than printing an empty label", () => {
+    expect(skillShadowView({}, "unnamed")).toEqual({ name: "unnamed", kept: "", dropped: "" });
   });
 });

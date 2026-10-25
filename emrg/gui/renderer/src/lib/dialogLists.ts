@@ -38,6 +38,19 @@ export interface SkillRow {
   description?: string;
 }
 
+/** One side of a name collision: which root declared it, and in which file. */
+export interface SkillShadowSide {
+  source?: string;
+  path?: string;
+}
+
+/** A skill name two declarations claimed; `kept` took effect, `dropped` lost the name. */
+export interface SkillShadowRow {
+  name?: string;
+  kept?: SkillShadowSide;
+  dropped?: SkillShadowSide;
+}
+
 export interface SkillRowView {
   label: string;
   hint: string;
@@ -48,6 +61,19 @@ export function skillRowView(s: SkillRow, unnamedText: string): SkillRowView {
   const label = s.name || unnamedText;
   const hint = `${s.source || ""}${s.description ? ` · ${s.description.slice(0, 50)}` : ""}`;
   return { label, hint };
+}
+
+export interface SkillShadowView {
+  name: string;
+  /** The declaration in effect, and the one that lost the name — each with source and path. */
+  kept: string;
+  dropped: string;
+}
+
+/** 顶替行格式化：两侧都带 source 与 path，缺一不可 —— 只说赢家等于没说。 */
+export function skillShadowView(s: SkillShadowRow, unnamedText: string): SkillShadowView {
+  const side = (x?: SkillShadowSide) => `${x?.source || ""}${x?.path ? `, ${x.path}` : ""}`;
+  return { name: s.name || unnamedText, kept: side(s.kept), dropped: side(s.dropped) };
 }
 
 export interface HelpRowView {
