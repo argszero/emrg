@@ -2934,3 +2934,64 @@ def test_a_base_that_moves_while_the_suite_runs_is_named_at_the_verdict(
     assert rc == 0, out.err
     assert "every step healthy" in out.out
     assert "base moved during the run" in out.err
+
+
+# --- a run must not leave the tree it measured behind -------------------------
+#
+# This tool materialises the planned tree as a real worktree, runs the suite there, and
+# removes it. The removal is what keeps the *caller's* repository clean, and it went
+# unpinned: for many cycles the working practice was to `rm -rf` a leaked directory and
+# run `git worktree prune` by hand after each measurement, on the strength of a claim
+# that this tool leaks. Measured 2026-10-25 (`cyc20261025-201042`) on this revision, it
+# does not: a full 207-second run left no `.git/worktrees` entry, and neither did a run
+# that raised. The claim was stale, and what was actually missing was this pin — the
+# property held by accident of two `finally` blocks with nothing exercising them.
+#
+# So the test drives the real `main` -- the removal lives in the call graph, not in a
+# callback a test could call directly -- with a stubbed suite, so it costs seconds rather
+# than the ~200 seconds a real suite run takes. A guard that made the measurement twice
+# as slow as the defect it pins is not a fix.
+#
+# Both arms are here because the paths differ: a green run's worktree is removed on the
+# way out of `_suite_verdict`, while a red one also materialises a *second* worktree for
+# the base (to ask which tree owns the red row), and both have to be gone afterwards.
+
+#: A suite that passes, as the tool's own runner would see it.
+_SUITE_GREEN = ["-c", "print('1 passed in 0.01s')"]
+
+#: A suite that fails the way pytest does: a per-test row, then a non-zero exit.
+_SUITE_RED = [
+    "-c",
+    "print('FAILED tests/test_probe.py::test_probe - boom')\n"
+    "print('1 failed in 0.01s')\n"
+    "raise SystemExit(1)",
+]
+
+
+def test_a_measured_run_leaves_no_worktree_behind_green_or_red(mod, monkeypatch, queue):
+    """The tree this tool measures is a worktree, so the caller's repository is the subject.
+
+    `git worktree list` reads the repository's own administrative record, which is what a
+    leaked worktree survives in: the scratch directory under the temporary root is deleted
+    by its context manager either way, so a directory listing would answer nothing.
+    """
+    repo, origin = queue
+    _branch_with(repo, "fine", {"tests/test_fine.py": "def test_fine():\n    assert True\n"})
+    _publish(repo, origin, 1, "fine")
+    monkeypatch.chdir(repo)
+
+    def listing() -> str:
+        return _worktree_listing(repo)
+
+    baseline = listing()
+
+    monkeypatch.setattr(mod, "SUITE", _SUITE_GREEN)
+    assert mod.main(["1", "--base", "master"]) == 0, "the green arm needs a green verdict"
+    assert listing() == baseline, "a passing run left the tree it measured behind"
+
+    monkeypatch.setattr(mod, "SUITE", _SUITE_RED)
+    assert mod.main(["1", "--base", "master"]) == 1, "the red arm needs a red verdict"
+    assert listing() == baseline, (
+        "a failing run left a worktree behind - and that is the path a caller reaches "
+        "most often, because a red plan is a finding rather than a mistake"
+    )
