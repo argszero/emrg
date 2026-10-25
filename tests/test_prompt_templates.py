@@ -2533,3 +2533,112 @@ def test_the_promote_method_pin_reads_position_and_absence() -> None:
         f"moving {phrase!r} to the end of the file left it reading as {expected!r} — the pin is "
         "reading presence, not position"
     )
+
+
+# ── the reflection heading's count is a claim, so it is measured ──────────────────────────
+#
+# `promote_prompt.md` opens its reflection section with a sentence that both mandates the
+# closing summary and states how many questions it owes. The section then lists them as a
+# numbered list, so the count has **two** homes: the sentence and the list. Nothing made
+# them move together — the number was bumped from 8 to 9 by hand in the change that added
+# the ninth question — and the sentence is the only instruction a round reads before it
+# starts answering. A round that trusts a stale count answers one question too few.
+#
+# So the count is derived here from the list it describes, in the section that owns it, and
+# the sentence is checked against that derivation. Scoping is the load-bearing part: this
+# template carries 39 numbered items across its sections, and a count taken across the file
+# would be answering a question nobody asked.
+
+_REFLECTION_HEADING = "### 5. Reflection"
+_REFLECTION_NEXT = "### 6."
+_REFLECTION_CLAIM = re.compile(r"answering these (\d+) questions")
+
+
+def _reflection_section(text: str) -> str:
+    """The reflection section's own text, from its heading up to the next one."""
+    start = text.index(_REFLECTION_HEADING)
+    return text[start : text.index(_REFLECTION_NEXT, start)]
+
+
+def _reflection_questions(section: str) -> list[str]:
+    """The numbered questions this section lists, one entry per question."""
+    return re.findall(r"^\d+\. \*\*", section, re.M)
+
+
+def _reflection_claim(section: str) -> int | None:
+    """The count the section's own sentence claims, or `None` when it states none."""
+    found = _REFLECTION_CLAIM.search(section)
+    return int(found.group(1)) if found else None
+
+
+def test_the_reflection_heading_counts_the_questions_that_follow_it() -> None:
+    """The sentence and the list it introduces are one fact, so they are read as one.
+
+    What this measures and what it does not: it pins that the two statements of the count
+    agree. Whether a round answers all of them is that round's own closing summary, which
+    no text assertion can reach.
+    """
+    section = _reflection_section(_PROMOTE_TEMPLATE.read_text(encoding="utf-8"))
+
+    listed = _reflection_questions(section)
+    assert listed, (
+        "the reflection section states no numbered questions, so a count taken from it "
+        "would be comparing against nothing"
+    )
+    claimed = _reflection_claim(section)
+    assert claimed is not None, (
+        "the reflection section no longer says how many questions it owes; the sentence is "
+        "the only instruction a round reads before it starts answering, and a section that "
+        "does not state a count cannot be read as owing one"
+    )
+    assert claimed == len(listed), (
+        f"the reflection heading claims {claimed} questions and the section lists "
+        f"{len(listed)} — the count and the list have drifted apart, so a round trusting "
+        "the heading answers the wrong number of them"
+    )
+
+
+def test_the_reflection_count_pin_reads_its_own_section_and_both_directions() -> None:
+    """Three arms the rule above cannot have on its own, all applied to synthetic text.
+
+    A guard that only reads the live template cannot show that it *discriminates*: it passes
+    today whether or not it could ever fail. These arms supply the failure, and the scope
+    arm supplies the opposite error — a count that quietly widens to the whole file would
+    still pass the first arm, because today's file has no numbered item that would join it.
+    """
+    text = _PROMOTE_TEMPLATE.read_text(encoding="utf-8")
+    section = _reflection_section(text)
+    listed = len(_reflection_questions(section))
+    claimed = _reflection_claim(section)
+    assert claimed is not None
+
+    # Arm 1 — a question added without the sentence moving: the mismatch must be visible.
+    tenth = f"{listed + 1}. **Would a tenth question catch this?** — the point of the arm.\n"
+    grown = section.rstrip() + "\n" + tenth
+    assert len(_reflection_questions(grown)) == listed + 1
+    assert _reflection_claim(grown) != len(_reflection_questions(grown)), (
+        "adding a question left the count reading as correct, so this guard would not "
+        "notice the drift it exists to catch"
+    )
+
+    # Arm 2 — the sentence corrected to match: the same pair now agrees, so arm 1 was
+    # reading the list rather than failing for some unrelated reason.
+    corrected = _REFLECTION_CLAIM.sub(
+        f"answering these {listed + 1} questions", grown
+    )
+    assert _reflection_claim(corrected) == len(_reflection_questions(corrected))
+
+    # Arm 3 — scope: a numbered item past this section must not enter the count. The
+    # template's other sections carry 39 of them, so a reading that did not stop at the next
+    # heading would answer a different question than the one the sentence asks. The second
+    # assertion is what keeps this arm honest: an arm whose edit landed nowhere measures
+    # nothing, and `_reflection_questions` takes a section it is handed, so passing it the
+    # whole file would test this test rather than the guard.
+    after = text.rstrip() + "\n\n10. **A question in another section.** — outside it.\n"
+    numbered = r"^\d+\. \*\*"
+    assert len(re.findall(numbered, after, re.M)) == len(re.findall(numbered, text, re.M)) + 1, (
+        "arm 3 added nothing, so it measured nothing"
+    )
+    assert len(_reflection_questions(_reflection_section(after))) == listed, (
+        "a numbered item added past the reflection section entered its count"
+    )
