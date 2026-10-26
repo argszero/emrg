@@ -42,7 +42,7 @@ What EMRG does today — capability statements, not a changelog.
 
 - **TUI client** — markdown/diffs, slash commands, autocomplete, pickers, clipboard images (`vision` per model), ESC interrupt, CJK-aware input
 - **Electron GUI** — streaming chat, tool-status cards, sessions, models, settings, onboarding, reconnect with daemon respawn; React + TypeScript; vitest
-- **Scheduled tasks** — `TaskHandler` for any registered project: builtin and custom types, CRUD, hot reload
+- **Scheduled tasks** — `TaskHandler` for any registered project: builtin and custom types, CRUD, hot reload, `when` early wake
 - **Rant-driven evolution** — host feedback through `/rant` drives the self-improvement cycles
 - **Memory** — project and session memory (YAML frontmatter + a Markdown index), compact/clear, a capped prompt footprint
 - **Skills** — `.emrg/skills/` with progressive disclosure + an installable-skill catalog

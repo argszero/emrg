@@ -14,6 +14,13 @@ Task config schema:
     open. Read in **local time only** (`datetime.now()`), so it follows the host's
     clock and whatever its zone does with DST. Weekdays only: no holidays, no make-up
     workdays.
+  when — optional; a mapping from a built-in condition name to seconds. While a
+    condition holds, the task is woken again at most that long after its last run, so a
+    task can keep a long `interval` and still answer a pulse. It only ever advances a
+    run: `interval` and `schedule` decide the task's own cadence and `when` never
+    suppresses one. The vocabulary is `emrg.server.wake.CONDITIONS` (`rant`, `feishu`),
+    and unlike `schedule` it is a **poll** — each condition is asked once per its own
+    seconds, inside the wait this scheduler already performs.
   config — type-specific config, and the mapping the templates see as ``task``. For
     evolution: config.agent links to agents.yml name.
   sandbox — optional; also accepted under config, where the record-level value wins.
@@ -57,6 +64,12 @@ from emrg.server.atomic import atomic_write_yaml
 # every pattern has a minimum length, so a value windowed first cannot match a credential
 # that crosses the cut.
 from emrg.server.redaction import redact_prefix, redact_string
+# The `when` conditions live in their own module: this file already carries the field
+# schema, the windows and the loop, and a condition shells out to a CLI — a different
+# kind of code from everything else here. `validate_when` is called from the one
+# validator both the loader and the CRUD path use, so a record cannot be accepted by one
+# and dropped by the other.
+from emrg.server.wake import shortest_when_seconds, validate_when, wakes
 from emrg.server.git_utils import (
     _detect_git_remote,
     ensure_local_exclude,
@@ -923,6 +936,9 @@ def validate_task_record(record: dict) -> str | None:
     schedule_error = validate_schedule(record.get("schedule"))
     if schedule_error:
         return f"task {name!r} has {schedule_error}"
+    when_error = validate_when(record.get("when"))
+    if when_error:
+        return f"task {name!r} has {when_error}"
     cfg = record.get("config")
     if cfg is not None and not isinstance(cfg, dict):
         return f"task {name!r} has config of type {type(cfg).__name__}, not a mapping"
@@ -1160,6 +1176,14 @@ class TaskHandler:
         self._next_run_dir = config_dir() / "next-run"
         self._next_run_file = self._next_run_dir / f"{self.name}.json"
         self._resume_next_run_at: float | None = self._load_next_run_state()
+
+        # ── `when` watermarks (issue #2592) ──
+        # ~/.emrg/wake-state/<task>.json holds what a condition has already seen —
+        # when each was last consulted, and the Feishu message ids already woken on.
+        # It is written by `emrg.server.wake`, not here: this class only says where the
+        # file lives, the way `_tasks_file` says where the truth lives and not what it
+        # says. Created on first write, because a task with no `when` writes nothing.
+        self._wake_state_dir = config_dir() / "wake-state"
 
     # ── The record this handler runs under (rant 2026-09-28T09:54:10) ──
 
@@ -2537,10 +2561,13 @@ class TaskHandler:
     def _clear_runtime_state(self) -> None:
         """Remove this handler's own runtime files (it is not coming back).
 
-        Without this a deleted task leaves a heartbeat and a next-run slot behind, and
-        both read as "something is scheduled here" to anyone who looks.
+        Without this a deleted task leaves a heartbeat, a next-run slot and its `when`
+        watermark behind, and all three read as "something is scheduled here" to anyone
+        who looks. The watermark is `emrg.server.wake`'s file, so its path comes from
+        that module rather than being spelled again here.
         """
-        for path in (self._heartbeat_file, self._next_run_file):
+        wake_state = self._wake_state_dir / f"{self.name}.json"
+        for path in (self._heartbeat_file, self._next_run_file, wake_state):
             try:
                 path.unlink(missing_ok=True)
             except OSError as exc:
@@ -2570,6 +2597,11 @@ class TaskHandler:
         # (rant 2026-09-29T09:23:55), and this loop only needs to know whether it
         # has already said this once.
         _started_logged = False
+        #: When this task's own cadence next comes due, as an instant. A `when` poll
+        #: shortens one wait but must not restart the interval it shortens: without this
+        #: the interval would be recomputed from now at every poll, and the task's own
+        #: run would never arrive at all (issue #2592).
+        natural_due: float | None = None
 
         while self._running:
             outcome = await self._refresh_record()
@@ -2585,34 +2617,23 @@ class TaskHandler:
                 )
                 _started_logged = True
 
-            # Slowdown → wait at the heartbeat interval (low-frequency full
-            # cycle, rant 2026-08-09T09:35:55; flag set by vibe check
-            # recommend_slowdown, rant 2026-08-20T10:58:55); otherwise the
-            # normal interval. Manual trigger wakes immediately either way.
-            # Never skip a cycle.
-            wait_timeout = (
-                self._heartbeat_interval()
-                if self._slowdown_active
-                # Rant 2026-08-09T13:16:36: exponential backoff while the
-                # daemon is unreachable — stops the retry/window storm.
-                else self._connect_backoff()
-            )
-            # Rant 2026-08-25T09:25:32 ④: a daemon restart must not reset the
-            # next run — fold the persisted slot into the wait (one-shot:
-            # shorten to the remainder, or run immediately when the slot
-            # already passed during downtime).
-            wait_timeout = self._resume_wait_timeout(wait_timeout)
-            # Issue #2486 ④⑨: cut the wait to the next window edge. A wait that spans
-            # an edge would sleep through the whole window it was about to enter — the
-            # 3-hour weekend wait that begins at 06:59 must wake at 09:00, not at
-            # 09:59 — and waking at the edge recomputes under the frequency that edge
-            # selects, so this re-arms rather than spins. The resume slot folded in just
-            # above is clipped by the same rule, which is why a daemon restart inside a
-            # window does not drop the task to the out-of-window frequency. The cut only
-            # ever shortens: the slowdown and the backoff still set the wait it shortens.
-            _boundary = seconds_to_next_boundary(self._task)
-            if _boundary is not None and _boundary < wait_timeout:
-                wait_timeout = _boundary
+            # A poll re-arm resumes what is left of the task's own cadence instead of
+            # recomputing it. The cuts inside `_natural_wait` already shaped that
+            # instant; recomputing here would restart the interval at every poll and push
+            # the task's own run out for ever (issue #2592).
+            if natural_due is not None:
+                wait_timeout = max(1.0, natural_due - time.time())
+            else:
+                wait_timeout = self._natural_wait()
+                natural_due = time.time() + wait_timeout
+            # `when` (issue #2592): a condition may wake this task ahead of its own
+            # cadence, so the condition poll takes a slot in the same wait. It only ever
+            # shortens that wait, and a poll that finds nothing re-arms instead of
+            # running — so the task's own interval is untouched in either direction.
+            _poll = self._wake_poll_seconds()
+            _polled = _poll is not None and _poll < wait_timeout
+            if _polled:
+                wait_timeout = _poll
             # Diagnostic log (rant 2026-08-18T20:48:45): expose which
             # scheduling mode drove the wait — normal | heartbeat | backoff —
             # so the saturation/backoff state machine is traceable end-to-end.
@@ -2627,7 +2648,9 @@ class TaskHandler:
                 self.name, int(wait_timeout), _mode, self._effective_interval(),
             )
             # Wait for interval or manual trigger (interruptible)
-            self._next_run_at = time.time() + wait_timeout
+            # A poll is internal: the next run reported stays the task's own cadence, so
+            # `next_run_at` never claims the task runs more often than it does.
+            self._next_run_at = natural_due if _polled else time.time() + wait_timeout
             self._save_next_run_state()  # survives daemon restarts (rant 2026-08-25T09:25:32 ④)
             manual_trigger = False
             try:
@@ -2642,8 +2665,21 @@ class TaskHandler:
                     "TaskHandler[%s] manually triggered", self.name
                 )
             except asyncio.TimeoutError:
-                # Normal scheduled run
-                pass
+                # Normal scheduled run — unless this wait was a `when` poll, in which case
+                # the run has to be earned: a holding condition wakes the task, and one
+                # that does not re-arms the remainder of its own cadence (issue #2592).
+                # The poll lives here, outside the cycle, which is what makes a wake that
+                # arrives while the task is already running harmless — it neither
+                # interrupts the cycle nor marks anything read, and the condition is
+                # judged again at the next poll.
+                if _polled:
+                    _woken, _notes = await self._condition_wake()
+                    for _note in _notes:
+                        self._logger.debug(
+                            "TaskHandler[%s]: when %s", self.name, _note
+                        )
+                    if not _woken:
+                        continue
 
             if not self._running:
                 break
@@ -2669,6 +2705,10 @@ class TaskHandler:
                 self._slowdown_active = False
                 self._save_saturation_state()
 
+            # This run consumes the cadence: the next wait is computed fresh from the
+            # record rather than resumed from the instant this one was made for
+            # (issue #2592).
+            natural_due = None
             self._logger.debug("TaskHandler[%s] tick", self.name)
             self._cycle_running = True
             self._cycle_start_time = time.time()  # per-cycle elapsed base (rant 2026-08-22T07:18:35)
@@ -2847,6 +2887,71 @@ class TaskHandler:
         """
         interval = self._effective_interval()
         return max(interval, min(interval * 8, 8 * 3600))
+
+    # ── `when`: what may wake this task ahead of its cadence (issue #2592) ──
+
+    def _natural_wait(self) -> float:
+        """How long this task would wait if nothing woke it early.
+
+        The whole cadence chain in one place: the slowdown's heartbeat, the connection
+        backoff, the persisted slot a restart must not reset, and the cut to the next
+        window edge. `run` takes this once per cycle and keeps the instant it makes, so a
+        `when` poll can shorten a wait without restarting the interval behind it.
+
+        Slowdown → wait at the heartbeat interval (low-frequency full cycle, rant
+        2026-08-09T09:35:55; flag set by vibe check `recommend_slowdown`, rant
+        2026-08-20T10:58:55); otherwise the normal interval. A manual trigger wakes
+        immediately either way, and a cycle is never skipped.
+        """
+        wait_timeout = (
+            self._heartbeat_interval()
+            if self._slowdown_active
+            # Rant 2026-08-09T13:16:36: exponential backoff while the daemon is
+            # unreachable — stops the retry/window storm.
+            else self._connect_backoff()
+        )
+        # Rant 2026-08-25T09:25:32 ④: a daemon restart must not reset the next run — fold
+        # the persisted slot into the wait (one-shot: shorten to the remainder, or run
+        # immediately when the slot already passed during downtime).
+        wait_timeout = self._resume_wait_timeout(wait_timeout)
+        # Issue #2486 ④⑨: cut the wait to the next window edge. A wait that spans an edge
+        # would sleep through the whole window it was about to enter — the 3-hour weekend
+        # wait that begins at 06:59 must wake at 09:00, not at 09:59 — and waking at the
+        # edge recomputes under the frequency that edge selects, so this re-arms rather
+        # than spins. The resume slot folded in just above is clipped by the same rule,
+        # which is why a daemon restart inside a window does not drop the task to the
+        # out-of-window frequency. The cut only ever shortens: the slowdown and the
+        # backoff still set the wait it shortens.
+        boundary = seconds_to_next_boundary(self._task)
+        if boundary is not None and boundary < wait_timeout:
+            wait_timeout = boundary
+        return wait_timeout
+
+    def _wake_poll_seconds(self) -> int | None:
+        """The tightest `when` this task states, or None when it states none.
+
+        The wait is sized for the shortest one; each condition is still consulted on its
+        own clock (the watermark `wakes` keeps), so one condition's cadence does not
+        become another's.
+        """
+        return shortest_when_seconds(self._task)
+
+    async def _condition_wake(self) -> tuple[bool, list[str]]:
+        """Ask this record's `when` conditions whether the task should run now.
+
+        In a worker thread: a condition reads a store or runs a CLI, and this coroutine
+        runs on the daemon's event loop — the same reason `_refresh_record` does.
+        """
+        if not self._task:
+            return False, []
+        agent = str(self._derived.get("agent_name") or self.name)
+        return await asyncio.to_thread(
+            wakes,
+            self._task,
+            task_name=self.name,
+            agent=agent,
+            state_dir=self._wake_state_dir,
+        )
 
     def _effective_interval(self) -> int:
         """How often this task runs right now, from its own record's windows.
@@ -3766,6 +3871,7 @@ class TaskScheduler:
     def _validate_task_fields(
         name: str, task_type: str, agent: str, interval: int,
         schedule: list | None = None,
+        when: dict | None = None,
     ) -> str | None:
         """Return an error string, or None when the fields are valid."""
         if not TASK_NAME_RE.match(name) or len(name) > TASK_NAME_MAX:
@@ -3776,18 +3882,24 @@ class TaskScheduler:
             return f"agent {agent!r} is not registered in agents.yml"
         if not isinstance(interval, int) or isinstance(interval, bool) or interval < MIN_INTERVAL:
             return f"interval must be an integer >= {MIN_INTERVAL}"
-        # The same validator the loader runs: one shape, one set of messages.
-        return validate_schedule(schedule)
+        # The same validators the loader runs: one shape, one set of messages.
+        schedule_error = validate_schedule(schedule)
+        if schedule_error:
+            return schedule_error
+        return validate_when(when)
 
     def task_create(
         self, name: str, task_type: str, agent: str,
         interval: int | None = None, enabled: bool = True,
         repo: str | None = None, description: str | None = None,
         sandbox: str | None = None, schedule: list | None = None,
+        when: dict | None = None,
     ) -> tuple[bool, str | dict]:
         """Create a task. Returns (ok, error) or (ok, task-dict)."""
         interval = DEFAULT_INTERVAL if interval is None else interval
-        err = self._validate_task_fields(name, task_type, agent, interval, schedule)
+        err = self._validate_task_fields(
+            name, task_type, agent, interval, schedule, when,
+        )
         if err:
             return False, err
         if sandbox is not None and sandbox not in SANDBOX_MODES:
@@ -3816,6 +3928,8 @@ class TaskScheduler:
             task["sandbox"] = sandbox
         if schedule is not None:
             task["schedule"] = schedule
+        if when is not None:
+            task["when"] = when
         if description:
             task["description"] = description
         tasks.append(task)
@@ -3836,8 +3950,9 @@ class TaskScheduler:
             new_agent = cfg.get("agent", "")
         new_interval = fields.get("interval", task.get("interval", DEFAULT_INTERVAL))
         new_schedule = fields.get("schedule", task.get("schedule"))
+        new_when = fields.get("when", task.get("when"))
         err = self._validate_task_fields(
-            name, new_type, new_agent, new_interval, new_schedule,
+            name, new_type, new_agent, new_interval, new_schedule, new_when,
         )
         if err:
             return False, err
@@ -3864,6 +3979,18 @@ class TaskScheduler:
                 task.pop("schedule", None)
             else:
                 task["schedule"] = fields["schedule"]
+        if "when" in fields:
+            # `when` follows `schedule` exactly, and for the same reason (issue #2490):
+            # an omitted key leaves the conditions alone, so a form that does not know
+            # the field cannot drop it; an explicit null removes it. Without this branch
+            # a client that *did* send `when` would be answered "ok" and lose it.
+            when_error = validate_when(fields["when"])
+            if when_error:
+                return False, when_error
+            if fields["when"] is None:
+                task.pop("when", None)
+            else:
+                task["when"] = fields["when"]
         if "enabled" in fields:
             task["enabled"] = bool(fields["enabled"])
         if "description" in fields:

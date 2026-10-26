@@ -38,6 +38,7 @@ from pathlib import Path
 from emrg.server.rants import (
     append_rant,
     cleanup_rants,
+    default_rants_log,
     list_rants,
     update_rant,
 )
@@ -265,8 +266,10 @@ class SubmitRantTool(ToolExecutor):
         return self._execute_cleanup(arguments)
 
     def _rants_log(self) -> Path:
-        from emrg.config import config_dir
-        return config_dir() / "rants.jsonl"
+        # The store owns this path (`rants.default_rants_log`): the scheduler's `rant`
+        # wake condition reads the same file, and two spellings of it would let the
+        # tool write a ledger nobody watches (issue #2592).
+        return default_rants_log()
 
     def _execute_submit(self, arguments: dict) -> ToolResult:
         message = str(arguments.get("message", "")).strip()
