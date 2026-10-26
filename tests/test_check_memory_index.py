@@ -778,3 +778,101 @@ def test_an_index_over_the_cap_is_not_rewritten(mod, tmp_path, capsys) -> None:
     assert mod.main([str(path)]) == 1
     assert path.read_bytes() == before
     capsys.readouterr()
+
+
+# ── a table row's cells match its header's ───────────────────────────────────
+
+
+def _cell_index(tmp_path: Path, name: str, body: list[str]) -> Path:
+    """A two-column table index whose rows are exactly `body`.
+
+    Two columns on purpose: the defect this reading exists for is a row carrying more
+    cells than its header declares, and the narrowest header that can show one wrong cell
+    is two. The rows carry no `](target)` link, so the resolution reading has no subject
+    here and cannot be the reason a fixture exits 1.
+    """
+    return _index(
+        tmp_path, name, ["# Memory Index", "", "| id | note |", "| --- | --- |"] + body
+    )
+
+
+def test_a_pipe_in_a_code_span_still_splits_the_row(mod, tmp_path, capsys) -> None:
+    """Backticks protect nothing: the table is split before any span is rendered.
+
+    GitHub splits a table line on every unescaped pipe *before* it renders an inline
+    span, so a cell quoting `||` ends early and the rest of the line spills into cells
+    the header never declared. Measured 2026-10-27 on this host: `.emrg/memory/MEMORY.md`
+    carries 8 bare pipes in its `sandbox-shell` row against a 5-cell header, and this
+    tool printed `rows 10, longest 511 chars, over 512: 0` and `OK` — neither a length
+    nor a line count can see a cell boundary, which is why the reading had to be added.
+    """
+    path = _cell_index(tmp_path, "bare.md", ["| a1 | `||` is not a pipe in cmd |"])
+
+    assert mod.main([str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "row at line 5: cells 4, header 2" in out, out
+    assert "a bare pipe splits a cell" in out, out
+    assert "OK:" not in out
+
+
+def test_an_escaped_pipe_is_content_and_does_not_split(mod, tmp_path, capsys) -> None:
+    """The counter-arm, differing by two backslashes: the repair the finding prescribes.
+
+    Without this direction the reading could not distinguish "a row with a literal pipe
+    in it", which is correct Markdown, from "a row that breaks the table" — and the
+    remedy it prints would be advice it refuses to follow itself.
+    """
+    path = _cell_index(tmp_path, "escaped.md", ["| a1 | `\\|\\|` is not a pipe in cmd |"])
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "rows mismatched: 0" in out, out
+    assert "OK:" in out
+
+
+def test_a_row_with_a_cell_too_few_is_a_fault_too(mod, tmp_path, capsys) -> None:
+    """Both directions, so the reading is not "a row may not be wider than its header".
+
+    A dropped cell is the same reader-visible break the other way, and a reading that
+    only catches extra pipes would call it clean.
+    """
+    path = _cell_index(tmp_path, "short.md", ["| a1 |", "| a2 | ok |"])
+
+    assert mod.main([str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "row at line 5: cells 1, header 2" in out, out
+    assert "a cell is missing" in out, out
+    assert "row at line 6" not in out, "the well-formed row beside it must not be named"
+    assert "OK:" not in out
+
+
+def test_a_line_with_no_pipe_is_not_a_cell_subject(mod, tmp_path, capsys) -> None:
+    """Prose beside a table is not a row, so it is not measured against the header.
+
+    The control for the three above: a fixture that differs by carrying a line with no
+    pipe in it, where the reading must stay silent rather than count a paragraph as a
+    one-cell row.
+    """
+    path = _cell_index(
+        tmp_path, "prose.md", ["| a1 | ok |", "", "A paragraph with no pipe in it."]
+    )
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "rows mismatched: 0" in out, out
+    assert "OK:" in out
+
+
+def test_a_list_index_says_the_cell_reading_had_no_subject(mod, tmp_path, capsys) -> None:
+    """No header, no cell reading — and the summary says so instead of implying one.
+
+    The same discipline the link clause follows: a summary is the line a reader takes, so
+    a reading with no subject must not be printed as a reading that passed.
+    """
+    _detail(tmp_path, "f.md")
+    path = _index(tmp_path, "list.md", ["# Memory Index", "", "- [a](f.md) one"])
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "no table row, so the cell reading had no subject here" in out, out
+    assert "the cell reading had no subject" in out.split("OK:")[-1], out
