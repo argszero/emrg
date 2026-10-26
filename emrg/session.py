@@ -316,8 +316,36 @@ def _refuse_a_non_regular_subject(path: Path) -> None:
 _NAME_SEPARATORS = ("/", "\\")
 
 
-def is_safe_session_id(session_id: object) -> bool:
-    """True when `session_id` names exactly one entry inside the sessions directory.
+#: The names Windows reserves for devices, in the set its own documentation gives. A
+#: directory cannot be called one of them, with or without an extension, so an id that is
+#: one of these names nothing on the platform that can receive it. The guard is the set
+#: itself and not a prefix: `console` and `con-artist` are ordinary names, and `COM0` /
+#: `LPT0` are **not** reserved — a predicate that refused them would cost the host names
+#: the platform accepts.
+_RESERVED_DEVICE_NAMES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{i}" for i in range(1, 10)}
+    | {f"lpt{i}" for i in range(1, 10)}
+)
+
+#: Why an id is not one entry of the sessions directory, in the two sentences the two
+#: refusals use. The first is about shape — the id is more than one component, or not a
+#: name at all. The second is about the filesystem, and it needs a sentence of its own: a
+#: reserved device name **is** one path component, so the first sentence would be false
+#: about it.
+_REFUSAL_NOT_ONE_COMPONENT = "a session id is one path component"
+_REFUSAL_NOT_A_DIRECTORY_NAME = (
+    "no directory can carry this name: it is a reserved device name, or it ends in a "
+    "space or a dot, which the filesystem folds away"
+)
+
+
+def session_id_refusal(session_id: object) -> str | None:
+    """Why `session_id` cannot name one entry of the sessions directory, or `None`.
+
+    The only writer of the verdict and of the sentence beside it: `is_safe_session_id` is
+    this returning `None`, and the daemon passes the sentence to the client rather than
+    restating the rule a third time.
 
     A session id arrives in a client message, so it is an input like any other:
     `Path(cwd) / ".emrg" / "sessions" / session_id` hands `..` and an absolute id to the
@@ -330,16 +358,48 @@ def is_safe_session_id(session_id: object) -> bool:
     separator, and no drive. The drive is asked of **both** flavours — `os.path.splitdrive`
     answers `("", "C:evil")` on this host and `ntpath.splitdrive` answers `("C:", "evil")`,
     and a `C:`-relative id is a path, not a name, on the platform that can receive it.
+
+    Two further refusals keep the name one a directory can actually carry, measured on
+    Windows Server 2022 on master `6ddb7cc`: `is_safe_session_id("con")` answered `True`,
+    and `Session.create_with_id("con", <agent>)` then raised `NotADirectoryError [WinError
+    267]` out of the mkdir — an OS error about a path, for a name the host chose; `nul`
+    failed one step later, on the `memory` subdirectory (`FileNotFoundError [WinError
+    3]`); and an id ending in a space or a dot is *folded* by Windows rather than refused,
+    so it names a different directory than the id says. Both are refused here on the same
+    ground as the separator: an id reaches a path on whichever platform runs it.
     """
     if not isinstance(session_id, str) or not session_id:
-        return False
+        return _REFUSAL_NOT_ONE_COMPONENT
     if "\0" in session_id or session_id in (".", ".."):
-        return False
+        return _REFUSAL_NOT_ONE_COMPONENT
     if any(sep in session_id for sep in _NAME_SEPARATORS):
-        return False
+        return _REFUSAL_NOT_ONE_COMPONENT
     if os.path.splitdrive(session_id)[0] or ntpath.splitdrive(session_id)[0]:
-        return False
-    return True
+        return _REFUSAL_NOT_ONE_COMPONENT
+    if session_id != session_id.rstrip(" ."):
+        return _REFUSAL_NOT_A_DIRECTORY_NAME
+    if session_id.split(".")[0].strip().lower() in _RESERVED_DEVICE_NAMES:
+        return _REFUSAL_NOT_A_DIRECTORY_NAME
+    return None
+
+
+def is_safe_session_id(session_id: object) -> bool:
+    """True when `session_id` names exactly one entry inside the sessions directory.
+
+    The rule, its two sentences and the readings behind them live in
+    `session_id_refusal`, which is the one writer of the verdict; this is the form the
+    callers that only need a yes or a no ask.
+    """
+    return session_id_refusal(session_id) is None
+
+
+class UnsafeSessionId(ValueError):
+    """A session id that cannot name one entry inside the sessions directory.
+
+    Raised where a directory is about to be made from the id, so the caller learns that
+    the *name* is the problem, instead of receiving the filesystem's error about the path
+    the name turned into.
+    """
 
 
 def session_dir(cwd: Path, session_id: str) -> Path:
@@ -517,7 +577,17 @@ class Session:
 
     @classmethod
     def create_with_id(cls, session_id: str, cwd: Path) -> Session:
-        """Create a new session with a specific session ID (from client)."""
+        """Create a new session with a specific session ID (from client).
+
+        The id is asked first, because this is the factory that makes a directory out of
+        it: a name no directory can carry — a reserved device name, or one ending in a
+        space or a dot — would otherwise fail inside `mkdir`, and the caller would get an
+        OS error about a path rather than a refusal about the name (measured on Windows
+        Server 2022: `NotADirectoryError [WinError 267]` for `con`).
+        """
+        refusal = session_id_refusal(session_id)
+        if refusal is not None:
+            raise UnsafeSessionId(f"refusing session id {session_id!r}: {refusal}")
         session = cls(session_id, cwd)
         now = datetime.now().isoformat()
         session._created_at = now

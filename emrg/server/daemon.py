@@ -103,10 +103,10 @@ from emrg.protocol import (
 )
 from emrg.session import (
     Session,
-    is_safe_session_id,
     last_n_messages,
     records_to_messages,
     session_dir,
+    session_id_refusal,
 )
 
 
@@ -2863,9 +2863,17 @@ class EmrgServer:
     async def _refuse_an_unsafe_session_id(
         self, ws, msg_type: str, session_id: object
     ) -> bool:
-        """Refuse a client-supplied session id that is not one path component.
+        """Refuse a client-supplied session id that cannot name one entry of the sessions
+        directory.
 
         True means the id was refused and the client has been told, so the caller stops.
+
+        Two reasons reach this door, and it reports the one `session_id_refusal` names: an
+        id that is more than one path component (or not a name at all), and an id no
+        directory can carry (a reserved device name, or a name ending in a space or a dot
+        — measured on Windows Server 2022, where `con` reached the mkdir and came back as
+        `WinError 267`). A device name *is* one path component, so it must not be told the
+        first sentence.
 
         A session id arrives in a client message and lands on a path in half the handlers
         below: `_get_or_create_session` (eleven callers) writes it, the resume reader and
@@ -2881,15 +2889,15 @@ class EmrgServer:
         client nothing. Both call sites ask this method, so the rule has one writer even
         though it has two doors.
         """
-        if not session_id or is_safe_session_id(session_id):
+        refusal = session_id_refusal(session_id)
+        if not session_id or refusal is None:
             return False
         logger.warning(
-            "refused a %r message carrying session id %r: a session id is one "
-            "path component inside <cwd>/.emrg/sessions", msg_type, session_id,
+            "refused a %r message carrying session id %r: %s inside "
+            "<cwd>/.emrg/sessions", msg_type, session_id, refusal,
         )
         await self._send(ws, {
-            "error": f"invalid session id: {session_id!r} (a session id is "
-                     f"one path component)",
+            "error": f"invalid session id: {session_id!r} ({refusal})",
         })
         return True
 
