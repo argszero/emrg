@@ -1543,20 +1543,48 @@ def _as_count(word: str) -> int:
         ) from None
 
 
+#: A list entry, by its marker. Emphasis is stripped afterwards, never required: an entry counts
+#: because it sits at a marker, and whether its author bolded it is formatting, not length.
+_LIST_ENTRY = re.compile(r"^(?:\d+\.|-)\s+(.*)$")
+
+
+def _entry_text(line: str) -> str | None:
+    """The text of a list entry, emphasis removed, or `None` when the line is not one."""
+    found = _LIST_ENTRY.match(line)
+    if not found:
+        return None
+    return re.sub(r"\*\*|__", "", found.group(1)).strip()
+
+
 def _numbered(recording: str) -> list[str]:
-    """The numbered self-review questions, one entry per question."""
-    return re.findall(r"^\d+\. \*\*(.+?)\*\*", recording, re.M)
+    """The numbered self-review questions, one entry per question.
+
+    Read by marker, not by emphasis. An earlier version matched `^\\d+\\. \\*\\*(.+?)\\*\\*`, so an
+    entry added in plain text was invisible to the pin — the drift the pin exists for walked straight
+    past it, which is the one failure a guard may not have.
+    """
+    listed: list[str] = []
+    for line in recording.split("\n"):
+        if re.match(r"^\d+\.\s", line):
+            text = _entry_text(line)
+            if text:
+                listed.append(text)
+    return listed
 
 
 def _bulleted_after_host_questions(recording: str) -> list[str]:
     """The bulleted questions §5 attributes to the host: the bullet list the sentence introduces.
 
-    The bound is the **contiguous run of bullets** that follows the sentence, not the rest of the
-    section. The section is one home for several subjects, and once it carried a second list the
-    wider bound read that one too: the count stayed right only because the other subject's items are
-    table rows rather than bullets, so a single bullet added there would redden this pin and blame
-    the host's list for a change that never touched it. A false red is how a guard gets weakened, so
-    the slice names the list it claims and stops where that list stops.
+    Two properties, both measured:
+
+    * **The bound is the contiguous run of bullets** that follows the sentence, not the rest of the
+      section. The section is one home for several subjects, and once it carried a second list the
+      wider bound read that one too: the count stayed right only because the other subject's items
+      are table rows rather than bullets, so a single bullet added there would redden this pin and
+      blame the host's list for a change that never touched it. A false red is how a guard gets
+      weakened, so the slice names the list it claims and stops where that list stops.
+    * **An entry is read by its marker**, with the emphasis stripped afterwards. Reading only bolded
+      entries made a plain one invisible, which is the same defect one layer down.
     """
     parts = recording.split(_HOST_ANCHOR, 1)
     assert len(parts) == 2, (
@@ -1565,11 +1593,13 @@ def _bulleted_after_host_questions(recording: str) -> list[str]:
     )
     listed: list[str] = []
     for line in parts[1].split("\n"):
-        found = re.match(r"^- \*\*(.+?)\*\*", line)
-        if found:
-            listed.append(found.group(1))
-        elif listed:
-            break
+        if not line.startswith("- "):
+            if listed:
+                break
+            continue
+        text = _entry_text(line)
+        if text:
+            listed.append(text)
     return listed
 
 
@@ -1665,6 +1695,28 @@ def test_the_closing_summary_count_pins_discriminate_in_both_directions() -> Non
         "questions — the slice is reading past the list its sentence introduces"
     )
     assert _claim(later, _HOST_CLAIM) == len(_bulleted_after_host_questions(later))
+
+    # a numbered entry added in PLAIN text moves the count too. An earlier reader matched the
+    # emphasis rather than the marker, so this arm went green while the list had grown — the drift
+    # the pin exists for walked past it, which is the one failure a guard may not have.
+    plain = section.replace("2. **Second?**\n", "2. **Second?**\n3. Third?\n")
+    assert len(_numbered(plain)) == 3, (
+        "a numbered entry added without bold produced no new entry — the reader is matching the "
+        "emphasis instead of the marker, and a list can grow while its count reads green"
+    )
+    assert _claim(plain, _SELF_REVIEW_CLAIM) != len(_numbered(plain))
+
+    # the same defect one layer down: a host question added in plain text
+    host_plain = section + "- Fifth?\n"
+    assert len(_bulleted_after_host_questions(host_plain)) == 3, (
+        "a bulleted entry added without bold produced no new entry — the host's list can grow while "
+        "its count reads green"
+    )
+    assert _claim(host_plain, _HOST_CLAIM) != len(_bulleted_after_host_questions(host_plain))
+
+    # emphasis is formatting, not length: an entry that is bolded in part still counts once
+    partial = section.replace("2. **Second?**\n", "2. **Second?**\n3. a **half-bold** entry\n")
+    assert len(_numbered(partial)) == 3
 
     # a count this pin cannot read is refused rather than defaulted
     with pytest.raises(AssertionError, match="cannot read as a number"):
