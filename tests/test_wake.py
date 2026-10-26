@@ -391,6 +391,68 @@ def test_the_feishu_condition_asks_the_cli_the_documented_shape(tmp_path):
     assert "--start" in reading, reading
 
 
+def test_the_stamp_sent_to_the_cli_names_its_zone(tmp_path):
+    """A boundary without an offset leaves its own meaning to the reader.
+
+    `lark-cli --start` answers this repository's Feishu task in two places: the round,
+    which the template hands `scheduler.py`'s `datetime.now(timezone.utc).isoformat()`,
+    and this poll. A bare local instant here would be the second carrier disagreeing
+    with the first about what a time is, and the CLI's own help offers the offset form
+    (`2026-01-01T15:04:05+08:00`), so the unaware spelling is not even the documented
+    one. Measured: the CLI accepts a naive stamp silently, which is exactly why nothing
+    downstream would notice.
+    """
+    runner = _feishu_runner(chats=[{"chat_id": "oc_g", "chat_mode": "group"}],
+                            messages={"oc_g": []})
+    local_clock = datetime(2026, 10, 26, 12, 0, 0)  # naive, as a caller may pass it
+    wakes(_record(feishu=300), task_name="t", agent="t",
+          state_dir=tmp_path / "wake-state", runner=runner, now=local_clock)
+
+    reading = next(" ".join(argv) for argv in runner.seen if "+chat-messages-list" in " ".join(argv))
+    stamp = reading.split("--start ", 1)[1].split(" ", 1)[0]
+    parsed = datetime.fromisoformat(stamp)
+    assert parsed.tzinfo is not None, (
+        f"the stamp sent to the CLI is {stamp!r}, which names no zone — the round is told "
+        "an aware UTC instant for the same query"
+    )
+    # …and it is the same instant the caller named, less this module's own lookback —
+    # read from the module rather than restated, so the window has one producer.
+    assert parsed == (local_clock - timedelta(seconds=wake_mod.FEISHU_LOOKBACK_SECONDS)).astimezone(), (
+        stamp, local_clock
+    )
+
+
+def test_a_watermark_written_in_another_zone_does_not_end_the_wait(tmp_path):
+    """The watermark outlives the code that wrote it, so a mixed pair must not raise.
+
+    `aware - naive` raises `TypeError`, and the subtraction that compares a stamp with
+    the clock sits outside the `try` that guards a condition. So before the instants
+    were normalised in one place, a state file carrying the older naive stamp met a
+    zoned clock and raised out of `wakes()` — and the task's own `run()` catches only
+    `asyncio.TimeoutError`, so that error ended the task's loop rather than one wait.
+    Both spellings are one instant here, and the condition is still consulted.
+    """
+    state_dir = tmp_path / "wake-state"
+    state_dir.mkdir()
+    (state_dir / "t.json").write_text(
+        # Naive, because that is what the code before this fix wrote: the watermark
+        # outlives its writer, so the pairing that has to survive is old-file/now-clock.
+        json.dumps({"checked": {"feishu": "2026-10-26T10:00:00"}}), encoding="utf-8"
+    )
+    runner = _feishu_runner(chats=[{"chat_id": "oc_g", "chat_mode": "group"}],
+                            messages={"oc_g": []})
+
+    # 12:00 local is 04:00 UTC, two hours past the stamp — so the condition is due.
+    held, notes = wakes(_record(feishu=300), task_name="t", agent="t",
+                        state_dir=state_dir, runner=runner,
+                        now=datetime(2026, 10, 26, 12, 0, 0))
+    assert held is False, notes
+    assert runner.seen, "the condition was skipped instead of consulted — its clock never elapsed"
+
+    written = json.loads((state_dir / "t.json").read_text(encoding="utf-8"))
+    assert datetime.fromisoformat(written["checked"]["feishu"]).tzinfo is not None, written
+
+
 # ── the wait ─────────────────────────────────────────────────────────────
 
 

@@ -32,7 +32,7 @@ import json
 import logging
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -225,12 +225,29 @@ def save_state(state_dir: Path, task_name: str, state: dict) -> None:
         logger.warning("wake state %s could not be written: %s", path, exc)
 
 
+def _aware(moment: datetime) -> datetime:
+    """`moment` as an aware instant in UTC. A naive one is read as local time.
+
+    Every instant this module compares or sends goes through here, for two reasons that
+    are one reason. **Sending**: the stamp handed to `lark-cli --start` must name its
+    zone — that CLI's own help offers `2026-01-01T15:04:05+08:00`, and a bare local
+    instant leaves the zone to the reader, which is the one thing a boundary may not do.
+    `scheduler.py` already renders the templates' `{{ timestamp }}` as
+    `datetime.now(timezone.utc).isoformat()`, so an unaware stamp here would be this
+    module disagreeing with the file that states the convention. **Comparing**: the
+    watermark outlives the code that wrote it, and `aware - naive` raises `TypeError`
+    rather than being wrong in a way a log would show; normalising both sides in one
+    place is what makes that unrepresentable instead of unlikely.
+    """
+    return moment.astimezone(timezone.utc)
+
+
 def _instant(text) -> datetime | None:
-    """`text` as an instant, or None when it is not one."""
+    """`text` as an aware instant, or None when it is not one."""
     if not isinstance(text, str):
         return None
     try:
-        return datetime.fromisoformat(text)
+        return _aware(datetime.fromisoformat(text))
     except ValueError:
         return None
 
@@ -365,7 +382,7 @@ def wakes(
     when = normalised_when(record)
     if not when:
         return False, []
-    moment = now or datetime.now()
+    moment = _aware(now) if now is not None else datetime.now(timezone.utc)
     state = load_state(state_dir, task_name)
     checked = state.get("checked")
     if not isinstance(checked, dict):
