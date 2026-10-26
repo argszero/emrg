@@ -3170,7 +3170,7 @@ class TestWSTaskWire:
                 try:
                     calls = {}
 
-                    def fake_create(name, task_type, agent, interval=None, enabled=True, repo=None, description=None, sandbox=None, schedule=None):
+                    def fake_create(name, task_type, agent, interval=None, enabled=True, repo=None, description=None, sandbox=None, schedule=None, when=None):
                         calls.update(name=name, task_type=task_type, agent=agent)
                         return True, {"name": name, "type": task_type}
 
@@ -3200,7 +3200,7 @@ class TestWSTaskWire:
                 try:
                     calls = {}
 
-                    def fake_create(name, task_type, agent, interval=None, enabled=True, repo=None, description=None, sandbox=None, schedule=None):
+                    def fake_create(name, task_type, agent, interval=None, enabled=True, repo=None, description=None, sandbox=None, schedule=None, when=None):
                         calls.update(name=name, task_type=task_type, agent=agent)
                         return True, {"name": name, "type": task_type}
 
@@ -3232,7 +3232,8 @@ class TestWSTaskWire:
                     calls = {}
 
                     def fake_create(name, task_type, agent, interval=None, enabled=True,
-                                    repo=None, description=None, sandbox=None, schedule=None):
+                                    repo=None, description=None, sandbox=None,
+                                    schedule=None, when=None):
                         calls.update(interval=interval, schedule=schedule)
                         return True, {"name": name, "type": task_type}
 
@@ -3251,6 +3252,72 @@ class TestWSTaskWire:
                         assert resp.get("ok") is True
                         assert calls["interval"] == 10800
                         assert calls["schedule"] == window, "the wire must not reshape it"
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_task_create_passes_the_when_conditions_through(self):
+        """The conditions arrive at the scheduler in the shape the client sent them.
+
+        Issue #2592: the field would otherwise be one a client can send and the daemon
+        quietly drops — the exact defect `schedule` had (#2490), which is why the wire's
+        key list and the scheduler's own argument list have to agree on it.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                server, _, cleanup = await _boot_server(cwd)
+                try:
+                    calls = {}
+
+                    def fake_create(name, task_type, agent, interval=None, enabled=True,
+                                    repo=None, description=None, sandbox=None,
+                                    schedule=None, when=None):
+                        calls.update(when=when)
+                        return True, {"name": name, "type": task_type}
+
+                    server._scheduler = self._mock_scheduler(create_side_effect=fake_create)
+                    ws = await connect_to_server()
+                    conditions = {"rant": 600, "feishu": 300}
+                    try:
+                        resp = await self._cmd(ws, {
+                            "type": "task_create", "name": "daily",
+                            "task_type": "evolution", "agent": "emrg",
+                            "interval": 14400, "when": conditions,
+                        })
+                        assert resp["type"] == "task_result"
+                        assert resp.get("ok") is True
+                        assert calls["when"] == conditions, "the wire must not reshape it"
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_task_update_passes_the_when_conditions_through(self):
+        """The same for the update path, whose key list is a separate filter to keep in step."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                server, _, cleanup = await _boot_server(cwd)
+                try:
+                    calls = {}
+
+                    def fake_update(name, **fields):
+                        calls.update(name=name, fields=fields)
+                        return True, {"name": name, "type": "evolution"}
+
+                    server._scheduler = self._mock_scheduler(update_side_effect=fake_update)
+                    ws = await connect_to_server()
+                    try:
+                        resp = await self._cmd(ws, {
+                            "type": "task_update", "name": "daily",
+                            "when": {"rant": 600},
+                        })
+                        assert resp.get("ok") is True
+                        assert calls["fields"].get("when") == {"rant": 600}, calls["fields"]
                     finally:
                         await ws.close()
                 finally:

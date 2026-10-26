@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from emrg.server.rants import default_rants_log, list_rants
+from emrg.tools.base import non_regular_kind
 
 logger = logging.getLogger("emrg.server.wake")
 
@@ -163,6 +164,24 @@ def state_path(state_dir: Path, task_name: str) -> Path:
     return Path(state_dir) / f"{task_name}.json"
 
 
+def _refuse_non_regular(path: Path) -> str | None:
+    """The kind of `path` when it is not a regular file, else None.
+
+    Asked **before** opening, because opening is what decides whether the caller returns
+    at all: a FIFO blocks at the open until a peer appears and raises nothing, so no
+    `except OSError` bounds it — and this runs on the daemon's path, where that block is
+    the whole daemon and the only recovery is a restart, which belongs to the host alone.
+
+    Absence is not a refusal. `non_regular_kind` **stats**, so a watermark that has not
+    been written yet arrives as an `OSError`, and that is the ordinary first-run case
+    this returns None for.
+    """
+    try:
+        return non_regular_kind(path)
+    except OSError:
+        return None
+
+
 def load_state(state_dir: Path, task_name: str) -> dict:
     """The persisted watermark, or `{}`.
 
@@ -171,9 +190,13 @@ def load_state(state_dir: Path, task_name: str) -> dict:
     poll rather than a wrong answer.
     """
     path = state_path(state_dir, task_name)
+    kind = _refuse_non_regular(path)
+    if kind:
+        logger.warning("wake state %s is a %s, not a regular file — starting over", path, kind)
+        return {}
     try:
         raw = path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return {}
     try:
         data = json.loads(raw)
@@ -186,9 +209,16 @@ def load_state(state_dir: Path, task_name: str) -> dict:
 def save_state(state_dir: Path, task_name: str, state: dict) -> None:
     """Write the watermark atomically; a failure is logged and nothing more."""
     path = state_path(state_dir, task_name)
+    tmp = path.with_suffix(".json.tmp")
+    kind = _refuse_non_regular(tmp)
+    if kind:
+        # Writing to a FIFO blocks for a reader exactly as reading one blocks for a
+        # writer; the watermark is an optimisation, so a planted one is skipped, not
+        # opened at the daemon's expense.
+        logger.warning("wake state %s is a %s, not a regular file — not written", tmp, kind)
+        return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(path)
     except OSError as exc:
