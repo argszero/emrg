@@ -1359,6 +1359,144 @@ def test_the_browser_is_scoped_to_login_walls(rendered):
                 f"first' and the cheaper path are no longer one instruction"
             )
 
+
+# --- the rules a round needs that the template used to leave to an installation --------------------
+#
+# Each was paid for in a lost submission or a misread score, and each lived only in an installation's
+# own `extra_prompt` — a field no other installation can read. They are ported here as method, in the
+# template's own words, into the three sections that own their subjects:
+#
+#   * the iteration phase, which decides how a submission is spent;
+#   * the goal-line section, which decides how a score is read;
+#   * the recording section, which requires the closing summary.
+#
+# The pins below are section-scoped for the reason §4's and §0.0's guards already give: this file
+# discusses measurement, scoring and self-review in several places, so a whole-document substring
+# check stays green after the section that owns the rule is deleted. A rule stated nowhere and a rule
+# stated in the wrong section read the same to a round that is looking for it where it belongs.
+
+
+def _recording(text: str) -> str:
+    return _section(text, "### 5. Recording", "\n### Error Handling")
+
+
+def _assess(text: str) -> str:
+    return _section(text, "### 1. Assess progress", "\n### Phases")
+
+
+# (i) how a submission is spent — the iteration phase
+_VOTE_ECONOMY_RULES = (
+    "A constant answer is a free estimator of the mean and of nothing else",
+    "An option is free only when its expectation is positive",
+    "A dead path is revived only after proving it is not an identity transform",
+    "A probe's order is its amplitude times its prior hit rate",
+    "One knob per vote while votes are scarce",
+    "Several columns in one submission means a per-column report",
+    "A number is read only after the line that printed it is identified",
+)
+
+# (ii) how a reading travels — the goal-line section
+_RULER_RULES = (
+    "A reading travels no further than the ruler that took it",
+    "What a manual selection costs depends on how the platform aggregates",
+    "The platform's free readings are exhausted before a slot is spent",
+)
+
+# (iii) the gate lines the closing summary owes — the recording section
+_GATE_LINES = (
+    "Translation",
+    "Scope",
+    "Coverage and counterexamples",
+    "Resolution",
+    "The explanation least wanted",
+    "Reverse self-defence",
+)
+
+# (iv) how a resetting allowance is spent — the assess section's quota ledger
+_QUOTA_SPEND_RULE = (
+    "A quota that resets is spent across its period, not at the start of it",
+    "states the share it is taking now as a fraction of the allowance",
+    "the most one batch may carry",
+    "the gap it will leave before the next",
+    "the last batch is placed so its result can still be read before the next reset",
+)
+
+
+def test_a_submission_is_a_purchase_and_the_rules_that_decide_it_are_in_the_iteration_phase() -> None:
+    """The seven vote-economy rules sit where the round decides how to spend a slot."""
+    phase_d = _flat(_phase_d(PROMPT.read_text(encoding="utf-8")))
+
+    for rule in _VOTE_ECONOMY_RULES:
+        assert _flat(rule) in phase_d, (
+            f"{rule!r} is not stated in the iteration phase, so a round deciding how to spend a "
+            "submission reads past it — the phase is where that decision is made"
+        )
+
+
+def test_the_ruler_rules_are_stated_where_a_score_is_read() -> None:
+    """The three rules about how far a reading travels sit under the goal line."""
+    goal = _flat(_goal_line(PROMPT.read_text(encoding="utf-8")))
+
+    for rule in _RULER_RULES:
+        assert _flat(rule) in goal, (
+            f"{rule!r} is not stated under the goal line, so the section that decides what a score "
+            "establishes does not carry it"
+        )
+
+
+def _gate_rows(text: str) -> list[str]:
+    """The gate lines the recording section lists, one entry per bold first cell."""
+    recording = _recording(text)
+    table = recording.split("| Line | The question it answers |", 1)
+    assert len(table) == 2, (
+        "the recording section no longer carries the gate-line table, so a count of its rows would "
+        "be a count of nothing"
+    )
+    return re.findall(r"^\| \*\*(.+?)\*\* \|", table[1], re.M)
+
+
+def test_the_gate_line_count_is_the_number_the_section_says_it_is() -> None:
+    """The stated count and the table it introduces are one fact, so they are read as one.
+
+    The table is the single home of which lines there are; the sentence states how many, and is
+    therefore a claim this guard measures rather than a second copy a reader has to reconcile.
+    """
+    text = PROMPT.read_text(encoding="utf-8")
+    rows = _gate_rows(text)
+    assert rows, "the gate-line table lists no lines, so a count taken from it compares against nothing"
+
+    stated = re.search(r"carries the (\w+) gate lines", _flat(_recording(text)))
+    assert stated, (
+        "the recording section no longer states how many gate lines the summary owes, so a round "
+        "cannot tell whether it has finished writing them"
+    )
+    assert stated.group(1) == "six", (
+        f"the section now claims {stated.group(1)!r} gate lines; if that is the intended number, "
+        "the table and this assertion move together"
+    )
+    assert len(rows) == 6, (
+        f"the section claims six gate lines and lists {len(rows)} — {rows!r}. The count and the "
+        "table have drifted apart, so a round trusting the sentence writes the wrong number of them"
+    )
+    assert tuple(rows) == _GATE_LINES, (
+        f"the gate lines are not the ones named: read {rows!r}, expected {list(_GATE_LINES)!r}"
+    )
+
+
+def test_the_quota_is_spent_across_its_period_rather_than_at_the_start_of_it() -> None:
+    """The distribution rule sits in the assess section, beside the ledger that opens the round.
+
+    The section is the one place a round decides what today's allowance is for, so a rule kept
+    anywhere else is read after the decision it governs has been made.
+    """
+    assess = _flat(_assess(PROMPT.read_text(encoding="utf-8")))
+
+    for part in _QUOTA_SPEND_RULE:
+        assert _flat(part) in assess, (
+            f"{part!r} is not stated beside the per-competition quota ledger, so a round opening "
+            "that ledger has nothing telling it to keep part of the allowance for later"
+        )
+
 # --- the two counts §5 states about its own lists ------------------------------------------------
 #
 # The defect class #2576 fixed for the promote template's reflection heading, found here by a
@@ -1367,11 +1505,8 @@ def test_the_browser_is_scoped_to_login_walls(rendered):
 # instruction a round reads before it starts answering, so a list edited without it — or the reverse —
 # leaves a round owing the wrong number with nothing to notice.
 #
-# The slice comes from `_section`, which this module already uses, rather than from a helper of its
-# own: two names for one boundary is how the two drift apart.
-
-_RECORDING_HEADING = "### 5. Recording"
-_RECORDING_END = "\n### Error Handling"
+# The slice is `_recording`, the helper the section-scoped pins above already use. One name for one
+# boundary: a second spelling of the same slice is how the two drift apart.
 
 _NUMBER_WORDS = {
     "two": 2,
@@ -1414,13 +1549,28 @@ def _numbered(recording: str) -> list[str]:
 
 
 def _bulleted_after_host_questions(recording: str) -> list[str]:
-    """The bulleted questions §5 attributes to the host: those after that sentence and before `---`."""
+    """The bulleted questions §5 attributes to the host: the bullet list the sentence introduces.
+
+    The bound is the **contiguous run of bullets** that follows the sentence, not the rest of the
+    section. The section is one home for several subjects, and once it carried a second list the
+    wider bound read that one too: the count stayed right only because the other subject's items are
+    table rows rather than bullets, so a single bullet added there would redden this pin and blame
+    the host's list for a change that never touched it. A false red is how a guard gets weakened, so
+    the slice names the list it claims and stops where that list stops.
+    """
     parts = recording.split(_HOST_ANCHOR, 1)
     assert len(parts) == 2, (
         f"§5 no longer carries the sentence naming the host's own questions ({_HOST_ANCHOR!r}), so a "
         "count taken from that part of the section would be a count of the wrong list"
     )
-    return re.findall(r"^- \*\*(.+?)\*\*", parts[1].split("\n---", 1)[0], re.M)
+    listed: list[str] = []
+    for line in parts[1].split("\n"):
+        found = re.match(r"^- \*\*(.+?)\*\*", line)
+        if found:
+            listed.append(found.group(1))
+        elif listed:
+            break
+    return listed
 
 
 def _claim(section: str, pattern: str) -> int:
@@ -1435,7 +1585,7 @@ def _claim(section: str, pattern: str) -> int:
 
 def test_the_closing_summary_counts_the_self_review_questions_it_lists() -> None:
     """The sentence and the numbered list it introduces are one fact, read as one."""
-    recording = _section(PROMPT.read_text(encoding="utf-8"), _RECORDING_HEADING, _RECORDING_END)
+    recording = _recording(PROMPT.read_text(encoding="utf-8"))
     listed = _numbered(recording)
     assert listed, (
         "§5 lists no numbered self-review questions, so a count taken from it compares against "
@@ -1450,7 +1600,7 @@ def test_the_closing_summary_counts_the_self_review_questions_it_lists() -> None
 
 def test_the_host_questions_count_is_the_number_the_section_says() -> None:
     """The second count is measured apart from the first: it introduces a different list."""
-    recording = _section(PROMPT.read_text(encoding="utf-8"), _RECORDING_HEADING, _RECORDING_END)
+    recording = _recording(PROMPT.read_text(encoding="utf-8"))
     listed = _bulleted_after_host_questions(recording)
     assert listed, (
         "§5 states how many questions the host asked for and then lists none, so the claim stands "
@@ -1505,6 +1655,16 @@ def test_the_closing_summary_count_pins_discriminate_in_both_directions() -> Non
     )
     assert len(_bulleted_after_host_questions(before)) == 2
     assert _claim(before, _HOST_CLAIM) == len(_bulleted_after_host_questions(before))
+
+    # a bullet in a LATER subject of the same section belongs to that subject, not this list.
+    # This is the arm that pins the bound: read to the end of the section, it would count three and
+    # redden the host's pin for a change that never touched it.
+    later = section + "\n**A different subject, in the same section.**\n\n- **Not a host question?**\n"
+    assert len(_bulleted_after_host_questions(later)) == 2, (
+        "a bullet belonging to a later subject in the same section was counted as one of the host's "
+        "questions — the slice is reading past the list its sentence introduces"
+    )
+    assert _claim(later, _HOST_CLAIM) == len(_bulleted_after_host_questions(later))
 
     # a count this pin cannot read is refused rather than defaulted
     with pytest.raises(AssertionError, match="cannot read as a number"):

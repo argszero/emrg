@@ -92,6 +92,7 @@ Read the session history and memory. **The round's unit of work is the set of AC
 - **Every round must traverse ALL active competitions**, each walked through `prepare → assess → execute one phase → record`. **"One phase per round" means one phase PER COMPETITION** (each competition advances at most one phase this round) — it is **not** a licence to work on only one competition, and §0.0 item 2 already requires the full traversal.
 - **Every competition must show an increment each round**, however small: a pending submission re-checked, a candidate gated, an artefact built, a decision recorded. A competition with genuinely nothing to do must be recorded as such **with a specific reason** — "I was busy with another competition", "it was waiting" and "it was already submitted" are **not** reasons.
 - **Open the round with a per-competition submission-quota ledger**: for every competition with quota remaining, either submit, or state a **specific** reason not to today. "Waiting for evidence", "no point submitting" and "did not get to it" do **not** count as reasons.
+- **A quota that resets is spent across its period, not at the start of it.** A daily allowance is a supply of readings, and a batch spent in the first hour can only answer questions the round could already pose. Attempts kept for later, made once the earlier batch's result is readable, answer questions it could not — which is what the interval between batches buys, and why spending the whole allowance at once gives up more than it saves. The ledger therefore states the share it is taking now as a fraction of the allowance rather than the whole of it, the most one batch may carry, and the gap it will leave before the next; the last batch is placed so its result can still be read before the next reset. The fraction, the batch bound and the gap are calibrated from the platform's own reset time and allowance — what the ledger may not do is omit them.
 
 Priority when several competitions are live:
 
@@ -154,6 +155,16 @@ Step 4 is the one most easily left out. A round that classified, counted or obse
 - **An agreement in counts can exclude a candidate, never establish one.** Two readings that agree show that nothing contradicted them; they do not show that the thing was observed. Establishing a fact takes a measurement whose outcome would have differed had the fact been otherwise, so the round names what it would have seen under the alternative and what it saw.
 - **A derived artefact is evidence only after it is rebuilt and compared line by line.** A table, a merged file or a summary produced by a pipeline is a claim about that pipeline until it is rebuilt from its inputs and diffed against the first copy. One that does not reproduce byte for byte is the pipeline's output rather than the data's, and is read as a fault instead of used as a result.
 
+**A submission is a purchase, and the round states what it is buying.** A slot spent on a question already answered is a slot the round no longer has, so each of the following is settled before the submission is made:
+
+- **A constant answer is a free estimator of the mean and of nothing else.** A deliberately constant submission costs one slot and returns the scoring rule's error directly, so two or three different constants solve for the mean and the variance of the outcome at no modelling cost. A moment fixes the mean and the spread, never the shape: the distribution stays a hypothesis, and a decision taken on a moment is a decision about the mean only. Turning it into one about the distribution needs an assumed shape and a rule for what would falsify it.
+- **An option is free only when its expectation is positive.** A scoring rule that keeps the best result makes a speculative submission's downside zero, which is what makes it worth taking — but the slot is not free, and repeating an answer that cannot move the score spends the next attempt for nothing. State the expectation before spending, and never fill a remaining quota just to use it.
+- **A dead path is revived only after proving it is not an identity transform.** Before restoring a mechanism that failed, show that the case it addresses lies outside what already runs. When its input set is contained in the candidate pool the round already produces, the change is a no-op: the restored path costs a submission and moves nothing, so the proof comes first and the change second.
+- **A probe's order is its amplitude times its prior hit rate, and both columns are written.** The amplitude is what the change could move; the prior is how likely that class of change was to hit, and its source is named — a measurement, not a recollection. A probe that would falsify a rule is never vetoed by a gate whose own criterion is the hypothesis under test: a check built on the assumption cannot be the reason the assumption goes unexamined.
+- **One knob per vote while votes are scarce.** Two changes in one submission leave the delta attributable to neither, and a conjunction design halves what the only slot of the day could have established. When the quota is small the second change waits for the next round; when it is not, several changes may run together only if the round reports each column apart.
+- **Several columns in one submission means a per-column report.** Where a submission carries more than one column, the round prints a hash of each column for the round it just produced, so that "I changed the column I meant to" is a reading rather than a belief — the failure it catches is a column edited in the copy and not in the artefact actually sent.
+- **A number is read only after the line that printed it is identified.** Before a figure is used, the round knows which line produced it and whether the accumulator behind it had finished. A running total read mid-stream looks exactly like a real movement, and rebuilding the quantity costs less than acting on the artefact.
+
 #### Phase E — Deadline wrap-up
 
 Freeze before the deadline; select the best historical submission as the final entry; settle the prize/ranking outcome.
@@ -186,6 +197,24 @@ Write the effective features/models/lessons into memory (so later competitions c
   the first improvement is scored below what the round had already achieved. Re-read that state
   each round, say what this round itself set or selected by hand, and treat a mismatch between what
   is set and this round's own best as this round's work rather than a note for later.
+- **A reading travels no further than the ruler that took it.** Two consequences, both settled
+  before a slot or a conclusion is spent. A candidate that correlates with the current reference at
+  0.98 or above **and** whose delta is within a tenth of the reference's own magnitude is the same
+  answer in different clothes: measure both, and spend the slot elsewhere. And a local ruler and the
+  leaderboard's are different instruments, whose ratio is measurable — divide one comparison's score
+  displacement by the local resolution that comparison could see, and where that ratio is far above
+  one, an axis the local reading turned off may not be called off on the board. Only an axis
+  measured on the board's own ruler may be.
+- **What a manual selection costs depends on how the platform aggregates.** Before pricing a choice
+  — keeping a diverse spread of entries, or holding a better one back — read how that platform turns
+  several entries into one result. Where it keeps the best, a spread costs nothing and "the worst
+  case" is an arithmetic error the round invented; where it averages or keeps the last, the cost is
+  real and is stated in the platform's own terms. The aggregation is read from that platform's text,
+  never assumed from another platform's habit.
+- **The platform's free readings are exhausted before a slot is spent.** Per-submission scores, the
+  submission list, the leaderboard endpoint and the discussion threads usually answer the question a
+  round was about to buy an answer to. Enumerating them costs requests and no quota, so a slot spent
+  on a question they already answered is spent for nothing.
 
 ---
 
@@ -321,6 +350,17 @@ The session transcript is what the next round reads — nothing is appended to a
 - **What does the host have to decide or do?** — every blocker with the case it falls in (the blocker rule below), and when that case is "no method found", the question itself goes here. A round that ends with a blocker and no question has left the host out of the loop, which is what *"如果你找不到方法，就和我讨论"* asks against.
 
 Write these for a reader who has not read the previous round's messages — the complaint was not that the summary was short, it was that it could not be followed.
+
+**The summary also carries the six gate lines, before the answers above.** They say how the round examined itself, and a reader who sees them first reads the conclusions knowing what they rest on:
+
+| Line | The question it answers |
+|---|---|
+| **Translation** | what was asked, against what this round actually did — in the same terms, so that a substitution is visible |
+| **Scope** | the denominator, and how much of it this round covered |
+| **Coverage and counterexamples** | what the reading covers, and the cases that argue against it |
+| **Resolution** | the smallest change this round's instrument could have shown |
+| **The explanation least wanted** | written **first** among the doubts: the compliance problem, the sampling bias, or the measurement assumption that would explain the result away |
+| **Reverse self-defence** | the round argues against its own conclusion and keeps it only if it cannot be knocked down; one that falls is corrected on the spot, and the correction is recorded beside the line that fell |
 
 ---
 
