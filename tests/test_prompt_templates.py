@@ -2560,9 +2560,24 @@ def _reflection_section(text: str) -> str:
     return text[start : text.index(_REFLECTION_NEXT, start)]
 
 
+_NUMBERED_ENTRY = re.compile(r"^\d+\.\s+(.*)$")
+
+
 def _reflection_questions(section: str) -> list[str]:
-    """The numbered questions this section lists, one entry per question."""
-    return re.findall(r"^\d+\. \*\*", section, re.M)
+    """The numbered questions this section lists, one entry per question.
+
+    An entry is read by its marker and its emphasis is stripped afterwards, so a question counts
+    because it sits at a number, not because its author bolded it. The earlier reader required
+    `**` after the marker, which made a plainly written tenth question invisible: the list grew,
+    the count stayed at nine, and the sentence agreed with the count — the pin read green straight
+    through the drift it exists to catch.
+    """
+    listed: list[str] = []
+    for line in section.split("\n"):
+        found = _NUMBERED_ENTRY.match(line)
+        if found:
+            listed.append(re.sub(r"\*\*|__", "", found.group(1)).strip())
+    return listed
 
 
 def _reflection_claim(section: str) -> int | None:
@@ -2635,13 +2650,35 @@ def test_the_reflection_count_pin_reads_its_own_section_and_both_directions() ->
     # nothing, and `_reflection_questions` takes a section it is handed, so passing it the
     # whole file would test this test rather than the guard.
     after = text.rstrip() + "\n\n10. **A question in another section.** — outside it.\n"
-    numbered = r"^\d+\. \*\*"
+    numbered = r"^\d+\.\s"
     assert len(re.findall(numbered, after, re.M)) == len(re.findall(numbered, text, re.M)) + 1, (
         "arm 3 added nothing, so it measured nothing"
     )
     assert len(_reflection_questions(_reflection_section(after))) == listed, (
         "a numbered item added past the reflection section entered its count"
     )
+
+    # Arm 4 — the drift written in plain text, which is the shape the earlier reader could not
+    # see. It required `**` after the marker, so a tenth question typed without bold was not in
+    # the list the count came from: the count stayed at nine, the sentence still said nine, and
+    # the two agreed while the section owed ten. This arm passes under that reader, which is
+    # exactly why it belongs here.
+    plain = section.rstrip() + f"\n{listed + 1}. Would a tenth question catch this? — unbolded.\n"
+    assert len(_reflection_questions(plain)) == listed + 1, (
+        "a question added in plain text produced no new entry — the reader is matching the "
+        "emphasis instead of the marker, so the list can grow while its count reads correct"
+    )
+    assert _reflection_claim(plain) != len(_reflection_questions(plain)), (
+        "a plainly written question left the claim reading as correct"
+    )
+
+    # Arm 5 — emphasis is formatting, not length: a partly bolded entry is still one entry, and
+    # the corrected sentence agrees with it, so arm 4 failed for the count and nothing else.
+    half_bold = _REFLECTION_CLAIM.sub(
+        f"answering these {listed + 1} questions",
+        section.rstrip() + f"\n{listed + 1}. A **partly bold** question.\n",
+    )
+    assert _reflection_claim(half_bold) == len(_reflection_questions(half_bold))
 
 
 # ── the `blocked` field states one availability rule, in the field that owns it ───────────

@@ -1496,3 +1496,228 @@ def test_the_quota_is_spent_across_its_period_rather_than_at_the_start_of_it() -
             f"{part!r} is not stated beside the per-competition quota ledger, so a round opening "
             "that ledger has nothing telling it to keep part of the allowance for later"
         )
+
+# --- the two counts §5 states about its own lists ------------------------------------------------
+#
+# The defect class #2576 fixed for the promote template's reflection heading, found here by a
+# section-scoped survey of spelled-out counts: §5 says "Seven questions" and "Three more", and until
+# this pin nothing compared either sentence against the list it introduces. The sentence is the only
+# instruction a round reads before it starts answering, so a list edited without it — or the reverse —
+# leaves a round owing the wrong number with nothing to notice.
+#
+# The slice is `_recording`, the helper the section-scoped pins above already use. One name for one
+# boundary: a second spelling of the same slice is how the two drift apart.
+
+_NUMBER_WORDS = {
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+}
+
+_SELF_REVIEW_CLAIM = r"\*\*(\w+) questions the closing summary must answer\*\*"
+_HOST_CLAIM = r"\*\*(\w+) more the host asked for by name\."
+_HOST_ANCHOR = "the host asked for by name"
+
+
+def _as_count(word: str) -> int:
+    """A spelled-out number as an int, refusing a word this pin cannot read.
+
+    Refusing rather than defaulting is the point: a claim rewritten as a digit ("7 questions") or as
+    a vague quantity would otherwise make every assertion built on it compare against nothing while
+    still reading green. "one" is deliberately absent — it is as often a pronoun as a count.
+    """
+    try:
+        return _NUMBER_WORDS[word.lower()]
+    except KeyError:
+        raise AssertionError(
+            f"§5 states its count as {word!r}, which this pin cannot read as a number. State it as "
+            f"one of {sorted(_NUMBER_WORDS)} so the sentence and its list stay comparable"
+        ) from None
+
+
+#: A list entry, by its marker. Emphasis is stripped afterwards, never required: an entry counts
+#: because it sits at a marker, and whether its author bolded it is formatting, not length.
+_LIST_ENTRY = re.compile(r"^(?:\d+\.|-)\s+(.*)$")
+
+
+def _entry_text(line: str) -> str | None:
+    """The text of a list entry, emphasis removed, or `None` when the line is not one."""
+    found = _LIST_ENTRY.match(line)
+    if not found:
+        return None
+    return re.sub(r"\*\*|__", "", found.group(1)).strip()
+
+
+def _numbered(recording: str) -> list[str]:
+    """The numbered self-review questions, one entry per question.
+
+    Read by marker, not by emphasis. An earlier version matched `^\\d+\\. \\*\\*(.+?)\\*\\*`, so an
+    entry added in plain text was invisible to the pin — the drift the pin exists for walked straight
+    past it, which is the one failure a guard may not have.
+    """
+    listed: list[str] = []
+    for line in recording.split("\n"):
+        if re.match(r"^\d+\.\s", line):
+            text = _entry_text(line)
+            if text:
+                listed.append(text)
+    return listed
+
+
+def _bulleted_after_host_questions(recording: str) -> list[str]:
+    """The bulleted questions §5 attributes to the host: the bullet list the sentence introduces.
+
+    Two properties, both measured:
+
+    * **The bound is the contiguous run of bullets** that follows the sentence, not the rest of the
+      section. The section is one home for several subjects, and once it carried a second list the
+      wider bound read that one too: the count stayed right only because the other subject's items
+      are table rows rather than bullets, so a single bullet added there would redden this pin and
+      blame the host's list for a change that never touched it. A false red is how a guard gets
+      weakened, so the slice names the list it claims and stops where that list stops.
+    * **An entry is read by its marker**, with the emphasis stripped afterwards. Reading only bolded
+      entries made a plain one invisible, which is the same defect one layer down.
+    """
+    parts = recording.split(_HOST_ANCHOR, 1)
+    assert len(parts) == 2, (
+        f"§5 no longer carries the sentence naming the host's own questions ({_HOST_ANCHOR!r}), so a "
+        "count taken from that part of the section would be a count of the wrong list"
+    )
+    listed: list[str] = []
+    for line in parts[1].split("\n"):
+        if not line.startswith("- "):
+            if listed:
+                break
+            continue
+        text = _entry_text(line)
+        if text:
+            listed.append(text)
+    return listed
+
+
+def _claim(section: str, pattern: str) -> int:
+    """The count a sentence states, as an int, or a failure naming what is missing."""
+    found = re.search(pattern, section)
+    assert found, (
+        f"§5 no longer states the count matching {pattern!r}. The sentence is what tells a round how "
+        "many items it owes, so a section without one cannot be read as owing any"
+    )
+    return _as_count(found.group(1))
+
+
+def test_the_closing_summary_counts_the_self_review_questions_it_lists() -> None:
+    """The sentence and the numbered list it introduces are one fact, read as one."""
+    recording = _recording(PROMPT.read_text(encoding="utf-8"))
+    listed = _numbered(recording)
+    assert listed, (
+        "§5 lists no numbered self-review questions, so a count taken from it compares against "
+        "nothing"
+    )
+    claimed = _claim(recording, _SELF_REVIEW_CLAIM)
+    assert claimed == len(listed), (
+        f"§5 claims {claimed} self-review questions and lists {len(listed)} — the count and the "
+        f"list have drifted apart: {listed!r}"
+    )
+
+
+def test_the_host_questions_count_is_the_number_the_section_says() -> None:
+    """The second count is measured apart from the first: it introduces a different list."""
+    recording = _recording(PROMPT.read_text(encoding="utf-8"))
+    listed = _bulleted_after_host_questions(recording)
+    assert listed, (
+        "§5 states how many questions the host asked for and then lists none, so the claim stands "
+        "without a subject"
+    )
+    claimed = _claim(recording, _HOST_CLAIM)
+    assert claimed == len(listed), (
+        f"§5 claims {claimed} questions the host asked for and lists {len(listed)} — {listed!r}"
+    )
+
+
+def test_the_closing_summary_count_pins_discriminate_in_both_directions() -> None:
+    """The failure the live template cannot supply, applied to synthetic text.
+
+    A pin that only reads the live file passes today whether or not it could ever fail. These arms
+    supply both errors it exists for — a list edited without its sentence, and a sentence edited
+    without its list — plus the opposite error: a count that quietly widened to a neighbouring list
+    would read the first two arms green while measuring the wrong thing.
+    """
+    section = (
+        "### 5. Recording\n\n"
+        "**Two questions the closing summary must answer**:\n\n"
+        "1. **First?**\n"
+        "2. **Second?**\n\n"
+        "**Two more the host asked for by name.**\n\n"
+        "- **Third?**\n"
+        "- **Fourth?**\n"
+    )
+
+    assert len(_numbered(section)) == 2
+    assert _claim(section, _SELF_REVIEW_CLAIM) == len(_numbered(section))
+    assert len(_bulleted_after_host_questions(section)) == 2
+    assert _claim(section, _HOST_CLAIM) == len(_bulleted_after_host_questions(section))
+
+    # a list grows and its sentence does not
+    grown = section.replace("2. **Second?**\n", "2. **Second?**\n3. **Third?**\n")
+    assert len(_numbered(grown)) == 3
+    assert _claim(grown, _SELF_REVIEW_CLAIM) != len(_numbered(grown))
+
+    # the sentence grows and the list does not
+    claim_only = section.replace("**Two questions", "**Three questions")
+    assert _claim(claim_only, _SELF_REVIEW_CLAIM) != len(_numbered(claim_only))
+
+    # the host's list grows and its sentence does not
+    host_grown = section + "- **Fifth?**\n"
+    assert len(_bulleted_after_host_questions(host_grown)) == 3
+    assert _claim(host_grown, _HOST_CLAIM) != len(_bulleted_after_host_questions(host_grown))
+
+    # a bullet placed BEFORE the host sentence belongs to no counted list, so it moves nothing
+    before = section.replace(
+        "**Two more the host", "- **A decoy bullet**\n\n**Two more the host"
+    )
+    assert len(_bulleted_after_host_questions(before)) == 2
+    assert _claim(before, _HOST_CLAIM) == len(_bulleted_after_host_questions(before))
+
+    # a bullet in a LATER subject of the same section belongs to that subject, not this list.
+    # This is the arm that pins the bound: read to the end of the section, it would count three and
+    # redden the host's pin for a change that never touched it.
+    later = section + "\n**A different subject, in the same section.**\n\n- **Not a host question?**\n"
+    assert len(_bulleted_after_host_questions(later)) == 2, (
+        "a bullet belonging to a later subject in the same section was counted as one of the host's "
+        "questions — the slice is reading past the list its sentence introduces"
+    )
+    assert _claim(later, _HOST_CLAIM) == len(_bulleted_after_host_questions(later))
+
+    # a numbered entry added in PLAIN text moves the count too. An earlier reader matched the
+    # emphasis rather than the marker, so this arm went green while the list had grown — the drift
+    # the pin exists for walked past it, which is the one failure a guard may not have.
+    plain = section.replace("2. **Second?**\n", "2. **Second?**\n3. Third?\n")
+    assert len(_numbered(plain)) == 3, (
+        "a numbered entry added without bold produced no new entry — the reader is matching the "
+        "emphasis instead of the marker, and a list can grow while its count reads green"
+    )
+    assert _claim(plain, _SELF_REVIEW_CLAIM) != len(_numbered(plain))
+
+    # the same defect one layer down: a host question added in plain text
+    host_plain = section + "- Fifth?\n"
+    assert len(_bulleted_after_host_questions(host_plain)) == 3, (
+        "a bulleted entry added without bold produced no new entry — the host's list can grow while "
+        "its count reads green"
+    )
+    assert _claim(host_plain, _HOST_CLAIM) != len(_bulleted_after_host_questions(host_plain))
+
+    # emphasis is formatting, not length: an entry that is bolded in part still counts once
+    partial = section.replace("2. **Second?**\n", "2. **Second?**\n3. a **half-bold** entry\n")
+    assert len(_numbered(partial)) == 3
+
+    # a count this pin cannot read is refused rather than defaulted
+    with pytest.raises(AssertionError, match="cannot read as a number"):
+        _claim(section.replace("**Two questions", "**7 questions"), _SELF_REVIEW_CLAIM)
