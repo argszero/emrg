@@ -30,10 +30,21 @@ five load-bearing phrases stayed in the file and none reached the render.
 A citation this rule does not carry
 ----------------------------------
 The rule is written as the template's own reasoning, with no host attribution,
-because no message states it for this task: `find-host-message.py --pattern
-'禁止降频'` answers `NOT FOUND` over the span its logs cover (2026-10-23 →
-2026-10-26). `scripts/check-rant-citations.py` already scans this file, so a
-citation added later without a public record reddens there — the attribution rule is
+because no message states it as a directive for this task. Two readings, both taken
+on this tree on 2026-10-26: `--pattern '禁止降频'` answers `NOT FOUND`, while
+`--pattern '降频'` finds 25 messages and none of them on 2026-10-06 — the date
+`competition_prompt.md` cites. So the competition file's own citation cannot be
+resolved from here, and the reason is the corpus rather than the host: the daemon log
+keeps only a message's first 60 characters, and the sessions reach back to 2026-07-15.
+A `NOT FOUND` is therefore a statement about what the record holds, never about what
+the host said.
+
+What the host did say, and findably, is the question this section answers —
+`2026-10-23 20:20:51`, session `s_260727_1103_866d`, 「支持特定任务不降频吗？」, whether
+a specific task can be exempt from the slowdown. A question is not a directive, so it
+is the occasion for the rule and not its authority; the authority is the task's own
+purpose. `scripts/check-rant-citations.py` already scans this file, so an attribution
+added later without a public record reddens there — the attribution rule is
 mechanised, and nothing here restates it.
 """
 
