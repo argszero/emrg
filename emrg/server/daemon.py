@@ -3039,6 +3039,7 @@ class EmrgServer:
                 description=msg.get("description"),
                 sandbox=msg.get("sandbox"),
                 schedule=msg.get("schedule"),
+                when=msg.get("when"),
             )
             if not ok:
                 await self._send(ws, {"type": "task_result", "error": res})
@@ -3054,7 +3055,12 @@ class EmrgServer:
             if not self._scheduler:
                 await self._send(ws, {"type": "task_result", "error": "scheduler not running"})
                 return
-            fields = {k: msg[k] for k in ("task_type", "agent", "interval", "enabled", "repo", "description", "sandbox", "schedule") if k in msg}
+            # This list is the wire's whole vocabulary: a key it omits is a field a
+            # client cannot edit, whatever the scheduler supports — which is how
+            # `schedule` was once silently dropped (#2490). `when` is here for the same
+            # reason `schedule` is (issue #2592), and a key the message omits still
+            # leaves that field alone.
+            fields = {k: msg[k] for k in ("task_type", "agent", "interval", "enabled", "repo", "description", "sandbox", "schedule", "when") if k in msg}
             if "task_type" in fields:
                 fields["type"] = fields.pop("task_type")
             ok, res = self._scheduler.task_update(msg.get("name", "").strip(), **fields)

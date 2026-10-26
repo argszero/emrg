@@ -38,6 +38,20 @@ _ALLOWED_STATUS_TRANSITIONS = {
 }
 
 
+def default_rants_log() -> Path:
+    """The ledger this installation writes — the one derivation of its path.
+
+    Two readers had spelled `config_dir() / "rants.jsonl"` for themselves: the
+    ``submit_rant`` tool and the path policy. A third reader is arriving with the
+    scheduler's ``rant`` wake condition (issue #2592), and three copies of a path is how
+    a reader comes to watch a file nobody writes. The import is local because
+    ``emrg.config`` is imported by nearly everything and this module is imported early.
+    """
+    from emrg.config import config_dir
+
+    return config_dir() / "rants.jsonl"
+
+
 def _normalize_rant(raw) -> dict | None:
     """Normalize one parsed line to the canonical 6-field dict.
 

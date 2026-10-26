@@ -159,6 +159,23 @@ A confined run cannot write your home directory, which is where `uv`, `pip` and 
 
 Inside a window that window's `interval` answers; outside every window and between windows the top-level one does, so one instant never has two answers. Times are **local time only** — read with `datetime.now()`, with no timezone field and no DST rule — so the windows follow the host's clock; there are no public holidays and no make-up workdays, only the weekdays a window names (`fri-mon` wraps around the week). A wait that would run past the next edge is **cut to it**: a 3-hour weekend cadence that begins at 06:59 wakes at 09:00 rather than sleeping through the window it was about to enter, and a restart inside a window does not drop the task to the out-of-window frequency. Two windows of one day may not overlap, a window crossing midnight is written as two windows, and every field is validated when the file is read — a bad window is refused with the value it refused and the shape it expects. The daemon's create/update path and the task listing carry the same shape (`effective_interval` and `next_window_boundary_in_seconds` in `list_tasks`); until a client can edit windows, hand-editing this file is how to set one, and the scheduler picks the change up at the task's next wake.
 
+**A task that runs when there is something to do** (`when` in `~/.emrg/tasks.yml`): `interval` says how often a task runs on its own initiative, and a fixed cadence is the wrong instrument for a pulse — a task polling an inbox every four hours is hours late for a message that arrived a minute after its last run, and a task on a short interval burns a whole agent round to discover that nothing arrived. `when` is an optional mapping from a built-in condition name to a number of seconds — "while this holds, run the task again at most this long after its last run":
+
+```yaml
+- name: feishu-inbox
+  interval: 14400
+  when:
+    feishu: 300        # an @, an @all, or a direct message needs the host
+- name: some-evolution-task
+  interval: 14400
+  when:
+    rant: 600          # this task's agent carries a rant that is not completed
+```
+
+It only ever advances a run: `interval` and `schedule` still decide the task's own cadence, `when` never suppresses a run the task would have taken anyway, and a record without `when` behaves exactly as before. The condition names are built in (`emrg/server/wake.py` holds the table) — a host writes a name and a number of seconds, never a command, a script or a function name, and an unknown name, a `0`, a negative number or a value under the `60`-second floor is refused with the value it refused and the shape it expects. A condition answers *holds*, *absent* or *cannot tell*; *cannot tell* — an unauthenticated `lark-cli`, an unreadable rant log — leaves the task asleep and logs the reason, because "could not read it" says nothing about whether the host is being asked for something.
+
+Unlike `schedule`, this is a **poll**: the scheduler already sleeps for the task's own wait, so the shortest `when` value takes a slot inside that wait and each condition is consulted on its own clock. A poll that finds nothing re-arms the remainder of the task's own cadence rather than restarting it, so `next_run_at` keeps reporting the real run and a condition cannot push that run out. A wake that would land while the task is already running is harmless — the poll happens outside the cycle, so it neither interrupts the cycle nor marks anything read, and the condition is judged again next time. `feishu` keeps a watermark under `~/.emrg/wake-state/<task>.json` because Feishu reports message times to the minute and a time cannot be a cursor: consecutive polls overlap deliberately and a message id is what decides. The daemon's create/update path and its wire handlers carry the field, so editing another field in a client cannot drop it, and hand-editing the file remains how to set one.
+
 ---
 
 ## 🏗️ Architecture
