@@ -31,21 +31,29 @@ A citation this rule does not carry
 ----------------------------------
 The rule is written as the template's own reasoning, with no host attribution,
 because no message states it as a directive for this task. Two readings, both taken
-on this tree on 2026-10-26: `--pattern '禁止降频'` answers `NOT FOUND`, while
-`--pattern '降频'` finds 25 messages and none of them on 2026-10-06 — the date
-`competition_prompt.md` cites. So the competition file's own citation cannot be
-resolved from here, and the reason is the corpus rather than the host: the daemon log
-keeps only a message's first 60 characters, and the sessions reach back to 2026-07-15.
-A `NOT FOUND` is therefore a statement about what the record holds, never about what
-the host said.
+with `scripts/find-host-message.py` on 2026-10-26: `--pattern '禁止降频'` answers
+`NOT FOUND`, while `--pattern '降频'` finds 25 messages and none of them on
+2026-10-06 — the date `competition_prompt.md` cites. So the competition file's own
+citation cannot be resolved from here, and the reason is the corpus rather than the
+host: the daemon log keeps only a message's first 60 characters.
 
-What the host did say, and findably, is the question this section answers —
-`2026-10-23 20:20:51`, session `s_260727_1103_866d`, 「支持特定任务不降频吗？」, whether
-a specific task can be exempt from the slowdown. A question is not a directive, so it
-is the occasion for the rule and not its authority; the authority is the task's own
-purpose. `scripts/check-rant-citations.py` already scans this file, so an attribution
-added later without a public record reddens there — the attribution rule is
-mechanised, and nothing here restates it.
+Those counts are readings over the span that run reported, not a property of this
+tree. The instrument states that span in its own header — how many log files it read,
+and how many session directories hold a history, with the first and last instant of
+each — and both numbers are the installation's, so a reader elsewhere reproduces the
+reading's shape rather than its digits. A `NOT FOUND` is therefore a statement about
+what the record holds, never about what the host said.
+
+What the host did say — `2026-10-23 20:20:51`, 「支持特定任务不降频吗？」, whether a
+specific task can be exempt from the slowdown — is the question this section answers.
+A question is not a directive, so it is the occasion for the rule and not its
+authority; the authority is the task's own purpose. The quotation is carried for what
+it asks and is not offered as evidence another installation could open, because the
+session id holding it resolves only in the record where it was spoken.
+`scripts/check-rant-citations.py` scans `emrg/server/feishu_prompt.md` — the template
+is in that guard's `INSTRUCTION_FILES` — so an attribution added to it without a
+public record reddens there. The attribution rule is mechanised, and nothing here
+restates it.
 """
 
 from __future__ import annotations
