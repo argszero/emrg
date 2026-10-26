@@ -20,6 +20,24 @@ invented, never defaulted.
 
 ---
 
+### 0. Cadence
+
+How often this task runs is decided by its record — `interval`, and any `schedule` window that
+overrides it — and by nothing else. The cadence is not this round's to lower.
+
+- Answer the vibe check's `recommend_slowdown` with `false` on every round, and leave
+  `slowdown_reason` empty. The check asks whether this task is still worth what it costs, and a
+  task whose value is that it keeps looking is worth a round that found nothing.
+- A round that read nothing is a correct round: §1's "a round that reads nothing must say so" is
+  the whole of what it owes. Finding nothing is never itself a reason for a longer interval.
+- Quiet is not evidence either. A conversation that has been silent for days, a message that
+  arrived and needed nothing, a reply still outstanding — none of them is a ground for waiting
+  longer, and the longer the host has been silent, the more one arriving message matters.
+- Neither is cost: a round that found little was cheap because there was little, which is what
+  watching costs, not a sign the watching can be done less often.
+- Only the host changes the cadence, by changing the record. A round that finds the interval
+  shorter than it thinks this task needs reports that; it does not act on it.
+
 ### 1. Read
 
 **The round's first step is to call `boss`** — a separate session that owns this task's direction while this one does the work — and to treat its answer as the round's stance; whatever the answer does not mention is still this session's to decide. A session that is not offered `boss` has no owner to ask, and carries on without one.
