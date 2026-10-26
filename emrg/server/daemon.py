@@ -107,6 +107,7 @@ from emrg.session import (
     last_n_messages,
     records_to_messages,
     session_dir,
+    session_id_refusal_reason,
 )
 
 
@@ -2880,16 +2881,24 @@ class EmrgServer:
         directory one level above the agent root and started its turn, telling the
         client nothing. Both call sites ask this method, so the rule has one writer even
         though it has two doors.
+
+        The sentence the client reads is `session_id_refusal_reason`'s, because the rules
+        are not all about shape: a reserved device name (`con`, `nul`, `com1`, with or
+        without an extension) is one path component and names no directory on Windows,
+        and a name ending in a space or a dot names a different directory than it says.
         """
         if not session_id or is_safe_session_id(session_id):
             return False
+        # The reason, not a fixed sentence: `a session id is one path component` is true of
+        # a path escape and false of a device name, which is exactly one component and
+        # still names no directory (issue #2598).
+        reason = session_id_refusal_reason(session_id)
         logger.warning(
-            "refused a %r message carrying session id %r: a session id is one "
-            "path component inside <cwd>/.emrg/sessions", msg_type, session_id,
+            "refused a %r message carrying session id %r: %s",
+            msg_type, session_id, reason,
         )
         await self._send(ws, {
-            "error": f"invalid session id: {session_id!r} (a session id is "
-                     f"one path component)",
+            "error": f"invalid session id: {session_id!r} ({reason})",
         })
         return True
 
