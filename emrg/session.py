@@ -315,6 +315,71 @@ def _refuse_a_non_regular_subject(path: Path) -> None:
 #: whichever platform runs it.
 _NAME_SEPARATORS = ("/", "\\")
 
+#: Names Windows resolves to a device rather than to a directory, so `mkdir` answers
+#: `NotADirectoryError [WinError 267]` — an operating-system error about a name the
+#: predicate had already accepted. An extension does not help (`con.txt` is the console
+#: too), which is why the base name is what gets judged. `COM0`, `COM10` and `LPT0` are
+#: not in the set, and neither is a name that merely contains one (`console`).
+_RESERVED_DEVICE_BASES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{i}" for i in range(1, 10)}
+    | {f"lpt{i}" for i in range(1, 10)}
+)
+
+#: What Windows does to the *end* of a name: it strips trailing spaces and dots, so an id
+#: ending in one names a directory the id does not spell.
+_TRAILING_STRIPPED = (" ", ".")
+
+
+class UnsafeSessionId(ValueError):
+    """A session id that names no directory, carrying the rule it broke.
+
+    Raised where a directory would otherwise be attempted, so a caller reads the name as
+    the cause instead of a platform error about a path it never chose.
+    """
+
+
+def session_id_refusal_reason(session_id: object) -> str | None:
+    """The rule `session_id` breaks, or `None` when it names one entry in the directory.
+
+    One producer for the rule **and** for the sentence that reports it: the daemon sends
+    this text to the client, `Session.delete` logs it and `create_with_id` raises it, so
+    the three cannot drift into three accounts of one refusal — and the daemon cannot go
+    on saying "one path component" about a device name, which *is* one.
+
+    Platform-independent on purpose, on the predicate's existing ground: an id reaches a
+    path on whichever platform runs it, and a name that names no directory on one of them
+    is not portable. So the device set and the trailing-strip rule are refused on every
+    host, not only on Windows — a POSIX leg that accepted them would certify an id its
+    Windows leg cannot create.
+
+    The bound that follows, stated rather than hidden: an id whose directory already
+    exists on a platform where it can is refused when deleted, because the refusal is
+    about the name. `Session.load` does not consult this, so a directory already on disk
+    keeps loading.
+    """
+    if not isinstance(session_id, str) or not session_id:
+        return "a session id is a non-empty name"
+    if "\0" in session_id:
+        return "a name no filesystem accepts: it carries a NUL"
+    if session_id in (".", ".."):
+        return "a session id is one path component"
+    if any(sep in session_id for sep in _NAME_SEPARATORS):
+        return "a session id is one path component"
+    if os.path.splitdrive(session_id)[0] or ntpath.splitdrive(session_id)[0]:
+        return "a session id is one path component"
+    if session_id.split(".", 1)[0].lower() in _RESERVED_DEVICE_BASES:
+        return (
+            "a device name is one path component, but it names no directory on Windows "
+            "(CON, PRN, AUX, NUL, COM1-COM9, LPT1-LPT9, with or without an extension)"
+        )
+    if session_id[-1] in _TRAILING_STRIPPED:
+        return (
+            "Windows strips a trailing space or dot, so the directory this id names is "
+            "not the one it says"
+        )
+    return None
+
 
 def is_safe_session_id(session_id: object) -> bool:
     """True when `session_id` names exactly one entry inside the sessions directory.
@@ -330,16 +395,15 @@ def is_safe_session_id(session_id: object) -> bool:
     separator, and no drive. The drive is asked of **both** flavours — `os.path.splitdrive`
     answers `("", "C:evil")` on this host and `ntpath.splitdrive` answers `("C:", "evil")`,
     and a `C:`-relative id is a path, not a name, on the platform that can receive it.
+
+    The rules themselves live in `session_id_refusal_reason`, which also says *which* one
+    fired: a name can be one path component and still name no directory — `con` is one
+    component on Windows and is the console there, and `a ` loses its space. Measured
+    2026-10-26 on Windows Server 2022: this function answered True for `con`, `CON`,
+    `con.txt`, `com1` and `nul`, and the mkdir that followed raised `NotADirectoryError
+    [WinError 267]` naming the platform rather than the id.
     """
-    if not isinstance(session_id, str) or not session_id:
-        return False
-    if "\0" in session_id or session_id in (".", ".."):
-        return False
-    if any(sep in session_id for sep in _NAME_SEPARATORS):
-        return False
-    if os.path.splitdrive(session_id)[0] or ntpath.splitdrive(session_id)[0]:
-        return False
-    return True
+    return session_id_refusal_reason(session_id) is None
 
 
 def session_dir(cwd: Path, session_id: str) -> Path:
@@ -517,7 +581,15 @@ class Session:
 
     @classmethod
     def create_with_id(cls, session_id: str, cwd: Path) -> Session:
-        """Create a new session with a specific session ID (from client)."""
+        """Create a new session with a specific session ID (from client).
+
+        The id is asked **before** the session is constructed, because constructing one
+        creates its directory: a refused name would reach `mkdir` and come back as a
+        platform error naming neither the id nor the rule it broke (issue #2598).
+        """
+        reason = session_id_refusal_reason(session_id)
+        if reason is not None:
+            raise UnsafeSessionId(f"{session_id!r} cannot name a session: {reason}")
         session = cls(session_id, cwd)
         now = datetime.now().isoformat()
         session._created_at = now
@@ -1236,11 +1308,10 @@ class Session:
         """
         import shutil
 
-        if not is_safe_session_id(session_id):
+        reason = session_id_refusal_reason(session_id)
+        if reason is not None:
             logger.warning(
-                "refusing to delete a session named %r: a session id is one path "
-                "component, so nothing outside the sessions directory is reachable",
-                session_id,
+                "refusing to delete a session named %r: %s", session_id, reason,
             )
             return False
 
