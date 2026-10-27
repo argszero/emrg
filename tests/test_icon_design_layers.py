@@ -17,8 +17,10 @@ shipped:
    shipped file. Under the default `objectBoundingBox` units each branch resolves
    the gradient against its own bounding box, and the illumination points a
    different way per branch.
-3. **Four nodes.** A fifth branch close to its neighbours shrinks to a blob
-   below 128 px.
+3. **Four nodes, one per branch.** A fifth branch close to its neighbours shrinks
+   to a blob below 128 px; a branch that arrives bare, or a node beside the fan,
+   breaks the same count. Which layer is a node's is read from the document — the
+   largest circle where a branch arrives — so no id and no size is fixed here.
 4. **The body rectangle.** 56 inset, 912 square, `rx` 206 on a 1024 canvas — the
    shape every platform clips an app icon into.
 
@@ -48,13 +50,12 @@ NS = "{http://www.w3.org/2000/svg}"
 #: How many branches the fan has, and therefore how many nodes.
 BRANCHES = 4
 
-#: A node's **glow halo** — the one layer of a node's three that exists exactly once
-#: per node, and the only one named by what it is rather than by a size. On the
-#: shipped file the halo is `r="88"`, the body `r="42"` and the highlight `r="15"`,
-#: so counting by radius counted the halo while calling it the body, and resizing a
-#: node — a redesign that keeps four nodes — read as the fan losing all of them.
-#: The bodies cannot serve this purpose: the hub has one, and the hub is not a node.
-NODE_HALO_FILL = "url(#nodeGlow)"
+#: No constant names a node, because a node has no name in the design: it is a place
+#: a branch arrives. Counting one named its layer's gradient id, so a fan whose
+#: per-node layer was renamed coherently — the gradient and every `fill` that uses
+#: it, nothing else touched — was refused as having no nodes at all. That is the
+#: same fault as counting a radius, one constant over: an id is a name, and the
+#: property is that each branch ends in a node shaped like the others.
 
 #: The app-icon body: 1024 canvas, inset 56, so a 912 square with a 206 radius.
 BODY = {"x": "56", "y": "56", "width": "912", "height": "912", "rx": "206"}
@@ -66,6 +67,18 @@ def _start_point(element: ET.Element) -> tuple[float, float] | None:
     if match is None:
         return None
     return (float(match.group(1)), float(match.group(2)))
+
+
+def _end_point(element: ET.Element) -> tuple[float, float] | None:
+    """Where a path arrives, in user units; `None` when its `d` does not say.
+
+    The last coordinate pair is where the branch lands, which is where its node is.
+    """
+    pairs = re.findall(r"(-?\d+(?:\.\d+)?)[\s,]+(-?\d+(?:\.\d+)?)", element.get("d") or "")
+    if not pairs:
+        return None
+    x, y = pairs[-1]
+    return (float(x), float(y))
 
 
 def _centre(element: ET.Element) -> tuple[float, float] | None:
@@ -200,19 +213,70 @@ def faults(svg_text: str) -> list[str]:
             f"{max(branches)}), or the branch caps smear across its face"
         )
 
-    # 3. One node per branch. Counted by the layer that exists once per node, so a
-    # node resized is still a node; a node the fan does not have still reads as one
-    # the fan is missing.
-    haloes = [
-        element
-        for element in elements
-        if element.tag == NS + "circle" and element.get("fill") == NODE_HALO_FILL
-    ]
-    if len(haloes) != BRANCHES:
+    # 3. One node per branch, read from where the branches arrive rather than from a
+    # name or a size. Nothing here says what a node's layer is called or how big it
+    # is: a node is a place a branch ends, its outermost layer is whatever is largest
+    # there, and the property is that the fan's nodes are shaped alike. A renamed or
+    # resized node therefore passes, while a node missing from one branch, an extra
+    # one where no branch ends, or a fan of uneven nodes is refused.
+    arrivals = sorted(
+        {
+            point
+            for i in branches
+            if (point := _end_point(elements[i])) is not None
+        }
+    )
+    outermost: dict[tuple[float, float], float | None] = {}
+    for point in arrivals:
+        at_node = [
+            float(element.get("r"))
+            for element in elements
+            if element.tag == NS + "circle"
+            and _centre(element) == point
+            and element.get("r") is not None
+        ]
+        outermost[point] = max(at_node) if at_node else None
+
+    if len(arrivals) != BRANCHES:
         problems.append(
-            f"the fan has {len(haloes)} node halo(s) painted with {NODE_HALO_FILL}, "
-            f"expected {BRANCHES}"
+            f"the fan's branches arrive at {len(arrivals)} point(s), expected "
+            f"{BRANCHES}, so it cannot carry one node per branch"
         )
+    if not outermost:
+        problems.append(
+            "no node can be read: no branch's path says where it arrives, so the "
+            "fan's node count cannot be measured from this document"
+        )
+    else:
+        bare = [point for point, size in outermost.items() if size is None]
+        if bare:
+            problems.append(
+                f"a branch arrives at {bare[0][0]:g}, {bare[0][1]:g} where no node is "
+                "painted, so that branch ends bare"
+            )
+        sizes = sorted({size for size in outermost.values() if size is not None})
+        if len(sizes) > 1:
+            problems.append(
+                f"the fan's nodes are not shaped alike: their outermost layers measure "
+                f"{', '.join(f'{size:g}' for size in sizes)}, so at least one node is "
+                "missing its outer layer or carries a second one"
+            )
+        if sizes:
+            stray = [
+                _centre(element)
+                for element in elements
+                if element.tag == NS + "circle"
+                and element.get("r") is not None
+                and float(element.get("r")) == sizes[-1]
+                and _centre(element) not in outermost
+            ]
+            if stray:
+                problems.append(
+                    f"a node layer of {sizes[-1]:g} sits at "
+                    f"{stray[0][0]:g}, {stray[0][1]:g} where no branch ends: the fan "
+                    f"has {len(arrivals)} node(s) for {len(arrivals) + len(stray)} "
+                    "painted, so a fifth sits beside the four"
+                )
 
     # 2. One light for the fan: the gradient its branches reference, in user space,
     # centred on the hub they leave.
@@ -443,5 +507,70 @@ def test_the_check_accepts_a_fan_lit_by_a_renamed_gradient() -> None:
     problems = faults(renamed)
     assert problems == [], (
         "the check refuses a fan whose one gradient was renamed:\n"
+        + "\n".join(f"  - {problem}" for problem in problems)
+    )
+
+
+def test_the_check_accepts_a_fan_whose_node_layer_was_renamed() -> None:
+    """A node's layer is named too, and its name is no more a property than the
+    gradient's: renamed at the gradient and at every `fill` that uses it, the fan is
+    the same fan with four nodes.
+
+    This is the arm that was missing when the count was pinned to `url(#nodeGlow)`.
+    The file already held that an id is a name for the light, and broke the rule one
+    constant over for the nodes — a rename is a rename whichever layer carries it.
+    """
+    text = SVG.read_text(encoding="utf-8")
+    renamed = text.replace("nodeGlow", "nodeHalo")
+    assert renamed != text and "nodeGlow" not in renamed, (
+        "the substitution did not apply, so this arm measures nothing"
+    )
+    assert renamed.count("url(#nodeHalo)") == text.count("url(#nodeGlow)"), (
+        "the rename must reach the gradient and every fill that uses it, found "
+        f"{renamed.count('url(#nodeHalo)')} of {text.count('url(#nodeGlow)')}"
+    )
+
+    problems = faults(renamed)
+    assert problems == [], (
+        "the check refuses a fan whose per-node layer was renamed, though every "
+        "property holds:\n" + "\n".join(f"  - {problem}" for problem in problems)
+    )
+
+
+def test_the_check_refuses_a_node_missing_its_outer_layer() -> None:
+    """One branch arriving at a node that is not shaped like the rest: refused.
+
+    The rename arm above must not be bought by making the count vacuous. A node whose
+    outermost layer is gone still has a body and a highlight where its branch lands,
+    so a count of places would call it a node; what marks it is that the four are no
+    longer alike.
+    """
+    text = SVG.read_text(encoding="utf-8")
+    dropped = text.replace(
+        '  <circle cx="316" cy="508" r="88" fill="url(#nodeGlow)"/>\n', "", 1
+    )
+    assert dropped != text, "the substitution did not apply, so this arm measures nothing"
+
+    problems = faults(dropped)
+    assert any("not shaped alike" in problem for problem in problems), (
+        "the check accepted a node that lost its outer layer; it reports:\n"
+        + "\n".join(f"  - {problem}" for problem in problems)
+    )
+
+
+def test_the_check_refuses_a_node_beside_the_fan() -> None:
+    """A fifth node where no branch ends: refused, since four nodes are the design."""
+    text = SVG.read_text(encoding="utf-8")
+    added = text.replace(
+        '  <circle cx="708" cy="508" r="88" fill="url(#nodeGlow)"/>',
+        '  <circle cx="708" cy="508" r="88" fill="url(#nodeGlow)"/>\n'
+        '  <circle cx="820" cy="650" r="88" fill="url(#nodeGlow)"/>',
+        1,
+    )
+    assert added != text, "the substitution did not apply, so this arm measures nothing"
+
+    problems = faults(added)
+    assert any("where no branch ends" in problem for problem in problems), (
+        "the check accepted a node beside the fan; it reports:\n"
         + "\n".join(f"  - {problem}" for problem in problems)
     )
