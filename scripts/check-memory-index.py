@@ -63,7 +63,7 @@ apart, the two both read `- ` and a table index fell between them, so the trigge
 drew no note at all while four of that index's rows were past the bound (measured
 2026-10-01 on this host).
 
-Four readings, each from its own source
+Five readings, each from its own source
 ---------------------------------------
 The line **cap** is `MEMORY_INDEX_ROW_CAP` and the row **bound** is
 `INDEX_TITLE_MAX_CHARS`, both imported here rather than spelled again: they are
@@ -98,6 +98,21 @@ a clean verdict about rows the tool had not looked at. A reading that cannot see
 rows must not print a number that reads like all of them are within the bound; the two
 shapes above are what closes it, and the budget reading below is what covers the file
 whatever shape its rows are in.
+
+The **cell count** is the fifth, and its source is the table syntax rather than this
+rule's text. A row is a row, but a row whose cells do not match its header's is not the
+row a reader sees: GitHub splits a table line on every unescaped pipe *before* it renders
+anything, so a cell that quotes `||` inside a code span ends that cell early and pushes
+the rest of the line into cells the header never declared. Measured 2026-10-27 on this
+host: `.emrg/memory/MEMORY.md`'s `sandbox-shell` row carries 8 bare pipes against a
+5-cell header - **7 cells against 5** - and this tool printed `rows 10, longest 511
+chars, over 512: 0` and `OK`, because neither a length nor a line count can see a cell
+boundary. The cells are split by `emrg.memory.index_row_cells`, in the module that owns
+the row shape, so "which lines are rows" and "how many cells does this row have" are one
+definition rather than two that can drift. **Both directions fault**: too many cells (a
+pipe that needed escaping) and too few (a cell that was dropped). An escaped `\\|` is
+content and does not split, which is what lets the finding name the repair instead of
+only the symptom.
 
 Scope, named rather than implied
 --------------------------------
@@ -162,8 +177,9 @@ Exit codes
        rows carry none is a clean verdict about the three numbers and says so, rather
        than a claim about links nothing looked at.
 ``1``  at least one index is over a number the rule names (the line cap, the embed
-       budget, or a row past the bound), or carries a row link that resolves to no
-       file; each finding is printed with the line it is on.
+       budget, or a row past the bound), or carries a row whose cell count does not
+       match its header's, or a row link that resolves to no file; each finding is
+       printed with the line it is on.
 ``2``  nothing could be measured: no index under the tree, or a named index could
        not be read. An unreadable subject makes the reading incomplete, which is
        reported as such even when the other indexes were read - a partial reading
@@ -243,6 +259,10 @@ try:
     # reading this tool prints and the instruction an agent receives count the same
     # lines. Spelled separately once - both as `- ` - a table index fell between them.
     is_index_row = _memory_module.is_index_row
+    # The cells are the same module's answer for the same reason: a row's cell boundaries
+    # are part of what "a table row" means, and a second splitter here would be a second
+    # spelling of the escape rule, free to disagree with the shape definition beside it.
+    index_row_cells = _memory_module.index_row_cells
     THRESHOLD_SOURCE = str(Path(_memory_module.__file__).resolve())
     if not Path(THRESHOLD_SOURCE).is_relative_to(REPO_ROOT):
         THRESHOLD_ERROR = (
@@ -255,6 +275,10 @@ except Exception as exc:  # noqa: BLE001 - reported by main(), never swallowed
     MEMORY_INDEX_ROW_CAP = 0
 
     def is_index_row(line: str) -> bool:  # pragma: no cover - main() returns first
+        """Unreachable: `main()` reports the import failure before any index is read."""
+        raise RuntimeError(THRESHOLD_ERROR)
+
+    def index_row_cells(line: str):  # pragma: no cover - main() returns first
         """Unreachable: `main()` reports the import failure before any index is read."""
         raise RuntimeError(THRESHOLD_ERROR)
 
@@ -313,6 +337,13 @@ class Reading(NamedTuple):
     :param row_targets: every file link a row carries, as
         `(file line number, target)`, in file order - the resolution reading's
         subject. Excludes what `NON_FILE_TARGET` names.
+    :param cell_header: the file's table header, as `(file line number, cell count)`,
+        or `None` when the file carries no table row at all - which is the cell
+        reading's statement that it had no subject here.
+    :param cell_faults: the table rows whose cell count differs from the header's, as
+        `(file line number, that row's cells, the header's cells)`, in file order.
+        Both directions are faults: an unescaped pipe adds a cell, and a dropped one
+        removes a cell, and either way the row a reader sees is not the row written.
     """
 
     path: Path
@@ -321,6 +352,8 @@ class Reading(NamedTuple):
     row_lines: tuple[int, ...]
     row_lengths: tuple[int, ...]
     row_targets: tuple[tuple[int, str], ...] = ()
+    cell_header: Optional[tuple[int, int]] = None
+    cell_faults: tuple[tuple[int, int, int], ...] = ()
 
     @property
     def rows(self) -> int:
@@ -384,6 +417,7 @@ def measure(path: Path) -> Reading:
     row_lines: list[int] = []
     row_lengths: list[int] = []
     row_targets: list[tuple[int, str]] = []
+    table_rows: list[tuple[int, int]] = []
     for number, line in enumerate(lines, 1):
         if is_index_row(line):
             row_lines.append(number)
@@ -391,9 +425,26 @@ def measure(path: Path) -> Reading:
             for target in LINK.findall(CODE_SPAN.sub(" ", line)):
                 if not NON_FILE_TARGET.match(target):
                     row_targets.append((number, target))
+        cells = index_row_cells(line)
+        if cells is not None:
+            table_rows.append((number, len(cells)))
+    # The first table row is the header, and it is the one that states the file's width.
+    # One header per index is the shape this reading assumes, because an index is one
+    # table: a file carrying two tables of different widths is reported, and that
+    # report is a reader's question, not a fault this tool invents the answer to.
+    cell_header = table_rows[0] if table_rows else None
+    cell_faults = (
+        tuple(
+            (number, cells, cell_header[1])
+            for number, cells in table_rows[1:]
+            if cells != cell_header[1]
+        )
+        if cell_header is not None
+        else ()
+    )
     return Reading(
         path, len(lines), len(text), tuple(row_lines), tuple(row_lengths),
-        tuple(row_targets)
+        tuple(row_targets), cell_header, cell_faults
     )
 
 
@@ -448,6 +499,26 @@ def _report(reading: Reading) -> list[str]:
             f"  row at line {number} is {length} chars, "
             f"over the {INDEX_TITLE_MAX_CHARS} bound"
         )
+    if reading.cell_header is None:
+        out.append(
+            "  no table row, so the cell reading had no subject here - a `- ` list "
+            "index carries no header to count a row against"
+        )
+    else:
+        header_line, header_cells = reading.cell_header
+        out.append(
+            f"  table cells: header at line {header_line} has {header_cells}, "
+            f"rows mismatched: {len(reading.cell_faults)}"
+        )
+    for number, cells, expected in reading.cell_faults:
+        remedy = (
+            "a bare pipe splits a cell, and a literal one is written \\|"
+            if cells > expected
+            else "a cell is missing, and a table row carries every column its header does"
+        )
+        out.append(
+            f"  row at line {number}: cells {cells}, header {expected} - {remedy}"
+        )
     unresolved = reading.unresolved()
     out.append(
         f"  row links {len(reading.row_targets)}, unresolved: {len(unresolved)}"
@@ -494,12 +565,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                 else "the rule's numbers are unreadable from this interpreter, so "
                 "every run reports that instead of a count"
             )
-            + ", and every row link resolving to a file beside it."
+            + ", every table row's cells matching its header, and every row link "
+            "resolving to a file beside it."
         ),
         epilog=(
-            f"Exit 0: every index is within every number and every row link "
-            f"resolves. Exit 1: at least one is over one of them, or points at a "
-            f"file that is not there. Exit 2: nothing could be measured (no index "
+            f"Exit 0: every index is within every number, every table row's cells match "
+            f"its header, and every row link resolves. Exit 1: at least one is over one "
+            f"of them, carries a row whose cells do not match its header's, or points at "
+            f"a file that is not there. Exit 2: nothing could be measured (no index "
             f"under the tree, or a named index could not be read). Example: "
             f"{RUNNER} scripts/check-memory-index.py "
             "~/some/tree/.emrg/memory/MEMORY.md"
@@ -575,6 +648,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         if reading.lines > MEMORY_INDEX_ROW_CAP
         or reading.chars > INDEX_SIZE_WARN
         or reading.over(INDEX_TITLE_MAX_CHARS)
+        or reading.cell_faults
         or reading.unresolved()
     ]
     if not findings:
@@ -588,8 +662,24 @@ def main(argv: Optional[list[str]] = None) -> int:
         summary = (
             f"OK: {len(readings)} index(es) within the three numbers the rule names "
             f"({MEMORY_INDEX_ROW_CAP} lines, {INDEX_SIZE_WARN} chars, "
-            f"{INDEX_TITLE_MAX_CHARS} chars per row); "
+            f"{INDEX_TITLE_MAX_CHARS} chars per row)"
         )
+        # The cell reading carries its coverage for the reason the link clause below
+        # does: a summary is the line a reader takes, so it may not leave a reading it
+        # did not take looking like one it took. Measured 2026-10-27, the index this
+        # host embeds was a table and the summary said nothing about cells at all.
+        tables = [reading for reading in readings if reading.cell_header is not None]
+        if tables:
+            summary += (
+                f"; every table row's cell count matches its header "
+                f"({len(tables)} of {len(readings)} index(es) carry a table)"
+            )
+        else:
+            summary += (
+                "; the cell reading had no subject - no index read carries a table row, "
+                "so this is not a statement that any row's cells match its header's"
+            )
+        summary += "; "
         if not links_read:
             summary += (
                 "row links read: 0 - not one index read carries a ](target) link, so the "
@@ -612,7 +702,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     print(
         f"{len(findings)} of {len(readings)} index(es) over a number the rule names, "
-        "or carrying a row link that resolves nowhere; the rule is compacted in "
+        "carrying a row whose cells do not match its header's, or carrying a row link "
+        "that resolves nowhere; the rule is compacted in "
         "place, by the agent itself, and a stale row is rewritten or dropped when "
         "the detail file is gone"
     )

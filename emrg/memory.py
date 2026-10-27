@@ -245,6 +245,53 @@ def is_index_row(line: str) -> bool:
     return bool(_INDEX_ROW_TABLE.match(line)) and not _INDEX_ROW_TABLE_DELIMITER.match(line)
 
 
+def index_row_cells(line: str) -> tuple[str, ...] | None:
+    """The cells of a table-shaped row, or ``None`` when `line` is not one.
+
+    ``None`` and an empty tuple are different answers: ``None`` is "this line is not a
+    table row" (a ``- `` list row, prose, the delimiter row), while a table row always
+    carries at least one cell.
+
+    The split is written out rather than ``str.split("|")`` because a pipe may be
+    **escaped** — ``\\|`` is a literal pipe inside a cell, Markdown's own escape — and
+    counting it as a separator reads one cell as two. An inline code span does **not**
+    protect a pipe: GitHub's table syntax splits the row before it renders any span, so a
+    cell that quotes ``||`` inside backticks still breaks the table. Measured 2026-10-27
+    on this host: ``.emrg/memory/MEMORY.md``'s ``sandbox-shell`` row quotes ``||`` inside
+    a code span and reads as **7 cells against its 5-cell header** — the row this function
+    exists to make countable, and the pair `scripts/check-memory-index.py` reports.
+
+    Both outer pipes are optional, as they are to GitHub: ``| a | b`` and ``| a | b |``
+    are the same two cells. The indent is stripped by the same expression `is_index_row`
+    strips, so the two cannot disagree about which lines they are talking about.
+    """
+    line = _INDEX_ROW_INDENT.sub("", line, count=1).rstrip()
+    if not _INDEX_ROW_TABLE.match(line) or _INDEX_ROW_TABLE_DELIMITER.match(line):
+        return None
+    cells: list[str] = []
+    current: list[str] = []
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if char == "\\" and index + 1 < len(line):
+            current.append(line[index:index + 2])
+            index += 2
+            continue
+        if char == "|":
+            cells.append("".join(current))
+            current = []
+            index += 1
+            continue
+        current.append(char)
+        index += 1
+    cells.append("".join(current))
+    if cells and not cells[0].strip():
+        cells = cells[1:]
+    if cells and not cells[-1].strip():
+        cells = cells[:-1]
+    return tuple(cells)
+
+
 # Order of the `## type` sections when the index has to be rendered from
 # entries alone (a rebuild, or entries the document never had). The parser
 # accepts any `## <valid type>` heading; this only decides where new rows file.
