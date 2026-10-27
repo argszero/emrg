@@ -139,6 +139,19 @@ def _merged(number: int, *, body: str = "", merged_at: str = "2026-09-25T00:00:0
     return _refers_to(number, is_pr=True, state="closed", body=body, merged_at=merged_at)
 
 
+def _reopened(created_at: str = "2026-09-25T01:00:00Z") -> dict:
+    """A `reopened` event on the subject's own timeline - a state change, not a reference.
+
+    It sits beside the `closed` event it follows. Measured 2026-10-27 on
+    `issues/2358/timeline`: `closed` `2026-10-18T01:51:39Z`, `reopened`
+    `2026-10-18T01:52:36Z`, `closed` `2026-10-18T02:04:45Z` - all three after the merged
+    declarer's cross-reference at `2026-10-17T23:03:00Z`. It is the only thing that
+    separates "the merge closed it and somebody reopened it on purpose" from "the merge
+    should have closed it and did not", which are the same row without it.
+    """
+    return {"event": "reopened", "created_at": created_at}
+
+
 class FakeGh:
     """`_gh` replaced by a routing table; every call recorded.
 
@@ -847,6 +860,106 @@ def test_a_declarer_that_closed_without_merging_is_not_called_landed(
     # Nothing of that work is on master, so the landed reading is false here.
     assert "landed" not in detail
     assert "work is done" not in detail
+
+
+def test_an_issue_reopened_after_a_merge_is_not_called_never_closed(
+    mod, monkeypatch, capsys
+) -> None:
+    """The merged declarer *did* close the issue; a reopen came after it.
+
+    Measured shape (issue #2358's own timeline, 2026-10-27): the merged declarer's
+    reference, then a close, then a `reopened`. The reading used to print "landed and was
+    never closed" over that and send the reader to close an issue somebody had reopened
+    on purpose - the reopen being the record that the landing did not finish the work.
+    """
+    fake = FakeGh(
+        [_issue(10, "reopened after the merge")],
+        [],
+        {
+            10: [
+                _refers_to(
+                    30, is_pr=True, state="closed", body="Closes #10.",
+                    merged_at="2026-09-25T00:00:00Z",
+                ),
+                _reopened("2026-09-25T00:01:00Z"),
+            ]
+        },
+    )
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 1, out
+    detail = _detail(out, "#10 issue UNCLAIMED")
+    assert "#30 declared `Closes #10`" in detail
+    assert "reopened after that merge" in detail
+    assert "never closed" not in detail
+    assert "work is done" not in detail
+
+
+def test_a_reopen_before_the_merge_leaves_the_landed_reading_alone(
+    mod, monkeypatch, capsys
+) -> None:
+    """The control, and it differs from the test above by the reopen's position.
+
+    A reopen **before** the merge says nothing about that merge: the merge still closed
+    the issue, so "landed and was never closed" is the right sentence. Without this
+    direction a reading that called every merged declarer's issue reopened would pass the
+    test above, which is what a mutation arm is for, not what this file is for.
+    """
+    fake = FakeGh(
+        [_issue(10, "reopened long before the merge")],
+        [],
+        {
+            10: [
+                _reopened("2026-09-24T00:00:00Z"),
+                _refers_to(
+                    30, is_pr=True, state="closed", body="Closes #10.",
+                    merged_at="2026-09-25T00:00:00Z",
+                ),
+            ]
+        },
+    )
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 1, out
+    detail = _detail(out, "#10 issue UNCLAIMED")
+    assert "landed and was never closed" in detail
+    assert "reopened after that merge" not in detail
+
+
+def test_the_reopen_fact_is_read_against_a_declared_merge_only(mod) -> None:
+    """`reopened_after_merge` compares a reopen with a **declared** merge, nothing else.
+
+    Two readings in one test: a merged *mention* never closes the issue, so a reopen
+    after it is no evidence about it; a declared merge before the reopen is evidence.
+    A reading that compared against every merge it saw would flip the flag off the
+    mention alone and print the corrective sentence where the close-it reading is right.
+    """
+    mention_only = mod.referencing_prs(
+        [
+            _merged(40, merged_at="2026-09-20T00:00:00Z"),
+            _reopened("2026-09-21T00:00:00Z"),
+        ],
+        10,
+    )
+    assert mention_only.mentioned_landed == {40}
+    assert mention_only.reopened_after_merge is False
+
+    declared = mod.referencing_prs(
+        [
+            _refers_to(
+                30, is_pr=True, state="closed", body="Closes #10.",
+                merged_at="2026-09-20T00:00:00Z",
+            ),
+            _reopened("2026-09-21T00:00:00Z"),
+        ],
+        10,
+    )
+    assert declared.declared_merged == {30}
+    assert declared.reopened_after_merge is True
 
 
 def test_a_closed_issue_naming_a_pr_is_not_a_live_link(mod, monkeypatch, capsys) -> None:

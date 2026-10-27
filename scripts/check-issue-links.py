@@ -488,6 +488,12 @@ class Refs:
       happen to it (a rejected or change-requested PR is updated in place, never
       replaced).
 
+    One fact is about the **issue itself** rather than about any referrer, and it is kept
+    here because it comes off the same event stream and is only ever read beside
+    `declared_merged`: `reopened_after_merge` says this issue was reopened after the
+    newest merged declarer landed. That is the fact `_declined_detail` needs to stop
+    calling a deliberately-reopened issue "never closed".
+
     Each clause is written for the number of referrers it names (`_agrees`): the first
     revision of the fix above printed *"#1614 referenced it and are merged, and neither
     declares"* for one referrer and *"#1565 #1569 #1607 ... and neither declares"* for
@@ -502,6 +508,7 @@ class Refs:
     mentioned_open: set[int] = field(default_factory=set)
     mentioned_landed: set[int] = field(default_factory=set)
     mentioned_abandoned: set[int] = field(default_factory=set)
+    reopened_after_merge: bool = False
 
 
 def _gh(args: list[str]) -> str:
@@ -732,6 +739,23 @@ def _parse_instant(text: str) -> dt.datetime | None:
         return dt.datetime.fromisoformat(text)
     except ValueError:
         return None
+
+
+def _utc_instant(text: object) -> dt.datetime | None:
+    """`text` as a **comparable** instant, or `None` when it is not one.
+
+    `_parse_instant` answers instants as written, and GitHub writes them with a `Z`
+    offset, so a value without one parses *naive* — and comparing a naive datetime with
+    an aware one raises `TypeError`. Assuming UTC for the offset-less case keeps every
+    pair comparable, and it is the right assumption: every instant compared here comes
+    from GitHub, whose timestamps are UTC.
+    """
+    if not isinstance(text, str) or not text:
+        return None
+    parsed = _parse_instant(text.replace("Z", "+00:00"))
+    if parsed is None:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)
 
 
 def _retention_key(row: dict) -> str | None:
@@ -1171,9 +1195,21 @@ def referencing_prs(events: list[dict], issue_number: int) -> Refs:
     referrer that was only closed). `merged_at` is the discriminator rather than
     `state`, because `state` is `closed` for an abandoned PR and for a closed *issue*
     alike, while only a merge says the change is on master.
+
+    The `reopened` events are the one exception to "only `cross-referenced` matters": a
+    reopen **after** a merged declarer is what says that merge did not finish the work,
+    and without it `_declined_detail` tells the reader to close the issue over it. Every
+    other event kind is still skipped.
     """
     refs = Refs()
+    reopened: list[dt.datetime] = []
+    merged: list[dt.datetime] = []
     for event in events:
+        if event.get("event") == "reopened":
+            stamp = _utc_instant(event.get("created_at"))
+            if stamp is not None:
+                reopened.append(stamp)
+            continue
         if event.get("event") != "cross-referenced":
             continue
         source = (event.get("source") or {}).get("issue") or {}
@@ -1196,6 +1232,9 @@ def referencing_prs(events: list[dict], issue_number: int) -> Refs:
                 refs.declared_open.add(pr)
             elif pull.get("merged_at"):
                 refs.declared_merged.add(pr)
+                stamp = _utc_instant(pull.get("merged_at"))
+                if stamp is not None:
+                    merged.append(stamp)
             else:
                 refs.declared_abandoned.add(pr)
         elif open_pr:
@@ -1204,6 +1243,12 @@ def referencing_prs(events: list[dict], issue_number: int) -> Refs:
             refs.mentioned_landed.add(pr)
         else:
             refs.mentioned_abandoned.add(pr)
+    # Only a **declared** merge closes the issue, so only those instants are compared: a
+    # merged mention leaves the issue open, and a reopen after it says nothing about
+    # whether the work finished. Compared against the newest one, so the fact reads "it
+    # was reopened after every merge that could have closed it".
+    if merged and reopened:
+        refs.reopened_after_merge = max(reopened) > max(merged)
     return refs
 
 
@@ -1369,16 +1414,34 @@ def _declined_detail(refs: Refs, number: int) -> str:
 
     Both can be present at once (a merged attempt and an abandoned one on one issue), and
     a reader told only the first would close the issue over work that does not finish it.
+
+    A third fact can hide inside the merged one and it reverses its remedy: the issue was
+    closed **by that merge** and reopened afterwards. "Landed and was never closed" is
+    then false - the merge that landed the work is exactly what closed it - and the reopen
+    is the record that the landing did not finish the work. Measured 2026-10-27 on issue
+    #2358's own timeline, where the merged declarer closed it at `01:51:39Z` and
+    `reopened` follows at `01:52:36Z`: the sentence sent a reader to close an issue
+    somebody had deliberately reopened. That clause therefore stops advising the close
+    and says what the reopen already says.
     """
     clauses: list[str] = []
     if refs.declared_merged:
         verb, _ = _agrees(refs.declared_merged)
-        clauses.append(
-            f"{_numbers(refs.declared_merged)} declared `Closes #{number}` and {verb} "
-            "merged, which is the shape of work that landed and was never closed - "
-            "either close this issue with the reading that says the work is done, or "
-            "state here what it still leaves"
-        )
+        if refs.reopened_after_merge:
+            clauses.append(
+                f"{_numbers(refs.declared_merged)} declared `Closes #{number}` and {verb} "
+                "merged, and this issue was reopened after that merge - the merge is what "
+                "closed it, so the reopen is the reading that says the landing did not "
+                "finish the work: do not close this issue on that merge, state here what "
+                "it still leaves"
+            )
+        else:
+            clauses.append(
+                f"{_numbers(refs.declared_merged)} declared `Closes #{number}` and {verb} "
+                "merged, which is the shape of work that landed and was never closed - "
+                "either close this issue with the reading that says the work is done, or "
+                "state here what it still leaves"
+            )
     if refs.declared_abandoned:
         verb, _ = _agrees(refs.declared_abandoned)
         clauses.append(
