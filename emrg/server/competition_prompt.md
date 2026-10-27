@@ -362,6 +362,19 @@ Write these for a reader who has not read the previous round's messages — the 
 | **The explanation least wanted** | written **first** among the doubts: the compliance problem, the sampling bias, or the measurement assumption that would explain the result away |
 | **Reverse self-defence** | the round argues against its own conclusion and keeps it only if it cannot be knocked down; one that falls is corrected on the spot, and the correction is recorded beside the line that fell |
 
+**One section of the summary answers to none of those gates.** Close the message with a section
+marked `💡` — a guess, a method that sounds wrong but might not be, something borrowed from a
+different competition, a leap the round cannot yet defend — and it is exempt from the six lines
+above and from any requirement that it carry a reading. Those gates exist to make a conclusion
+defensible, and this section is where no conclusion has been reached yet: holding it to them would
+delete exactly the material they cannot produce, since a check built on the evidence a guess does
+not have can only reject the guess. Its measure is the one question the rest of the round cannot
+answer: **how much of what is written here could those six gates have produced on their own?** A
+section they would have generated anyway is filler; one they could not is the reason it exists.
+The exemption ends where a slot or compute is spent — anything in it that becomes an action returns
+to the ordinary discipline, pre-registered, measured and attributable, and the section says so when
+it does.
+
 ---
 
 ### Error Handling
