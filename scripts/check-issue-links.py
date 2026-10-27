@@ -102,8 +102,10 @@ States
 ------
     linked       the reading is complete in both directions
     unclaimed    no open PR declares the issue. The row names what it can see instead:
-                 closed PRs that declared it (the "landed and never closed" shape), or
-                 PRs that referenced it without declaring (a mention is not a claim)
+                 PRs that declared it and closed - **merged** (the "landed and never
+                 closed" shape) and **closed without merging** (an attempt that ended)
+                 are separate sentences, because only the first leaves work on master -
+                 or PRs that referenced it without declaring (a mention is not a claim)
     duplicate    more than one open PR declares the same open issue
     one-way      one side names the other and is not named back. Both directions get it,
                  because they have different readers: a PR that declares no issue leaves
@@ -468,9 +470,12 @@ class Refs:
 
     * `declared_open` - open PRs whose body carries a closing keyword for this issue:
       the PRs that claim it, and the only set that decides the issue's state;
-    * `declared_closed` - closed or merged PRs that declared it. A merged declarer whose
-      issue is still open is the anomaly worth naming (the keyword should have closed
-      it), and a closed unmerged declarer is simply abandoned work;
+    * `declared_merged` - merged PRs that declared it. A merged declarer whose issue is
+      still open is the anomaly worth naming: the keyword should have closed it, so the
+      work is on master and the issue is stale;
+    * `declared_abandoned` - closed, never-merged PRs that declared it. Nothing of that
+      work is on master, so the issue is **not** stale: the attempt ended, and the rule
+      answers it in its own PR rather than by opening a second one;
     * `mentioned_open`, `mentioned_landed`, `mentioned_abandoned` - PRs that referenced
       the issue **without** declaring it, split three ways because the reader's next move
       differs for each, and folding them together is a defect this tool shipped (issue
@@ -492,7 +497,8 @@ class Refs:
     """
 
     declared_open: set[int] = field(default_factory=set)
-    declared_closed: set[int] = field(default_factory=set)
+    declared_merged: set[int] = field(default_factory=set)
+    declared_abandoned: set[int] = field(default_factory=set)
     mentioned_open: set[int] = field(default_factory=set)
     mentioned_landed: set[int] = field(default_factory=set)
     mentioned_abandoned: set[int] = field(default_factory=set)
@@ -1182,7 +1188,16 @@ def referencing_prs(events: list[dict], issue_number: int) -> Refs:
         # "not open" and never as "open".
         open_pr = str(source.get("state") or "unknown") == "open"
         if issue_number in declared_claims(source.get("body")):
-            (refs.declared_open if open_pr else refs.declared_closed).add(pr)
+            # A closed declarer is two facts, not one, and the discriminator is already
+            # in hand: `merged_at` is read one branch down for a non-declaring referrer,
+            # for the same reason. Folding them into one set printed "landed" over an
+            # attempt that never reached master.
+            if open_pr:
+                refs.declared_open.add(pr)
+            elif pull.get("merged_at"):
+                refs.declared_merged.add(pr)
+            else:
+                refs.declared_abandoned.add(pr)
         elif open_pr:
             refs.mentioned_open.add(pr)
         elif pull.get("merged_at"):
@@ -1339,6 +1354,42 @@ def _mention_detail(refs: Refs, number: int) -> str:
     return "; ".join(clauses)
 
 
+def _declined_detail(refs: Refs, number: int) -> str:
+    """What to do about declarers that closed with no open one left.
+
+    Two facts, one sentence each, because the remedies are opposite: a **merged**
+    declarer means the work is on master and the issue is stale, while a **closed,
+    unmerged** declarer means none of it is on master and the issue is not stale at all.
+    One sentence for both — "merged or closed, which is the shape of work that landed" —
+    told a reader to close an issue over work that had been abandoned, and this module
+    states the distinction three times elsewhere: `referencing_prs` uses `merged_at`
+    rather than `state`, the `declared_abandoned` field says so, and `_mention_detail`
+    splits the same pair for a referrer that did not declare. A declarer is the same
+    pair one step stronger, so it gets the same two sentences.
+
+    Both can be present at once (a merged attempt and an abandoned one on one issue), and
+    a reader told only the first would close the issue over work that does not finish it.
+    """
+    clauses: list[str] = []
+    if refs.declared_merged:
+        verb, _ = _agrees(refs.declared_merged)
+        clauses.append(
+            f"{_numbers(refs.declared_merged)} declared `Closes #{number}` and {verb} "
+            "merged, which is the shape of work that landed and was never closed - "
+            "either close this issue with the reading that says the work is done, or "
+            "state here what it still leaves"
+        )
+    if refs.declared_abandoned:
+        verb, _ = _agrees(refs.declared_abandoned)
+        clauses.append(
+            f"{_numbers(refs.declared_abandoned)} declared `Closes #{number}` and "
+            f"{'was' if verb == 'is' else 'were'} closed without merging, so none of "
+            "that work is on master - continue that branch and reopen it rather than "
+            "opening a second PR for the same issue"
+        )
+    return "; ".join(clauses)
+
+
 def judge_issues(
     issues: list[dict],
     refs_by_issue: dict[int, Refs],
@@ -1375,13 +1426,8 @@ def judge_issues(
                     )
                 )
                 continue
-            if refs.declared_closed:
-                detail = (
-                    f"{_numbers(refs.declared_closed)} declared `Closes #{number}` and "
-                    "are merged or closed, which is the shape of work that landed and "
-                    "was never closed - either close this issue with the reading that "
-                    "says the work is done, or open the PR that finishes it"
-                )
+            if refs.declared_merged or refs.declared_abandoned:
+                detail = _declined_detail(refs, number)
             elif refs.mentioned_landed or refs.mentioned_abandoned or refs.mentioned_open:
                 detail = _mention_detail(refs, number)
             else:

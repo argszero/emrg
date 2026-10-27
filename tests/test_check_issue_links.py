@@ -673,20 +673,33 @@ def test_the_mention_split_is_read_from_the_events_own_fields(mod) -> None:
         _refers_to(20, is_pr=True, body="open mention"),                       # open PR
         _merged(21),                                                           # merged
         _refers_to(22, is_pr=True, state="closed", body="abandoned"),          # closed
-        _refers_to(23, is_pr=True, state="closed", body="Closes #10."),        # declared
+        _refers_to(23, is_pr=True, state="closed", body="Closes #10."),        # declared, closed
         _refers_to(24, is_pr=True, body="Closes #10."),                        # declared, open
         _refers_to(25, is_pr=False),                                           # an *issue*
+        _refers_to(                                                    # declared, merged
+            26, is_pr=True, state="closed", body="Closes #10.",
+            merged_at="2026-09-25T00:00:00Z",
+        ),
     ]
 
     refs = mod.referencing_prs(events, 10)
 
     assert refs.declared_open == {24}
-    assert refs.declared_closed == {23}
+    # A declarer that closed is two facts: #26 reached master, #23 did not. One set for
+    # both is what printed "landed" over an abandoned attempt.
+    assert refs.declared_merged == {26}
+    assert refs.declared_abandoned == {23}
     assert refs.mentioned_open == {20}
     assert refs.mentioned_landed == {21}
     assert refs.mentioned_abandoned == {22}
-    # #25 is an issue referencing the subject, so it is in none of the five sets above.
-    assert 25 not in refs.mentioned_open | refs.mentioned_landed | refs.mentioned_abandoned
+    # #25 is an issue referencing the subject, so it is in none of the sets above.
+    assert 25 not in (
+        refs.declared_merged
+        | refs.declared_abandoned
+        | refs.mentioned_open
+        | refs.mentioned_landed
+        | refs.mentioned_abandoned
+    )
 
 
 def test_a_mention_is_not_a_claim(mod, monkeypatch, capsys) -> None:
@@ -784,7 +797,13 @@ def test_a_merged_declarer_names_the_landed_and_never_closed_shape(
         [],
         {
             10: [
-                _refers_to(30, is_pr=True, state="closed", body="Closes #10."),
+                # `merged_at` is what makes this merged; `state="closed"` alone is also
+                # what an abandoned PR reports, and the fixture said "merged" while
+                # building the other one until the field stopped conflating them.
+                _refers_to(
+                    30, is_pr=True, state="closed", body="Closes #10.",
+                    merged_at="2026-09-25T00:00:00Z",
+                ),
                 _refers_to(40, is_pr=True, state="open", body="just mentions #10"),
             ]
         },
@@ -796,8 +815,38 @@ def test_a_merged_declarer_names_the_landed_and_never_closed_shape(
     assert rc == 1, out
     detail = _detail(out, "#10 issue UNCLAIMED")
     assert "#30 declared `Closes #10`" in detail
-    assert "merged or closed" in detail
+    assert "merged" in detail
     assert "landed and was never closed" in detail
+    assert "closed without merging" not in detail
+
+
+def test_a_declarer_that_closed_without_merging_is_not_called_landed(
+    mod, monkeypatch, capsys
+) -> None:
+    """The mirror of the sentence above, and the one that used to be wrong.
+
+    `state` is `closed` for a merge and for an abandoned attempt alike, so a reading
+    that folds the two prints "work that landed" over a PR that never reached master,
+    and tells the reader to close the issue with a reading that says the work is done.
+    This fixture and the one above differ in exactly one field (`merged_at`), so a
+    reading that goes by the state answers both the same way and this is what notices.
+    """
+    fake = FakeGh(
+        [_issue(10, "an attempt that ended")],
+        [],
+        {10: [_refers_to(30, is_pr=True, state="closed", body="Closes #10.")]},
+    )
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 1, out
+    detail = _detail(out, "#10 issue UNCLAIMED")
+    assert "#30 declared `Closes #10`" in detail
+    assert "closed without merging" in detail
+    # Nothing of that work is on master, so the landed reading is false here.
+    assert "landed" not in detail
+    assert "work is done" not in detail
 
 
 def test_a_closed_issue_naming_a_pr_is_not_a_live_link(mod, monkeypatch, capsys) -> None:
@@ -1022,7 +1071,7 @@ def test_the_two_directions_are_read_from_opposite_sources_and_never_transposed(
 
     refs = mod.referencing_prs(events, 10)
     assert refs.declared_open == {20}
-    assert refs.declared_closed == set()
+    assert refs.declared_merged == set() and refs.declared_abandoned == set()
     # #30 is an *open* PR that only mentions the issue: the bucket a citation belongs in.
     assert refs.mentioned_open == {30}
     assert refs.mentioned_landed == set() and refs.mentioned_abandoned == set()
@@ -1033,11 +1082,12 @@ def test_the_two_directions_are_read_from_opposite_sources_and_never_transposed(
     empty = mod.referencing_prs([], 10)
     assert (
         empty.declared_open,
-        empty.declared_closed,
+        empty.declared_merged,
+        empty.declared_abandoned,
         empty.mentioned_open,
         empty.mentioned_landed,
         empty.mentioned_abandoned,
-    ) == (set(), set(), set(), set(), set())
+    ) == (set(), set(), set(), set(), set(), set())
     assert mod.referencing_issues([], {10}) == set()
     assert mod.named_by_issue({}) == {}
     assert mod.declared_claims(None) == set()
