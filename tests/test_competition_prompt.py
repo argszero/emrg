@@ -1721,3 +1721,44 @@ def test_the_closing_summary_count_pins_discriminate_in_both_directions() -> Non
     # a count this pin cannot read is refused rather than defaulted
     with pytest.raises(AssertionError, match="cannot read as a number"):
         _claim(section.replace("**Two questions", "**7 questions"), _SELF_REVIEW_CLAIM)
+
+
+# --- the section a round may think in ------------------------------------------------------------
+#
+# §5 measures every part of the closing summary: a reading, a denominator, a resolution, a
+# counterexample. Those are the right gates for a conclusion and the wrong ones for a guess — a
+# check built on the evidence a guess does not have can only reject the guess — so without a named
+# place for one, the material those gates cannot produce has nowhere to be written and no reading
+# records that it went missing. Measured before this change: no occurrence of
+# reflect / instinct / wild / exempt / novel / innovation in the template, and no section exempt
+# from the six gate lines.
+
+
+def test_a_section_of_the_summary_is_exempt_from_the_gate_lines():
+    """§5: one section may hold what the gates cannot produce, and it must name its own bound.
+
+    Asserted against §5's own body rather than the whole document, for the reason this file's
+    other section-scoped guards give: the template discusses measurement and gates in several
+    places, so a whole-document substring check stays green after the section itself is deleted —
+    a report about wording elsewhere in the file instead of a measurement of this rule.
+    """
+    body = _flat(_recording(PROMPT.read_text(encoding="utf-8")))
+    assert "One section of the summary answers to none of those gates" in body, (
+        "§5 no longer names a section exempt from the six gate lines — a round holding an idea it "
+        "cannot yet evidence has nowhere to put it, and nothing records that it was dropped"
+    )
+    assert "exempt from the six lines above" in body
+    assert "any requirement that it carry a reading" in body, (
+        "the exemption no longer covers the reading requirement, so the section is free of only "
+        "half of what would reject a guess"
+    )
+    assert "could those six gates have produced on their own" in body, (
+        "the section lost its one measure — without it the exemption is a licence to write "
+        "anything, which is filler rather than thinking"
+    )
+    # The bound: the exemption is about reasoning, never about spending.
+    assert "The exemption ends where a slot or compute is spent" in body, (
+        "the exemption is unbounded — an action taken on it would skip the discipline every other "
+        "reading in this file is held to"
+    )
+    assert "pre-registered, measured and attributable" in body
