@@ -75,6 +75,13 @@ in the usual install locations before calling it blocked.
   start a fresh authorisation on one `missing` answer: it changes the host's account state,
   and the wrong `HOME` reproduces the symptom whatever the token says.
 - A round that reads nothing must say so.
+- **An empty answer is a reading only once the interface has been shown to work.** A listing
+  that comes back with nothing proves nothing by itself: a quiet conversation, a token valid
+  under one `HOME` and missing under another, and a lagging index all answer the same way.
+  Before reporting that nothing arrived, read one conversation known to hold messages — a call
+  that returns them is what makes "nothing new" mean nothing arrived rather than nothing was
+  readable. Do it when a listing comes back empty, or when the index or the account is in
+  doubt; it checks the instrument, and is never instead of the round's own reading.
 
 ### 2. Judge
 
