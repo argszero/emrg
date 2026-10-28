@@ -719,6 +719,104 @@ def test_a_closed_unmerged_pr_reads_as_closed_and_not_as_merged(mod, monkeypatch
     assert "closed without merging" in out
 
 
+def test_a_merged_pr_prints_the_vote_history_its_line_promises(mod, monkeypatch, capsys):
+    """Issue #2627. The merged line promised the votes and printed none.
+
+    Measured 2026-10-28 on the live repo: #2626 and #2624 both reported
+    "the votes below are the history of how it was reviewed" with nothing below it,
+    although each carried three approving reviews naming three different cycles. The
+    cause was structural rather than a bad payload - `check_pr`'s terminal return builds
+    a `Verdict` and never asks for the reviews, so `votes` was empty by construction,
+    while the print site's own comment says the opposite.
+
+    Both halves are asserted: the history is printed, and each line carries the review's
+    **own** instant, which is what lets a reader check a landed head against the
+    approvals it needed (three from three cycles, for a release PR, is a rule that can
+    only be checked after the merge).
+    """
+    fake = FakeGh(_three_votes(), state="MERGED", merged_at="2026-10-03T14:46:59Z",
+                  mergeable="UNKNOWN", merge_state="UNKNOWN")
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert rc == 0
+    for cycle, at in (
+        ("cyc20260911-090000", "2026-09-11T01:00:00Z"),
+        ("cyc20260911-100000", "2026-09-11T02:00:00Z"),
+        ("cyc20260911-110000", "2026-09-11T03:00:00Z"),
+    ):
+        assert f"{at} OK   {cycle} - the review approved" in out, out
+    # A history, not a count: nothing on a landed head is reported as counting, because
+    # there is no head left for a vote to be about.
+    assert "counts" not in out
+
+
+def test_a_landed_heads_history_is_not_voided_by_the_merge_instant(mod, monkeypatch, capsys):
+    """The control for the tempting fix: reuse the live clock on the landed path.
+
+    A terminal PR's `push_time` is the **merge** instant, so reusing the `at <=
+    push_time` clause would stamp every review of a correctly merged PR with "submitted
+    before the head push (merge time)". That is a wrong reading of a correct fact, and
+    it is worse than the empty list it replaces: the empty list at least said nothing.
+
+    The fixture keeps every vote before `merged_at` on purpose, so an implementation
+    that reuses the gate cannot pass this by accident of the timeline.
+    """
+    votes = _three_votes()
+    merged_at = "2026-10-03T14:46:59Z"
+    assert all(v["at"] < merged_at for v in votes), "the fixture must predate the merge"
+    fake = FakeGh(votes, state="MERGED", merged_at=merged_at,
+                  mergeable="UNKNOWN", merge_state="UNKNOWN")
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "submitted before the head push" not in out
+    assert "VOID" not in out, "the clock is not asked of a head that has landed"
+    assert out.count("the review approved") == 3, out
+
+
+def test_a_landed_heads_history_names_a_veto_and_a_body_it_cannot_attribute(
+        mod, monkeypatch, capsys):
+    """What the landed path keeps from the live one, and what it does not.
+
+    Kept: the verdict-bearing reviews, told apart by mark (a veto is "NO", not "OK"),
+    and the two reasons a vote cannot be attributed to a cycle - which are facts about
+    the *body*, not about the clock, so a landed head reports them too. Dropped: plain
+    comments, exactly as on the live path.
+    """
+    fake = FakeGh([
+        _approve("cyc20260911-090000", "2026-09-11T01:00:00Z"),
+        _veto("cyc20260911-110000", "2026-09-11T03:00:00Z"),
+        _review("2026-09-11T04:00:00Z", "\u2705 LGTM - looked fine to me"),
+        _review("2026-09-11T05:00:00Z", "just a note, no verdict here"),
+    ], state="MERGED", merged_at="2026-10-03T14:46:59Z",
+        mergeable="UNKNOWN", merge_state="UNKNOWN")
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "OK   cyc20260911-090000 - the review approved" in out
+    assert "NO   cyc20260911-110000 - the review objected" in out
+    assert "VOID (no cycle id) - no cycle id in the vote body" in out
+    assert "just a note" not in out, "a body with no verdict is not a vote"
+
+
+def test_a_landed_heads_undated_review_fails_loud(mod, monkeypatch, capsys):
+    """The `at` refusal is shared with the live path, not lost on the terminal one.
+
+    A projection that did not apply would leave every history line undated, and an
+    undated history cannot be placed against a merge, a head push or anything else: it
+    would look like a reading while answering nothing.
+    """
+    class NoAt(FakeGh):
+        def paginated(self, args):
+            return [{"body": "\u2705 LGTM - cycle `cyc20260911-090000`", "author": SELF_LOGIN}]
+
+    fake = NoAt([], state="MERGED", merged_at="2026-10-03T14:46:59Z",
+                mergeable="UNKNOWN", merge_state="UNKNOWN")
+    rc = _run(mod, monkeypatch, fake)
+    assert rc == 2
+    assert "has no `at` field" in capsys.readouterr().err
+
+
 def test_an_uncomputed_mergeability_fails_loud(mod, monkeypatch, capsys):
     """`UNKNOWN` is a question not yet answered, not an answer of "mergeable".
 
