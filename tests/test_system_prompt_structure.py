@@ -68,8 +68,10 @@ LIMIT_HEADINGS = (
 
 #: Every `## ` heading the prompt carries, in order. The order is the design: who you are → where you
 #: are → what you were given → how you work → what you keep → where the conversation lives → how you
-#: write → two special actions → the limits. Pinned as a list rather than as a count, because a
-#: duplicated heading and a missing one are different defects and a count sees neither.
+#: write → two special actions → the limits → the shape a round must have. Pinned as a list rather than
+#: as a count, because a duplicated heading and a missing one are different defects and a count sees
+#: neither. The last entry is deliberate: the round's shape closes the file, after every rule a round
+#: must not break.
 EXPECTED_H2 = [
     "## Where you are",
     "## Agent context",
@@ -81,6 +83,7 @@ EXPECTED_H2 = [
     "## Rants",
     "## Your own prompt",
     "## Hard limits",
+    "## Plan before every call",
 ]
 
 #: The two permanent principles, quoted from the charter — `MANIFESTO.md` 第四条附则二 and
