@@ -78,17 +78,23 @@ def _feishu_runner(*, chats, messages, identity=None, fail=()):
     return runner
 
 
-def _message(message_id, *, sender="ou_stranger", sender_type="user", mentions=()):
+def _message(message_id, *, sender="ou_stranger", sender_type="user", mentions=(), replies=()):
     """A message in the shape `+chat-messages-list` answers.
 
     The sender defaults to a stranger: the host's own messages are excluded by design, so
     a host-sender default would make every case below read as noise for the wrong reason.
+
+    `replies` are the messages hanging under this one in a thread. The listing answers them
+    nested, so they are attached rather than listed beside their parent.
     """
-    return {
+    message = {
         "message_id": message_id,
         "sender": {"id": sender, "sender_type": sender_type},
         "mentions": list(mentions),
     }
+    if replies:
+        message["thread_replies"] = list(replies)
+    return message
 
 
 def _mention(open_id=None, *, name=None, key=None):
@@ -312,6 +318,70 @@ def test_the_feishu_condition_answers_the_three_cases_that_need_the_host(tmp_pat
         held, notes = wakes(_record(feishu=300), task_name="t", agent="t",
                             state_dir=state_dir, runner=runner)
         assert held is True, f"{label} should wake the task: {notes}"
+
+
+def test_the_feishu_condition_reads_a_thread_reply_that_mentions_the_host(tmp_path):
+    """An @ inside a thread holds the condition, exactly as a top-level one does.
+
+    `+chat-messages-list` answers a thread as its parent carrying the replies, so the @
+    arrives under `thread_replies` and in no other list. A condition that walks the top
+    level alone answers `absent` — the same answer a quiet inbox gives, which is why the
+    miss is silent and the task then sleeps for its whole interval.
+    """
+    runner = _feishu_runner(
+        chats=[{"chat_id": "oc_group", "chat_mode": "group"}],
+        messages={"oc_group": [
+            _message("om_parent", replies=[_message("om_reply", mentions=[_mention(HOST)])]),
+        ]},
+    )
+    held, notes = wakes(_record(feishu=300), task_name="t", agent="t",
+                        state_dir=tmp_path / "wake-state", runner=runner)
+    assert held is True, notes
+
+
+def test_the_feishu_condition_does_not_wake_on_a_thread_that_asks_nothing(tmp_path):
+    """The other direction: a reply that mentions nobody, and one the task itself sent.
+
+    A wake that fires on every threaded conversation costs a round every interval, which
+    is worse than the miss it buys — so a reply passes the same sender test the top level
+    does, and the answer stays `absent`.
+    """
+    runner = _feishu_runner(
+        chats=[{"chat_id": "oc_group", "chat_mode": "group"}],
+        messages={"oc_group": [
+            _message("om_parent", sender="ou_stranger", replies=[
+                _message("om_reply_noise", sender="ou_other"),
+                _message("om_reply_own", sender="ou_bot", sender_type="app"),
+            ]),
+        ]},
+    )
+    held, notes = wakes(_record(feishu=300), task_name="t", agent="t",
+                        state_dir=tmp_path / "wake-state", runner=runner)
+    assert held is False, notes
+    assert any("feishu: absent" in note for note in notes), notes
+
+
+def test_a_thread_reply_is_de_duplicated_by_its_own_id(tmp_path):
+    """A reply read twice in one lookback window is one message, not a second wake.
+
+    The reply's id is not its parent's: a de-duplication that keyed a thread by its parent
+    would re-wake the task for as long as the parent stayed in the window.
+    """
+    runner = _feishu_runner(
+        chats=[{"chat_id": "oc_group", "chat_mode": "group"}],
+        messages={"oc_group": [
+            _message("om_parent", replies=[_message("om_reply", mentions=[_mention(HOST)])]),
+        ]},
+    )
+    state_dir = tmp_path / "wake-state"
+    start = datetime(2026, 10, 26, 12, 0, 0)
+    first, _ = wakes(_record(feishu=300), task_name="t", agent="t",
+                     state_dir=state_dir, runner=runner, now=start)
+    second, notes = wakes(_record(feishu=300), task_name="t", agent="t",
+                          state_dir=state_dir, runner=runner,
+                          now=start + timedelta(minutes=6))
+    assert first is True
+    assert second is False, f"the same reply must not wake the task twice: {notes}"
 
 
 def test_the_feishu_condition_ignores_noise_and_the_tasks_own_messages(tmp_path):

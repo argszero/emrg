@@ -34,7 +34,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Iterator, Sequence
 
 from emrg.server.rants import default_rants_log, list_rants
 from emrg.tools.base import non_regular_kind
@@ -328,12 +328,13 @@ def _condition_feishu(*, state: dict, now: datetime, runner, cli: str) -> Verdic
             # that matters may be in exactly the one that could not be read.
             return Verdict(UNKNOWN, f"conversation {chat_id}: {exc}")
         for message in _message_items(reply):
-            message_id = _message_id(message)
-            if message_id is None or message_id in seen:
-                continue
-            if _needs_the_host(message, host=host, direct=_is_direct(chat)):
-                hits += 1
-            seen.add(message_id)
+            for item in _messages_with_replies(message):
+                message_id = _message_id(item)
+                if message_id is None or message_id in seen:
+                    continue
+                if _needs_the_host(item, host=host, direct=_is_direct(chat)):
+                    hits += 1
+                seen.add(message_id)
 
     state["seen"] = sorted(seen)[-FEISHU_SEEN_CAP:]
     state["since"] = (
@@ -503,6 +504,24 @@ def _message_items(data: dict) -> list[dict]:
         if isinstance(value, list):
             return [item for item in value if isinstance(item, dict)]
     raise ConditionUnavailable(f"the message list carried no messages: {sorted(payload)}")
+
+
+def _messages_with_replies(message: dict) -> Iterator[dict]:
+    """A message and the replies hanging under it, the message first.
+
+    `+chat-messages-list` answers a thread as its parent carrying the replies in
+    `thread_replies`, so an @ the host was handed inside a thread is in that list and in
+    no other one. A reader that stops at the top level does not see it, and the condition
+    then answers `absent` for a host who was in fact asked something — the failure is
+    silent, because the answer it gives is the same one a quiet inbox gives.
+    """
+    yield message
+    replies = message.get("thread_replies")
+    if not isinstance(replies, list):
+        return
+    for reply in replies:
+        if isinstance(reply, dict):
+            yield reply
 
 
 def _chat_id(chat: dict) -> str | None:

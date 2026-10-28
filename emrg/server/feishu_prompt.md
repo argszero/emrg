@@ -58,6 +58,11 @@ in the usual install locations before calling it blocked.
   replied", because it returns the conversation in the order it was written.
   `im +messages-search` answers out of an index that lags a send by seconds, so it can never
   establish that nothing came back.
+- **A message's `thread_replies` are part of that conversation.** A listing answers a thread as
+  its parent carrying the replies, so an @ to the host written as a reply arrives in that key
+  and in no other list. Read the replies as you read the top level — the same sender test, the
+  same judgement — and never treat a thread as read because its parent was: a thread nobody
+  opened is a message nobody saw.
 - The conversation the host answers in is the one your own last message landed in (`oc_…`), so
   keep that id beside the message id: §3 reads a reply by position, and a position means nothing
   in a conversation you are not looking at.
