@@ -2535,6 +2535,128 @@ def test_the_promote_method_pin_reads_position_and_absence() -> None:
     )
 
 
+# ── the product method the ios-app template owed its readers ────────────────────────────────
+#
+# An installation's `extra_prompt` for this task carried the product discipline its rounds were
+# actually run by: two gates before a direction is chosen, the closed loop marked segment by
+# segment, a static mockup the host confirms before any code, gates written before the features
+# they gate, and a version that reaches TestFlight and a store page. Measured against the
+# template before this change: `TestFlight`, `static`, `fail-closed`, `fail-open`, `store page`,
+# `onboarding` and `calibrat` each returned **0** occurrences, while the six phases, the
+# rejection gate, the credentials rules and cross-round state were already there. A general
+# method an installation has to file as its own configuration is a gap in the template: every
+# other installation's rounds run without it.
+#
+# Each pin names the section that owns the subject, and the section is checked rather than
+# assumed — a phrase moved into an appendix leaves a presence assertion green while the rule has
+# left the place a reader looks for it. The control below moves one phrase to the end of the file
+# and requires the positional reading to notice, which a presence-only pin cannot do.
+
+#: (phrase the rule is stated as, heading that owns its subject).
+IOS_METHOD_RULES = (
+    (
+        "Evidence that people pay for this",
+        "#### 1.1 Two gates, and a candidate that fails either is replaced",
+    ),
+    (
+        "A structural difference, stated in one sentence",
+        "#### 1.1 Two gates, and a candidate that fails either is replaced",
+    ),
+    (
+        "Prefer a product that gives a conclusion to one that reports activity",
+        "#### 1.1 Two gates, and a candidate that fails either is replaced",
+    ),
+    (
+        "mark each one **have** or **missing**",
+        "#### 3.1 The loop, segment by segment",
+    ),
+    (
+        "A loop with a missing segment",
+        "#### 3.1 The loop, segment by segment",
+    ),
+    (
+        "A static mockup of the screens comes before implementation",
+        "#### 3.2 The design is agreed before the code",
+    ),
+    (
+        "The default path is the product",
+        "#### 3.2 The design is agreed before the code",
+    ),
+    (
+        "Write the gate that fails first",
+        "#### 4.1 Gates before features, and each gate is seen red",
+    ),
+    (
+        "A gate that fails open is not a gate",
+        "#### 4.1 Gates before features, and each gate is seen red",
+    ),
+    (
+        "Every version goes to TestFlight",
+        "#### 5.1 Every version ships to the host's hands",
+    ),
+    (
+        "Open the build and look at it before reporting it",
+        "#### 5.1 Every version ships to the host's hands",
+    ),
+    (
+        "one screenshot and one sentence",
+        "#### 5.2 The store page is where a small app is found",
+    ),
+    (
+        "At this stage installs are the only hard number",
+        "#### 5.2 The store page is where a small app is found",
+    ),
+)
+
+
+def test_the_ios_template_carries_the_product_method_it_was_missing() -> None:
+    """Each rule is stated once, in the section that owns its subject.
+
+    What this measures and what it does not: it pins that the rules are **stated where a reader
+    looks for them**. Whether a round obeyed them is that round's own closing summary, which no
+    text assertion can answer.
+    """
+    text = _IOS_TEMPLATE.read_text(encoding="utf-8")
+
+    assert "### 1. Phase 1 — Research and niche selection" in text, (
+        "the phases this block pins have been renumbered or renamed, so a positional reading "
+        "below would compare against nothing"
+    )
+
+    for phrase, expected in IOS_METHOD_RULES:
+        found = _heading_above(text, phrase)
+        assert _heading_matches(found, expected), (
+            f"the ios-app template no longer states {phrase!r} under {expected!r} "
+            f"(found: {found!r}). A rule stated nowhere, or stated in a section that does not "
+            "own its subject, is one a round reads past."
+        )
+        assert text.count(phrase) == 1, (
+            f"{phrase!r} appears {text.count(phrase)} times — a rule written twice is two "
+            "answers that will disagree, and the reader has no way to pick one"
+        )
+
+
+def test_the_ios_method_pin_reads_position_and_absence() -> None:
+    """The controls: a deleted rule and a moved rule must each redden, and they are not the same
+    arm — deletion is what a rewrite does, relocation is what a busy edit does."""
+    text = _IOS_TEMPLATE.read_text(encoding="utf-8")
+    phrase, expected = IOS_METHOD_RULES[0]
+
+    deleted = text.replace(phrase, "")
+    assert deleted != text, f"{phrase!r} is pinned but absent, so this arm measured nothing"
+    assert _heading_above(deleted, phrase) is None, (
+        "a deleted rule still reads as present, so the pin would not notice its own rule going"
+    )
+
+    moved = text.replace(phrase, "").rstrip() + f"\n\n{phrase}\n"
+    found = _heading_above(moved, phrase)
+    assert found is not None, "the relocation arm lost the phrase it moved, not the position"
+    assert not _heading_matches(found, expected), (
+        f"moving {phrase!r} to the end of the file left it reading as {expected!r} — the pin is "
+        "reading presence, not position"
+    )
+
+
 # ── the reflection heading's count is a claim, so it is measured ──────────────────────────
 #
 # `promote_prompt.md` opens its reflection section with a sentence that both mandates the

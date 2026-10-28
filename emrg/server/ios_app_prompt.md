@@ -110,6 +110,17 @@ For each candidate record, in the form a later round can re-check:
 - **Implementation shape**: the screens, the data it needs, whether it needs a server, and roughly how many rounds it would take
 - **Compute and cost**: what building and running it costs in money (a server, a domain, a certificate renewal) and in rounds
 
+#### 1.1 Two gates, and a candidate that fails either is replaced
+
+§2 refuses a direction Apple would reject. It does not refuse a direction nobody would pay for, so selection carries two gates of its own and a candidate needs both.
+
+1. **Evidence that people pay for this**, measured and written into the candidate record: what the nearest apps charge, whether they charge at all, and how many ratings they carry. A category in which no paid app holds a meaningful number of ratings is a refusal rather than a maybe, and a feeling about the market is not the measure.
+2. **A structural difference, stated in one sentence** that names who it is for and what they get that they cannot get today. "It is well engineered" is not a difference, and adding features to a direction that has none does not create one.
+
+**Prefer a product that gives a conclusion to one that reports activity.** A counter of days, words or sessions has hundreds of competitors, and being the best of them still makes it the next one; a product that tells its user something they could not work out for themselves is the shape that can hold a niche.
+
+**Both gates or a different candidate.** Passing §2 is not graduation from this section: an app with no rejection risk can still be one nobody pays for.
+
 **Do not start building from this phase.** A candidate graduates only by passing §2.
 
 ---
@@ -173,6 +184,24 @@ A candidate that passed §2 becomes a project. Create its repository and its dir
 
 Read the current App Store Connect state before choosing a version number: never reuse a version or build number that has already been uploaded.
 
+#### 3.1 The loop, segment by segment
+
+Write the product as the four or five segments a user passes through, in the order they pass through them, and mark each one **have** or **missing** in the inception record.
+
+- **A loop with a missing segment promises an outcome the app does not deliver.** It ships the verdict without the result, which is the failure that looks finished from a distance. The missing segment outranks every new feature, and it outranks a version number: a round that would ship a half-built core ships no version at all.
+- Asked whether the product is "too simple", the answer is the core made deeper, not an unrelated feature bolted to the side.
+
+#### 3.2 The design is agreed before the code
+
+- **A static mockup of the screens comes before implementation, and the host confirms it screen by screen.** A mockup is cheap to change and a built screen is not; the confirmation is where a misunderstanding costs a minute instead of a round.
+- The mockup is the acceptance surface, so it carries what the host will check: every requirement visible somewhere, the core effect on a screen of its own, one concept per screen, and the user's own vocabulary rather than words the app invented. **A requirement that cannot be pointed at is not on the screen, and a feature nobody can see has not been built.**
+- **An example value in a mockup is an example, not a requirement** — do not hard-code the sample into the build.
+- **The default path is the product.** The first screen is the value itself, never a questionnaire, a calibration, a permission request or a sign-in, and whatever must exist anyway is a side door rather than the way in. Keep the navigation to what the product needs, with two destinations as the budget and everything else in settings.
+
+#### 3.3 The order of the screens
+
+Order the screens by the order a user uses them, not by the order the code is organised in. Where the order is a preference, the user may choose it — but content is not hidden behind a switch: a screen the user cannot reach is a screen the app does not have.
+
 ---
 
 ### 4. Phase 4 — Implementation
@@ -183,6 +212,16 @@ One phase per round, and one coherent piece of work per round.
 - Run the app in the simulator and exercise the flow you changed — a build that compiles is not a feature that works.
 - Keep the monetisation path real from the first buildable version: StoreKit products defined and purchasable in the sandbox, not stubbed behind a TODO.
 - Record what changed and what was verified, in the app's memory entry (§7).
+- **A version is not a promise about what was changed; it is a promise about what a user can now do.** Before choosing one, name the capability a user sees. If there is none, the version does not exist yet.
+
+#### 4.1 Gates before features, and each gate is seen red
+
+- **Write the gate that fails first, then the feature that makes it pass.** "Done" with no gate that would have refused it is a claim, and this task has nowhere else to keep one.
+- **A rule a comment claims is not a rule.** The comment says what the code must do; if nothing executes it, the gap between the claim and the implementation is where the defect gets through. Where the two differ, the code is the rule.
+- **Watch a gate fail before trusting it.** Add a case that must be refused, confirm it is refused, and do it again whenever a judgement is widened — a gate that has only ever been seen green has not been measured.
+- **A gate that fails open is not a gate.** Reading a missing value as permission, or a failed read as a pass, is a defect in the gate rather than a tolerance in the check.
+- Test the things that must not happen as well as the ones that must: a tap on inert text opens nothing, an unselected path writes no file, a refused permission does not fall back to the network.
+- Assert real numbers — except a number a generator owns, which is derived at read time rather than written down, or a correct regeneration reads as a regression.
 
 **Attribution before submission**: for anything worth sharing later, note in the memory entry where the idea came from and under what licence any third-party code, font or asset is used, so the record can be taken apart honestly if it is submitted or criticised.
 
@@ -197,6 +236,20 @@ One phase per round, and one coherent piece of work per round.
 3. **Submit**, then **record the submission**: instant, target version, and what was submitted.
 
 Then **continue with other work in the same round**. Review takes days and a round takes minutes; waiting is not a phase.
+
+#### 5.1 Every version ships to the host's hands
+
+- **Every version goes to TestFlight**, which is the channel the host actually opens. A version that exists only in App Store Connect has not been shipped.
+- **Open the build and look at it before reporting it.** A screen nobody opened is a screen nobody verified, and the round's summary says which screens it saw rather than implying it saw them all.
+- **One change at a time.** Navigation, data and copy changed in one submission cannot be diagnosed when one of them breaks.
+- **Do not rename an app after it is submitted.** A rename buys nothing and slows the review.
+- **Do not wait for a review to finish before releasing something better.** If a better build exists, submit it and withdraw the older one from the queue.
+
+#### 5.2 The store page is where a small app is found
+
+At low install volume, acquisition happens on the store page rather than inside the app, and what it has to work with is **one screenshot and one sentence**. The sentence is concrete and belongs to the user — a named situation with a number in it — not a description of the software. Everything the copy claims has to be shown by the build it describes, so the assets are made from a build that exists.
+
+**At this stage installs are the only hard number.** Price and metadata are not the bottleneck while nobody sees the app, so a pricing experiment is judged by the installs it produces rather than by the argument for it — including a decision to make the app free.
 
 ---
 
