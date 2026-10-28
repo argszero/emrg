@@ -72,7 +72,7 @@ REQUIRED_TERMS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-#: The rule's unit, its criterion and its reason, as shipped in **both** carriers. Editing either
+#: The rule's unit, its subject and its reason, as shipped in **both** carriers. Editing either
 #: one alone is the defect this pair catches, so `test_both_carriers_state_the_same_unit_and_criterion`
 #: reads the live text of each rather than one file's expectations about the other.
 #:
@@ -91,9 +91,23 @@ REQUIRED_TERMS: dict[str, tuple[str, ...]] = {
 #: (`emits fresh output`), which both carriers do still state word for word. The ruled-out alternative
 #: was to keep the old marker and edit R10 in the same PR: the host scoped this change to the bullet,
 #: and a rulebook entry rewritten to fit a one-line prompt change is the drift this test exists to stop.
-SHARED_UNIT = "you can already specify"
-SHARED_CRITERION = "its arguments need an answer you have not read yet"
-SHARED_REASON = "emits fresh output"
+#: The marker set moved a second time when the bullet became a **shape** rule, and it moved for the
+#: reason the 2026-10-21 move above already gives: a marker one side dropped cannot be a phrase two
+#: carriers share. What went with the old wording is `you can already specify`, the criterion clause
+#: (`its arguments need an answer you have not read yet`) and `emits fresh output`. What the two still
+#: state word for word is the unit (`in one round` — the round, not the call), the subject (`tool
+#: calls`) and the reason (`A round is billed for`).
+#:
+#: The **criterion** is the honest part of that change, and it is now single-carrier by design. R10 asks
+#: a cycle to issue every call it can specify and sets no number; `system.j2` states the shape a round
+#: must have — two, and no third, five or more — and that floor exists nowhere else. Two criteria for one
+#: rule is the drift this file was written against, so the split is asserted rather than assumed:
+#: `test_the_shape_criterion_lives_in_the_session_prompt_alone` requires the clause in `system.j2` and
+#: requires R10 not to carry a competing one. A later cycle that gives R10 its own number reddens there,
+#: which is the point — the decision to state the floor twice must be made, not inherited.
+SHARED_UNIT = "in one round"
+SHARED_SUBJECT = "tool calls"
+SHARED_REASON = "A round is billed for"
 
 #: The unit this rule may no longer be stated in. The first version of R10 taught exactly
 #: these; the host retired the merge-several-calls-into-one reading explicitly at
@@ -191,13 +205,41 @@ def test_both_carriers_state_the_same_unit_and_criterion() -> None:
         ),
         "emrg/server/prompts/system.j2": SYSTEM_PROMPT.read_text(encoding="utf-8"),
     }
-    for marker, label in ((SHARED_UNIT, "unit"), (SHARED_CRITERION, "criterion"),
+    for marker, label in ((SHARED_UNIT, "unit"), (SHARED_SUBJECT, "subject"),
                           (SHARED_REASON, "reason")):
         missing = [name for name, text in carriers.items() if marker not in text]
         assert not missing, (
             f"the {label} `{marker}` is not in {missing}: R10 and system.j2 carry one rule, so "
             "a change to either one moves both (issue #2300, rant 2026-10-15T21:21:29)"
         )
+
+
+def test_the_shape_criterion_lives_in_the_session_prompt_alone() -> None:
+    """The floor on calls per round belongs to one carrier, and the other must not restate it.
+
+    `system.j2` states the shape — two, and no third, five or more calls — because that is the artifact a
+    session is rendered under on every round. R10 states the behaviour a cycle follows and sets no number,
+    and that is deliberate: two carriers holding two versions of one criterion is the defect the
+    comparison above exists to catch, and a criterion stated in the rulebook *and* differently in the
+    prompt would be that defect in its worst form, because a cycle reads one and obeys the other.
+
+    So this arm reads both directions. The clause must be in `system.j2`; the same clause must not appear
+    in R10. A future cycle that decides the floor belongs in the rulebook too has to delete this test and
+    record why, which makes it a decision — the alternative is for the two files to disagree in silence.
+    """
+    prompt = SYSTEM_PROMPT.read_text(encoding="utf-8")
+    rulebook = _section(TEMPLATE.read_text(encoding="utf-8"), R10_HEADING)
+    clause = "**no call at all**, or **five or more calls**"
+    assert clause in prompt, (
+        "the shape a round must have is gone from emrg/server/prompts/system.j2: it is the whole rule, "
+        "and the terms it sits among cannot replace it"
+    )
+    duplicates = [marker for marker in (clause, "no call at all", "five or more calls")
+                  if marker in rulebook]
+    assert not duplicates, (
+        f"R10 restates the shape criterion ({duplicates}): one rule with two criteria is free to "
+        "disagree with itself, and a cycle reads R10 while a session is rendered from system.j2"
+    )
 
 
 #: The refusal sentence, verbatim. It names the thing it refuses, so the negative scan has

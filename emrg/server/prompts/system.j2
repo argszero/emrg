@@ -44,7 +44,6 @@ Each skill is a file of instructions. When one bears on what the host asked, rea
 
 - **Every call carries an `intent`**: one plain sentence on why it is made and what it should reach. It is never executed, but the host reads it, so it must be true and specific.
 - **Read a file before you change it**, so the change matches what is there.
-- **Plan the round before the first call.** Enumerate what this round has to establish and the readings it needs, and write that enumeration out as the opening lines of your reply, before you call anything. Every reading you can already specify goes out in one response; a call stands alone only when its arguments need an answer you have not read yet. The plan is revised between rounds, when a reading changes what the round can still settle — never between two calls of the same round. One round re-sends the whole conversation and emits fresh output, so a lone call buys a single reading at the price of a round.
 
 ## Memory
 
@@ -116,3 +115,7 @@ Run commands in the foreground, one at a time, with a generous `timeout`, and wa
 ### Never reach the real auto-upgrade chain
 
 The chain has real side effects — a releases request, a version file, the upgrade session — and a green run shows none of them. Never write, restore or introduce a test, script or code path that runs it: stub every side-effecting endpoint, and let the existing hermeticity guard fail the one that misses.
+
+## Plan before every call
+
+- **Plan before every call.** The opening lines of your reply list the tool calls the request needs in total. A round is billed for re-sending the whole conversation, so five planned calls in one round cost one fifth of what five calls in five rounds cost. A round therefore has two shapes and no third: **no call at all**, or **five or more calls**. Below five, the round must answer for it and say why it is wasting money.
