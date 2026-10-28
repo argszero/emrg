@@ -1857,6 +1857,78 @@ def _view_with_computed_mergeability(number: int, wait: float) -> dict:
         time.sleep(min(_MERGEABILITY_POLL_SECONDS, remaining))
 
 
+def _review_rows(number: int) -> list[dict]:
+    """Every review on this PR, oldest first, in the projected shape.
+
+    **Every page, not the first 30**: a truncated list drops the newest reviews, which
+    are exactly the votes that count (and the endpoint orders oldest first, so the loss
+    is invisible in the output - it just looks short).
+
+    One reader for both the live and the landed path, because the two readings ask the
+    same question of the same endpoint and would otherwise drift: the merged-PR line has
+    always promised its votes ("the votes below are the history of how it was reviewed")
+    while `check_pr`'s terminal return built a `Verdict` without ever asking for them, so
+    the promise pointed at an empty list. Measured 2026-10-28 on #2626 and #2624.
+    """
+    reviews = _gh_json_paginated(
+        [
+            "api",
+            f"repos/{REPO}/pulls/{number}/reviews",
+            "--jq",
+            ".[] | {at: .submitted_at, body: .body, author: .user.login}",
+        ]
+    )
+    reviews.sort(key=lambda r: str(r.get("at") or ""))
+    return reviews
+
+
+def _history_votes(number: int, reviews: list[dict]) -> list[Vote]:
+    """The votes on a head that has already landed, read as history rather than a count.
+
+    Two things make this a different reading from the live one, and collapsing them
+    would misreport a landed PR:
+
+    * **The clock is not asked.** `own_head_window` answers "would this vote still count
+      against that head", and a landed head has no head to count against. Asking it is
+      worse than skipping it, because a terminal PR's `push_time` is the *merge* instant:
+      every review predates it, so the whole history would come back voided as "submitted
+      before the head push" - a wrong reading of a correct fact.
+    * **`counted` is not filled**, because nothing is being counted. The line prints what
+      the review said, which is the fact a reader comes to this report for.
+
+    The two reasons a vote is unusable *regardless of state* are still reported, because
+    they are about the body and not about time: a body naming no cycle id, and one naming
+    several (which cycle wrote it cannot be measured, so it credits none of them).
+    """
+    votes: list[Vote] = []
+    for r in reviews:
+        assert isinstance(r, dict)
+        # The same refusal as the live path: without the projection `at` reads as "",
+        # and an undated history is a history a reader cannot place against anything.
+        at = str(r.get("at") or "")
+        if not at:
+            raise RuntimeError(
+                f"review payload for #{number} has no `at` field (keys: "
+                f"{sorted(r)[:5]}) - the --jq projection did not apply, so vote "
+                "times are unknown; refusing to report a history"
+            )
+        kind = classify(str(r.get("body") or ""))
+        if kind == "comment":
+            continue
+        ids = distinct_cycle_ids(str(r.get("body") or ""))
+        cycle = ids[0] if len(ids) == 1 else None
+        if len(ids) > 1:
+            votes.append(Vote(at, kind, None, False,
+                f"the vote body names {len(ids)} cycle ids ({', '.join(ids)}) - which "
+                "cycle wrote it cannot be measured, so it credits none of them",
+                tuple(ids)))
+        elif cycle is None:
+            votes.append(Vote(at, kind, None, False, "no cycle id in the vote body"))
+        else:
+            votes.append(Vote(at, kind, cycle, True, "", tuple(ids)))
+    return votes
+
+
 def check_pr(
     number: int,
     needed: int,
@@ -1886,6 +1958,11 @@ def check_pr(
             merge_state=str(view.get("mergeStateStatus") or ""),
             state=state,
             merged_at=str(view.get("mergedAt") or ""),
+            # Asked here, not left empty: this branch returns before the live path
+            # reaches its review fetch, and the report's own merged-PR line promises
+            # the history. One `gh` call, and only for a head someone asks about after
+            # it landed - the open path's read costs are untouched.
+            votes=_history_votes(number, _review_rows(number)),
         )
 
     mergeable, merge_state = _merge_state(view)
@@ -1926,18 +2003,7 @@ def check_pr(
         checks, checks_truncated = _head_check_runs(head)
         checks_read = True
 
-    # Every page, not the first 30: a truncated list drops the newest reviews,
-    # which are exactly the votes that count (and the endpoint orders oldest
-    # first, so the loss is invisible in the output - it just looks short).
-    reviews = _gh_json_paginated(
-        [
-            "api",
-            f"repos/{REPO}/pulls/{number}/reviews",
-            "--jq",
-            ".[] | {at: .submitted_at, body: .body, author: .user.login}",
-        ]
-    )
-    reviews.sort(key=lambda r: str(r.get("at") or ""))
+    reviews = _review_rows(number)
 
     votes: list[Vote] = []
     # One resolve per cycle, not per vote: the window is read from the cycle records
@@ -2199,7 +2265,8 @@ def main(argv: list[str] | None = None) -> int:
                     print(
                         "    merged PR: this head has landed, so there is nothing here "
                         "to vote on, merge or refresh - the votes below are the history "
-                        "of how it was reviewed"
+                        "of how it was reviewed, and the clock that voids a vote is not "
+                        "asked of a landed head"
                     )
                 else:
                     print(
@@ -2207,8 +2274,21 @@ def main(argv: list[str] | None = None) -> int:
                         "nothing here to vote on or merge - the votes below are its "
                         "history"
                     )
-                for index, vote in enumerate(v.votes):
-                    print(f"    {vote.at}      {_cycle_label(vote)} - {vote.why}")
+                # History reads differently from a live count on purpose: no "counts"
+                # column, because nothing is counted against a head that has landed,
+                # and what the review *said* is the fact worth printing. The two marks
+                # are the live columns' for a veto ("NO") and an approval ("OK"); a
+                # vote that cannot be attributed to a cycle keeps "VOID", because that
+                # is a fact about the body and not about the head having landed.
+                for vote in v.votes:
+                    if vote.kind == "veto":
+                        mark = "NO  "
+                        note = "the review objected" if vote.valid else vote.why
+                    elif vote.valid:
+                        mark, note = "OK  ", "the review approved"
+                    else:
+                        mark, note = "VOID", vote.why
+                    print(f"    {vote.at} {mark} {_cycle_label(vote)} - {note}")
                 continue
             # A missing run is both a caveat about the count *and* the CI conjunct
             # unverified, so the line says which: `mark` is already BLOCKED here,
