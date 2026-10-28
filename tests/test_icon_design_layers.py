@@ -179,6 +179,39 @@ def hub_centre(elements: list[ET.Element]) -> tuple[float, float] | None:
     return counted.most_common(1)[0][0]
 
 
+def _ownership(
+    centres: list[tuple[float, float]], anchors: list[tuple[float, float]]
+) -> tuple[dict[tuple[float, float], tuple[float, float]], set[tuple[float, float]]]:
+    """Which anchor owns each circle centre, and which centres no anchor owns.
+
+    An anchor is the hub's centre or a place a branch arrives. A circle sitting on an
+    anchor belongs to it, and an anchor also owns one circle leaning off it — the
+    nearest centre no other anchor is nearer to, which is its bright core. One apiece,
+    so a second circle beside an anchor is a fifth node however it is drawn.
+
+    The two-way nearest test is what a missing layer needs. A node's ring is nearer to
+    its own arrival than to the hub, so it can never be passed off as the hub's
+    highlight; and a hub whose highlight is gone owns nothing beside itself, which is
+    the fault rather than a stand-in that satisfies the lean by accident.
+    """
+    seated = set(anchors)
+    owned: dict[tuple[float, float], tuple[float, float]] = {
+        point: point for point in centres if point in seated
+    }
+    if anchors:
+        leaning: dict[tuple[float, float], tuple[float, float]] = {}
+        for point in centres:
+            if point in seated:
+                continue
+            mine = min(anchors, key=lambda anchor: _distance(point, anchor))
+            best = leaning.get(mine)
+            if best is None or _distance(point, mine) < _distance(best, mine):
+                leaning[mine] = point
+        owned.update({point: anchor for anchor, point in leaning.items()})
+    unclaimed = {point for point in centres if point not in owned}
+    return owned, unclaimed
+
+
 def faults(svg_text: str) -> list[str]:
     """Every way `svg_text` breaks the design, in the design's own terms.
 
@@ -211,6 +244,16 @@ def faults(svg_text: str) -> list[str]:
         and _start_point(elements[i]) == centre
         and _gradient_id(elements[i].get("stroke")) is not None
     ]
+    # Where the branches arrive is where the nodes are, and it is read before the hub's
+    # own layers are chosen: a circle is a node's when it sits where a branch ends, or is
+    # the core leaning off that place, and only what no node owns can be a hub layer.
+    # Choosing "the nearest circle beside the centre" instead let a node's outer ring 242
+    # units away stand in for the hub's highlight once that highlight was deleted — it
+    # leans up and left like a highlight, so the sphere read as lit and the missing layer
+    # went unreported. Ownership is a place, so it is decided by place.
+    arrivals = sorted(
+        {point for i in branches if (point := _end_point(elements[i])) is not None}
+    )
     concentric = [
         i
         for i in painted
@@ -218,18 +261,30 @@ def faults(svg_text: str) -> list[str]:
         and elements[i].tag == NS + "circle"
         and _centre(elements[i]) == centre
     ]
+    circle_centres = [
+        point
+        for point in (
+            _centre(element) for element in elements if element.tag == NS + "circle"
+        )
+        if point is not None
+    ]
+    anchors = ([] if centre is None else [centre]) + list(arrivals)
+    owned, unclaimed = _ownership(circle_centres, anchors)
     # The hub's third layer is its specular highlight, and it is deliberately not
     # concentric: it sits up and left of the centre, the direction every node's core
     # leans (a node's body is at `(x, y)`, its core at `(x-6, y-8)`). So it is read as
-    # the nearest circle beside the centre — the lean is the property, and how far it
-    # leans is the design's to choose, which a maximum distance would take away.
+    # the nearest circle the *hub* owns beside its centre — the lean is the property, and
+    # how far it leans is the design's to choose, which a maximum distance would take
+    # away. A hub that owns none has no highlight, however many node cores lean the same
+    # way, and that is the fault below.
     beside = [
         i
         for i in painted
         if centre is not None
         and elements[i].tag == NS + "circle"
-        and _centre(elements[i]) is not None
-        and _centre(elements[i]) != centre
+        and (point := _centre(elements[i])) is not None
+        and point != centre
+        and owned.get(point) == centre
     ]
     highlight = (
         min(beside, key=lambda i: _distance(_centre(elements[i]), centre))
@@ -281,13 +336,6 @@ def faults(svg_text: str) -> list[str]:
     # there, and the property is that the fan's nodes are shaped alike. A renamed or
     # resized node therefore passes, while a node missing from one branch, an extra
     # one where no branch ends, or a fan of uneven nodes is refused.
-    arrivals = sorted(
-        {
-            point
-            for i in branches
-            if (point := _end_point(elements[i])) is not None
-        }
-    )
     outermost: dict[tuple[float, float], float | None] = {}
     for point in arrivals:
         at_node = [
@@ -326,31 +374,14 @@ def faults(svg_text: str) -> list[str]:
         # Every circle in the design belongs either to the hub or to one of its nodes,
         # and both give their layers the same shape: two rings concentric on a centre
         # and one bright core leaning off it. So a circle is accounted for when it
-        # sits at an anchor — the hub, or a place a branch arrives — or when it is the
-        # one circle leaning off that anchor. No radius takes part. A size is what the
-        # four nodes happen to measure, not what makes a circle a node, and keying the
-        # test to it read the hub's own resized halo as a fifth node while a fifth
-        # node of any other size went unseen.
-        circles = [
-            element
-            for element in elements
-            if element.tag == NS + "circle" and _centre(element) is not None
-        ]
-        anchors = ([] if centre is None else [centre]) + list(outermost)
-        accounted = set(anchors)
-        for anchor in anchors:
-            leaning = [
-                point
-                for point in (_centre(element) for element in circles)
-                if point != anchor
-            ]
-            if leaning:
-                accounted.add(min(leaning, key=lambda point: _distance(point, anchor)))
-        stray = [
-            point
-            for point in (_centre(element) for element in circles)
-            if point not in accounted
-        ]
+        # sits at an anchor — the hub, or a place a branch arrives — or when it is
+        # that anchor's own leaning core, the one circle nearest it that no closer
+        # anchor claims. No radius takes part. A size is what the four nodes happen to
+        # measure, not what makes a circle a node, and keying the test to it read the
+        # hub's own resized halo as a fifth node while a fifth node of any other size
+        # went unseen. Ownership was decided above, before the hub's layers were read,
+        # so the hub and the nodes cannot disagree about who owns a circle.
+        stray = sorted(unclaimed)
         if stray:
             problems.append(
                 f"a circle sits at {stray[0][0]:g}, {stray[0][1]:g} where no branch "
@@ -512,6 +543,43 @@ def test_the_check_refuses_a_highlight_that_leans_the_wrong_way() -> None:
     )
     assert "up and left" in problems[0], (
         f"the check reported {problems[0]!r}, which does not name the lean"
+    )
+
+
+def test_the_check_refuses_a_hub_with_no_layer_beside_its_centre() -> None:
+    """A hub lit by nothing of its own: refused, in the missing layer's own words.
+
+    Deleting the hub's specular highlight leaves two rings and no bright core, and this
+    check passed it. The layer beside the centre was read as the nearest circle of any
+    owner, so a node's outer ring 242 units away — up and left, the way a highlight
+    leans — stood in for the deleted one, and it satisfied the lean as well. A sphere
+    with no highlight of its own reads as a flat disc whichever way a node's core leans,
+    so the refusal has to be made. Which layer belongs to whom is a place, and a node's
+    ring is never the hub's.
+
+    One fault, not two: the arm is about the missing layer, and a second finding would
+    mean the deletion broke something else and this arm could not attribute it.
+    """
+    text = SVG.read_text(encoding="utf-8")
+    highlight = '  <circle cx="505" cy="642" r="20" fill="#E4FFF2"/>\n'
+    assert highlight in text, (
+        "the hub's highlight is not written the way this arm removes it, so it measures "
+        "nothing"
+    )
+    dropped = text.replace(highlight, "", 1)
+    assert 'cx="505" cy="642"' not in dropped, "the highlight is still painted"
+    assert dropped.count("<circle") == text.count("<circle") - 1, (
+        "exactly one circle must be gone, found "
+        f"{text.count('<circle') - dropped.count('<circle')}"
+    )
+
+    problems = faults(dropped)
+    assert len(problems) == 1, (
+        "the hub lost its highlight and the check reports more than that, so this arm "
+        "cannot attribute it:\n" + "\n".join(f"  - {problem}" for problem in problems)
+    )
+    assert "no layer beside its centre" in problems[0], (
+        f"the check reported {problems[0]!r}, which does not name the missing layer"
     )
 
 
