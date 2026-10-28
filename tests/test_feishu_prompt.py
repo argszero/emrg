@@ -282,6 +282,42 @@ def test_the_thread_rule_reaches_the_round_and_not_merely_the_file(rendered):
     )
 
 
+#: The rule that tells a round how to read an empty answer: one conversation known to hold
+#: messages, read before "nothing arrived" is reported.
+POSITIVE_CONTROL_MARK = "known to hold messages"
+
+
+def test_the_template_says_an_empty_answer_needs_a_positive_control():
+    """§1 says a round that reads nothing must say so — and said nothing about how to know.
+
+    A zero from a listing is the same answer a genuinely quiet conversation, a token valid
+    under another `HOME` and a lagging index all give. Without this sentence a round reports
+    "nothing arrived" on an instrument it never checked, and this task's whole product is the
+    difference between a quiet inbox and an unread one.
+    """
+    text = PROMPT.read_text(encoding="utf-8")
+    section = text[text.index(FIRST_STEP) :]
+    assert "reads nothing must say so" in section, (
+        "§1 lost the sentence this rule qualifies — the positive control is owed precisely "
+        "because an empty round has to be reported, and an unchecked empty report is not a "
+        "reading"
+    )
+    assert POSITIVE_CONTROL_MARK in section, (
+        "§1 no longer says how to tell an empty answer from an unreadable one — read one "
+        "conversation known to hold messages before reporting that nothing arrived"
+    )
+
+
+def test_the_positive_control_reaches_the_round_and_not_merely_the_file(rendered):
+    """The same requirement on the prompt a round is sent: a Jinja construct hides it in the file."""
+    assert POSITIVE_CONTROL_MARK in rendered, (
+        "the rendered Feishu prompt lost the positive-control sentence — a round is told an "
+        "empty round is a correct round and given no way to know the round was empty rather "
+        "than blind"
+
+    )
+
+
 def test_the_cadence_scanner_answers_both_ways():
     """The device earns its verdict: a block is found, and its absence is not silence.
 
