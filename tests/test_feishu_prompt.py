@@ -254,6 +254,34 @@ def test_both_templates_that_forbid_a_slowdown_give_the_same_answer():
         )
 
 
+#: The rule that makes a thread part of the conversation it hangs under: the key the
+#: listing answers a thread in, so a round that reads it sees the replies.
+THREAD_MARK = "`thread_replies`"
+
+
+def test_the_template_says_a_thread_is_part_of_its_conversation():
+    """Without this the round reads the parent and reports the thread as covered."""
+    text = PROMPT.read_text(encoding="utf-8")
+    section = text[text.index(FIRST_STEP) :]
+    assert THREAD_MARK in section, (
+        "§1 no longer tells a round to read a message's thread replies — an @ to the host "
+        "written inside a thread arrives in that key and in no other list, so a round that "
+        "stops at the parent reports a conversation it never saw"
+    )
+    assert "never treat a thread as read because its parent was" in section, (
+        "§1 lost the sentence that stops a thread being closed by having read its parent — "
+        "the replies are the part that can carry the @"
+    )
+
+
+def test_the_thread_rule_reaches_the_round_and_not_merely_the_file(rendered):
+    """The same requirement on the prompt a round is sent, where a Jinja construct hides."""
+    assert THREAD_MARK in rendered, (
+        "the rendered Feishu prompt lost the thread-reply rule — a round is told to read the "
+        "conversation and not that a thread is part of it"
+    )
+
+
 def test_the_cadence_scanner_answers_both_ways():
     """The device earns its verdict: a block is found, and its absence is not silence.
 
