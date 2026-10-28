@@ -61,24 +61,86 @@ BRANCHES = 4
 BODY = {"x": "56", "y": "56", "width": "912", "height": "912", "rx": "206"}
 
 
+#: A path's command letters and its numbers, as the document writes them.
+_PATH_TOKEN = re.compile(r"[MmZzLlHhVvCcSsQqTtAa]|-?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?")
+
+#: How many numbers a command consumes before it states its own end point. An arc's
+#: seven are `rx ry rot large-arc sweep x y`, so only its last two are a place.
+_ARITY = {"M": 2, "L": 2, "T": 2, "H": 1, "V": 1, "Q": 4, "S": 4, "C": 6, "A": 7}
+
+#: A paint-server reference: `url(#id)`, with the whitespace CSS allows inside it.
+_URL_REFERENCE = re.compile(r"\s*url\(\s*#([^)\s]+)\s*\)\s*")
+
+
+def _gradient_id(stroke: str | None) -> str | None:
+    """The gradient a `stroke` references, or `None` when it references none.
+
+    Deliberately one reading of one attribute. This file selected a branch with
+    `stroke.startswith("url(#")` and read that same stroke's light with a second,
+    different regex, so `stroke="url( #branchGrad )"` — which CSS strips to the same
+    reference and every renderer draws identically — left the fan with no branch to
+    select and no light to read. Two parsers of one attribute get one parser.
+    """
+    match = _URL_REFERENCE.fullmatch(stroke or "")
+    return match.group(1) if match else None
+
+
+def _path_ends(d: str) -> tuple[tuple[float, float] | None, tuple[float, float] | None]:
+    """Where a path begins and where it arrives, walking each command's arithmetic.
+
+    The numbers in `d` are places only through the command that owns them: a relative
+    `c` carries offsets, and an `m` at the head of a path offsets from `(0, 0)`.
+    Reading the last pair anywhere in the string answered `(-196, -142)` for this
+    icon's own branch curve written relative — a point nothing is painted at — and an
+    `M`-only reader made a fan written `m 512 650` state no origin at all, so the hub
+    was derived from the stem's foot. A guard that answers a different question than
+    the one it states is not a stricter guard.
+    """
+    tokens = _PATH_TOKEN.findall(d or "")
+    current = (0.0, 0.0)
+    start: tuple[float, float] | None = None
+    command = ""
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token.isalpha():
+            command = token
+            index += 1
+            continue
+        if not command:
+            return None, None
+        upper = command.upper()
+        need = _ARITY.get(upper)
+        if need is None or index + need > len(tokens):
+            break
+        values = [float(value) for value in tokens[index : index + need]]
+        index += need
+        if upper == "H":
+            current = (current[0] + values[0] if command != upper else values[0], current[1])
+        elif upper == "V":
+            current = (current[0], current[1] + values[0] if command != upper else values[0])
+        else:
+            x, y = values[-2], values[-1]
+            current = (x + current[0], y + current[1]) if command != upper else (x, y)
+        if start is None:
+            start = current
+        if upper == "M":
+            # Every pair after the first under one `M` is an implicit line to.
+            command = "l" if command != upper else "L"
+    return start, current
+
+
 def _start_point(element: ET.Element) -> tuple[float, float] | None:
     """Where a path begins, in user units; `None` when its `d` does not say."""
-    match = re.match(r"\s*M\s*(-?[\d.]+)[\s,]+(-?[\d.]+)", element.get("d") or "")
-    if match is None:
-        return None
-    return (float(match.group(1)), float(match.group(2)))
+    return _path_ends(element.get("d") or "")[0]
 
 
 def _end_point(element: ET.Element) -> tuple[float, float] | None:
     """Where a path arrives, in user units; `None` when its `d` does not say.
 
-    The last coordinate pair is where the branch lands, which is where its node is.
+    That is where the branch lands, which is where its node is.
     """
-    pairs = re.findall(r"(-?\d+(?:\.\d+)?)[\s,]+(-?\d+(?:\.\d+)?)", element.get("d") or "")
-    if not pairs:
-        return None
-    x, y = pairs[-1]
-    return (float(x), float(y))
+    return _path_ends(element.get("d") or "")[1]
 
 
 def _centre(element: ET.Element) -> tuple[float, float] | None:
@@ -147,7 +209,7 @@ def faults(svg_text: str) -> list[str]:
         if centre is not None
         and elements[i].tag == NS + "path"
         and _start_point(elements[i]) == centre
-        and (elements[i].get("stroke") or "").startswith("url(#")
+        and _gradient_id(elements[i].get("stroke")) is not None
     ]
     concentric = [
         i
@@ -261,29 +323,47 @@ def faults(svg_text: str) -> list[str]:
                 f"{', '.join(f'{size:g}' for size in sizes)}, so at least one node is "
                 "missing its outer layer or carries a second one"
             )
-        if sizes:
-            stray = [
-                _centre(element)
-                for element in elements
-                if element.tag == NS + "circle"
-                and element.get("r") is not None
-                and float(element.get("r")) == sizes[-1]
-                and _centre(element) not in outermost
+        # Every circle in the design belongs either to the hub or to one of its nodes,
+        # and both give their layers the same shape: two rings concentric on a centre
+        # and one bright core leaning off it. So a circle is accounted for when it
+        # sits at an anchor — the hub, or a place a branch arrives — or when it is the
+        # one circle leaning off that anchor. No radius takes part. A size is what the
+        # four nodes happen to measure, not what makes a circle a node, and keying the
+        # test to it read the hub's own resized halo as a fifth node while a fifth
+        # node of any other size went unseen.
+        circles = [
+            element
+            for element in elements
+            if element.tag == NS + "circle" and _centre(element) is not None
+        ]
+        anchors = ([] if centre is None else [centre]) + list(outermost)
+        accounted = set(anchors)
+        for anchor in anchors:
+            leaning = [
+                point
+                for point in (_centre(element) for element in circles)
+                if point != anchor
             ]
-            if stray:
-                problems.append(
-                    f"a node layer of {sizes[-1]:g} sits at "
-                    f"{stray[0][0]:g}, {stray[0][1]:g} where no branch ends: the fan "
-                    f"has {len(arrivals)} node(s) for {len(arrivals) + len(stray)} "
-                    "painted, so a fifth sits beside the four"
-                )
+            if leaning:
+                accounted.add(min(leaning, key=lambda point: _distance(point, anchor)))
+        stray = [
+            point
+            for point in (_centre(element) for element in circles)
+            if point not in accounted
+        ]
+        if stray:
+            problems.append(
+                f"a circle sits at {stray[0][0]:g}, {stray[0][1]:g} where no branch "
+                f"ends and no hub layer stands: {len(stray)} of them belong to neither "
+                "the hub nor a node, so a fifth is painted beside the four"
+            )
 
     # 2. One light for the fan: the gradient its branches reference, in user space,
     # centred on the hub they leave.
     referenced = [
-        match.group(1)
+        wanted
         for i in branches
-        if (match := re.fullmatch(r"\s*url\(#([^)]+)\)\s*", elements[i].get("stroke") or ""))
+        if (wanted := _gradient_id(elements[i].get("stroke"))) is not None
     ]
     if branches and len(set(referenced)) != 1:
         problems.append(
@@ -537,6 +617,110 @@ def test_the_check_accepts_a_fan_whose_node_layer_was_renamed() -> None:
     )
 
 
+def test_the_check_accepts_a_hub_halo_as_small_as_the_nodes() -> None:
+    """The hub's halo is a halo, not a node: resized to 88 it is still three layers.
+
+    Read as "any circle of the nodes' size at no arrival", the hub's own halo became a
+    fifth node the moment a designer shrank it to the radius the four nodes carry — a
+    document with the layering, the light, the four nodes and the body rect all intact,
+    refused for a size. Which layer belongs to whom is a place, not a measurement.
+    """
+    text = SVG.read_text(encoding="utf-8")
+    resized = text.replace('cx="512" cy="650" r="150"', 'cx="512" cy="650" r="88"', 1)
+    assert resized != text, "the substitution did not apply, so this arm measures nothing"
+    assert resized.count('cx="512" cy="650" r="88"') == 1, (
+        "exactly the hub's halo must carry the new radius, found "
+        f"{resized.count('cx=\"512\" cy=\"650\" r=\"88\"')}"
+    )
+
+    problems = faults(resized)
+    assert problems == [], (
+        "the check refuses a hub whose halo was resized to the nodes' radius, though "
+        "every property holds:\n" + "\n".join(f"  - {problem}" for problem in problems)
+    )
+
+
+def test_the_check_accepts_a_branch_written_with_a_relative_curve() -> None:
+    """`c` states offsets from where it stands; where it lands is still where it lands.
+
+    The shipped curve written relatively — `c -76 -32 -150 -82 -196 -142` from
+    `M 512 650` — arrives at the same `316, 508`. Read as "the last pair in the string",
+    it arrived at `-196, -142`, which reported the branch as both bare and a fifth node
+    at a point no renderer draws at.
+    """
+    text = SVG.read_text(encoding="utf-8")
+    absolute = "M 512 650 C 436 618 362 568 316 508"
+    relative = "M 512 650 c -76 -32 -150 -82 -196 -142"
+    curved = text.replace(absolute, relative)
+    assert curved != text, "the substitution did not apply, so this arm measures nothing"
+    assert curved.count(relative) == 2, (
+        "a branch is drawn twice, crisp and blurred, and both must move to the relative "
+        f"spelling; found {curved.count(relative)} of 2"
+    )
+
+    problems = faults(curved)
+    assert problems == [], (
+        "the check refuses a branch drawn with a relative curve, though it arrives "
+        "where the absolute one does:\n"
+        + "\n".join(f"  - {problem}" for problem in problems)
+    )
+
+
+def test_the_check_accepts_a_fan_written_entirely_with_relative_moves() -> None:
+    """`m 512 650` at the head of a path is the same origin as `M 512 650`.
+
+    A reader that accepts only an absolute moveto made a fan written this way state no
+    start at all, so the hub was derived from whatever starts were left — the stem's
+    foot at `470, 950` — and the fan was then refused for being lit from a gradient the
+    stem's hue carries. That is not a refusal of the design.
+    """
+    text = SVG.read_text(encoding="utf-8")
+    rewritten = text
+    for absolute, relative in (
+        ("M 512 650 C 436 618 362 568 316 508", "m 512 650 c -76 -32 -150 -82 -196 -142"),
+        ("M 512 650 C 470 576 448 492 444 414", "m 512 650 c -42 -74 -64 -158 -68 -236"),
+        ("M 512 650 C 554 576 576 492 580 414", "m 512 650 c 42 -74 64 -158 68 -236"),
+        ("M 512 650 C 588 618 662 568 708 508", "m 512 650 c 76 -32 150 -82 196 -142"),
+    ):
+        rewritten = rewritten.replace(absolute, relative)
+
+    assert "M 512 650" not in rewritten, "a branch still states its origin absolutely"
+    assert rewritten.count("m 512 650") == 2 * BRANCHES, (
+        "every branch, crisp and blurred, must carry the relative moveto; found "
+        f"{rewritten.count('m 512 650')} of {2 * BRANCHES}"
+    )
+
+    problems = faults(rewritten)
+    assert problems == [], (
+        "the check refuses a fan written with relative moves, though its origin, its "
+        "light and its nodes are unchanged:\n"
+        + "\n".join(f"  - {problem}" for problem in problems)
+    )
+
+
+def test_the_check_accepts_whitespace_inside_the_stroke_reference() -> None:
+    """`url( #branchGrad )` and `url(#branchGrad)` are the same paint server.
+
+    CSS strips the space, so both render identically. Two readers of one `stroke` — a
+    prefix test selecting branches and a stricter regex reading their light — left this
+    document with no branches at all, and loosening either one alone would have left the
+    other declining the same string.
+    """
+    text = SVG.read_text(encoding="utf-8")
+    spaced = text.replace('stroke="url(#branchGrad)"', 'stroke="url( #branchGrad )"')
+    assert spaced != text, "the substitution did not apply, so this arm measures nothing"
+    assert spaced.count("url( #branchGrad )") == BRANCHES, (
+        "every branch must carry the spaced reference, found "
+        f"{spaced.count('url( #branchGrad )')} of {BRANCHES}"
+    )
+
+    problems = faults(spaced)
+    assert problems == [], (
+        "the check refuses a fan whose stroke reference carries whitespace, though it "
+        "names the same gradient:\n" + "\n".join(f"  - {problem}" for problem in problems)
+    )
+
+
 def test_the_check_refuses_a_node_missing_its_outer_layer() -> None:
     """One branch arriving at a node that is not shaped like the rest: refused.
 
@@ -559,18 +743,27 @@ def test_the_check_refuses_a_node_missing_its_outer_layer() -> None:
 
 
 def test_the_check_refuses_a_node_beside_the_fan() -> None:
-    """A fifth node where no branch ends: refused, since four nodes are the design."""
-    text = SVG.read_text(encoding="utf-8")
-    added = text.replace(
-        '  <circle cx="708" cy="508" r="88" fill="url(#nodeGlow)"/>',
-        '  <circle cx="708" cy="508" r="88" fill="url(#nodeGlow)"/>\n'
-        '  <circle cx="820" cy="650" r="88" fill="url(#nodeGlow)"/>',
-        1,
-    )
-    assert added != text, "the substitution did not apply, so this arm measures nothing"
+    """A fifth node where no branch ends: refused at any size, since four are the design.
 
-    problems = faults(added)
-    assert any("where no branch ends" in problem for problem in problems), (
-        "the check accepted a node beside the fan; it reports:\n"
-        + "\n".join(f"  - {problem}" for problem in problems)
-    )
+    Keyed to the radius the four nodes measure, this arm accepted a fifth node of `90`
+    and one painted as a body only at `42` — both sitting beside the fan with nothing
+    arriving at either. What makes a node is a branch ending at it, so the test is a
+    circle at no arrival and on no hub ring, whatever its radius reads.
+    """
+    text = SVG.read_text(encoding="utf-8")
+    anchor = '  <circle cx="708" cy="508" r="88" fill="url(#nodeGlow)"/>'
+    assert anchor in text, "the anchor this arm appends after is gone, so it measures nothing"
+
+    for shape in (
+        '<circle cx="820" cy="650" r="88" fill="url(#nodeGlow)"/>',
+        '<circle cx="820" cy="650" r="90" fill="url(#nodeGlow)"/>',
+        '<circle cx="820" cy="650" r="42" fill="url(#nodeBody)"/>',
+    ):
+        added = text.replace(anchor, anchor + "\n  " + shape, 1)
+        assert added != text, "the substitution did not apply, so this arm measures nothing"
+
+        problems = faults(added)
+        assert any("where no branch ends" in problem for problem in problems), (
+            f"the check accepted a fifth node drawn as {shape}; it reports:\n"
+            + "\n".join(f"  - {problem}" for problem in problems)
+        )
