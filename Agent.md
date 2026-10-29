@@ -1,6 +1,6 @@
 # EMRG — Agent.md
 
-> **Principles and conventions only** — what to obey and how to decide. History belongs in the scripts' docstrings and `--help`, in commit messages and in the evolution records, not here.
+> **Principles and conventions only** — what to obey and how to decide. History belongs in the scripts' docstrings and `--help`, in commit messages and evolution records, not here.
 
 ## Project Overview
 
@@ -8,7 +8,7 @@ EMRG is a self-evolving AI agent architecture experiment: a **micro-kernel** —
 
 ## Architecture
 
-**The server is the living core; a client is only the interface.** Task understanding, tool scheduling, capability growth and self-evolution live in the server; one server serves many clients and outlives any of them.
+**The server is the living core; a client is only the interface.** Task understanding, tool scheduling, capability growth and self-evolution live there; one server serves many clients and outlives any of them.
 
 - `emrg/` — core: `__main__.py` (CLI), `protocol.py`, `config.py`, `connect.py` (WebSocket over loopback, token auth)
 - `emrg/server/` — the daemon: `daemon.py` (messages, the background thread running evolution, the tool loop), `llm.py`, `tool_types.py`, task templates
@@ -25,14 +25,14 @@ EMRG is a self-evolving AI agent architecture experiment: a **micro-kernel** —
 - A client auto-detects the server and starts it if absent
 - `README.md` and `Agent.md` are English; `README.cn.md` is the Chinese README
 - Commits: `emrg: <description>`, English, one intent per commit
-- A derived number is never written where a guard can measure it; a rule that can be mechanised is mechanised, because prose decays
+- A derived number is never written where a guard can measure it; a mechanisable rule is mechanised, because prose decays
 - Prefer inspectable state: everything the agent knows is a file
 
 ## Terminology
 
 The execution model, in this repo's own terms (`emrg/server/daemon.py`):
 
-- **Tool loop** — the whole process triggered by one user message: LLM requests and tool calls repeat until a round produces no new tool calls (`_run_tool_loop`).
+- **Tool loop** — the whole process triggered by one user message: LLM requests and tool calls repeat until a round brings no new tool calls (`_run_tool_loop`).
 - **Round** — one iteration inside a tool loop: one LLM request + zero or more tool calls + their execution (`round_num`, bounded by `max_tool_rounds`).
 - **Evolution cycle** — one full self-evolution run (Preparation → Look → Think → Act → Record). Never call it a "round".
 
@@ -43,8 +43,8 @@ What EMRG does today — capability statements, not a changelog.
 - **TUI client** — markdown/diffs, slash commands, autocomplete, pickers, clipboard images (`vision` per model), ESC interrupt, CJK-aware input
 - **Electron GUI** — streaming chat, tool-status cards, sessions, models, settings, onboarding, reconnect with daemon respawn; React + TypeScript; vitest
 - **Scheduled tasks** — `TaskHandler` for any registered project: builtin and custom types, CRUD, hot reload, `when` early wake
-- **Rant-driven evolution** — host feedback through `/rant` drives the self-improvement cycles
-- **Memory** — project and session memory (YAML frontmatter + a Markdown index), compact/clear, a capped prompt footprint
+- **Rant-driven evolution** — host feedback through `/rant` drives the cycles
+- **Memory** — project and session memory (YAML frontmatter + a Markdown index), compact/clear, capped prompt footprint
 - **Skills** — `.emrg/skills/` with progressive disclosure + an installable-skill catalog
 - **Operational** — config hot-reload, project tracking, headless GitHub auth
 - **Inspectable by design** — state, memory and logs are files; git is the state store
@@ -59,13 +59,13 @@ Renderer: `cd emrg/gui/renderer && npm run typecheck && npm test` (754: 5 snapsh
 - CI: pytest on ubuntu **and windows-2025**, the GUI suites, and an actionlint gate over `.github/workflows/`; re-trigger a dropped push with `scripts/re-trigger-ci.sh <branch>`, never an empty commit
 - Merge gates, run before merging — each asks what no other gate asks: `uv run --no-sync python3 scripts/check-vote-count.py` (approvals still valid) · `scripts/check-pr-base.py` (base reaches master) · `scripts/check-merge-freshness.py` (that green CI is about the landing tree) · `scripts/check-merge-order.py` (dirt and what it lands) · `scripts/check-merge-landing-diff.py` (what the landing changes) · `scripts/check-merge-pairs.py` / `scripts/check-merge-sequence.py` (a pair, or a whole order) · `scripts/check-merge-tree-health.py` (the merged tree passes one guard) · `scripts/check-merge-plan-suite.py` (the plan's final tree passes the suite) — all under `uv run --no-sync python3`
 - Post-merge audit: `uv run --no-sync python3 scripts/check-merge-landed.py <N>` (did the merge land a tree its reviews named)
-- Other tools: `uv run --no-sync python3 scripts/check-node-test-count.py --write` (the Node totals), `scripts/check-memory-index.py` (a MEMORY.md against the index rule), `scripts/check-patch-files.py` (a rebuilt patch keeps its predecessor's files), `scripts/check-memory-rotation.py` (whose memory moved), `scripts/cast-vote.py` (a counted vote), `scripts/feishu-gate.py` (the third-party send's gate), `bump-version.py`, `classify-conflict.py`, `sync-master-from-api.py`, `push-branch-from-api.py`
+- Other tools: `uv run --no-sync python3 scripts/check-node-test-count.py --write` (the Node totals), `scripts/check-memory-index.py` (a MEMORY.md vs the index rule), `scripts/check-patch-files.py` (a rebuilt patch keeps its files), `scripts/check-staged-inverse.py` (an index holding an earlier commit's tree), `scripts/check-memory-rotation.py` (whose memory moved), `scripts/cast-vote.py` (a counted vote), `scripts/feishu-gate.py` (the third-party send gate), `bump-version.py`, `classify-conflict.py`, `sync-master-from-api.py`, `push-branch-from-api.py`
 
 Every guard that reads a working tree names it before its verdict; a question it cannot answer is reported unmeasurable, never as a pass.
 
 ## Releasing
 
-1. **Bump** — `python3 scripts/bump-version.py <x.y.z>` rewrites every version declaration at once; `tests/test_version_sync.py` proves they agree. PR it, take three approvals from different cycles, squash merge — never self-merge a release PR.
+1. **Bump** — `python3 scripts/bump-version.py <x.y.z>` rewrites every version declaration; `tests/test_version_sync.py` proves they agree. PR it, take three approvals from different cycles, squash merge — never self-merge a release PR.
 2. **Tag** — `git tag -a v<x.y.z> -m "emrg v<x.y.z>" && git push origin v<x.y.z>`. The tag is the **only** trigger of `build-release.yml`; Test never signs or notarizes.
 3. **Verify and confirm** — `scripts/check-release-published.py v<x.y.z>`: green across the platform matrix, published as Latest (not draft, not prerelease) with the full asset set.
 

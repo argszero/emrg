@@ -101,6 +101,7 @@ SWEPT = {
     "check-rant-citations.py",
     "check-release-prompt.py",
     "check-retry-bounds.py",
+    "check-staged-inverse.py",
     "check-undefined-names.py",
     "check-workflows.py",
     "check_nonlocal.py",
