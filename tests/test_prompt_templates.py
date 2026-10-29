@@ -2625,6 +2625,28 @@ IOS_METHOD_RULES = (
         "Submission itself runs through `reviewSubmissions`",
         "#### 5.3 The platform locks a submission, so the order is the rule",
     ),
+    # The four below are the same kind of gap one subject later. An installation filed them as
+    # its own configuration: what the content of an app costs, that coverage and occurrences are
+    # two numbers rather than one, that a changed measurement basis voids the numbers taken on
+    # the old one, and that a decision is asked as a single question. None of them is about this
+    # installation's account or its apps — every installation whose product carries content meets
+    # all four — so the template is where they belong.
+    (
+        "Measure what the content costs before committing to it",
+        "#### 4.2 The content a user gets is measured before it is promised",
+    ),
+    (
+        '"How many there are" and "how often each appears" are two different numbers',
+        "#### 4.2 The content a user gets is measured before it is promised",
+    ),
+    (
+        "When the basis of a measurement changes, the old numbers are void and are recomputed",
+        "#### 4.2 The content a user gets is measured before it is promised",
+    ),
+    (
+        "A decision asked of the host is one question at a time",
+        "### 8. Recording",
+    ),
 )
 
 

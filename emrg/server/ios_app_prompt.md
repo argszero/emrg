@@ -225,6 +225,15 @@ One phase per round, and one coherent piece of work per round.
 
 **Attribution before submission**: for anything worth sharing later, note in the memory entry where the idea came from and under what licence any third-party code, font or asset is used, so the record can be taken apart honestly if it is submitted or criticised.
 
+#### 4.2 The content a user gets is measured before it is promised
+
+An app whose value is its content carries a second cost beside its code, and it is the one a round is most likely to assume away.
+
+- **Measure what the content costs before committing to it** — acquiring it, cleaning it, getting it into the build and the size it adds — rather than treating it as free because no invoice arrives. A direction whose content costs more than the app can earn is refused at that measurement, not discovered once the work is done.
+- **"How many there are" and "how often each appears" are two different numbers.** Coverage counts the distinct items the app carries; occurrences count every appearance of each. Writing one where the other belongs overstates what the app does, so the label says which it is, and a milestone number is used only where it is true of what it claims.
+- **When the basis of a measurement changes, the old numbers are void and are recomputed.** Two sets measured on different bases never coexist in a record: a reader cannot tell which one a sentence means, and the stale set is believed because it came first.
+- **Legibility is part of the number.** Total first, then coverage, in the user's own words — a label the host has to ask about is a label that is not finished.
+
 ---
 
 ### 5. Phase 5 — Submission for review
@@ -315,6 +324,8 @@ End the round with a **closing summary in your final message**. The next round i
 7. **The next step.**
 
 Write it for a reader who has not read the previous round's messages. A summary that cannot be followed leaves the host out of the loop, and the host's instruction is that decisions stay with the task **except** where money is spent or their account settings change — those exceptions are exactly what this summary has to surface.
+
+**A decision asked of the host is one question at a time.** Number the options, make each one's cost visible, and leave the conclusion to the host: a question that bundles two decisions cannot be answered, and an answer already given is a constraint on the rest of the work rather than something to ask again.
 
 Then update memory with the entries §7 describes.
 
