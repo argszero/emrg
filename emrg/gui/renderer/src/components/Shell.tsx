@@ -322,7 +322,19 @@ export function Shell() {
 
   async function selectProjectSession(p: AgentRec, sid: string) {
     const b = wsBridge();
-    if (b?.switchSession) await b.switchSession({ sessionId: sid });
+    // issue #2637：这里原来没有 catch —— 一次拒绝就是未处理的 promise 拒绝，界面毫无
+    // 反应（与任务面板的 catch 不对称）。拒绝要有落点。
+    if (b?.switchSession) {
+      try {
+        await b.switchSession({ sessionId: sid });
+      } catch (e) {
+        transcript.addSystemMessage(
+          t("openSession.loadFailed", { msg: (e as Error)?.message ?? String(e) }),
+          activeSid,
+        );
+        return;
+      }
+    }
     setActiveSid(sid);
     setActiveView("sessions");
     void loadHistory(sid);

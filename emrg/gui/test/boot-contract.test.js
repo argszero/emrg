@@ -338,3 +338,34 @@ test("issue #2490: emrg:taskLimits reports the daemon's own minimum, never a lit
     "no literal floor may live in this handler — that is the copy issue #2490 removes"
   );
 });
+
+// issue #2637：切会话不再因「当前会话自有流运行中」被拒。
+// 那条拒绝成立过一个年代：切换当时会关闭旧连接，而 close() 对 ownStream 连接先发
+// cancel 再断 ws（conn-manager.test.js 的 P6 正钉着「先 cancel 再 close」），于是放行
+// 切换就等于静默杀掉正在跑的那一轮。此后切换改为不动旧连接（关闭是 emrg:closeSession
+// 的事），每会话各有 ws 与记录桶 ⇒ 那条拒绝只剩拒绝本身，而它的两个调用方都把拒绝说
+// 在用户看不见的地方：侧边栏没有 catch（未处理的 promise 拒绝、界面毫无反应），任务
+// 面板的 catch 写进「正在离开的」那个会话的记录。
+test("issue #2637: emrg:switchSession does not consult ownStream to refuse a switch", () => {
+  // 「查了没有」问的是代码，不是注释：注释里点到这把锁的正当改版必须静默，代码里真去
+  // 读它必须变红 —— 两条都在下面各钉一次，否则这个谓词读不出任何东西。
+  const withoutLineComments = (s) => s.replace(/^\s*\/\/.*$/gm, "");
+  const region = handlerRegion(read("main.js"), "emrg:switchSession");
+  assert.ok(
+    !/ownStream/.test(withoutLineComments(region)),
+    "a streaming turn lives on its own session's connection and outlives the switch, so " +
+      "refusing the navigation protects nothing; the lock still matters to close(), which " +
+      "cancels a busy connection — it just must not gate switching",
+  );
+  assert.ok(
+    !/ownStream/.test(withoutLineComments("// 切会话不查 ownStream\nfoo();")),
+    "a comment naming the lock is not a consultation of it",
+  );
+  assert.ok(
+    /ownStream/.test(withoutLineComments('if (c?.ownStream) throw new Error("x");')),
+    "reading it in code is still caught — else this guard reads nothing at all",
+  );
+  // 反方向：同一段里别的拒绝不许被一起带走。
+  assert.match(region, /REJECT invalid session_id/, "session-id validation stays a refusal");
+  assert.match(region, /too many open sessions/, "the open-session cap stays a refusal");
+});

@@ -584,11 +584,9 @@ vision = false
         logger.warn(`[gui:switch] REJECT too many open sessions (${openSessions.size}/${DEFAULT_CAP}) sid=${sessionId}`);
         throw new Error(`too many open sessions (${DEFAULT_CAP}) — close some first`);
       }
-      // G65：自有流运行中禁止切会话（每连接独立锁，查当前激活连接）
-      if (connManager?.get(currentSessionId)?.ownStream) {
-        logger.warn(`[gui:switch] REJECT own stream in progress (sid=${currentSessionId})`);
-        throw new Error("stream in progress — cannot switch");
-      }
+      // issue #2637：切会话不看 ownStream。自有流跑在它自己会话的连接上，切换不动它
+      // （P4：切走不关闭旧连接），所以「流运行中禁止切」只拒绝、不保护。G65 锁仍归
+      // close() / cancel 用：conn-manager 关闭在忙连接时先 cancel 再断 ws。
       const prevSid = currentSessionId;
       logger.info(`[gui:switch] prevSid=${prevSid} → target=${sessionId}, openSessions.size=${openSessions.size}`);
       // G110：切会话清空旧连接分组缓存（含 timer），防广播"幽灵"残留
