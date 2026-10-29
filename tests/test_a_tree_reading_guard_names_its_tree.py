@@ -135,14 +135,22 @@ def _carries(subjects: tuple[str, ...]) -> bool:
     """Whether this checkout holds any of these subject paths."""
     return any(next(REPO_ROOT.glob(pattern), None) is not None for pattern in subjects)
 
-#: The one guard run here that names a *given* tree rather than its own checkout, so it
-#: is asked a different question below: its line must follow its argument.
-TAKES_A_TREE_ARGUMENT = "check-citation-resolves.py"
+#: The guards whose tree is the caller's to choose rather than this checkout, keyed by the
+#: argument that points each at one (`()` = the tree is the positional subject). Their line
+#: must follow that argument, and the two legs below ask them that instead of the
+#: own-checkout question `RUN_HERE` members are asked. The bucket is decided by the
+#: **default**, not by convenience: a guard whose default root is the tree the caller stands
+#: in cannot be in `RUN_HERE`, because the leg there requires it to name this checkout
+#: whatever the cwd — which for such a guard would be a line that follows nothing.
+TAKES_A_TREE_ARGUMENT = {
+    "check-citation-resolves.py": (),
+    "check-staged-inverse.py": ("--repo",),
+}
 
 #: The guards that can be pointed at a tree of the caller's choosing, and the argument
 #: that points each at one — the shape the empty-tree leg below needs and cannot derive,
 #: because "accepts a root" is not visible in the source the way a `tree: ` line is.
-#: `TAKES_A_TREE_ARGUMENT` is here as the member whose tree *is* its argument;
+#: `TAKES_A_TREE_ARGUMENT`'s members are here as the guards whose tree *is* their argument;
 #: `check_unbound_reads.py` takes the same kind of input behind an optional flag, which
 #: is why it is also in `RUN_HERE` (with no flag it names its own checkout);
 #: `check-workflows.py` takes one behind `--root` and is classified in the
@@ -163,6 +171,7 @@ TAKES_A_TREE_ARGUMENT = "check-citation-resolves.py"
 #: `--root` and was not listed, so nothing pointed it at a tree.
 POINTABLE_AT_A_TREE = {
     "check-citation-resolves.py": (),
+    "check-staged-inverse.py": ("--repo",),
     "check-retry-bounds.py": ("--root",),
     "check_unbound_reads.py": ("--root",),
     "check-undefined-names.py": ("--root",),
@@ -393,7 +402,7 @@ def _classified() -> set[str]:
     """
     return (
         set(RUN_HERE)
-        | {TAKES_A_TREE_ARGUMENT}
+        | set(TAKES_A_TREE_ARGUMENT)
         | set(NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE)
         | set(NOT_TREE_READERS)
     )
@@ -409,7 +418,7 @@ def _tree_reading_buckets() -> set[str]:
     disk is classified"), which is a different one (reviewed 2026-10-06,
     `cyc20261006-230355`).
     """
-    return set(RUN_HERE) | {TAKES_A_TREE_ARGUMENT} | set(NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE)
+    return set(RUN_HERE) | set(TAKES_A_TREE_ARGUMENT) | set(NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE)
 
 
 def _first_line(proc: subprocess.CompletedProcess) -> str:
@@ -610,33 +619,43 @@ def test_a_tree_reading_guard_names_its_own_checkout_whatever_the_cwd(tmp_path, 
         )
 
 
-def test_the_guard_that_takes_a_tree_names_the_tree_it_was_given(tmp_path) -> None:
-    """The citation guard's line follows its **argument** — the leg a constant dies on.
+def _git_init(path: Path) -> None:
+    """A working tree with no commit: enough for a guard to name it, and nothing to invert."""
+    subprocess.run(["git", "init", "-q", str(path)], check=True, capture_output=True)
 
-    This guard is the one whose tree is chosen by its caller, so its subject is not this
-    repository: pointed at a directory a test built, it must say so. A line hardcoded to
-    the repository root would pass every other assertion in this file and fail here.
+
+def test_the_guard_that_takes_a_tree_names_the_tree_it_was_given(tmp_path) -> None:
+    """A guard whose tree is its argument names **that** tree — the leg a constant dies on.
+
+    These guards' subject is chosen by their caller, so it is not this repository: pointed
+    at a tree a test built, each must say so. A line hardcoded to the repository root would
+    pass every other assertion in this file and fail here.
+
+    The subject is a real working tree, because a guard answering about an index needs one
+    to answer about at all; it holds no commit, so neither guard can report a finding about
+    it — the subject of this leg is the line, not the verdict.
     """
-    script = SCRIPTS_DIR / TAKES_A_TREE_ARGUMENT
     subject = tmp_path / "some-tree"
     subject.mkdir()
+    _git_init(subject)
 
-    proc = _run([str(script), str(subject)], cwd=REPO_ROOT)
+    for name, flag in TAKES_A_TREE_ARGUMENT.items():
+        proc = _run([str(SCRIPTS_DIR / name), *flag, str(subject)], cwd=REPO_ROOT)
 
-    named = _named_root(proc)
-    assert named, (
-        f"{TAKES_A_TREE_ARGUMENT}: no `tree: ` line in its report "
-        f"(rc={proc.returncode}, stdout={proc.stdout[:200]!r})"
-    )
-    assert Path(named).resolve() == subject.resolve(), (
-        f"{TAKES_A_TREE_ARGUMENT}: it was given {subject} and named {named} — the line "
-        "must name the tree that answered, or it is a constant wearing the "
-        "convention's clothes"
-    )
-    assert Path(named).resolve() != REPO_ROOT, (
-        "the control is only discriminating while the tree it was given is not this "
-        "repository — otherwise both halves of this file's control name the same path"
-    )
+        named = _named_root(proc)
+        assert named, (
+            f"{name}: no `tree: ` line in its report "
+            f"(rc={proc.returncode}, stdout={proc.stdout[:200]!r})"
+        )
+        assert Path(named).resolve() == subject.resolve(), (
+            f"{name}: it was given {subject} and named {named} — the line "
+            "must name the tree that answered, or it is a constant wearing the "
+            "convention's clothes"
+        )
+        assert Path(named).resolve() != REPO_ROOT, (
+            "the control is only discriminating while the tree it was given is not this "
+            "repository — otherwise both halves of this file's control name the same path"
+        )
 
 
 def _refusal(proc: subprocess.CompletedProcess) -> str:
@@ -687,21 +706,25 @@ def test_a_guard_pointed_at_a_tree_it_read_nothing_from_refuses_to_pass(tmp_path
             )
 
 
-def test_the_citation_guards_line_is_not_merely_the_default(tmp_path) -> None:
-    """Run with no argument, that guard names the tree it defaults to (`.`), not this one.
+def test_a_guard_that_takes_a_tree_defaults_to_the_tree_it_stands_in(tmp_path) -> None:
+    """Run with no argument, each names the tree it defaults to (`.`), not this one.
 
     The default is what a cycle gets when it runs the guard by hand from a shell, so the
     line has to be right there too — and it is the run that shows the guard's subject is
     "the tree you are standing in" rather than "the repository the file lives in".
     """
-    script = SCRIPTS_DIR / TAKES_A_TREE_ARGUMENT
-    proc = _run([str(script)], cwd=tmp_path)
+    subject = tmp_path / "standing-in"
+    subject.mkdir()
+    _git_init(subject)
 
-    named = _named_root(proc)
-    assert Path(named).resolve() == tmp_path.resolve(), (
-        f"{TAKES_A_TREE_ARGUMENT}: run from {tmp_path} with no argument it named "
-        f"{named!r} — its default root is `.`, and that is the tree it read"
-    )
+    for name in TAKES_A_TREE_ARGUMENT:
+        proc = _run([str(SCRIPTS_DIR / name)], cwd=subject)
+
+        named = _named_root(proc)
+        assert Path(named).resolve() == subject.resolve(), (
+            f"{name}: run from {subject} with no argument it named "
+            f"{named!r} — its default root is `.`, and that is the tree it read"
+        )
 
 
 def test_the_refusal_reader_takes_only_a_line_that_starts_with_the_spelling() -> None:
