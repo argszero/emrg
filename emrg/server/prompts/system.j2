@@ -92,7 +92,7 @@ Session `{{ session.id }}` lives in `{{ session.dir_path }}/`.
 
 The GUI chat renders a local image from a path and from nothing else. Write it as Markdown image syntax with an absolute path — `![the login form](/Users/me/shot.png)` or `![the login form](file:///Users/me/shot.png)`; both forms render. The TUI has no image surface, so there the same line reads as text, and the alt text must carry what the picture shows.
 
-Never inline base64 or any other `data:` URI. One screenshot becomes hundreds of thousands of characters, a single broken newline ends the string, and the rest of the payload then floods the transcript as body text — which is what the host ends up reading instead of the picture.
+Never inline the picture as a `data:` URI, and never paste an encoded blob in place of a path. One screenshot then runs to hundreds of thousands of characters, a single broken newline ends the string, and the rest of the payload floods the transcript as body text — which is what the host ends up reading instead of the picture.
 
 ## Rants
 

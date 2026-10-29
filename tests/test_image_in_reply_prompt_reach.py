@@ -54,7 +54,8 @@ IMAGE_TERMS = (
     "Markdown image syntax with an absolute path",               # how to write it
     "both forms render",                                         # /abs and file:/// alike
     "the alt text must carry what the picture shows",            # the TUI half
-    "Never inline base64 or any other `data:` URI",              # the prohibition
+    "Never inline the picture as a `data:` URI",                 # the prohibition
+    "never paste an encoded blob in place of a path",            # the habit it forbids
     "floods the transcript as body text",                        # why it is forbidden
 )
 
@@ -145,9 +146,11 @@ def test_the_prohibition_and_the_way_round_it_are_pinned_together() -> None:
     wording change.
     """
     block = _block_after(SYSTEM_PROMPT.read_text(encoding="utf-8"), IMAGE_HEADING)
-    assert "Never inline base64" in block, (
-        "the block no longer forbids inlining base64 — the habit that turns one screenshot into "
-        "hundreds of thousands of characters"
+    assert "Never inline the picture as a `data:` URI" in block, (
+        "the block no longer forbids inlining the picture as a `data:` URI — the habit that turns "
+        "one screenshot into hundreds of thousands of characters. It names the `data:` form rather "
+        "than the encoding by name because `tests/test_system_prompt_structure.py` holds the "
+        "template to zero digits, and the encoding's name carries two of them"
     )
     assert "/Users/me/shot.png" in block and "file:///Users/me/shot.png" in block, (
         "the block must show both accepted spellings; a prohibition whose alternative is unstated "
@@ -174,9 +177,7 @@ def test_the_scan_reports_absence() -> None:
     doubled = f"{IMAGE_HEADING}\n\n{IMAGE_HEADING}\n\n- Must push\n"
     assert doubled.count(IMAGE_HEADING) == 2
 
-    partial = f"{IMAGE_HEADING}\n\nNever inline base64 or any other `data:` URI\n"
-    assert _block_after(partial, IMAGE_HEADING).strip().startswith("Never inline base64")
-    assert "Never inline base64 or any other `data:` URI" not in _missing_terms(
-        partial, IMAGE_TERMS
-    )
+    partial = f"{IMAGE_HEADING}\n\nNever inline the picture as a `data:` URI\n"
+    assert _block_after(partial, IMAGE_HEADING).strip().startswith("Never inline the picture")
+    assert "Never inline the picture as a `data:` URI" not in _missing_terms(partial, IMAGE_TERMS)
     assert len(_missing_terms(partial, IMAGE_TERMS)) == len(IMAGE_TERMS) - 1
