@@ -168,7 +168,8 @@
   color: var(--text-1);
 }
 
-.react-shell-main .conn-banner {
+.react-shell-main .conn-banner,
+.react-shell-main .switch-banner {
   padding: 8px 16px;
   background: var(--amber-soft);
   color: var(--amber);
