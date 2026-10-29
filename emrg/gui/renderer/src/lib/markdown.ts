@@ -24,15 +24,67 @@ export interface MarkedLike {
   parse(text: string, opts?: Record<string, unknown>): string | Promise<string>;
   lexer(text: string): Array<Record<string, unknown>>;
   parser(tokens: Array<Record<string, unknown>>): string;
-  use(opts: { renderer?: { code?: (code: string, infostring: string, escaped: boolean) => string } }): unknown;
+  use(opts: {
+    renderer?: {
+      code?: (code: string, infostring: string, escaped: boolean) => string;
+      image?: (href: string, title: string | null, text: string) => string;
+    };
+  }): unknown;
 }
 export interface DomPurifyLike {
   sanitize(html: string): string;
+  /** 属性级钩子的注册入口（DOMPurify addHook）；没有它的替身只能走默认策略，file: 不会被放行 */
+  addHook?(name: string, fn: SanitizeAttributeHook): void;
 }
+
+/** DOMPurify `uponSanitizeAttribute` 钩子的入参（只声明这里用到的字段） */
+export interface SanitizeAttributeHookArg {
+  attrName?: unknown;
+  attrValue?: unknown;
+  forceKeepAttr?: unknown;
+}
+/** 钩子签名：node 是被消毒的元素，data 是当前属性的可改写描述 */
+export type SanitizeAttributeHook = (
+  node: { nodeName?: unknown },
+  data: SanitizeAttributeHookArg,
+) => void;
 export interface HljsLike {
   getLanguage(lang: string): boolean;
   highlight(code: string, opts: { language: string; ignoreIllegals: boolean }): { value: string };
   highlightAuto(code: string): { value: string };
+}
+
+/**
+ * 本地图片路径归一（issue #2638）。
+ *
+ * 渲染进程打包后是 `file://` 文档，`/Users/me/shot.png` 这种根绝对路径会被当成
+ * **origin 根**解析（应用自己的 dist 目录），不是宿主文件系统 —— 所以在进 DOM 前
+ * 改写成 `file:///Users/me/shot.png`。已有 scheme（`file:` / `http:` / `data:`…）、
+ * 协议相对（`//host/a.png`）与相对路径原样返回，归一只管根绝对写法。
+ */
+export function normalizeImageSrc(href: unknown): string {
+  const src = String(href ?? "").trim();
+  if (!src) return src;
+  if (src.startsWith("//")) return src; // 协议相对：保留原意，不猜 scheme
+  // 盘符路径 C:\x 或 C:/x —— 单字母"scheme"不是 scheme
+  if (/^[a-zA-Z]:[\\/]/.test(src)) return `file:///${src.replace(/\\/g, "/")}`;
+  if (/^[a-zA-Z][a-zA-Z0-9+.\-]*:/.test(src)) return src;
+  if (src.startsWith("/")) return `file://${src}`;
+  return src;
+}
+
+/**
+ * `file:` 是否只该在这一处放行：`img[src]`。
+ *
+ * 判断条件收在一个函数里，钩子与测试读同一份 —— 放行范围一旦扩出去（`a[href]`、
+ * `iframe[src]`、任何事件属性），这里就是唯一会红的地方。
+ */
+export function isLocalImageSrc(tagName: unknown, attrName: unknown, value: unknown): boolean {
+  return (
+    String(tagName ?? "").toLowerCase() === "img" &&
+    String(attrName ?? "").toLowerCase() === "src" &&
+    /^file:/i.test(String(value ?? ""))
+  );
 }
 
 /** 代码块复制按钮文案（默认英文；与 vanilla "复制代码"/"Copy code" 对齐） */
@@ -86,11 +138,43 @@ export function createMarkdownRenderer(deps: {
     return `<div class="code-block"><div class="code-head"><button type="button" class="code-copy" title="${copyLabel()}">${copyLabel()}</button></div><pre>${codeHtml}</pre></div>`;
   }
 
-  /** marked.use 自定义 renderer 只配置一次 */
+  /**
+   * marked image renderer：src 先归一再转义（`/abs.png` → `file:///abs.png`）。
+   * alt/title 一并转义 —— 默认 renderer 把 text 直接拼进属性，靠消毒器兜底；
+   * 这里自己转义，属性边界不由 HTML 的宽容解析决定。
+   */
+  function imageRenderer(href: string, title: string | null, text: string): string {
+    const src = escapeHtml(normalizeImageSrc(href));
+    const alt = escapeHtml(text ?? "");
+    const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
+    return `<img src="${src}" alt="${alt}"${titleAttr}>`;
+  }
+
+  /**
+   * 放行 `img[src]` 的 `file:`（issue #2638）。
+   *
+   * DOMPurify 的默认 URI 策略不含 `file:`，会把 `src` 整个剥掉，只剩一个带 alt 的
+   * 破图 —— 本地图片于是只有 base64 一条路。这里的钩子只在 isLocalImageSrc 成立时
+   * 置 `forceKeepAttr`：DOMPurify 3.x 里它只绕过 URI/白名单检查，`SAFE_FOR_XML` 与
+   * `attributename` 检查仍在；`javascript:` 与其它元素/属性因此逐字走默认策略。
+   * 没有 addHook 的替身不做任何放行 —— 默认策略就是它的全部行为。
+   */
+  function installFileImageHook(): void {
+    if (!DOMPurify || typeof DOMPurify.addHook !== "function") return;
+    DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
+      if (!isLocalImageSrc(node && node.nodeName, data && data.attrName, data && data.attrValue)) {
+        return;
+      }
+      data.forceKeepAttr = true;
+    });
+  }
+
+  /** marked.use 自定义 renderer / 消毒钩子只配置一次 */
   let configured = false;
   function ensureConfigured(): void {
     if (!marked || configured) return;
-    marked.use({ renderer: { code: codeRenderer } });
+    marked.use({ renderer: { code: codeRenderer, image: imageRenderer } });
+    installFileImageHook();
     configured = true;
   }
 
