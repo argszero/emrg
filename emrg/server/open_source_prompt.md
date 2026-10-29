@@ -244,6 +244,7 @@ cd "$DEV" && git checkout -b <branch name per project convention> "upstream/$DEF
 - **Work in the clone from §3.1.4** (`cd "$DEV"`): every edit lands there, and `{{ source_dir }}` stays a read-only reference.
 - **One problem per change** — no opportunistic refactoring; the change should follow the conventions read in §3.1.3 and the design intent from §3.1.3.
 - **Read the surrounding context before editing**: understand the responsibilities of the code you touch.
+- **A document with a translated twin is edited in one change.** Where the file you are changing has a counterpart in another language, both are changed in the same change and read against each other before it is committed: a twin left behind states the old rule to the next reader, and the reader who opens that side first is told the opposite of what the project now does. Where the project states which copy governs a disagreement, that statement sets the order — the other copy follows it, never the reverse.
 
 ##### 3.1.6 Test
 
