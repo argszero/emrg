@@ -685,6 +685,37 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     expect(screen.queryByTestId("panel-tasks")).not.toBeInTheDocument();
   });
 
+  it("切换被拒（issue #2637）：任务面板原地不动，拒绝出现在人操作的面板上，不写进没人看的转录", async () => {
+    const m = mockEmrg();
+    m.switchSession.mockRejectedValueOnce(new Error("boom-guard"));
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("nav-tasks"));
+    await waitFor(() => expect(screen.getByTestId("task-row")).toBeInTheDocument());
+    fireEvent.click(screen.getByTitle("Open session"));
+    // 拒绝可见：横幅就在任务面板上方
+    const banner = await screen.findByTestId("switch-error");
+    expect(banner).toHaveTextContent("boom-guard");
+    // 人没有被搬走：仍在任务面板，会话视图没有被切换过去
+    expect(screen.getByTestId("panel-tasks")).toBeInTheDocument();
+    expect(screen.queryByTestId("composer")).not.toBeInTheDocument();
+  });
+
+  it("切换被拒后再次成功 → 横幅退场并进入会话视图（issue #2637）", async () => {
+    const m = mockEmrg();
+    m.switchSession.mockRejectedValueOnce(new Error("boom-guard"));
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("nav-tasks"));
+    await waitFor(() => expect(screen.getByTestId("task-row")).toBeInTheDocument());
+    fireEvent.click(screen.getByTitle("Open session"));
+    await screen.findByTestId("switch-error");
+    // 第二次点击：mock 已回落到默认 resolve
+    fireEvent.click(screen.getByTitle("Open session"));
+    await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
+    expect(screen.queryByTestId("switch-error")).not.toBeInTheDocument();
+  });
+
   it("进入 Rant 面板 → 加载 listRants 并渲染 rant 行", async () => {
     const m = mockEmrg();
     render(wrapper(<Shell />));

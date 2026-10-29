@@ -130,6 +130,9 @@ export function Shell() {
   const [rants, setRants] = useState<RantRec[]>([]);
   const [projectSessions, setAgentSessions] = useState<SessionRow[] | null>(null);
   const [projectSessionsError, setAgentSessionsError] = useState<string | null>(null);
+  // 切会话被拒时的可见提示（issue #2637）：拒绝必须落在人操作的那个面板上，
+  // 而不是一个不在屏幕上的转录或一个未处理的 Promise。
+  const [switchError, setSwitchError] = useState<string | null>(null);
   const [dialogState, dispatch] = useReducer(dialogReducer, initialDialogState);
   // Batch 5 slice 8：任务表单 + Rant 对话框（vanilla openTaskForm/openRantForm 语义）
   const [taskForm, setTaskForm] = useState<{ task: TaskRec | null } | null>(null);
@@ -322,7 +325,16 @@ export function Shell() {
 
   async function selectProjectSession(p: AgentRec, sid: string) {
     const b = wsBridge();
-    if (b?.switchSession) await b.switchSession({ sessionId: sid });
+    if (!b?.switchSession) return;
+    try {
+      await b.switchSession({ sessionId: sid });
+    } catch (e) {
+      // 切换失败：人没有离开当前视图，所以拒绝要出现在**这里**（issue #2637）——
+      // 以前这一行没有 try，拒绝变成未处理的 Promise rejection，点一下像没反应。
+      setSwitchError((e as Error)?.message ?? String(e));
+      return;
+    }
+    setSwitchError(null);
     setActiveSid(sid);
     setActiveView("sessions");
     void loadHistory(sid);
@@ -335,14 +347,14 @@ export function Shell() {
     if (!b?.switchSession) return;
     try {
       await b.switchSession({ sessionId: task.session_id, projectPath: task.agent_path });
+      setSwitchError(null);
       setActiveSid(task.session_id);
       setActiveView("sessions");
       void loadHistory(task.session_id);
     } catch (e) {
-      transcript.addSystemMessage(
-        t("openSession.loadFailed", { msg: (e as Error)?.message ?? String(e) }),
-        activeSid,
-      );
+      // 以前这条拒绝被写进 `activeSid` 的会话记录，而人正看着任务面板 —— 消息落在
+      // 一个不在屏幕上的转录里。面板视图上方的横幅才是人操作的地方（issue #2637）。
+      setSwitchError((e as Error)?.message ?? String(e));
     }
   }
 
@@ -452,6 +464,8 @@ export function Shell() {
   /** 工作区视图切换（vanilla app.js switchView 语义）：
    *  点当前面板 → toggle 回会话视图；点其他面板 → 切换；点 sessions → 回会话视图 */
   function switchView(view: SidebarViewId): void {
+    // 换视图即离开那次失败的操作现场，提示随之退场（issue #2637）
+    setSwitchError(null);
     if (view === "sessions") {
       setActiveView("sessions");
       return;
@@ -795,28 +809,35 @@ export function Shell() {
         </aside>
         <main className="react-shell-main" data-testid="react-shell-main">
           {isPanelView ? (
-            <WorkspaceView
-              activeView={activeView}
-              onSwitch={switchView}
-              agents={agents}
-              tasks={tasks}
-              rants={rants}
-              projectSessions={projectSessions}
-              projectSessionsError={projectSessionsError}
-              currentSid={activeSid}
-              version={appState.currentVersion}
-              evolutionCount={appState.evolutionCount}
-              onViewAgentSessions={(p) => void loadProjectSessions(p)}
-              onSelectAgentSession={(p, sid) => void selectProjectSession(p, sid)}
-              onAddAgent={() => void addProject()}
-              onDeleteAgent={deleteAgent}
-              onTriggerTask={(task) => void triggerTask(task)}
-              onOpenSessionTask={(task) => void openTaskSession(task)}
-              onEditTask={(task) => void openTaskForm(task)}
-              onDeleteTask={(task) => deleteTask(task)}
-              onNewRant={() => void newRant()}
-              renderer={mdRenderer}
-            />
+            <>
+              {switchError ? (
+                <div className="switch-banner" role="alert" data-testid="switch-error">
+                  {t("app.switchFailed", { msg: switchError })}
+                </div>
+              ) : null}
+              <WorkspaceView
+                activeView={activeView}
+                onSwitch={switchView}
+                agents={agents}
+                tasks={tasks}
+                rants={rants}
+                projectSessions={projectSessions}
+                projectSessionsError={projectSessionsError}
+                currentSid={activeSid}
+                version={appState.currentVersion}
+                evolutionCount={appState.evolutionCount}
+                onViewAgentSessions={(p) => void loadProjectSessions(p)}
+                onSelectAgentSession={(p, sid) => void selectProjectSession(p, sid)}
+                onAddAgent={() => void addProject()}
+                onDeleteAgent={deleteAgent}
+                onTriggerTask={(task) => void triggerTask(task)}
+                onOpenSessionTask={(task) => void openTaskSession(task)}
+                onEditTask={(task) => void openTaskForm(task)}
+                onDeleteTask={(task) => deleteTask(task)}
+                onNewRant={() => void newRant()}
+                renderer={mdRenderer}
+              />
+            </>
           ) : (
             <>
               {disconnected ? (

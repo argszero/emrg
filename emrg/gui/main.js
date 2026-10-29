@@ -584,11 +584,10 @@ vision = false
         logger.warn(`[gui:switch] REJECT too many open sessions (${openSessions.size}/${DEFAULT_CAP}) sid=${sessionId}`);
         throw new Error(`too many open sessions (${DEFAULT_CAP}) — close some first`);
       }
-      // G65：自有流运行中禁止切会话（每连接独立锁，查当前激活连接）
-      if (connManager?.get(currentSessionId)?.ownStream) {
-        logger.warn(`[gui:switch] REJECT own stream in progress (sid=${currentSessionId})`);
-        throw new Error("stream in progress — cannot switch");
-      }
+      // 切会话不再因「当前会话仍在流式」而拒绝（issue #2637）：切走只打开/复用**目标**
+      // 会话的连接，旧连接原样保留（见下方 openSession 之后的 P4 注释），所以一个正在
+      // 生成的回合不受切换影响。真正会切断回合的是主动关闭——`ConnManager.close()`
+      // 先发 cancel 再断 ws，那条路径不变。
       const prevSid = currentSessionId;
       logger.info(`[gui:switch] prevSid=${prevSid} → target=${sessionId}, openSessions.size=${openSessions.size}`);
       // G110：切会话清空旧连接分组缓存（含 timer），防广播"幽灵"残留
