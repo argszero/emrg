@@ -507,6 +507,29 @@ def _replay_rows(messages) -> list[tuple[str, object, str]]:
 CANCELLED_LINE = "⏸ Interrupted — response stopped. You can continue."
 
 
+def esc_stops_the_session_turn(*, busy: bool, turn_running: bool) -> bool:
+    """Whether Esc has a turn to stop, so the keystroke asks instead of doing nothing.
+
+    The two facts are not the same question and neither implies the other:
+
+    * ``busy`` is **this client's own send in flight** — it is true only for a turn
+      this connection started;
+    * ``turn_running`` is **the session's turn**, fed by the daemon's `turn_start` /
+      `done` frames and by the resume snapshot, so it is true for a turn a scheduled
+      task or another client started as well.
+
+    Asking ``busy`` alone left the host pressing Esc at a scheduled task's turn with
+    nothing happening: the session was on screen, the elapsed timer was counting, and
+    the keystroke was silent. The daemon's cancel is session-scoped (it resolves the
+    turn from the named session), so a client watching that session can stop the same
+    turn whichever client began it — the fact to ask is therefore the wider one.
+
+    The keystroke still only *asks*: `request_cancel` sends the frame and the daemon's
+    ``cancelled`` receipt remains the only statement that anything stopped.
+    """
+    return busy or turn_running
+
+
 async def request_cancel(conn, session_id: str) -> None:
     """Ask the daemon to stop ``session_id``'s turn; send nothing if unknown.
 
@@ -1272,7 +1295,8 @@ async def interactive(init_auto_evolve: bool = False, console=None):
     # Whether the **session's** turn is running — the daemon's fact, fed by
     # `turn_start` / `done` / the resume snapshot, and the lifetime of the elapsed
     # timer (requirement 3). `busy` keeps its own meaning: this client's send is in
-    # flight, which is what ESC and the queue logic ask about.
+    # flight, which is what the queue logic asks about; ESC asks both facts through
+    # `esc_stops_the_session_turn`, so a turn this client did not start is stoppable.
     turn_running: bool = False
     # P1 queue-injection client side (daemon #655): messages sent while the
     # session is busy are queued daemon-side (task_queued). Track them here so
@@ -2835,15 +2859,18 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                 return True
             return True
 
-        # ── ESC interrupt when busy ──────────────────────────
+        # ── ESC interrupt: this client's send, or the session's turn ──
         # Mimics Claude Code: Esc stops the current response mid-turn,
         # keeping work done so far. Dialogs (selector/autocomplete) are
-        # handled below — this only fires when LLM is actively responding.
+        # handled below — this only fires when there is a turn to stop.
         # Nothing is cleared or narrated here (rant 2026-09-20T12:50:13): the
         # daemon's `cancelled` receipt is the only statement of what stopped, so
         # a keypress cannot claim a stop the session never took. The typing
         # indicator keeps turning until that receipt arrives.
-        if data == b"\x1b" and busy:
+        # `esc_stops_the_session_turn` asks both facts: `busy` alone is this
+        # client's own send, so a scheduled task's turn — or a peer client's —
+        # was on screen and counted down while Esc did nothing.
+        if data == b"\x1b" and esc_stops_the_session_turn(busy=busy, turn_running=turn_running):
             await request_cancel(conn, session_id)
             return True
 

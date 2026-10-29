@@ -871,7 +871,7 @@ def test_the_tool_selector_closes_on_esc_before_the_turn_cancel_can_see_it():
     """
     src = _app_source()
     panel = src.index("if tool_sel.active and tool_sel.widget:")
-    cancel = src.index("# ── ESC interrupt when busy ──")
+    cancel = src.index("# ── ESC interrupt: this client's send, or the session's turn ──")
 
     assert panel < cancel
     block = src[panel:panel + 1200]
