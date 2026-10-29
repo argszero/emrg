@@ -49,6 +49,9 @@ function mockEmrg() {
   const setSandboxRoots = vi.fn().mockResolvedValue({ ok: true });
   const triggerTask = vi.fn().mockResolvedValue({ ok: true });
   const switchSession = vi.fn().mockResolvedValue({ ok: true });
+  // Rant 2026-10-29T14:21:57: the stop button must reach the daemon for a turn this
+  // client did not start, so the bridge it calls has to exist here.
+  const cancel = vi.fn().mockResolvedValue({ ok: true });
   (window as unknown as { emrg?: unknown }).emrg = {
     onEvent,
     sendMessage,
@@ -73,6 +76,7 @@ function mockEmrg() {
     setSandboxRoots,
     triggerTask,
     switchSession,
+    cancel,
   };
   return {
     listeners,
@@ -96,6 +100,7 @@ function mockEmrg() {
     setSandboxRoots,
     triggerTask,
     switchSession,
+    cancel,
     emit: (evt: DaemonEventFrame) => listeners.forEach((cb) => cb(evt)),
   };
 }
@@ -924,6 +929,28 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
     await waitFor(() =>
       expect(screen.getByTestId("session-info").textContent).toMatch(/\[05:\d\d\]/),
     );
+  });
+
+  it("停止按钮跟着会话走，而不是跟着本端发没发过请求（rant 2026-10-29T14:21:57）", async () => {
+    // 这一轮不是本端发起的：定时任务的一次 tick，或者另一个客户端。本端从未调用
+    // `sendMessage`，只收到 daemon 的 `turn_start` 广播。
+    //
+    // TUI 的 Esc 曾经只看「本端有请求在飞」（`busy`），于是这种轮在屏幕上跑着、
+    // 计时在走，按 Esc 却什么都没发生，只能去开 GUI 或者杀掉 daemon。GUI 这边
+    // 读的是 `busyBySid[activeSid]` —— daemon 广播的会话级事实 —— 所以本来是好的；
+    // 这条测试把「本来是好的」变成「再也不能变坏」：删掉 Shell 里那一行
+    // `busy = appState.busyBySid[activeSid]`，停止按钮就不会出现，本测试变红。
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(screen.getByTestId("composer-input")).toBeInTheDocument());
+    m.emit({ type: "turn_start", data: { started_at: Math.floor(Date.now() / 1000) }, sid: "s1" });
+
+    const stop = await screen.findByTestId("composer-stop");
+    expect(m.sendMessage).not.toHaveBeenCalled(); // 本端确实没发起过这一轮
+    fireEvent.click(stop);
+    await waitFor(() => expect(m.cancel).toHaveBeenCalledWith("s1"));
   });
 
   it("快照说没有轮在跑 → 会话信息行不显示计时（不得留下上一轮的时刻）", async () => {

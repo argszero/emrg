@@ -36,6 +36,7 @@ pytestmark = pytest.mark.skipif(
 from emrg.client.app import (
     CANCELLED_LINE,
     cancelled_line,
+    esc_stops_the_session_turn,
     receipt_is_about_a_turn_this_client_shows,
     request_cancel,
     the_ending_completes_a_receipt_this_client_holds,
@@ -321,13 +322,61 @@ def test_the_esc_branch_asks_and_shows_nothing():
     TTY loop, so no runtime assertion can reach it, and this is the only form in
     which "there is no local optimistic branch" can be checked at all.
     """
-    block = _block_after('if data == b"\\x1b" and busy:', "return True")
+    block = _block_after(
+        'if data == b"\\x1b" and esc_stops_the_session_turn(', "return True"
+    )
 
     assert "request_cancel(" in block, "Esc must ask the daemon"
     assert "chat.add(" not in block, "the keystroke must not narrate"
     assert "busy = False" not in block, "the keystroke must not clear busy (only the receipt does)"
     assert "term.set_title(" not in block, "the keystroke must not reset the title"
     assert "CANCELLED_LINE" not in block
+
+
+# ── which turn Esc has to stop ───────────────────────────────
+
+
+def test_esc_stops_a_turn_this_client_did_not_start():
+    """The session's turn counts, whoever started it.
+
+    This is the case that was silent: a scheduled task's tick, or another client's
+    send, keeps the session busy and the timer counting, and this connection never
+    sent anything — so a judgement reading only `busy` answered false and the
+    keystroke did nothing. The cancel is session-scoped daemon-side, which is what
+    makes stopping it from here legal at all.
+    """
+    assert esc_stops_the_session_turn(busy=False, turn_running=True) is True
+
+
+def test_esc_stops_this_clients_own_send_too():
+    """The narrower fact is not replaced by the wider one: a send in flight still counts.
+
+    Both are true at once for a turn this client started, and either alone has to
+    be enough — reading only the session's fact would lose the moment between the
+    send and the daemon's `turn_start`.
+    """
+    assert esc_stops_the_session_turn(busy=True, turn_running=False) is True
+
+
+def test_esc_with_no_turn_sends_nothing():
+    """Neither fact: the dialogs below own the keystroke, so no request goes out."""
+    assert esc_stops_the_session_turn(busy=False, turn_running=False) is False
+
+
+def test_the_esc_branch_asks_both_facts():
+    """The wiring row: the predicate's own tests pass even if this hands it a constant.
+
+    Same defect and same reason as `test_the_receipt_asks_the_two_fact_question` —
+    a call site passing `turn_running=False` leaves every predicate test above
+    green while restoring exactly the behaviour that was reported.
+    """
+    block = _block_after(
+        'if data == b"\\x1b" and esc_stops_the_session_turn(', "return True"
+    )
+
+    assert "busy=busy, turn_running=turn_running" in block, (
+        "the branch must hand the predicate both variables, not a constant"
+    )
 
 
 def test_the_narration_is_found_where_it_now_belongs():
