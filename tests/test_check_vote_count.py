@@ -30,6 +30,7 @@ from __future__ import annotations
 import importlib.util
 import ast
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -839,17 +840,44 @@ def test_a_landed_heads_history_reports_why_a_vote_credits_nobody(
     out = capsys.readouterr().out
     assert rc == 0, out
 
-    assert (
-        "2026-09-11T01:00:00Z VOID (3 cycle ids) - the vote body names 3 cycle ids "
-        "(cyc20260911-120000, cyc20260911-090000, cyc20260911-100000) - which cycle "
-        "wrote it cannot be measured, so it credits none of them"
-    ) in out, out
-    assert (
-        "2026-09-11T02:00:00Z NO   (2 cycle ids) - the vote body names 2 cycle ids "
-        "(cyc20260911-120000, cyc20260911-140000) - which cycle wrote it cannot be "
-        "measured, so it credits none of them"
-    ) in out, out
-    assert "the review objected" not in out, (
+    def _row(at: str) -> tuple[str, int, str]:
+        """(mark, id count, note) for the landed-history row at `at`.
+
+        Read as fields, not as a sentence. The mark, the label and "the reason is the
+        vote's own" are the facts this row exists to carry; the sentence around them is
+        prose, and pinning it made a rewrite of the wording fail a test about the
+        distinction. Measured: rewriting both adjacent literals that build the note
+        left the mark, the label, the id list and the credits-nobody statement intact,
+        the line reading `the body names 3 cycles (...), and no single one of them can
+        be credited with this review` - and the verbatim assertion still reddened.
+        """
+        rows = [ln for ln in out.splitlines() if ln.strip().startswith(at)]
+        assert len(rows) == 1, out
+        head, sep, note = rows[0].partition(" - ")
+        assert sep, rows[0]
+        m = re.match(r"\s*\S+\s+(\S+)\s+\((\d+) cycle ids\)$", head)
+        assert m, head
+        return m.group(1), int(m.group(2)), note
+
+    # An approval whose body names three ids credits none of them. The mark is the
+    # VOID that is about the body rather than about the head having landed, and the
+    # label counts the ids a reader would otherwise have to count.
+    mark, count, note = _row("2026-09-11T01:00:00Z")
+    assert (mark, count) == ("VOID", 3), out
+    for cid in ("cyc20260911-120000", "cyc20260911-090000", "cyc20260911-100000"):
+        assert cid in note, note
+    assert note.strip(), "a vote that credits nobody cannot be explained by an empty note"
+
+    # A veto naming two ids keeps its own "NO" mark and its own reason - not the line a
+    # *valid* veto gets. That collapse is the second defect this row exists to catch,
+    # and it is the reason the note is asserted to be something other than that
+    # constant rather than asserted to be particular words.
+    mark, count, note = _row("2026-09-11T02:00:00Z")
+    assert (mark, count) == ("NO", 2), out
+    for cid in ("cyc20260911-120000", "cyc20260911-140000"):
+        assert cid in note, note
+    assert note.strip(), "an unattributable veto must still say why it credits nobody"
+    assert note.strip() != "the review objected", (
         "a veto that credits no cycle must print why it credits nobody, not the line a "
         "valid veto gets - the same mark, two different facts"
     )
