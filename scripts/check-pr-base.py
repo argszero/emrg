@@ -59,8 +59,28 @@ Exit codes
 0  no open PR's base is a dead end (bases either reach master, or are an open
    PR's head - the latter reported as LIVE)
 1  at least one open PR is based on a dead end - retarget it before merging
-2  the question could not be answered (gh failed, response unparseable, or a
-   requested PR number is not among the open PRs)
+2  the question could not be answered (gh failed, response unparseable, a
+   requested PR number is not among the open PRs, or no repository could be named
+   to measure - see "Which repository answered" below)
+
+Which repository answered
+-------------------------
+Every verdict here is about exactly one repository, and the first line of every report
+names it. `master` and the branch list are that repository's, so a reader who cannot see
+which one was read cannot tell whose bases were classified.
+
+`--repo` names it. Without `--repo` the repository used to be left to gh's own
+`{owner}/{repo}` placeholder, which gh resolves from the remotes of the directory this
+runs in - correct on an ordinary clone, and wrong on a checkout whose only GitHub remote
+is a fork. A fork holds a **copy** of `master` and the branches it had when it was forked,
+so the gate answered about the fork and said nothing about it. Measured 2026-10-29
+(`cyc20261029-082021`) on master `7e76668`: the placeholder resolved to `pm25coder/emrg`
+with 50 branches against the upstream's 1159, so 1158 upstream bases were reported as "no
+longer exists on the remote"; and the upstream master head `7e766683` - the commit this
+very file is committed in - read as *not on master*, flipping `_ref_is_on_master` from
+True to False. Same commit, same question, two answers, and no line of output naming the
+repository that gave either. So the placeholder never reaches gh as a path now: a fork is
+refused by name, and any other resolution is reported before the verdicts.
 
 What the count covers
 ---------------------
@@ -85,6 +105,12 @@ import subprocess
 import sys
 
 MASTER = "master"
+
+#: gh's placeholder for "the repository of the directory this runs in". Spelled once,
+#: because it is the one token that must never again reach a `repos/...` path: gh resolves
+#: it from the cwd's remotes, and on a checkout whose only GitHub remote is a fork that
+#: resolution *is* the fork. `_repo_for_the_question` is where it is resolved and refused.
+PLACEHOLDER = "{owner}/{repo}"
 
 
 def _gh(*args: str) -> str:
@@ -123,8 +149,15 @@ def _gh_json(*args: str) -> object:
     return json.loads(_gh(*args))
 
 
-def _open_prs(repo: str | None) -> list[dict]:
-    """Every open PR with the fields this check needs."""
+def _open_prs(repo: str) -> list[dict]:
+    """Every open PR **in `repo`**, with the fields this check needs.
+
+    `repo` is always a concrete `owner/name` - the caller named it, or
+    `_repo_for_the_question` resolved it. The `if repo:` that used to be here was the
+    second half of the old defect: omitting `-R` is what made gh answer about whatever
+    repository the checkout resolved to, and leaving the omissible branch in place would
+    keep that answer one forgotten argument away.
+    """
     args = [
         "pr",
         "list",
@@ -134,9 +167,9 @@ def _open_prs(repo: str | None) -> list[dict]:
         "100",
         "--json",
         "number,baseRefName,headRefName,state",
+        "-R",
+        repo,
     ]
-    if repo:
-        args += ["-R", repo]
     payload = _gh_json(*args)
     if not isinstance(payload, list):
         raise RuntimeError(f"expected a list of PRs, got {type(payload).__name__}")
@@ -147,16 +180,63 @@ def _open_prs(repo: str | None) -> list[dict]:
     return payload
 
 
-def _repo_path(repo: str | None) -> str:
-    """`owner/name` - the caller's, or gh's placeholder for the current repo."""
-    return repo if repo else "{owner}/{repo}"
+class Unmeasurable(RuntimeError):
+    """The question cannot be answered, and refusing is the answer.
+
+    The same exit path as any other `RuntimeError` here (rc 2), and named apart so a
+    reader of the refusal can see which of the two it was: this one means the repository
+    to measure could not be named, not that gh failed.
+    """
 
 
-def _branch_heads(repo: str | None) -> dict[str, str]:
-    """branch name -> head sha, for every branch on the remote."""
+def _repo_for_the_question(repo: str | None) -> str:
+    """The concrete `owner/name` this run reads - resolved, never a placeholder.
+
+    `--repo` is the caller naming a repository, which is not a guess. Without it, the
+    repository used to be gh's placeholder and gh resolved it from the remotes of the
+    checkout - on which a fork is the answer, and a fork is the wrong repository for this
+    question for two measured reasons: its `master` is a copy that lags, and its branch
+    list is a snapshot taken at fork time. Measured 2026-10-29 (`cyc20261029-082021`) on
+    master `7e76668`: the placeholder resolved to `pm25coder/emrg` (50 branches against
+    the upstream's 1159), and the upstream master head `7e766683` itself read as *not on
+    master* - the same commit answering False here and True under `--repo argszero/emrg`.
+
+    So a fork is refused **by name**, together with the repository it forks, and the
+    remedy is spelled out; a non-fork resolution is returned so `main` can print it before
+    any verdict. The non-fork half is load-bearing: an ordinary clone, whose remote is the
+    repository itself, must keep working without new flags.
+    """
+    if repo:
+        return repo
+    meta = _gh_json("api", f"repos/{PLACEHOLDER}")
+    if not isinstance(meta, dict):
+        raise Unmeasurable(
+            f"gh answered {type(meta).__name__} for {PLACEHOLDER}, not a repository - "
+            f"there is no repository to measure"
+        )
+    resolved = meta.get("full_name")
+    if not resolved:
+        raise Unmeasurable(
+            f"gh did not name the repository it resolved from {PLACEHOLDER}: {meta!r}"
+        )
+    parent = (meta.get("parent") or {}).get("full_name")
+    if parent:
+        raise Unmeasurable(
+            f"refusing to measure: with no --repo, gh resolved this checkout to "
+            f"{resolved}, which is a fork of {parent}. The base a PR declares and the "
+            f"master it has to reach both belong to one repository, and a fork holds a "
+            f"copy of master and the branches it had when it was forked, so a verdict "
+            f"read here is a verdict about {resolved}, not about {parent}. Name the "
+            f"repository to measure: --repo {parent}"
+        )
+    return resolved
+
+
+def _branch_heads(repo: str) -> dict[str, str]:
+    """branch name -> head sha, for every branch of `repo`."""
     # `_gh` (not a bare subprocess.run) so a missing `gh` raises the same
     # RuntimeError as a failing one and takes the rc-2 path.
-    out = _gh("api", f"repos/{_repo_path(repo)}/branches", "--paginate")
+    out = _gh("api", f"repos/{repo}/branches", "--paginate")
     # --paginate concatenates page arrays, which is not valid JSON as a whole;
     # the endpoint returns an array per page, so parse per document if it parses,
     # else fall back to line-delimited objects.
@@ -175,9 +255,9 @@ def _branch_heads(repo: str | None) -> dict[str, str]:
     return heads
 
 
-def _ref_is_on_master(sha: str, repo: str | None) -> bool:
-    """True when `sha` is an ancestor of (or equal to) master's head."""
-    data = _gh_json("api", f"repos/{_repo_path(repo)}/compare/{MASTER}...{sha}")
+def _ref_is_on_master(sha: str, repo: str) -> bool:
+    """True when `sha` is an ancestor of (or equal to) `repo`'s master head."""
+    data = _gh_json("api", f"repos/{repo}/compare/{MASTER}...{sha}")
     status = data.get("status")
     if status is None:
         raise RuntimeError(f"compare response has no status: {data}")
@@ -187,7 +267,7 @@ def _ref_is_on_master(sha: str, repo: str | None) -> bool:
 
 
 def classify_base(
-    base: str, branches: dict[str, str], repo: str | None, open_heads: set[str] = frozenset()
+    base: str, branches: dict[str, str], repo: str, open_heads: set[str] = frozenset()
 ) -> tuple[str, str]:
     """`(verdict, why)` for one PR's base branch.
 
@@ -228,15 +308,36 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Report PRs whose base branch cannot reach master."
     )
-    parser.add_argument("--repo", help="owner/name (default: the current repo)")
+    parser.add_argument(
+        "--repo",
+        help=(
+            "owner/name to measure (default: the repository gh resolves for this "
+            "checkout, refused when that repository is a fork)"
+        ),
+    )
     parser.add_argument(
         "prs", nargs="*", type=int, help="only these PR numbers (default: all open)"
     )
     args = parser.parse_args(argv)
 
+    # Resolved before anything is measured: a refusal that arrived after a verdict would
+    # still be a verdict, and the shape this file used to print was a verdict about an
+    # unnamed repository.
     try:
-        prs = _open_prs(args.repo)
-        branches = _branch_heads(args.repo)
+        repo = _repo_for_the_question(args.repo)
+    except (RuntimeError, json.JSONDecodeError) as exc:
+        print(f"cannot determine PR bases: {exc}", file=sys.stderr)
+        return 2
+
+    # Named before any verdict, on every run: `master` and the branch list are this
+    # repository's, so the reader has to be able to see whose they were. The line carries
+    # no other word on purpose - the tests below assert what the *verdict* lines say, and
+    # this one must not fall inside those assertions.
+    print(f"repo: {repo}")
+
+    try:
+        prs = _open_prs(repo)
+        branches = _branch_heads(repo)
     except (RuntimeError, json.JSONDecodeError) as exc:
         print(f"cannot determine PR bases: {exc}", file=sys.stderr)
         return 2
@@ -274,7 +375,7 @@ def main(argv: list[str] | None = None) -> int:
     for pr in sorted(prs, key=lambda p: p["number"]):
         try:
             verdict, why = classify_base(
-                pr["baseRefName"], branches, args.repo, open_heads
+                pr["baseRefName"], branches, repo, open_heads
             )
         except (RuntimeError, json.JSONDecodeError) as exc:
             print(f"#{pr['number']} UNKNOWN base={pr['baseRefName']!r}: {exc}")

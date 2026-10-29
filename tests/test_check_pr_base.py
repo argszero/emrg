@@ -434,3 +434,176 @@ class TestTheSummaryCountsTheSelectionNotTheRepository:
 
         assert rc == 1, out
         assert "2 of the 3 named PR(s)" in out, out
+
+
+class TestTheRepositoryItReadIsNamed:
+    """A verdict here is about exactly one repository, and this gate has to say which.
+
+    Measured 2026-10-29 (`cyc20261029-082021`) on master `7e76668`, in a checkout whose
+    `origin` is a local directory and whose only GitHub remote is `fork = pm25coder/emrg`.
+    With no `--repo`, gh resolved the tool's `{owner}/{repo}` placeholder to the fork, and
+    the same commit asked the same question answered twice:
+
+        _ref_is_on_master("7e766683...", None)              -> False
+        _ref_is_on_master("7e766683...", "argszero/emrg")   -> True
+
+    because `master` was read in two repositories. The branch sets the verdicts are
+    classified against differ the same way - 50 against 1159 - so 1158 upstream bases came
+    back as "no longer exists on the remote", and the upstream master head itself read as
+    not on master. No line of that output named the repository that had answered, and with
+    an empty queue the exit code was a clean 0.
+
+    Three directions are pinned, and each rules out one bad fix: a fork is refused **and
+    named** (so restoring the silent fallback reds), an ordinary checkout is still measured
+    **and named** (so "refuse whenever `--repo` is absent" cannot pass), and `--repo`
+    performs no resolution read at all (so a fix that keeps asking gh and only prints the
+    answer afterwards is not this fix).
+    """
+
+    FORK = {
+        "full_name": "pm25coder/emrg",
+        "fork": True,
+        "parent": {"full_name": "argszero/emrg"},
+    }
+    ORDINARY = {"full_name": "someone/emrg", "fork": False, "parent": None}
+
+    @staticmethod
+    def _dead_pr() -> list[dict]:
+        return [{"number": 1148, "baseRefName": "feature/dead", "headRefName": "h1"}]
+
+    def _wire_resolution(self, mod, monkeypatch, resolution, calls=None):
+        def fake(*args):
+            if calls is not None:
+                calls.append(args)
+            return resolution
+
+        monkeypatch.setattr(mod, "_gh_json", fake)
+
+    def _wire_measurement(self, mod, monkeypatch, seen, prs=None):
+        def fake_open(repo):
+            seen.append(repo)
+            return self._dead_pr() if prs is None else prs
+
+        monkeypatch.setattr(mod, "_open_prs", fake_open)
+        monkeypatch.setattr(mod, "_branch_heads", lambda repo: {"feature/dead": "s1"})
+        monkeypatch.setattr(mod, "_ref_is_on_master", lambda sha, repo: False)
+
+    def test_a_fork_is_refused_by_name(self, mod, monkeypatch, capsys) -> None:
+        """The measured shape: the checkout resolves to a fork, so nothing is measured."""
+        seen: list[str] = []
+        self._wire_resolution(mod, monkeypatch, self.FORK)
+        self._wire_measurement(mod, monkeypatch, seen)
+
+        rc = mod.main([])
+        err = capsys.readouterr().err
+
+        assert rc == 2, "a fork is not a repository this question can be asked of"
+        assert seen == [], "the repository must be settled before anything is measured"
+        assert "pm25coder/emrg" in err, err
+        assert "argszero/emrg" in err, "the refusal must name the repository it is a fork of"
+        assert "--repo argszero/emrg" in err, "and it must name the remedy"
+
+    def test_an_ordinary_checkout_is_measured_and_named(
+        self, mod, monkeypatch, capsys
+    ) -> None:
+        """The control: a non-fork resolution keeps the tool's ordinary invocation alive.
+
+        Without this, a fix that refused whenever `--repo` is absent would pass the test
+        above while taking away the way every normal clone runs this gate.
+        """
+        seen: list[str] = []
+        self._wire_resolution(mod, monkeypatch, self.ORDINARY)
+        self._wire_measurement(mod, monkeypatch, seen)
+
+        rc = mod.main([])
+        out = capsys.readouterr().out
+
+        assert rc == 1, out
+        assert seen == ["someone/emrg"], "the measurement must use the resolved repository"
+        assert out.splitlines()[0] == "repo: someone/emrg", out
+
+    def test_a_named_repo_is_printed_before_any_verdict(
+        self, mod, monkeypatch, capsys
+    ) -> None:
+        """`--repo` is the caller naming the repository, so gh is never asked to guess."""
+        seen: list[str] = []
+        calls: list[tuple] = []
+        self._wire_resolution(mod, monkeypatch, self.FORK, calls)
+        self._wire_measurement(mod, monkeypatch, seen)
+
+        rc = mod.main(["--repo", "owner/repo"])
+        out = capsys.readouterr().out
+
+        assert rc == 1, out
+        assert calls == [], "--repo means no resolution read at all"
+        assert seen == ["owner/repo"], seen
+        assert out.splitlines()[0] == "repo: owner/repo", out
+
+    def test_the_placeholder_is_a_lookup_and_never_a_path(
+        self, mod, monkeypatch, capsys
+    ) -> None:
+        """The defect itself, read off every argument the tool hands `gh`.
+
+        The token `{owner}/{repo}` is what gh resolves from the cwd's remotes, so the fix
+        is not "print the repository afterwards" but "never let gh pick": the token may
+        appear exactly once, as the lookup this module performs itself, and never inside a
+        `repos/...` path a verdict then rests on.
+        """
+        calls: list[tuple] = []
+
+        def fake_gh_json(*args):
+            calls.append(args)
+            if " ".join(args) == f"api repos/{mod.PLACEHOLDER}":
+                return self.ORDINARY
+            return {"status": "ahead"}  # not on master: the DEAD verdict
+
+        monkeypatch.setattr(mod, "_gh_json", fake_gh_json)
+        monkeypatch.setattr(
+            mod,
+            "_gh",
+            lambda *args: json.dumps([{"name": "feature/dead", "commit": {"sha": "s1"}}]),
+        )
+        monkeypatch.setattr(mod, "_open_prs", lambda repo: self._dead_pr())
+
+        rc = mod.main([])
+        assert rc == 1, capsys.readouterr()
+
+        with_token = [a for a in calls if any(mod.PLACEHOLDER in part for part in a)]
+        assert with_token == [("api", f"repos/{mod.PLACEHOLDER}")], with_token
+        assert any(
+            "repos/someone/emrg/compare/master..." in part for a in calls for part in a
+        ), calls
+
+    def test_a_resolution_that_names_no_repository_is_unmeasurable(
+        self, mod, monkeypatch, capsys
+    ) -> None:
+        """A resolution that answers nothing is not a repository to measure."""
+        seen: list[str] = []
+        self._wire_resolution(mod, monkeypatch, {"full_name": ""})
+        self._wire_measurement(mod, monkeypatch, seen)
+
+        rc = mod.main([])
+        err = capsys.readouterr().err
+
+        assert rc == 2, err
+        assert seen == [], seen
+        assert "did not name the repository" in err, err
+
+    def test_an_empty_queue_still_names_the_repository(
+        self, mod, monkeypatch, capsys
+    ) -> None:
+        """Named even when there is nothing to classify.
+
+        The repository line is not a header of the verdict table - it is the answer to
+        "whose queue was read", and an empty queue is exactly the case where a caller has
+        nothing else to go on. What the queue being empty *means* (this gate answers 0
+        where its siblings answer 2) is a separate question and not pinned here.
+        """
+        seen: list[str] = []
+        self._wire_resolution(mod, monkeypatch, self.ORDINARY)
+        self._wire_measurement(mod, monkeypatch, seen, prs=[])
+
+        mod.main([])
+        out = capsys.readouterr().out
+
+        assert out.splitlines()[0] == "repo: someone/emrg", out
