@@ -2134,6 +2134,78 @@ def test_the_published_contribution_pin_answers_both_ways():
         )
 
 
+# ── §3.1.5 lists what an edit must satisfy, and it said nothing about a two-language file ────
+#
+# A project that keeps a translated copy of a document has two readers of one instruction, and a
+# change that updates only the side its round was reading leaves the other side stating the old
+# rule — silently, because no suite in the target repository compares the two. The rule is pinned
+# by **position**, not by presence: `_heading_above` reads `##`-to-`####`, and §3.1.5 is a
+# five-level heading, so the same sentence under §3.1.6 would be read here as a testing rule and
+# under §3.1.1 as an entry check.
+_OPEN_SOURCE_TWIN_PHRASE = "A document with a translated twin is edited in one change"
+_OPEN_SOURCE_TWIN_SECTION = "##### 3.1.5 Implement"
+_OPEN_SOURCE_TWIN_NEXT = "##### 3.1.6 Test"
+
+
+def _fifth_level_section_of(text: str, phrase: str) -> str | None:
+    """The nearest `#####` heading before `phrase`, or `None` when the phrase is absent."""
+    heading = None
+    for line in text.splitlines():
+        if line.startswith("##### "):
+            heading = line.strip()
+        if phrase in line:
+            return heading
+    return None
+
+
+def test_the_open_source_prompt_pairs_a_document_with_its_translated_twin() -> None:
+    """An edit rule that omits the twin is an edit rule half the projects cannot follow.
+
+    The English-only principle at the top of the template does not cover this: it governs what
+    the task sends outward, not the repository's own documents, and it says nothing about a copy
+    a change leaves behind.
+    """
+    text = (PROMPTS_DIR / "open_source_prompt.md").read_text(encoding="utf-8")
+
+    assert text.count(_OPEN_SOURCE_TWIN_PHRASE) == 1, (
+        f"{_OPEN_SOURCE_TWIN_PHRASE!r} appears {text.count(_OPEN_SOURCE_TWIN_PHRASE)} times — "
+        "a rule written twice is two answers that will disagree"
+    )
+    for heading in (_OPEN_SOURCE_TWIN_SECTION, _OPEN_SOURCE_TWIN_NEXT):
+        assert f"\n{heading}" in "\n" + text, (
+            f"the section this pin reads position against is gone: {heading!r} — a positional "
+            "reading of a missing bound compares against nothing"
+        )
+    assert _fifth_level_section_of(text, _OPEN_SOURCE_TWIN_PHRASE) == _OPEN_SOURCE_TWIN_SECTION, (
+        "the translated-twin rule is no longer under "
+        f"{_OPEN_SOURCE_TWIN_SECTION!r} (found: "
+        f"{_fifth_level_section_of(text, _OPEN_SOURCE_TWIN_PHRASE)!r}) — a rule in a section "
+        "that does not own its subject is one a round reads as something else"
+    )
+
+
+def test_the_translated_twin_pin_reads_position_and_absence() -> None:
+    """The controls: a deleted rule and a moved rule must each redden, and they are not the same
+    arm — deletion is what a rewrite does, relocation is what a busy edit does."""
+    text = (PROMPTS_DIR / "open_source_prompt.md").read_text(encoding="utf-8")
+
+    deleted = text.replace(_OPEN_SOURCE_TWIN_PHRASE, "")
+    assert deleted != text, (
+        f"{_OPEN_SOURCE_TWIN_PHRASE!r} is pinned but absent, so this arm measured nothing"
+    )
+    assert _fifth_level_section_of(deleted, _OPEN_SOURCE_TWIN_PHRASE) is None, (
+        "a deleted rule still reads as present, so the pin would not notice its own rule going"
+    )
+
+    moved = deleted.rstrip() + f"\n\n{_OPEN_SOURCE_TWIN_PHRASE}\n"
+    found = _fifth_level_section_of(moved, _OPEN_SOURCE_TWIN_PHRASE)
+    assert found is not None, "the relocation arm lost the phrase it moved, not the position"
+    assert found != _OPEN_SOURCE_TWIN_SECTION, (
+        f"moving the phrase to the end of the file left it reading as {found!r} — the pin is "
+        "reading presence, not position"
+    )
+
+
 # --------------------------------------------------------------------------- the inbound half
 #
 # A round of the promotion task is written as four outward steps: find a topic, join it,
