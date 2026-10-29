@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { FENCE_END_RE, isFenceClosed, createMarkdownRenderer, type MarkedLike } from "./markdown";
+import {
+  FENCE_END_RE,
+  isFenceClosed,
+  createMarkdownRenderer,
+  normalizeImageSrc,
+  isLocalImageSrc,
+  type MarkedLike,
+} from "./markdown";
 
 /**
  * markdown.test.ts — marked/DOMPurify/highlight 封装纯逻辑测试（Batch 1 remainder）。
@@ -267,5 +274,49 @@ describe("块投影：live 代码围栏 未闭合→纯文本 / 闭合→完整�
     // 稳定块未重投影（intro 段落缓存不动）
     expect(state.stableCount).toBe(1);
     expect(body.querySelectorAll(".md-block:not(.live)")).toHaveLength(1);
+  });
+});
+
+describe("normalizeImageSrc：本地图片两种写法归一（issue #2638）", () => {
+  it("根绝对路径 → file:///…（origin 根不是宿主文件系统）", () => {
+    expect(normalizeImageSrc("/Users/me/shot.png")).toBe("file:///Users/me/shot.png");
+  });
+
+  it("已是 file: 的原样返回（不重复加 scheme）", () => {
+    expect(normalizeImageSrc("file:///Users/me/shot.png")).toBe("file:///Users/me/shot.png");
+  });
+
+  it("其它 scheme / 协议相对 / 相对路径原样返回", () => {
+    expect(normalizeImageSrc("https://x.dev/a.png")).toBe("https://x.dev/a.png");
+    expect(normalizeImageSrc("data:image/png;base64,AAA")).toBe("data:image/png;base64,AAA");
+    expect(normalizeImageSrc("//cdn.example.com/a.png")).toBe("//cdn.example.com/a.png");
+    expect(normalizeImageSrc("shots/a.png")).toBe("shots/a.png");
+  });
+
+  it("Windows 盘符路径 → file:///（单字母不是 scheme）", () => {
+    expect(normalizeImageSrc("C:\\shots\\a.png")).toBe("file:///C:/shots/a.png");
+    expect(normalizeImageSrc("C:/shots/a.png")).toBe("file:///C:/shots/a.png");
+  });
+
+  it("空值原样（不造出 file:// 空路径）", () => {
+    expect(normalizeImageSrc("")).toBe("");
+    expect(normalizeImageSrc(undefined)).toBe("");
+  });
+});
+
+describe("isLocalImageSrc：放行条件只认 img[src] 的 file:（issue #2638）", () => {
+  it("img + src + file: → true（大小写不敏感）", () => {
+    expect(isLocalImageSrc("img", "src", "file:///a.png")).toBe(true);
+    expect(isLocalImageSrc("IMG", "SRC", "FILE:///a.png")).toBe(true);
+  });
+
+  it("同一 URL 挂在别的元素/属性上 → false（放行范围不扩）", () => {
+    expect(isLocalImageSrc("a", "href", "file:///a.png")).toBe(false);
+    expect(isLocalImageSrc("img", "onerror", "file:///a.png")).toBe(false);
+    expect(isLocalImageSrc("iframe", "src", "file:///a.png")).toBe(false);
+  });
+
+  it("img[src] 但不是 file: → false（javascript:/data: 走默认策略）", () => {
+    expect(isLocalImageSrc("img", "src", "javascript:alert(1)")).toBe(false);
   });
 });

@@ -343,3 +343,11 @@
 .error-boundary-actions button:hover {
   background: var(--bg-soft);
 }
+
+/* 聊天区本地图片（issue #2638）：本地截图动辄几千像素宽，只收宽不放高——
+   小于容器的图保持原始尺寸。 */
+.assistant-html img,
+.md-stream img {
+  max-width: 100%;
+  height: auto;
+}

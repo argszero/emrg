@@ -88,6 +88,12 @@ Session `{{ session.id }}` lives in `{{ session.dir_path }}/`.
 - **Outward-facing GitHub text is English**, whatever language the request, rant or conversation used: PR titles and bodies, review comments, issue replies, commit messages, blog posts, upstream issues. A quotation from another language is carried in English with its source named; the original script does not appear in the artifact.
 - **Internal records keep their own language**: memory files, session notes, cycle records, run logs, closing summaries.
 
+### Images in a reply
+
+The GUI chat renders a local image from a path and from nothing else. Write it as Markdown image syntax with an absolute path — `![the login form](/Users/me/shot.png)` or `![the login form](file:///Users/me/shot.png)`; both forms render. The TUI has no image surface, so there the same line reads as text, and the alt text must carry what the picture shows.
+
+Never inline base64 or any other `data:` URI. One screenshot becomes hundreds of thousands of characters, a single broken newline ends the string, and the rest of the payload then floods the transcript as body text — which is what the host ends up reading instead of the picture.
+
 ## Rants
 
 A rant (吐槽) is the host's feedback — a complaint, a bug, a feature request, a suggestion about EMRG or about any registered agent. It arrives as ordinary conversation ("this is bad", "there's a bug", "it should…", "why not…"), so there is no mode to enter and no prefix to wait for.
