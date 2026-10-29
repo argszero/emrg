@@ -34,7 +34,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Iterator, Sequence
+from typing import Callable, Sequence
 
 from emrg.server.rants import default_rants_log, list_rants
 from emrg.tools.base import non_regular_kind
@@ -57,19 +57,16 @@ UNKNOWN = "unknown"
 LARK_CLI = "lark-cli"
 _CLI_TIMEOUT = 120
 
-#: How many of the host's most recently active conversations one poll reads. Each chat
-#: is one CLI call in the foreground, so this is a budget on wall-clock time, not on
-#: correctness: a chat outside the window is read on a poll where it is more recent.
-FEISHU_MAX_CHATS = 5
+#: The window each Feishu poll re-reads, and the reach of a wake: a message older than a
+#: day is not something a task running several times a day can still act on. Feishu
+#: reports message times to the minute, so a time can never be a cursor: consecutive
+#: polls overlap deliberately and the message id is what decides, which is why `seen`
+#: exists at all (issue #2592, default 4).
+FEISHU_LOOKBACK_SECONDS = 86400
 
-#: The window each Feishu poll re-reads. Feishu reports message times to the minute, so
-#: a time can never be a cursor: consecutive polls overlap deliberately and the message
-#: id is what decides, which is why `seen` exists at all (issue #2592, default 4).
-FEISHU_LOOKBACK_SECONDS = 900
-
-#: How many message ids the watermark remembers. Bounded because the file is read and
-#: rewritten on every poll: older ids fall out, and the lookback window is what makes
-#: that safe — an id older than the window is never re-read in the first place.
+#: How many message ids the watermark remembers, counted from the newest seen. A day of
+#: candidates is tens of messages, so this guards against a bad answer rather than
+#: bounding something the window reaches.
 FEISHU_SEEN_CAP = 500
 
 
@@ -281,6 +278,17 @@ def _condition_feishu(*, state: dict, now: datetime, runner, cli: str) -> Verdic
 
     All three count as one question — "is the host being asked for something" — so one
     condition answers it rather than three the host would have to remember to list.
+
+    Two searches answer it, and no walk over the conversation list does. A per-conversation
+    read is one CLI call in the foreground, so the number of conversations a poll can cover
+    is bounded by how long a poll may take — which leaves every conversation outside that
+    budget permanently unread, answering `absent` exactly as a quiet inbox does. Searching
+    covers all of them without the cost growing with how many the host is in.
+
+    `--at-chatter-ids` answers both mention forms in one call (the CLI's own help: it "also
+    matches messages that @all"), and `--chat-type p2p` answers the direct ones, where no
+    mention is needed. `--page-all` is part of both: without it the CLI answers one page of
+    twenty and the rest of the window is invisible, which reads exactly like a quiet inbox.
     """
     try:
         identity = _cli_json(["auth", "status", "--json"], runner=runner, cli=cli)
@@ -289,59 +297,55 @@ def _condition_feishu(*, state: dict, now: datetime, runner, cli: str) -> Verdic
             return Verdict(
                 UNKNOWN, "auth status carried no identities.user.openId"
             )
-        chats = _chat_items(
-            _cli_json(
-                [
-                    "im", "+chat-list", "--types=p2p,group", "--sort=active_time",
-                    "--as", "user", "--page-size", str(FEISHU_MAX_CHATS), "--json",
-                ],
-                runner=runner, cli=cli,
-            )
+        # Whole seconds, because the API refuses a stamp carrying microseconds — and that
+        # refusal would surface as an unreadable inbox rather than as the argument it is.
+        since = (now - timedelta(seconds=FEISHU_LOOKBACK_SECONDS)).replace(microsecond=0)
+        search = [
+            "im", "+messages-search", "--as", "user", "--no-reactions", "--page-all",
+            "--json", "--start", since.isoformat(),
+        ]
+        mentioned = _message_items(
+            _cli_json(search + ["--at-chatter-ids", host], runner=runner, cli=cli)
+        )
+        direct = _message_items(
+            _cli_json(search + ["--chat-type", "p2p"], runner=runner, cli=cli)
         )
     except ConditionUnavailable as exc:
         return Verdict(UNKNOWN, str(exc))
 
-    if not chats:
-        # An empty list is not the same statement as "nothing was sent": it is what a
-        # missing p2p scope, a token that has not refreshed and an account in no chats
-        # all answer alike, and only one of those means the host has nothing waiting.
-        return Verdict(UNKNOWN, "the conversation list came back empty")
+    # One id is one message however many queries answer it: a direct message that also
+    # mentions the host comes back from both, and consecutive polls overlap by design.
+    found: dict[str, dict] = {}
+    for message in (*mentioned, *direct):
+        message_id = _message_id(message)
+        if message_id is not None:
+            found.setdefault(message_id, message)
 
-    seen = {value for value in (state.get("seen") or []) if isinstance(value, str)}
-    since = _instant(state.get("since")) or (now - timedelta(seconds=FEISHU_LOOKBACK_SECONDS))
-    hits = 0
-    for chat in chats[:FEISHU_MAX_CHATS]:
-        chat_id = _chat_id(chat)
-        if not chat_id:
-            continue
-        try:
-            reply = _cli_json(
-                [
-                    "im", "+chat-messages-list", "--chat-id", chat_id,
-                    "--start", since.isoformat(), "--order", "asc", "--as", "user",
-                    "--no-reactions", "--json",
-                ],
-                runner=runner, cli=cli,
-            )
-        except ConditionUnavailable as exc:
-            # One unreadable conversation makes the whole answer unknown: the message
-            # that matters may be in exactly the one that could not be read.
-            return Verdict(UNKNOWN, f"conversation {chat_id}: {exc}")
-        for message in _message_items(reply):
-            for item in _messages_with_replies(message):
-                message_id = _message_id(item)
-                if message_id is None or message_id in seen:
-                    continue
-                if _needs_the_host(item, host=host, direct=_is_direct(chat)):
-                    hits += 1
-                seen.add(message_id)
+    # Two local exclusions and no third. `@all` arrives with `mentions: null`, so a local
+    # mention test would discard the very messages the mention query was asked for; a
+    # result returned by `--at-chatter-ids` has already proved its mention.
+    candidates = [
+        message_id
+        for message_id, message in found.items()
+        if not _sender_is_app(message) and _sender_of(message) != host
+    ]
 
-    state["seen"] = sorted(seen)[-FEISHU_SEEN_CAP:]
-    state["since"] = (
-        now - timedelta(seconds=FEISHU_LOOKBACK_SECONDS)
-    ).isoformat()
-    if hits:
-        return Verdict(HOLDS, f"{hits} message(s) need the host")
+    seen = [value for value in (state.get("seen") or []) if isinstance(value, str)]
+    if "seen" not in state:
+        # Without a watermark the first poll would wake the task for a whole day of
+        # history it has already handled, and one such wake costs a full round.
+        state["seen"] = candidates[-FEISHU_SEEN_CAP:]
+        state["since"] = since.isoformat()
+        return Verdict(ABSENT, f"warmed up: {len(candidates)} message(s) marked seen")
+
+    known = set(seen)
+    fresh = [message_id for message_id in candidates if message_id not in known]
+    # Trimmed in first-seen order. An id's lexical order says nothing about its age, so a
+    # lexical trim could keep a month-old id and drop the one that just arrived.
+    state["seen"] = (seen + fresh)[-FEISHU_SEEN_CAP:]
+    state["since"] = since.isoformat()
+    if fresh:
+        return Verdict(HOLDS, f"{len(fresh)} message(s) need the host")
     return Verdict(ABSENT, "nothing new needs the host")
 
 
@@ -486,16 +490,6 @@ def _payload(data: dict) -> dict:
     return inner if isinstance(inner, dict) else data
 
 
-def _chat_items(data: dict) -> list[dict]:
-    """The conversations an answer lists; a missing list is not an empty one."""
-    payload = _payload(data)
-    for key in ("items", "chats"):
-        value = payload.get(key)
-        if isinstance(value, list):
-            return [item for item in value if isinstance(item, dict)]
-    raise ConditionUnavailable(f"the conversation list carried no items: {sorted(payload)}")
-
-
 def _message_items(data: dict) -> list[dict]:
     """The messages an answer lists. `+chat-messages-list` answers `messages`."""
     payload = _payload(data)
@@ -504,48 +498,6 @@ def _message_items(data: dict) -> list[dict]:
         if isinstance(value, list):
             return [item for item in value if isinstance(item, dict)]
     raise ConditionUnavailable(f"the message list carried no messages: {sorted(payload)}")
-
-
-def _messages_with_replies(message: dict) -> Iterator[dict]:
-    """A message and the replies hanging under it, the message first.
-
-    `+chat-messages-list` answers a thread as its parent carrying the replies in
-    `thread_replies`, so an @ the host was handed inside a thread is in that list and in
-    no other one. A reader that stops at the top level does not see it, and the condition
-    then answers `absent` for a host who was in fact asked something — the failure is
-    silent, because the answer it gives is the same one a quiet inbox gives.
-    """
-    yield message
-    replies = message.get("thread_replies")
-    if not isinstance(replies, list):
-        return
-    for reply in replies:
-        if isinstance(reply, dict):
-            yield reply
-
-
-def _chat_id(chat: dict) -> str | None:
-    for key in ("chat_id", "chatId", "id"):
-        value = chat.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return None
-
-
-def _is_direct(chat: dict) -> bool:
-    """Is this a one-to-one conversation?
-
-    Unknown answers **False** on purpose. A group read as direct would wake the task for
-    every message in it, while a direct read as a group only misses a message with no
-    mention in it — and the mention form is the one the other two cases cover. A
-    deployment whose chat list omits the mode therefore loses the quieter half of one
-    case rather than gaining noise in every conversation.
-    """
-    for key in ("chat_mode", "chatMode", "chat_type", "chatType", "mode", "type"):
-        value = chat.get(key)
-        if isinstance(value, str):
-            return value.strip().lower() in ("p2p", "single", "direct")
-    return False
 
 
 def _message_id(message: dict) -> str | None:
@@ -586,48 +538,3 @@ def _sender_is_app(message: dict) -> bool:
             if isinstance(value, str):
                 return value.strip().lower() == "app"
     return False
-
-
-def _mentions_of(message: dict) -> list[dict]:
-    mentions = message.get("mentions")
-    if not isinstance(mentions, list):
-        return []
-    return [item for item in mentions if isinstance(item, dict)]
-
-
-def _mention_open_id(mention: dict) -> str | None:
-    inner = mention.get("id")
-    if isinstance(inner, dict):
-        for key in ("open_id", "openId", "id"):
-            value = inner.get(key)
-            if isinstance(value, str) and value:
-                return value
-    elif isinstance(inner, str) and inner:
-        return inner
-    for key in ("open_id", "openId"):
-        value = mention.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return None
-
-
-def _is_all_mention(mention: dict) -> bool:
-    key = mention.get("key")
-    if isinstance(key, str) and key.strip().lower() in ("@_all", "all"):
-        return True
-    if _mention_open_id(mention) in ("all", "@_all"):
-        return True
-    name = mention.get("name")
-    return isinstance(name, str) and name.strip().lower() in ("all", "所有人", "全体成员")
-
-
-def _needs_the_host(message: dict, *, host: str, direct: bool) -> bool:
-    """Is this message a request the host has to look at?"""
-    if _sender_is_app(message):
-        return False
-    if _sender_of(message) == host:
-        return False
-    for mention in _mentions_of(message):
-        if _is_all_mention(mention) or _mention_open_id(mention) == host:
-            return True
-    return direct

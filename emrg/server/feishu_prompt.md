@@ -45,19 +45,29 @@ overrides it — and by nothing else. The cadence is not this round's to lower.
 Messages come from `lark-cli`, which speaks the Feishu IM API. If it is not on `PATH`, look
 in the usual install locations before calling it blocked.
 
-- List the conversations first: `im +chat-list --types=p2p,group --sort=active_time`.
-  Without `--types` it returns groups only, and every direct chat disappears.
-- Then read each conversation: `im +chat-messages-list --chat-id <id> --start <ISO> --end
-  <ISO> --order desc --no-reactions`. The messages are under `data.messages` — not
-  `data.items`.
+- Sweep the inbox with two `im +messages-search` calls over the last 24 hours, each carrying
+  `--as user --no-reactions --page-all --json --start <ISO>`: one with
+  `--at-chatter-ids <the host's open id>` — the CLI's own help says it "also matches messages
+  that @all", so that one call answers both mention forms — and one with `--chat-type p2p` for
+  the direct conversations, where no mention is needed. `--page-all` is not optional: without
+  it the call answers one page of 20 and the rest of the window is invisible, which looks
+  exactly like a quiet inbox. `--start` takes whole seconds; a stamp carrying microseconds is
+  refused.
+- `im +chat-list` chooses among conversations, it does not read them: one listing per
+  conversation costs a call each, so an inbox swept that way covers only the few a round has
+  time for, and the rest is never read at all. Use `im +chat-messages-list --chat-id <id>` when
+  you want one conversation's whole thread.
+- The messages are under `data.messages` — not `data.items`.
 - Read as the user, send as the bot: reading a direct conversation needs `--as user`, because a
   bot cannot see a p2p conversation, while a message to the host is sent as the bot (§3). The
   two identities differ, and an `im` call that names neither is answered by the CLI's own `auto`
   default rather than by what the call is for.
-- `im +chat-messages-list --chat-id <id> --order asc` is the listing that answers "has the host
-  replied", because it returns the conversation in the order it was written.
-  `im +messages-search` answers out of an index that lags a send by seconds, so it can never
-  establish that nothing came back.
+- Whether the host has replied is read by position, not by clock: `im +chat-messages-list
+  --chat-id <id> --order asc` returns the conversation in the order it was written, so a reply
+  counts only when it comes after the request in that listing. Sweeping the inbox and deciding
+  what a conversation holds are two different reads: the searches above say which messages
+  exist, and this ascending listing is where a reply is read — it is what
+  `scripts/feishu-gate.py` decides consent from.
 - **A message's `thread_replies` are part of that conversation.** A listing answers a thread as
   its parent carrying the replies, so an @ to the host written as a reply arrives in that key
   and in no other list. Read the replies as you read the top level — the same sender test, the

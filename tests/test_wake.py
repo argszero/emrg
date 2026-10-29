@@ -48,12 +48,15 @@ class _Done:
         self.stderr = stderr
 
 
-def _feishu_runner(*, chats, messages, identity=None, fail=()):
+def _feishu_runner(*, mentioned=(), direct=(), identity=None, fail=()):
     """A `lark-cli` stand-in: route each argv to a payload, and record what it saw.
 
-    `messages` maps a chat id to the list `+chat-messages-list` should answer. `fail`
-    holds the argv fragments whose call should exit non-zero, so an unreadable answer is
-    a scenario rather than an accident.
+    Two buckets, because the condition asks two questions: `mentioned` is what the
+    `--at-chatter-ids` search answers, `direct` what `--chat-type p2p` answers. `fail`
+    holds the argv fragments whose call should exit non-zero, so an unreadable answer is a
+    scenario rather than an accident. Any other call is a failure, which is what keeps the
+    pinned argv honest: a condition that called a different endpoint would be caught here
+    rather than pass on a payload it was never meant to read.
     """
     seen: list[list[str]] = []
 
@@ -67,45 +70,42 @@ def _feishu_runner(*, chats, messages, identity=None, fail=()):
             return _Done(identity if identity is not None else {
                 "identities": {"user": {"openId": HOST}},
             })
-        if "+chat-list" in joined:
-            return _Done({"data": {"chats": chats}})
-        if "+chat-messages-list" in joined:
-            chat_id = argv[argv.index("--chat-id") + 1]
-            return _Done({"data": {"messages": messages.get(chat_id, [])}})
+        if "+messages-search" in joined:
+            if "--at-chatter-ids" in argv:
+                return _Done({"data": {"messages": list(mentioned)}})
+            if "--chat-type" in argv:
+                return _Done({"data": {"messages": list(direct)}})
+            return _Done(returncode=1, stderr=f"a search with no bucket: {joined}")
         return _Done(returncode=1, stderr=f"unexpected call: {joined}")
 
     runner.seen = seen
     return runner
 
 
-def _message(message_id, *, sender="ou_stranger", sender_type="user", mentions=(), replies=()):
-    """A message in the shape `+chat-messages-list` answers.
+def _message(message_id, *, sender="ou_stranger", sender_type="user", mentions=()):
+    """A message in the shape `+messages-search` answers.
 
     The sender defaults to a stranger: the host's own messages are excluded by design, so
     a host-sender default would make every case below read as noise for the wrong reason.
-
-    `replies` are the messages hanging under this one in a thread. The listing answers them
-    nested, so they are attached rather than listed beside their parent.
+    `mentions=None` reproduces an `@all`, which arrives with a null `mentions` — the shape
+    a local mention test would have discarded.
     """
-    message = {
+    return {
         "message_id": message_id,
         "sender": {"id": sender, "sender_type": sender_type},
-        "mentions": list(mentions),
+        "mentions": None if mentions is None else list(mentions),
     }
-    if replies:
-        message["thread_replies"] = list(replies)
-    return message
 
 
-def _mention(open_id=None, *, name=None, key=None):
-    entry: dict = {}
-    if open_id is not None:
-        entry["id"] = {"open_id": open_id}
-    if name is not None:
-        entry["name"] = name
-    if key is not None:
-        entry["key"] = key
-    return entry
+def _warmed(state_dir):
+    """A state file past the first-poll warm-up, which answers `absent` on purpose.
+
+    A first poll records the window and does not wake the task, so a test that wants the
+    second poll's behaviour has to say it is past the first one.
+    """
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "t.json").write_text(json.dumps({"seen": []}), encoding="utf-8")
+    return state_dir
 
 
 def _record(**when) -> dict:
@@ -254,8 +254,7 @@ def test_each_condition_keeps_its_own_clock(tmp_path, monkeypatch):
     monkeypatch.setattr(wake_mod, "default_rants_log", lambda: log)
     # A readable answer, so this condition is stamped and its clock can be compared with
     # `rant`'s: an unreadable one is deliberately retried and never stamped (next test).
-    runner = _feishu_runner(chats=[{"chat_id": "oc_g", "chat_mode": "group"}],
-                            messages={"oc_g": []})
+    runner = _feishu_runner()
     state_dir = tmp_path / "wake-state"
     record = _record(rant=600, feishu=300)
 
@@ -286,7 +285,7 @@ def test_a_condition_that_cannot_be_read_is_not_a_quiet_one(tmp_path, monkeypatc
     so the next poll asks again instead of waiting out a whole interval on a failed read.
     """
     monkeypatch.setattr(wake_mod, "default_rants_log", lambda: tmp_path / "missing.jsonl")
-    runner = _feishu_runner(chats=[], messages={}, identity={"identities": {}})
+    runner = _feishu_runner(identity={"identities": {}})
     state_dir = tmp_path / "wake-state"
     start = datetime(2026, 10, 26, 12, 0, 0)
 
@@ -302,124 +301,75 @@ def test_a_condition_that_cannot_be_read_is_not_a_quiet_one(tmp_path, monkeypatc
 
 
 def test_the_feishu_condition_answers_the_three_cases_that_need_the_host(tmp_path):
-    """A real @, an @all, and a direct message all hold; none of them is a mention of the host."""
+    """A real @, an @all, and a direct message all hold.
+
+    The two mention forms arrive in the bucket the mention query answered, and the direct
+    one in the p2p bucket — which is the whole reason the query is asked twice.
+    """
     cases = {
-        "a real mention of the host": ([_message("m1", mentions=[_mention(HOST)])], []),
-        "an @all": ([_message("m2", mentions=[_mention(key="@_all")])], []),
-        "a direct message": ([], [_message("m3", sender="ou_stranger")]),
+        "a real mention of the host": {
+            "mentioned": [_message("m1", mentions=[{"id": {"open_id": HOST}}])],
+        },
+        "an @all whose mentions are null": {
+            "mentioned": [_message("m2", mentions=None)],
+        },
+        "a direct message from a stranger": {
+            "direct": [_message("m3", sender="ou_stranger")],
+        },
     }
-    for label, (group_messages, direct_messages) in cases.items():
-        state_dir = tmp_path / label.replace(" ", "-")
-        runner = _feishu_runner(
-            chats=[{"chat_id": "oc_group", "chat_mode": "group"},
-                   {"chat_id": "oc_direct", "chat_mode": "p2p"}],
-            messages={"oc_group": group_messages, "oc_direct": direct_messages},
-        )
+    for label, buckets in cases.items():
+        runner = _feishu_runner(**buckets)
         held, notes = wakes(_record(feishu=300), task_name="t", agent="t",
-                            state_dir=state_dir, runner=runner)
+                            state_dir=_warmed(tmp_path / label.replace(" ", "-")),
+                            runner=runner)
         assert held is True, f"{label} should wake the task: {notes}"
 
 
-def test_the_feishu_condition_reads_a_thread_reply_that_mentions_the_host(tmp_path):
-    """An @ inside a thread holds the condition, exactly as a top-level one does.
+def test_the_feishu_condition_does_not_walk_the_conversation_list(tmp_path):
+    """A per-conversation read covers only the conversations the poll had budget for.
 
-    `+chat-messages-list` answers a thread as its parent carrying the replies, so the @
-    arrives under `thread_replies` and in no other list. A condition that walks the top
-    level alone answers `absent` — the same answer a quiet inbox gives, which is why the
-    miss is silent and the task then sleeps for its whole interval.
+    That was the defect: the sixth and every later conversation was never read on any
+    poll, and the condition still answered `absent` — the same answer a quiet inbox gives.
+    The guard is the absence of those calls rather than a count of them, because two
+    searches cover every conversation only for as long as nothing reintroduces the walk.
     """
+    runner = _feishu_runner(mentioned=[_message("m1", mentions=None)])
+    wakes(_record(feishu=300), task_name="t", agent="t",
+          state_dir=_warmed(tmp_path / "wake-state"), runner=runner)
+
+    calls = [" ".join(argv) for argv in runner.seen]
+    assert calls, "the condition made no call at all"
+    for forbidden in ("+chat-list", "+chat-messages-list"):
+        assert not [call for call in calls if forbidden in call], (
+            f"{forbidden} reintroduces the per-conversation budget the searches replaced: {calls}"
+        )
+    assert len([call for call in calls if "+messages-search" in call]) == 2, calls
+
+
+def test_the_feishu_condition_ignores_the_tasks_own_messages_and_the_hosts(tmp_path):
+    """The bot writes into the host's own conversation, so an unfiltered direct bucket
+    would read every answer this very task sent as a fresh request — the task waking
+    itself in a loop. `sender_type: app` is what excludes it, and the host's own id
+    excludes what he wrote himself."""
     runner = _feishu_runner(
-        chats=[{"chat_id": "oc_group", "chat_mode": "group"}],
-        messages={"oc_group": [
-            _message("om_parent", replies=[_message("om_reply", mentions=[_mention(HOST)])]),
-        ]},
+        mentioned=[_message("m1", sender="ou_bot", sender_type="app")],
+        direct=[
+            _message("m2", sender="ou_bot", sender_type="app"),
+            _message("m3", sender=HOST),
+        ],
     )
     held, notes = wakes(_record(feishu=300), task_name="t", agent="t",
-                        state_dir=tmp_path / "wake-state", runner=runner)
-    assert held is True, notes
-
-
-def test_the_feishu_condition_does_not_wake_on_a_thread_that_asks_nothing(tmp_path):
-    """The other direction: a reply that mentions nobody, and one the task itself sent.
-
-    A wake that fires on every threaded conversation costs a round every interval, which
-    is worse than the miss it buys — so a reply passes the same sender test the top level
-    does, and the answer stays `absent`.
-    """
-    runner = _feishu_runner(
-        chats=[{"chat_id": "oc_group", "chat_mode": "group"}],
-        messages={"oc_group": [
-            _message("om_parent", sender="ou_stranger", replies=[
-                _message("om_reply_noise", sender="ou_other"),
-                _message("om_reply_own", sender="ou_bot", sender_type="app"),
-            ]),
-        ]},
-    )
-    held, notes = wakes(_record(feishu=300), task_name="t", agent="t",
-                        state_dir=tmp_path / "wake-state", runner=runner)
-    assert held is False, notes
-    assert any("feishu: absent" in note for note in notes), notes
-
-
-def test_a_thread_reply_is_de_duplicated_by_its_own_id(tmp_path):
-    """A reply read twice in one lookback window is one message, not a second wake.
-
-    The reply's id is not its parent's: a de-duplication that keyed a thread by its parent
-    would re-wake the task for as long as the parent stayed in the window.
-    """
-    runner = _feishu_runner(
-        chats=[{"chat_id": "oc_group", "chat_mode": "group"}],
-        messages={"oc_group": [
-            _message("om_parent", replies=[_message("om_reply", mentions=[_mention(HOST)])]),
-        ]},
-    )
-    state_dir = tmp_path / "wake-state"
-    start = datetime(2026, 10, 26, 12, 0, 0)
-    first, _ = wakes(_record(feishu=300), task_name="t", agent="t",
-                     state_dir=state_dir, runner=runner, now=start)
-    second, notes = wakes(_record(feishu=300), task_name="t", agent="t",
-                          state_dir=state_dir, runner=runner,
-                          now=start + timedelta(minutes=6))
-    assert first is True
-    assert second is False, f"the same reply must not wake the task twice: {notes}"
-
-
-def test_the_feishu_condition_ignores_noise_and_the_tasks_own_messages(tmp_path):
-    """A group message that asks for nothing, and the bot's own reply, both leave it asleep.
-
-    The bot writes into the host's own conversation, so a direct chat with no sender
-    filter would read every answer this very task sent as a fresh request — the task
-    waking itself in a loop. `sender_type: app` is what excludes it.
-    """
-    runner = _feishu_runner(
-        chats=[{"chat_id": "oc_group", "chat_mode": "group"},
-               {"chat_id": "oc_direct", "chat_mode": "p2p"}],
-        messages={
-            "oc_group": [_message("m1", sender="ou_stranger")],
-            "oc_direct": [
-                _message("m2", sender="ou_bot", sender_type="app"),
-                _message("m3", sender=HOST),
-            ],
-        },
-    )
-    held, notes = wakes(_record(feishu=300), task_name="t", agent="t",
-                        state_dir=tmp_path / "wake-state", runner=runner)
+                        state_dir=_warmed(tmp_path / "wake-state"), runner=runner)
     assert held is False, notes
     assert any("feishu: absent" in note for note in notes), notes
 
 
 def test_the_feishu_condition_de_duplicates_by_message_id(tmp_path):
-    """One message wakes the task once, however many polls re-read it.
-
-    Feishu reports message times to the minute, so consecutive polls overlap on purpose
-    and a time can never be the cursor. The id is.
-    """
-    message = _message("om_same", mentions=[_mention(HOST)])
-    runner = _feishu_runner(
-        chats=[{"chat_id": "oc_group", "chat_mode": "group"}],
-        messages={"oc_group": [message]},
-    )
-    state_dir = tmp_path / "wake-state"
+    """One message wakes the task once, however many polls re-read it, and however many
+    queries answer it: a direct message that also mentions the host comes back twice."""
+    message = _message("om_same", mentions=None)
+    state_dir = _warmed(tmp_path / "wake-state")
+    runner = _feishu_runner(mentioned=[message], direct=[message])
     start = datetime(2026, 10, 26, 12, 0, 0)
 
     first, _ = wakes(_record(feishu=300), task_name="t", agent="t",
@@ -431,34 +381,112 @@ def test_the_feishu_condition_de_duplicates_by_message_id(tmp_path):
     assert second is False, f"the same message id must not wake the task twice: {notes}"
 
     # A genuinely new message still does.
-    runner = _feishu_runner(
-        chats=[{"chat_id": "oc_group", "chat_mode": "group"}],
-        messages={"oc_group": [message, _message("om_new", mentions=[_mention(HOST)])]},
-    )
+    runner = _feishu_runner(mentioned=[message, _message("om_new", mentions=None)])
     third, notes = wakes(_record(feishu=300), task_name="t", agent="t",
                          state_dir=state_dir, runner=runner,
                          now=start + timedelta(minutes=12))
     assert third is True, notes
 
 
-def test_the_feishu_condition_asks_the_cli_the_documented_shape(tmp_path):
-    """The argv is pinned: a condition that called a different endpoint would be silent.
+def test_a_first_poll_warms_up_instead_of_waking_on_a_day_of_history(tmp_path):
+    """No `seen` key is a deployment that has never read this window: record, do not wake.
 
-    The listing must name `user` (a bot cannot see a direct conversation) and must ask
-    for p2p as well as groups — without `--types`, groups are all that comes back.
+    The window is a day long, so the first poll finds everything the task already handled
+    at its old cadence. Waking for it buys one full round spent re-reading, and the
+    watermark is the only thing that knows the difference.
     """
-    runner = _feishu_runner(chats=[{"chat_id": "oc_g", "chat_mode": "group"}],
-                            messages={"oc_g": []})
+    runner = _feishu_runner(mentioned=[_message("m1", mentions=None)],
+                            direct=[_message("m2", sender="ou_stranger")])
+    state_dir = tmp_path / "wake-state"
+    start = datetime(2026, 10, 26, 12, 0, 0)
+
+    held, notes = wakes(_record(feishu=300), task_name="t", agent="t",
+                        state_dir=state_dir, runner=runner, now=start)
+    assert held is False, notes
+    assert any("warmed up" in note for note in notes), notes
+    state = json.loads((state_dir / "t.json").read_text(encoding="utf-8"))
+    assert sorted(state["seen"]) == ["m1", "m2"], state["seen"]
+
+    # The next poll reads the same two messages and stays asleep: the warm-up recorded
+    # them, it did not merely skip them.
+    held, notes = wakes(_record(feishu=300), task_name="t", agent="t",
+                        state_dir=state_dir, runner=runner,
+                        now=start + timedelta(minutes=6))
+    assert held is False, notes
+
+
+def test_a_search_that_cannot_be_read_is_not_a_quiet_inbox(tmp_path):
+    """`ok: false`, a payload with no message list, and a non-zero exit are one answer.
+
+    Each says nothing about whether a message is waiting, so the condition is `unknown` —
+    and its stamp is not advanced, which is what makes the next poll ask again instead of
+    waiting out a whole interval on a failed read.
+    """
+    shapes = {
+        "ok is false": _Done({"ok": False, "error": {"type": "validation"}}),
+        "no message list": _Done({"data": {"cursor": ""}}),
+        "a non-zero exit": _Done(returncode=1, stderr="unknown flag"),
+    }
+    for label, answer in shapes.items():
+        def runner(argv, _answer=answer):
+            if "auth" in argv:
+                return _Done({"identities": {"user": {"openId": HOST}}})
+            return _answer
+
+        state_dir = _warmed(tmp_path / label.replace(" ", "-"))
+        held, notes = wakes(_record(feishu=300), task_name="t", agent="t",
+                            state_dir=state_dir, runner=runner)
+        assert held is False, f"{label}: {notes}"
+        assert any("feishu: unknown" in note for note in notes), (label, notes)
+        state = json.loads((state_dir / "t.json").read_text(encoding="utf-8"))
+        assert "feishu" not in state.get("checked", {}), (
+            label, "an unreadable answer must be retried on the next poll"
+        )
+
+
+def test_the_watermark_keeps_the_newest_ids_in_first_seen_order(tmp_path):
+    """An id's lexical order says nothing about its age.
+
+    Trimming by string order would keep whichever ids sort last — a stale one could
+    outlive the message that just arrived, and the message then wakes the task twice.
+    """
+    state_dir = tmp_path / "wake-state"
+    state_dir.mkdir()
+    (state_dir / "t.json").write_text(json.dumps({"seen": ["z_old", "a_older"]}),
+                                     encoding="utf-8")
+    ids = [f"om_{index:04d}" for index in range(wake_mod.FEISHU_SEEN_CAP + 5)]
+    runner = _feishu_runner(mentioned=[_message(value) for value in ids])
+
+    wakes(_record(feishu=300), task_name="t", agent="t", state_dir=state_dir, runner=runner)
+
+    state = json.loads((state_dir / "t.json").read_text(encoding="utf-8"))
+    assert len(state["seen"]) == wake_mod.FEISHU_SEEN_CAP, len(state["seen"])
+    assert state["seen"][-1] == ids[-1], state["seen"][-3:]
+    assert "z_old" not in state["seen"], "the oldest ids are what the cap drops"
+
+
+def test_the_feishu_searches_ask_the_documented_shape(tmp_path):
+    """The argv is pinned: the buckets and `--page-all` are what make the answer cover
+    every conversation, and the stamp must not carry microseconds the API refuses.
+
+    `--page-all` is load-bearing rather than tidy: without it the CLI answers one page of
+    twenty and the rest of a day-long window is invisible — the same silent miss the
+    conversation walk had, one layer down.
+    """
+    runner = _feishu_runner()
     wakes(_record(feishu=300), task_name="t", agent="t",
-          state_dir=tmp_path / "wake-state", runner=runner)
+          state_dir=_warmed(tmp_path / "wake-state"), runner=runner)
 
     calls = [" ".join(argv) for argv in runner.seen]
-    listing = next(call for call in calls if "+chat-list" in call)
-    assert "--types=p2p,group" in listing, listing
-    assert "--as user" in listing, listing
-    reading = next(call for call in calls if "+chat-messages-list" in call)
-    assert "--as user" in reading, reading
-    assert "--start" in reading, reading
+    searches = [call for call in calls if "+messages-search" in call]
+    assert len(searches) == 2, calls
+    for call in searches:
+        for flag in ("--page-all", "--as user", "--no-reactions", "--json", "--start"):
+            assert flag in call, f"{flag} is missing from {call}"
+        stamp = call.split("--start ", 1)[1].split(" ", 1)[0]
+        assert "." not in stamp, f"{stamp} carries microseconds, which the API refuses"
+    assert any("--at-chatter-ids " + HOST in call for call in searches), searches
+    assert any("--chat-type p2p" in call for call in searches), searches
 
 
 def test_the_stamp_sent_to_the_cli_names_its_zone(tmp_path):
@@ -472,24 +500,25 @@ def test_the_stamp_sent_to_the_cli_names_its_zone(tmp_path):
     one. Measured: the CLI accepts a naive stamp silently, which is exactly why nothing
     downstream would notice.
     """
-    runner = _feishu_runner(chats=[{"chat_id": "oc_g", "chat_mode": "group"}],
-                            messages={"oc_g": []})
-    local_clock = datetime(2026, 10, 26, 12, 0, 0)  # naive, as a caller may pass it
+    runner = _feishu_runner()
+    local_clock = datetime(2026, 10, 26, 12, 0, 0, 123456)  # naive, with microseconds
     wakes(_record(feishu=300), task_name="t", agent="t",
-          state_dir=tmp_path / "wake-state", runner=runner, now=local_clock)
+          state_dir=_warmed(tmp_path / "wake-state"), runner=runner, now=local_clock)
 
-    reading = next(" ".join(argv) for argv in runner.seen if "+chat-messages-list" in " ".join(argv))
+    reading = next(" ".join(argv) for argv in runner.seen if "+messages-search" in " ".join(argv))
     stamp = reading.split("--start ", 1)[1].split(" ", 1)[0]
     parsed = datetime.fromisoformat(stamp)
     assert parsed.tzinfo is not None, (
         f"the stamp sent to the CLI is {stamp!r}, which names no zone — the round is told "
         "an aware UTC instant for the same query"
     )
+    assert parsed.microsecond == 0, f"{stamp} carries microseconds the API refuses"
     # …and it is the same instant the caller named, less this module's own lookback —
     # read from the module rather than restated, so the window has one producer.
-    assert parsed == (local_clock - timedelta(seconds=wake_mod.FEISHU_LOOKBACK_SECONDS)).astimezone(), (
-        stamp, local_clock
-    )
+    assert parsed == (
+        local_clock.replace(microsecond=0)
+        - timedelta(seconds=wake_mod.FEISHU_LOOKBACK_SECONDS)
+    ).astimezone(), (stamp, local_clock)
 
 
 def test_a_watermark_written_in_another_zone_does_not_end_the_wait(tmp_path):
@@ -509,8 +538,7 @@ def test_a_watermark_written_in_another_zone_does_not_end_the_wait(tmp_path):
         # outlives its writer, so the pairing that has to survive is old-file/now-clock.
         json.dumps({"checked": {"feishu": "2026-10-26T10:00:00"}}), encoding="utf-8"
     )
-    runner = _feishu_runner(chats=[{"chat_id": "oc_g", "chat_mode": "group"}],
-                            messages={"oc_g": []})
+    runner = _feishu_runner()
 
     # 12:00 local is 04:00 UTC, two hours past the stamp — so the condition is due.
     held, notes = wakes(_record(feishu=300), task_name="t", agent="t",
