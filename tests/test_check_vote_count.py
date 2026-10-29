@@ -30,6 +30,7 @@ from __future__ import annotations
 import importlib.util
 import ast
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -797,6 +798,91 @@ def test_a_landed_heads_history_names_a_veto_and_a_body_it_cannot_attribute(
     assert "NO   cyc20260911-110000 - the review objected" in out
     assert "VOID (no cycle id) - no cycle id in the vote body" in out
     assert "just a note" not in out, "a body with no verdict is not a vote"
+
+
+def test_a_landed_heads_history_reports_why_a_vote_credits_nobody(
+        mod, monkeypatch, capsys):
+    """The two branches of the landed history that no other arm reached (issue #2633).
+
+    Both were measured by removing them: `_history_votes`' `if len(ids) > 1:` replaced
+    by `if False:`, and the print site's `note = "the review objected" if vote.valid
+    else vote.why` flattened to `note = "the review objected"`. Under either mutation
+    this file answered `95 passed`, so neither branch was a requirement anything held.
+
+    The neighbour above covers a body naming **one** id in each mark. These two bodies
+    name several, which is the state the label has to tell apart from "wrote none": an
+    approval naming three ids credits none of them, and a veto naming two must still say
+    why instead of borrowing the valid veto's line. Both are facts about the *body*, so
+    a landed head reports them even though nothing on it is counted.
+    """
+    approval = (
+        "\u2705 LGTM - cycle `cyc20260911-120000`; the approvals of "
+        "cyc20260911-090000 and cyc20260911-100000 are void at this head"
+    )
+    veto = (
+        "\u274c Needs fix - cycle `cyc20260911-120000`; the objection of "
+        "cyc20260911-140000 is carried here too"
+    )
+    # The shape under test, not a guess: three ids on the first body and two on the
+    # second, each classified by the mark its first line opens with.
+    assert mod.distinct_cycle_ids(approval) == [
+        "cyc20260911-120000", "cyc20260911-090000", "cyc20260911-100000"]
+    assert mod.classify(approval) == "approve"
+    assert mod.distinct_cycle_ids(veto) == ["cyc20260911-120000", "cyc20260911-140000"]
+    assert mod.classify(veto) == "veto"
+
+    fake = FakeGh([
+        _review("2026-09-11T01:00:00Z", approval),
+        _review("2026-09-11T02:00:00Z", veto),
+    ], state="MERGED", merged_at="2026-10-03T14:46:59Z",
+        mergeable="UNKNOWN", merge_state="UNKNOWN")
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+
+    def _row(at: str) -> tuple[str, int, str]:
+        """(mark, id count, note) for the landed-history row at `at`.
+
+        Read as fields, not as a sentence. The mark, the label and "the reason is the
+        vote's own" are the facts this row exists to carry; the sentence around them is
+        prose, and pinning it made a rewrite of the wording fail a test about the
+        distinction. Measured: rewriting both adjacent literals that build the note
+        left the mark, the label, the id list and the credits-nobody statement intact,
+        the line reading `the body names 3 cycles (...), and no single one of them can
+        be credited with this review` - and the verbatim assertion still reddened.
+        """
+        rows = [ln for ln in out.splitlines() if ln.strip().startswith(at)]
+        assert len(rows) == 1, out
+        head, sep, note = rows[0].partition(" - ")
+        assert sep, rows[0]
+        m = re.match(r"\s*\S+\s+(\S+)\s+\((\d+) cycle ids\)$", head)
+        assert m, head
+        return m.group(1), int(m.group(2)), note
+
+    # An approval whose body names three ids credits none of them. The mark is the
+    # VOID that is about the body rather than about the head having landed, and the
+    # label counts the ids a reader would otherwise have to count.
+    mark, count, note = _row("2026-09-11T01:00:00Z")
+    assert (mark, count) == ("VOID", 3), out
+    for cid in ("cyc20260911-120000", "cyc20260911-090000", "cyc20260911-100000"):
+        assert cid in note, note
+    assert note.strip(), "a vote that credits nobody cannot be explained by an empty note"
+
+    # A veto naming two ids keeps its own "NO" mark and its own reason - not the line a
+    # *valid* veto gets. That collapse is the second defect this row exists to catch,
+    # and it is the reason the note is asserted to be something other than that
+    # constant rather than asserted to be particular words.
+    mark, count, note = _row("2026-09-11T02:00:00Z")
+    assert (mark, count) == ("NO", 2), out
+    for cid in ("cyc20260911-120000", "cyc20260911-140000"):
+        assert cid in note, note
+    assert note.strip(), "an unattributable veto must still say why it credits nobody"
+    assert note.strip() != "the review objected", (
+        "a veto that credits no cycle must print why it credits nobody, not the line a "
+        "valid veto gets - the same mark, two different facts"
+    )
+    # Neither is reported as counting: nothing is counted against a head that landed.
+    assert "counts" not in out, out
 
 
 def test_a_landed_heads_undated_review_fails_loud(mod, monkeypatch, capsys):
