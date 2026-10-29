@@ -251,6 +251,16 @@ At low install volume, acquisition happens on the store page rather than inside 
 
 **At this stage installs are the only hard number.** Price and metadata are not the bottleneck while nobody sees the app, so a pricing experiment is judged by the installs it produces rather than by the argument for it — including a decision to make the app free.
 
+#### 5.3 The platform locks a submission, so the order is the rule
+
+Submitting is a sequence of API calls rather than a form filled in once, and two of its steps refuse work done in the wrong order. Both refusals belong to the platform, not to the client that receives them, and both are cheap to avoid and expensive to discover.
+
+- **The search metadata is frozen once a version is submitted.** A `PATCH` of `keywords` or `description` on a submitted version is refused with `409 STATE_ERROR`, and the values then take effect only in the next version's record. `promotionalText` is the one field still writable after submission, and it is not indexed for search, so rewriting it cannot recover an omission. Write the search metadata before submitting, and read it back first.
+- **A new version record copies the previous one's description and keywords into each localization, and not its promotional text.** Those localizations are created along with the record and can only be `PATCH`ed afterwards: a `POST` that carries relationships answers `422`, and addressing them through the parent's sub-collection answers `405`.
+- **Submission itself runs through `reviewSubmissions`**: create the submission, attach the version as one of its items, then set `submitted` to true. The older `appStoreVersionSubmissions` path is `DELETE`-only, so a round that reaches for it to submit finds a call that can only withdraw.
+
+A refusal is read by its code before it is read as a problem with the value: a `409` here means the field is locked, and re-sending it until the answer changes spends rounds on a lock that never opens.
+
 ---
 
 ### 6. Phase 6 — Result tracking and monetisation iteration

@@ -2606,6 +2606,25 @@ IOS_METHOD_RULES = (
         "At this stage installs are the only hard number",
         "#### 5.2 The store page is where a small app is found",
     ),
+    # The submission mechanics joined this table for the same reason as the thirteen above: a
+    # round can only submit through the platform's own sequence, and every installation met the
+    # same two locks. What the template said was "prepare the submission" and "submit"; what it
+    # did not say is that a submitted version freezes its search metadata, that a new version
+    # record copies some fields and not others, or that the submission itself is a sequence of
+    # calls with a withdraw-only predecessor. A platform rule holds identically everywhere, so
+    # its absence is the template's rather than an installation's.
+    (
+        "The search metadata is frozen once a version is submitted",
+        "#### 5.3 The platform locks a submission, so the order is the rule",
+    ),
+    (
+        "Those localizations are created along with the record and can only be `PATCH`ed afterwards",
+        "#### 5.3 The platform locks a submission, so the order is the rule",
+    ),
+    (
+        "Submission itself runs through `reviewSubmissions`",
+        "#### 5.3 The platform locks a submission, so the order is the rule",
+    ),
 )
 
 
