@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
+from emrg.tools import read_receipts
 from emrg.tools.base import ToolExecutor, count_argument, special_file_kind, special_file_refusal
 
 logger = logging.getLogger(__name__)
@@ -414,5 +415,34 @@ class ReadTool(ToolExecutor):
 
         if cap_note is not None:
             result_lines.append(cap_note)
+
+        # ── Say how much of the file this reading showed ──
+        #
+        # Every file read records its coverage, not only a complete one, because
+        # the caller of this record needs to name what is missing: a write that
+        # would replace a file with less of it is refused, and "4 000 of 5 000
+        # lines have been shown" is the sentence that makes the refusal
+        # actionable. A reading that starts past line 1, or resumes a line from a
+        # byte offset, records no prefix from the start — it shows lines 2..n and
+        # the first one only partly, so counting it as line 1 would overstate
+        # what the caller has seen (issue #2652; the reproduction is the
+        # docstring of `emrg/tools/read_receipts.py`).
+        covered_from = start_line if start_line_byte_offset == 0 else start_line + 1
+        try:
+            stat = path.stat()
+        except OSError:
+            # A file that vanished between the read and here cannot be
+            # overwritten either, so there is nothing for the receipt to protect.
+            stat = None
+        if stat is not None:
+            read_receipts.record(
+                path,
+                size=stat.st_size,
+                mtime_ns=stat.st_mtime_ns,
+                start_line=covered_from,
+                end_line=end,
+                total_lines=total_lines,
+                session=arguments.get("_session_id"),
+            )
 
         return ToolResult(name="read", content="\n".join(result_lines))

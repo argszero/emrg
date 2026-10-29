@@ -159,12 +159,15 @@ def injected(tmp_path):
     and ``sandbox_roots``, that same fact as paths; rant 2026-10-09T09:43:39), and
     a real ``Session`` would create directories on disk to prove nothing extra. A
     stub is kept here rather than a real session because the subject is the
-    injection rule; empty grants is the "nobody named one" case.
+    injection rule; empty grants is the "nobody named one" case. ``session_id`` is
+    the fourth field the rule reads: three tools are told who is asking (issue
+    #2652), and a stub without one is a session that cannot exist.
     """
 
     def call(tool: str, args: dict, *, sandbox: str | None = None, cwd: Path | None = None):
         session = SimpleNamespace(
             cwd=cwd or tmp_path, sandbox_grants=[], sandbox_roots=[],
+            session_id="stub-session",
         )
         EmrgServer._inject_tool_arguments(tool, args, session, TaskRequest(sandbox=sandbox))
         return args
@@ -345,7 +348,21 @@ def test_the_frozen_executor_is_gone():
 
 
 def test_an_unknown_tool_receives_nothing(injected):
-    assert injected("read", {"path": "x"}) == {"path": "x"}
+    assert injected("not_a_mounted_tool", {"path": "x"}) == {"path": "x"}
+
+
+def test_a_read_is_told_only_who_is_asking(injected):
+    """`read` is named by one rule now, and it is not a boundary.
+
+    This used to be folded into the unknown-tool case above, which read `read`
+    receives nothing — true while no rule named a non-shell tool. One does now
+    (issue #2652): the identity a reading is filed under, without which a later
+    whole-file `write` can never be licensed by what that read showed. What a
+    read must still not receive is a root or a tier: it runs nothing and writes
+    nothing, so neither is its business.
+    """
+    args = injected("read", {"path": "x"})
+    assert args == {"path": "x", "_session_id": "stub-session"}
 
 
 def test_the_injection_runs_before_every_execution(injected):

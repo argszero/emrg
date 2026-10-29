@@ -226,6 +226,8 @@ def test_the_injection_documents_every_argument_it_writes():
         "_parent_cwd",  # must not choose, all injected unconditionally
         "_parent_tools",
         "_parent_sandbox",
+        "_session_id",  # who is asking: `write` refuses to replace content
+        # this session was not shown (issue #2652)
     }
     assert written == pinned, (
         f"the injection writes {sorted(written)}, the guard expects "

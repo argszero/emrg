@@ -483,13 +483,41 @@ def test_every_mounted_dialect_receives_the_session_cwd(tmp_path):
 
 
 def test_a_dialect_that_is_not_mounted_receives_nothing(tmp_path):
-    """The set is a set, not a wildcard: an unknown tool is left alone."""
+    """The set is a set, not a wildcard: an unknown tool is left alone.
+
+    The name here is one no roster holds. It used to be ``read``, back when no
+    rule named a non-shell tool — and `read` is named by one now: the caller's
+    identity rides every read too, because a read that showed a session a file is
+    what licenses a later `write` over it (issue #2652), and a receipt filed under
+    a session nobody named is a receipt the write can never find.
+    """
     server = _instantiate()
     args: dict = {}
     server._inject_tool_arguments(
-        "read", args, SimpleNamespace(cwd=tmp_path), SimpleNamespace(sandbox="workspace-write")
+        "not_a_mounted_tool",
+        args,
+        SimpleNamespace(cwd=tmp_path, session_id="s1"),
+        SimpleNamespace(sandbox="workspace-write"),
     )
     assert args == {}
+
+
+def test_a_read_is_told_who_is_asking(tmp_path):
+    """One key for a read, and it is the identity rather than a boundary.
+
+    A read consumes no root and runs nothing, so the tier and the workspace are
+    none of its business; what it needs is the name to file its reading under, or
+    the guard that licenses a whole-file replacement cannot be satisfied at all.
+    """
+    server = _instantiate()
+    args: dict = {}
+    server._inject_tool_arguments(
+        "read",
+        args,
+        SimpleNamespace(cwd=tmp_path, session_id="s1"),
+        SimpleNamespace(sandbox="workspace-write"),
+    )
+    assert args == {"_session_id": "s1"}
 
 
 # ── the prompt: it names the tool that is registered ─────────────────────
