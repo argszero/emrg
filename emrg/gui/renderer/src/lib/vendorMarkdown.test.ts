@@ -41,3 +41,39 @@ describe("vendorMarkdown", () => {
     expect(html).toContain("<strong>ok</strong>");
   });
 });
+
+/**
+ * 本地图片（issue #2638）：`file:` 只对 `img[src]` 放行。
+ *
+ * 这一组必须用**真实 vendor** DOMPurify 断言 —— 断言的对象是它 3.4.13 的策略，
+ * 不是本仓库对策略的建模。撤掉 markdown.ts 里的钩子，前两条会退化成只剩 alt 的破图
+ * （`<img alt="shot">`），第四条会跟着变绿；这正是它们要拦住的方向。
+ */
+describe("本地图片：file: 只对 img[src] 放行（issue #2638）", () => {
+  it("file:/// 写法 → 带 src 的 img（不是只剩 alt 的破图）", async () => {
+    const md = createProdMarkdownRenderer();
+    const html = await md.renderMarkdown("![shot](file:///Users/me/shot.png)");
+    expect(html).toContain("<img");
+    expect(html).toContain('src="file:///Users/me/shot.png"');
+  });
+
+  it("/绝对路径 写法 → 归一成 file:///，同样带 src", async () => {
+    const md = createProdMarkdownRenderer();
+    const html = await md.renderMarkdown("![shot](/Users/me/shot.png)");
+    expect(html).toContain('src="file:///Users/me/shot.png"');
+  });
+
+  it("javascript: 仍被剥（img 与 a 都不放行）", async () => {
+    const md = createProdMarkdownRenderer();
+    const html = await md.renderMarkdown(
+      '<img src="javascript:alert(1)">\n\n<a href="javascript:alert(2)">x</a>',
+    );
+    expect(html).not.toContain("javascript:");
+  });
+
+  it("同一个 file: URL 挂到 a[href] 上仍被剥（放行范围只有 img[src]）", async () => {
+    const md = createProdMarkdownRenderer();
+    const html = await md.renderMarkdown("[open](file:///Users/me/shot.png)");
+    expect(html).not.toContain('href="file:');
+  });
+});
