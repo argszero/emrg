@@ -564,8 +564,11 @@ def test_load_and_start_feishu_task(tmp_path):
          "reading a direct conversation needs the user identity, and the identity that reads is "
          "not the identity that sends"),
         ("### 1. Read", "`im +messages-search`",
-         "the search index lags a send by seconds, so the section has to name the listing that "
-         "answers whether the host replied and say why the other cannot"),
+         "the inbox is swept by two searches, and a round that fell back to one listing per "
+         "conversation reads only the conversations it has time for"),
+        ("### 1. Read", "--order asc",
+         "whether the host replied is a question of position inside the conversation, so the "
+         "section has to name the listing that answers it"),
         ("### 1. Read", "the one your own last message landed in",
          "§3 reads a reply by position inside a conversation, so the round has to know which "
          "conversation that is before the positional rule means anything"),
