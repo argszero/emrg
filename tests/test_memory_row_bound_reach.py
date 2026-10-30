@@ -20,6 +20,19 @@ constant's value. The second half is the one that matters: the number is a bound
 The *other* half of this defect — the daemon's compaction trigger, which reads the same rows
 — is `tests/test_memory_index_embed_cap_ends.py`; the guard that prints the reading is
 `tests/test_check_memory_index.py`.
+
+The gate that hid the last writer
+---------------------------------
+Both numbers reached every session that *had* an index, and neither reached a session that did
+not: the sentence sat inside `{% if has_memories %}`, while the else branch says "Create the agent
+memory directory with its index". Measured 2026-10-31 through the daemon's own builder, on a
+session whose cwd carries no `MEMORY.md`: `has 'No memories yet': True`, `carries row bound 512 :
+False`, `carries line cap 100 : False`. So the one round in which the bound decides the file's
+shape — the round the index is made in, which is the promote task's first round against a project
+that keeps no memory yet — was the one round told nothing about it. A rule about how long a row
+may be does not depend on the row existing, so it now renders outside the gate, and
+`test_a_session_with_no_index_still_receives_both_numbers` reads it on exactly that session.
+`_session_with_an_index` remains for the rest of the block, which still needs an index to render.
 """
 
 from __future__ import annotations
@@ -107,11 +120,13 @@ def _make_server() -> EmrgServer:
 
 
 def _session_with_an_index(tmp_path: Path) -> Session:
-    """A session whose cwd carries a agent memory index, so the block really renders.
+    """A session whose cwd carries an agent memory index, so the whole block renders.
 
-    The hygiene section sits under `{% if has_memories %}`, so a session with no index
-    renders the *else* branch — a prompt in which the bound could be absent for a reason
-    that has nothing to do with this rule, which is the false pass this helper removes.
+    The block's remaining bullets — the two stores and their paths, "a write is two steps", the
+    organisation rules — are under `{% if has_memories %}`, so they need an index to render at
+    all. The bound is no longer one of them (2026-10-31): it states how long a row may be, which
+    does not depend on a row existing, and `_session_without_an_index` reads it where the
+    section's *else* branch renders.
     """
     memory_dir = tmp_path / ".emrg" / "memory"
     memory_dir.mkdir(parents=True)
@@ -120,6 +135,16 @@ def _session_with_an_index(tmp_path: Path) -> Session:
         encoding="utf-8",
     )
     return Session.create_with_id("row-bound-reach", tmp_path)
+
+
+def _session_without_an_index(tmp_path: Path) -> Session:
+    """A session whose cwd carries no `MEMORY.md` — the prompt that tells it to create one.
+
+    Nothing is created here: the point of the reading is the branch that says "Create the agent
+    memory directory with its index", which is what a promote task sees the first time it lands in
+    a project that keeps no memory yet.
+    """
+    return Session.create_with_id("row-bound-no-index", tmp_path)
 
 
 def test_the_shared_template_states_the_bound() -> None:
@@ -192,6 +217,41 @@ def test_the_rendered_prompt_carries_the_stores_line_cap(tmp_path: Path) -> None
     )
 
 
+def test_a_session_with_no_index_still_receives_both_numbers(tmp_path: Path) -> None:
+    """The writer that has not written yet: the else branch, which asks it to create the index.
+
+    Measured 2026-10-31, with both numbers inside `{% if has_memories %}`: this session's prompt
+    said "Create the agent memory directory with its index" and carried neither bound — so the
+    first index was made under a rule with no edge, which is the round the bound matters most in.
+    The else branch is asserted to be the branch that rendered, so this cannot pass by the full
+    block having appeared for some other reason.
+    """
+    server = _make_server()
+    rendered = server._build_system_prompt(_session_without_an_index(tmp_path))
+    assert "No memories yet" in rendered, (
+        "this reading is about the branch that tells a session to create an index; the prompt "
+        "rendered the indexed block instead, so the case under test did not happen"
+    )
+    bound_line = _bound_line(rendered)
+    assert bound_line, (
+        "a session told to create an index must be told how long a row may be — the bound now "
+        "renders whether or not one exists"
+    )
+    assert str(INDEX_TITLE_MAX_CHARS) in bound_line, (
+        f"the bound must be the store's number ({INDEX_TITLE_MAX_CHARS}); the line reads: "
+        f"{bound_line!r}"
+    )
+    cap_line = _line_cap_line(rendered)
+    assert cap_line, (
+        "a session told to create an index must be told the line cap it is compacted at; a "
+        "threshold with no number is a licence to keep appending"
+    )
+    assert str(MEMORY_INDEX_ROW_CAP) in cap_line, (
+        f"the cap must be the daemon's number ({MEMORY_INDEX_ROW_CAP}); the line reads: "
+        f"{cap_line!r}"
+    )
+
+
 def test_the_number_is_injected_not_written_in_the_template() -> None:
     """Both directions, for both numbers: the render follows its context, so one home each.
 
@@ -230,4 +290,28 @@ def test_the_number_is_injected_not_written_in_the_template() -> None:
     assert str(MEMORY_INDEX_ROW_CAP) not in cap_line, (
         f"the line still carries {MEMORY_INDEX_ROW_CAP} with the context set to {cap_probe} "
         "— that number is written into the template, and two copies of it can drift"
+    )
+
+    # The same two readings with the gates off. The sentence is about the shape of a row, not
+    # about an index that already exists, so it has to follow its context in the render a session
+    # with no index receives as well — that render is the one the bound used to be absent from,
+    # and a fix that stated the numbers there as literals would be the drift this file refuses,
+    # one branch further in.
+    gated_off = _get_jinja_env().get_template("system.j2").render(
+        os_name="test", config_dir="/nonexistent", has_memories=False,
+        index_title_max_chars=row_probe, memory_index_row_cap=cap_probe,
+    )
+    assert "No memories yet" in gated_off, (
+        "the gated-off render must be the else branch; otherwise these two readings repeat the "
+        "ones above and measure nothing new"
+    )
+    off_bound = _bound_line(gated_off)
+    off_cap = _line_cap_line(gated_off)
+    assert off_bound and str(row_probe) in off_bound, (
+        "with no index the bound must still follow the render context; the line reads: "
+        f"{off_bound!r}"
+    )
+    assert off_cap and str(cap_probe) in off_cap, (
+        "with no index the line cap must still follow the render context; the line reads: "
+        f"{off_cap!r}"
     )
