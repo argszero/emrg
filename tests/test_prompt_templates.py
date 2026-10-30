@@ -2517,6 +2517,10 @@ PROMOTE_METHOD_RULES = (
         "### 6. Effect Measurement & Method Review (PDCA Check & Act)",
     ),
     (
+        "corrected visibly, never replaced in silence",
+        "### 6. Effect Measurement & Method Review (PDCA Check & Act)",
+    ),
+    (
         "A method under review is a hypothesis, not a fixture",
         "### 6. Effect Measurement & Method Review (PDCA Check & Act)",
     ),
