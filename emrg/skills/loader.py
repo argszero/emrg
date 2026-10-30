@@ -1,15 +1,25 @@
 """Skill loader — parse Markdown skills with YAML frontmatter.
 
-Skills are filesystem-based Markdown packages. They live in two roots:
+Skills are filesystem-based Markdown packages. They are read from four roots, **lowest
+precedence first**, because that is where the ecosystem actually installs them:
 
-  - ~/.emrg/skills/         (user skills)
-  - <agent>/.emrg/skills/ (agent skills)
+  1. ~/.claude/skills       (label "claude")
+  2. ~/.agents/skills       (label "agents")
+  3. ~/.emrg/skills         (label "user", from `config_dir()`)
+  4. <agent>/.emrg/skills   (label "agent")
 
-and each root is read in **both** layouts, `<name>.md` and `<name>/SKILL.md`
-(`_skill_files_in`). `<agent>` is the nearest ancestor of the *session's*
-working directory carrying a `.git` (`_agent_root`) — not the process's cwd,
-which for the daemon is `~/.emrg` and would give every session one agent's
-skills.
+A later root's declaration of a name replaces an earlier one's, so an agent's own copy is
+the one in effect and the host's instance copy beats both provider directories. A root the
+host does not have is skipped without disturbing the others. The list itself is
+`default_skill_roots()`, and every reader takes it as a parameter defaulting to that list —
+so a test states the roots it means instead of inheriting whatever is installed on the
+machine running it.
+
+Each root is read in **both** layouts, `<name>.md` and `<name>/SKILL.md`
+(`_skill_files_in`), and the bundle wins over a flat file of the same name inside one root.
+`<agent>` is the nearest ancestor of the *session's* working directory carrying a `.git`
+(`_agent_root`) — not the process's cwd, which for the daemon is `~/.emrg` and would give
+every session one agent's skills.
 
 Nothing here is cached: every `load_skills` call re-reads the files, so a skill
 written, edited or deleted on disk reaches the next prompt without a restart.
@@ -22,7 +32,9 @@ Each skill file has YAML frontmatter:
   # Markdown body with instructions
 
 The loader uses a minimal hand-written frontmatter parser to avoid
-adding a YAML dependency for the simple key-value format.
+adding a YAML dependency for the simple key-value format. It reads quoted and plain
+values and the block scalars `>`/`>-`/`|`/`|-` (and their `+` forms), because the skills
+published into the provider directories write `description:` that way.
 
 Progressive disclosure: only the skill name + description are injected
 into the system prompt. The LLM uses the read tool to load the full
@@ -34,7 +46,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 # The "is this path a regular file" rule is the tool layer's, reached at a path. Imported
 # rather than restated, for the reason `emrg/memory.py` gives at the same import: the
@@ -56,12 +68,17 @@ class Skill:
     description: str
     path: Path          # source file path
     body: str           # markdown body (after frontmatter)
-    source: str         # "user" or "agent"
+    source: str         # the root it came from: "claude", "agents", "user" or "agent"
 
 
 @dataclass
 class SkillShadow:
     """One declaration of a name that another declaration had already taken.
+
+    ``kept`` is the declaration that survived *every* root, not whichever one happened to
+    overtake this loser: a name carried by `~/.claude`, `~/.agents` and `~/.emrg` yields two
+    shadows, and both point at `~/.emrg`'s copy — the one the prompt's list above them
+    offers, and so the one a reader should edit.
 
     The two layers of this loader key a skill by different things: `_skill_files_in`
     selects candidate *files* by filename, while `_skills_under` files the parsed
@@ -79,30 +96,92 @@ class SkillShadow:
     dropped: Skill      # the declaration that lost the name
 
 
+# Every indicator a YAML block scalar can carry. The set is closed on purpose: a value that
+# is one of these opens a block, and anything else is the value itself, so a description
+# reading `>` is the one shape that cannot be told from its own text without this list.
+_BLOCK_SCALARS = ("|", "|-", "|+", ">", ">-", ">+")
+
+
+def _join_block_scalar(indicator: str, lines: list[str]) -> str:
+    """The real text under a block-scalar key, from the indented lines that follow it.
+
+    Two shapes, and the difference is what the indicator is for: ``|`` is literal and keeps
+    its line breaks, ``>`` is folded and joins each run of lines into one paragraph with a
+    blank line between paragraphs. A trailing ``-`` strips the final newline and ``+``
+    keeps the trailing blank lines; the bare forms behave like ``-`` here, because this text
+    is a description rather than a file and a trailing newline in it would be noise in a
+    one-line prompt entry.
+
+    The indentation removed is the block's own, taken from its least-indented non-blank
+    line, so a block indented by two spaces and one indented by four read alike.
+    """
+    body = list(lines)
+    while body and not body[0].strip():
+        body.pop(0)
+    if not indicator.endswith("+"):
+        while body and not body[-1].strip():
+            body.pop()
+    indents = [len(line) - len(line.lstrip()) for line in body if line.strip()]
+    cut = min(indents) if indents else 0
+    stripped = [line[cut:] if line.strip() else "" for line in body]
+
+    if indicator.startswith(">"):
+        paragraphs: list[str] = []
+        current: list[str] = []
+        for line in stripped:
+            if line.strip():
+                current.append(line.strip())
+            elif current:
+                paragraphs.append(" ".join(current))
+                current = []
+        if current:
+            paragraphs.append(" ".join(current))
+        return "\n".join(paragraphs)
+    return "\n".join(stripped).rstrip("\n")
+
+
 def _parse_frontmatter(text: str) -> dict[str, str]:
     """Parse simple key: value YAML frontmatter.
 
-    Handles quoted strings and plain values. No nested structures.
-    Indented (nested) lines are ignored so a skill whose frontmatter also
-    carries a nested metadata list (skill-catalog.md, rant
-    2026-08-08T10:14:29) keeps its own top-level name/description —
-    nested ``description:`` keys must not overwrite the top-level one.
-    This avoids adding pyyaml as a dependency for the simple format.
+    Handles quoted strings, plain values and block scalars (``>``, ``>-``, ``|``, ``|-``
+    and their ``+`` forms). No nested structures: an indented line outside a block scalar is
+    nested YAML and is ignored, so a skill whose frontmatter also carries a nested metadata
+    list (skill-catalog.md, rant 2026-08-08T10:14:29) keeps its own top-level
+    name/description — nested ``description:`` keys must not overwrite the top-level one.
+
+    Block scalars are read because that is how the skills published into the provider
+    directories write their description (rant 2026-10-30T10:42:59): the earlier reader
+    stored the indicator as the value and skipped every line of the real text, so such a
+    skill was described by the two characters ``>-``.
     """
     result: dict[str, str] = {}
-    for line in text.split("\n"):
-        if line[:1].isspace():  # indented → nested YAML, not a top-level key
+    lines = text.split("\n")
+    index = 0
+    while index < len(lines):
+        raw = lines[index]
+        index += 1
+        if raw[:1].isspace():  # indented → nested YAML, or a block already consumed
             continue
-        line = line.strip()
+        line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        if ":" in line:
-            key, _, value = line.partition(":")
-            key = key.strip()
-            value = value.strip()
-            # Strip surrounding quotes
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
-                value = value[1:-1]
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip()
+        value = value.strip()
+        if value in _BLOCK_SCALARS:
+            block: list[str] = []
+            while index < len(lines):
+                following = lines[index]
+                if following.strip() and not following[:1].isspace():
+                    break  # the next top-level key ends the block
+                block.append(following)
+                index += 1
+            value = _join_block_scalar(value, block)
+        elif len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        if key:
             result[key] = value
     return result
 
@@ -208,6 +287,37 @@ def _user_skills_root() -> Path:
     return config_dir() / "skills"
 
 
+# The label each root reports under. The three default roots keep *separate* labels
+# because the prompt has to say which one a skill came from, and "user" alone cannot tell a
+# `~/.claude/skills` entry from a `~/.emrg/skills` one (rant 2026-10-30T10:42:59, item 7).
+ROOT_CLAUDE = "claude"
+ROOT_AGENTS = "agents"
+ROOT_USER = "user"
+ROOT_AGENT = "agent"
+
+
+def default_skill_roots() -> list[tuple[str, Path]]:
+    """The three instance-wide roots and their labels, **lowest precedence first**.
+
+    They hang off ``config_dir()``'s parent rather than a second ``Path.home()`` call, and
+    that is load-bearing rather than tidy: `config_dir()` *is* ``~/.emrg``, so its parent is
+    the home the other two sit in — one derivation, so a host that redirects the instance
+    root redirects all three at once. That is what keeps a suite honest about the fourth
+    argument of this rule: measured on the development host, `~/.claude/skills` holds 28
+    skills and `~/.agents/skills` 27 of the same names, so a test that inherited them would
+    answer one way here and another way on a runner with none.
+
+    The agent's own root is deliberately *not* in this list: it depends on the session, and
+    `load_skills_with_shadows` reads it last so that it beats all three.
+    """
+    home = config_dir().parent
+    return [
+        (ROOT_CLAUDE, home / ".claude" / "skills"),
+        (ROOT_AGENTS, home / ".agents" / "skills"),
+        (ROOT_USER, _user_skills_root()),
+    ]
+
+
 def _skill_files_in(root: Path) -> list[Path]:
     """Every skill file one root carries, in both layouts the ecosystem uses.
 
@@ -253,56 +363,86 @@ def _skill_files_in(root: Path) -> list[Path]:
 
 
 def _skills_under(
-    root: Path, source: str, into: dict[str, Skill], shadows: list[SkillShadow]
+    root: Path, source: str, into: dict[str, Skill], dropped: dict[str, list[Skill]]
 ) -> None:
-    """Read one root into ``into``, the later root winning on a shared name.
+    """Read one root into ``into``, a later declaration of a name replacing an earlier one.
 
-    A skill that arrives under a name already taken replaces the earlier one **and**
-    records the pair in ``shadows``: the losing declaration is a fact about this tree,
-    and the caller that renders the prompt is the only reader able to say so.
+    Every declaration that loses its name is appended to ``dropped`` under that name —
+    deliberately *not* paired with the declaration that beat it at that moment. With two
+    roots the two shapes agree; with three they do not. Reading `~/.claude` → `~/.agents` →
+    `~/.emrg`, a name carried by all three is displaced twice, and a per-step pairing
+    reports `~/.agents`' copy as "in effect" while the list above the paragraph offers
+    `~/.emrg`'s — one prompt contradicting itself about which file a reader should edit.
+    `load_skills_with_shadows` therefore pairs each loss with the declaration that actually
+    survived, once every root has been read.
     """
     for skill_file in _skill_files_in(root):
         skill = _parse_skill_file(skill_file, source)
         if skill:
             previous = into.get(skill.name)
             if previous is not None:
-                shadows.append(SkillShadow(name=skill.name, kept=skill, dropped=previous))
+                dropped.setdefault(skill.name, []).append(previous)
             into[skill.name] = skill
             logger.debug("skill loaded: %s (%s) from %s", skill.name, source, skill_file)
 
 
 def load_skills_with_shadows(
     agent_dir: Optional[Path] = None,
+    roots: Optional[Sequence[tuple[str, Path]]] = None,
 ) -> tuple[list[Skill], list[SkillShadow]]:
     """Load every skill, plus every declaration that lost its name to another.
 
-    The same read `load_skills` makes — the same two roots, the same live re-read, the
-    same documented precedence (a name carried by both roots: the agent's copy wins) —
-    with the merge's discarded half returned instead of dropped. Only a caller that
-    renders a prompt has to think about the second list; everything that just asks
-    "which skills are there" keeps calling `load_skills`.
+    The roots are read **in the order given**, and a later root's declaration of a name
+    replaces an earlier one's — which is why the list is ordered lowest precedence first.
+    `default_skill_roots()` puts `~/.claude/skills` before `~/.agents/skills` before
+    `~/.emrg/skills`, and the agent's own directory is read last whatever the list says, so
+    the agent always beats the three instance-wide roots. A root that is absent is skipped
+    and the rest are unaffected.
+
+    ``roots`` is how a caller — and above all a test — states the chain it means. Its
+    default is the real one; passing a list means the host's own directories are never
+    opened, which is the difference between measuring this rule and measuring the machine.
+
+    The merge's discarded half is returned rather than dropped: only a caller that renders
+    a prompt has to think about the second list, and everything that just asks "which skills
+    are there" keeps calling `load_skills`.
     """
     start = Path(agent_dir) if agent_dir is not None else Path.cwd()
     agent_root = _agent_root(start)
 
     all_skills: dict[str, Skill] = {}
-    shadows: list[SkillShadow] = []
-    user_root = _user_skills_root()
-    if user_root.is_dir():
-        _skills_under(user_root, "user", all_skills, shadows)
+    displaced: dict[str, list[Skill]] = {}
+    for label, root in default_skill_roots() if roots is None else roots:
+        root_path = Path(root)
+        if root_path.is_dir():
+            _skills_under(root_path, label, all_skills, displaced)
 
     agent_skills_root = agent_root / ".emrg" / "skills"
     if agent_skills_root.is_dir():
-        _skills_under(agent_skills_root, "agent", all_skills, shadows)
+        _skills_under(agent_skills_root, ROOT_AGENT, all_skills, displaced)
 
+    # Paired here rather than at each merge step: a name carried by three roots loses two
+    # declarations, and both were beaten by the same survivor, not by each other.
+    shadows = [
+        SkillShadow(name=name, kept=all_skills[name], dropped=loser)
+        for name, losers in displaced.items()
+        for loser in losers
+    ]
     return sorted(all_skills.values(), key=lambda s: s.name), shadows
 
 
-def load_skills(agent_dir: Optional[Path] = None) -> list[Skill]:
-    """Load every skill from the user root and one agent root, read live.
+def load_skills(
+    agent_dir: Optional[Path] = None,
+    roots: Optional[Sequence[tuple[str, Path]]] = None,
+) -> list[Skill]:
+    """Load every skill from the three instance roots and one agent root, read live.
 
-    User skills (``~/.emrg/skills/``) are read first, then the agent's
-    (``<root>/.emrg/skills/``); a skill of the same name: the agent's wins.
+    The instance roots are `default_skill_roots()` — ``~/.claude/skills``, then
+    ``~/.agents/skills``, then ``~/.emrg/skills`` — and the agent's
+    (``<root>/.emrg/skills/``) is read last, so of two skills sharing a name the later
+    root's wins: an agent copy beats the instance copy, which beats both provider
+    directories. ``roots`` supplies a different chain, which is how a test avoids reading
+    the host's own directories.
 
     ``agent_dir`` is the **session's** working directory — deliberately not the
     process's, which for the daemon is whatever it was started in and made every
