@@ -184,6 +184,13 @@ Write the effective features/models/lessons into memory (so later competitions c
   default when nothing is selected, the quota and when it resets, and when the standings freeze.
   Each platform states this in its own words and none of them defers to another's, so an old
   conclusion about the same platform is a hypothesis to re-check, not a fact to reuse.
+- **The standing a gap is measured against is itself a reading.** The highest number on a
+  leaderboard is an entry, not a standard: it may be one the platform's rules do not permit — a
+  leaked target, an external dataset the rules exclude, a submission later disqualified — and a gap
+  computed against it reports work that no permitted entry had to do. So the score to beat is the
+  best standing the rules allow, and where that differs from the top of the board the round states
+  which of the two its gap is computed against and what accounts for the difference. An entry that
+  is out of reach because the rules forbid the route is not evidence that the route is needed.
 - **A conclusion about what the rules allow is a reading with a source**: before a round acts on
   "not allowed", "already at the ceiling" or "this lever is untried", it goes back to the platform's
   own text and says which kind of claim it is holding — the platform's official wording, quoted; a
@@ -191,6 +198,15 @@ Write the effective features/models/lessons into memory (so later competitions c
   assumption and settled rather than built on. A claim inherited from an index line, from an earlier
   summary or from another competitor's phrasing is none of these, and is re-read before it is acted
   on.
+- **The rules are amended after they are published, and the amendment is part of the text.** A
+  rules page states the rules as first written; corrections, clarifications, exceptions and
+  invitations to appeal arrive afterwards, in that platform's own updates and discussion threads,
+  and a round that concluded from a single reading of the page holds a conclusion about a text that
+  has since moved. So each round re-reads the platform's updates and discussion for what changed
+  since the previous round, and a conclusion drawn from the rules says which round last read them.
+  A correction found there is settled against the rules page rather than replacing it: the page is
+  the rule, the thread is where it was corrected, and a round that cannot tell which it is holding
+  has a reading to take before it acts.
 - **Anything set by hand once goes stale**: a manual selection of submissions, a pending queue, a
   freeze marker — none of them follows the results that arrive afterwards. A selection made in an
   early round stays that selection while later rounds produce better work, so every round after

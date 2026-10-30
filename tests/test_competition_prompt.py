@@ -1762,3 +1762,74 @@ def test_a_section_of_the_summary_is_exempt_from_the_gate_lines():
         "reading in this file is held to"
     )
     assert "pre-registered, measured and attributable" in body
+
+
+# --- the two rules a second measurement of an installation's supplement still found missing ----------
+#
+# The same slot measured again later, with two whole sections of the supplement classified rather than
+# the report taken on trust: 18 rule bullets, and 16 of them were already stated in the body under
+# other words. What was absent is the pair below, and the pair is one subject — *the reference a round
+# measures against is itself a reading, and a stale one* — which is why they are pinned together.
+#
+# ⛔ The supplement is an installation's private file. These tests pin the rules as this template
+# states them, and the rule text here is a paraphrase written in the template's own voice. Nothing
+# from the supplement is copied, and nothing here names where it lives.
+
+
+def test_a_gap_is_measured_against_what_the_rules_allow_not_the_board_top(rendered):
+    """The leaderboard's highest number is an entry, not a standard.
+
+    A gap is arithmetic between the round's own standing and a target, and the target was being read
+    off the top of the board as though every entry there were one the rules permitted. Where the
+    leader is a leaked target, an external dataset the rules exclude or a submission that was
+    disqualified, the gap then reports work no permitted entry had to do — and the levers it implies
+    are levers the rules forbid.
+    """
+    body = _flat(_goal_line(rendered))
+    assert "The standing a gap is measured against is itself a reading" in body, (
+        "§2 no longer says the target of a gap is a reading — the board's top goes back to being "
+        "treated as a standard"
+    )
+    assert "the best standing the rules allow" in body, (
+        "the section lost the compliant frontier itself, which is the whole content of the rule"
+    )
+    assert "leaked target" in body and "disqualified" in body, (
+        "the section no longer names the ways an entry can be ineligible, so a round has no way to "
+        "recognise the case it is meant to catch"
+    )
+    assert "which of the two its gap is computed against" in body, (
+        "the section does not require the round to say which target it used, so a gap against an "
+        "ineligible entry reads as a gap against a permitted one"
+    )
+    assert "is not evidence that the route is needed" in body, (
+        "the consequence is gone: without it the section states a fact about the board and leaves "
+        "the inference that follows from it unwritten"
+    )
+
+
+def test_the_rules_are_re_read_because_they_are_amended_after_publication(rendered):
+    """A conclusion about the rules expires when the rules move.
+
+    The page states the rules as first written; corrections and exceptions arrive afterwards in the
+    platform's updates and discussion threads. A round that read the page once holds a conclusion
+    about a text that has since changed, and nothing in the file asked it to look again.
+    """
+    body = _flat(_goal_line(rendered))
+    assert "The rules are amended after they are published" in body, (
+        "§2 no longer says the rules move after publication — a single reading of the page becomes "
+        "the whole of the reading again"
+    )
+    assert "updates and discussion" in body, (
+        "the section lost the place the corrections actually appear, which is the one thing a round "
+        "can act on"
+    )
+    assert "re-reads the platform's updates and discussion" in body, (
+        "nothing asks for the reading each round, so the rule is true and never used"
+    )
+    assert "which round last read them" in body, (
+        "the conclusion carries no date, so a stale one cannot be recognised as stale"
+    )
+    assert "settled against the rules page rather than replacing it" in body, (
+        "the thread is allowed to override the page, which inverts the authority the section exists "
+        "to place — the page is the rule and the thread is where it was corrected"
+    )
