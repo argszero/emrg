@@ -194,6 +194,12 @@ logger = logging.getLogger(__name__)
 #: roots — and two hand-written unions would be two chances to drift apart.
 _ROOT_CONSUMING_TOOLS = SHELL_TOOL_NAMES | {"write", "edit"}
 
+#: The file tools whose caller has to be nameable, because one of them decides
+#: whether another may replace a file's whole content (issue #2652). ``read`` is
+#: here and not in ``_ROOT_CONSUMING_TOOLS`` on purpose: it consumes no root, and
+#: adding it there would hand a read the write tier's boundary.
+_CALLER_IDENTIFIED_TOOLS = {"read", "write", "edit"}
+
 #: The tools a **host conversation** is offered, by name (issue #2465).
 #:
 #: This is a whitelist, and naming a tool is the only way to offer it: a tool
@@ -4318,6 +4324,17 @@ class EmrgServer:
           tier is resolved from ``tasks.yml`` into the request and never written
           onto the session, so every child such a task spawned ran unconfined at
           ``policy.DEFAULT_MODE`` while the task body itself was confined.
+        * **who is asking is a fact, not a field.** ``read``, ``write`` and
+          ``edit`` are told the session they belong to, under ``_session_id``,
+          injected from the session and therefore replacing any value the model
+          put in the call (issue #2652). One of the three decides something about
+          another: a whole-file ``write`` is answered only when this session has
+          been shown every line of the file that is there now, and the reading
+          that showed them was filed under this name. The model is the party that
+          guard is about, so an identity it chose is the one input the guard
+          cannot take from it — and a reading filed under a name nobody injected
+          is a reading a write can never find, which is why ``read`` is in this
+          class rather than left anonymous.
 
         ``workspace`` is a new key for the shell tools and the old executor
         ignores it (it reads ``command``/``timeout``/``workdir``/``sandbox``
@@ -4338,6 +4355,16 @@ class EmrgServer:
         :param req: the request carrying the task's configured tier.
         """
         cwd = str(session.cwd)
+        if tc_name in _CALLER_IDENTIFIED_TOOLS:
+            # **Who is asking**, for the one guard that has to know: `write`
+            # replaces a file's whole content, and it refuses while a read has not
+            # shown the caller that content (issue #2652 — measured by writing a
+            # 5,000-line file back from a capped read of it: 1,002 lines survived,
+            # and the call reported `Updated`). Injected unconditionally, so a
+            # value the model put in the call is **replaced**: the model is the
+            # party that guard is about, and an identity it chose is the one fact
+            # the guard cannot take from it.
+            args["_session_id"] = session.session_id
         # Two classes, and what separates them is what the value decides. A shell
         # tool runs in this directory and may write under it, so the model cannot
         # name it; a read-only discovery tool does neither, so its directory is a

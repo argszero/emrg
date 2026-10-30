@@ -9,12 +9,91 @@ from pathlib import Path
 from emrg.sandbox.fence import file_refusal
 from emrg.sandbox.policy import grants_from_arguments, resolve_policy
 from emrg.server.tool_types import ToolDefinition, ToolResult
+from emrg.tools import read_receipts
 from emrg.tools.base import ToolExecutor, special_file_kind, special_file_refusal
 from emrg.tools.file_policy import resolve_file_target
 
 logger = logging.getLogger(__name__)
 
 MAX_WRITE_SIZE = 10 * 1024 * 1024  # 10 MB safety limit
+
+
+def _lines_held(path: Path) -> int | None:
+    """How many lines `path` holds, by the read tool's own rule, or None.
+
+    The rule is the read tool's rather than a fresh one: a file ending in a
+    newline splits into one element more than it has lines, and counting that
+    empty tail made every terminated file read as one line longer than it is
+    (`emrg/tools/read_tool.py`, the paragraph above `total_lines`). The refusal
+    below quotes a number back to the caller, so it has to be the number the
+    caller was shown.
+    """
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    # An open is not a read: on a FIFO it blocks until a peer appears, and this
+    # runs on the daemon's event loop. `execute` has already refused a non-regular
+    # subject at this path, and the kind is asked again here rather than leaning on
+    # that — the path can be replaced between the two stats, and a refusal is worth
+    # less than the daemon it would block.
+    if special_file_kind(info.st_mode) is not None:
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        # A binary or unreadable subject has no line count to state; the refusal
+        # falls back to its size rather than inventing one.
+        return None
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return len(lines)
+
+
+def _blind_overwrite_refusal(
+    path: Path,
+    size: int,
+    coverage: tuple[int, int] | None,
+) -> str:
+    """The refusal a whole-file replacement earns when the file was not read.
+
+    It names **both** numbers — what the file holds and what has been shown —
+    because the caller's next action depends on the gap between them, and a
+    refusal that said only "read it first" would leave the size of the loss
+    unstated.
+    """
+    held = _lines_held(path)
+    holds = (
+        f"{held:,} lines ({size:,} bytes)"
+        if held is not None
+        else f"{size:,} bytes"
+    )
+    if coverage is None:
+        seen = "none of them has been shown to this session"
+    else:
+        shown, total = coverage
+        seen = (
+            f"only {shown:,} of those {total:,} lines have been shown to this "
+            f"session"
+        )
+    return (
+        f"Error: {path} already holds {holds} and this call would replace all of "
+        f"it, but {seen}.\n\n"
+        f"A write that replaces content the caller has not read is refused rather "
+        f"than answered: what it removes is invisible to whoever asked for it, and "
+        f"the loss is silent — the file is simply shorter, and this tool reports "
+        f"success.\n\n"
+        f"Do one of these:\n"
+        f"  - read the file first. `read` returns at most 1000 lines per call and "
+        f"says so with a `truncated` line; a longer file takes repeated calls from "
+        f"where the last one stopped, and the refusal stops once the whole file has "
+        f"been shown;\n"
+        f"  - use `edit` instead, which changes only the text you quote and is the "
+        f"right tool for a large file.\n\n"
+        f"Creating a new file needs nothing, and so does replacing a file this "
+        f"session has just written."
+    )
 
 
 class WriteTool(ToolExecutor):
@@ -98,21 +177,108 @@ class WriteTool(ToolExecutor):
             return ToolResult(name="write", content=f"Error creating directory: {e}", error=True)
 
         existed = path.exists()
+        before: os.stat_result | None = None
         if existed:
+            before = path.stat()
             # An existing subject has a kind, and only a regular file can be written:
             # `write_text` on a FIFO blocks at the open until a reader appears (measured
             # 2026-10-10, `cyc20261010-215146`: no return within 10 s in its own
             # process, while the same call against a regular file returned). A path that
             # does not exist yet has no kind to judge, and creating it is the call's job.
-            special = special_file_kind(path.stat().st_mode)
+            special = special_file_kind(before.st_mode)
             if special is not None:
                 return ToolResult(
                     name="write", content=special_file_refusal(path, special), error=True
+                )
+
+            # ── A whole-file replacement of content nobody has read ──
+            #
+            # `write` replaces every byte of its subject, so the one fact it needs
+            # is whether the caller has been shown them. Nothing asked that
+            # question, and the cost was measured: a 5,000-line file read through
+            # the read tool's default cap, written back with what that read
+            # returned, came out at 1,002 lines — a call that reported `Updated`
+            # (issue #2652). Every number below comes from the file on disk now,
+            # not from anything the caller supplied.
+            #
+            # The guard is keyed on the version that is actually there: a receipt
+            # describing an older version does not match, so a file that changed
+            # after the read is read again rather than overwritten on the strength
+            # of a reading about different content.
+            #
+            # A file that holds nothing has nothing for this call to destroy, so
+            # there is no reading to demand: `write` is how an empty file, or one
+            # whose content is being cleared, is authored. Refusing it would be a
+            # refusal with no loss behind it — and it printed one, measured
+            # 2026-10-30: `already holds 0 lines (0 bytes) … none of them has been
+            # shown to this session`, which asks the caller to read a file with
+            # nothing in it.
+            coverage: tuple[int, int] | None = (0, 0) if before.st_size == 0 else None
+            if coverage is None:
+                coverage = read_receipts.coverage(
+                    path,
+                    size=before.st_size,
+                    mtime_ns=before.st_mtime_ns,
+                    session=arguments.get("_session_id"),
+                )
+            # ── The numbers are the cheap half of the key; the bytes are the half
+            #    that cannot be preserved by accident ──
+            #
+            # A whole-file replacement that keeps the length *and* the
+            # modification time is ordinary: `cp -p`, `rsync -a`, `tar -x` and
+            # `git checkout` all put the old timestamp back onto new bytes. A
+            # receipt keyed on the two numbers alone answered that state as though
+            # nothing had moved — measured 2026-10-30: `'AAAAAAAAAA'` read,
+            # `'BBBBBBBBBB'` written back at the same length and same `mtime_ns`,
+            # whole-file write answered, and content this session never saw was
+            # destroyed. So a receipt that claims completeness is only believed
+            # once the bytes agree with the ones it was filed on, and a subject
+            # whose bytes cannot be read is refused rather than assumed unchanged.
+            # The bytes are asked about only where a loss is possible: a subject
+            # holding nothing cannot be destroyed, and the synthetic `(0, 0)` above
+            # is completeness with no receipt behind it — asking it about bytes would
+            # turn the empty-file carve-out back into the refusal it replaced.
+            if before.st_size and coverage is not None and coverage[0] >= coverage[1]:
+                if not read_receipts.content_matches(
+                    path,
+                    size=before.st_size,
+                    mtime_ns=before.st_mtime_ns,
+                    session=arguments.get("_session_id"),
+                ):
+                    coverage = None
+            if coverage is None or coverage[0] < coverage[1]:
+                return ToolResult(
+                    name="write",
+                    content=_blind_overwrite_refusal(path, before.st_size, coverage),
+                    error=True,
                 )
         try:
             path.write_text(content, encoding="utf-8")
         except OSError as e:
             return ToolResult(name="write", content=f"Error writing file: {e}", error=True)
+
+        # The caller has now authored every byte of the file, so a second write in
+        # the same turn needs no further reading — and the receipt must describe the
+        # version this call produced, not the one it replaced.
+        try:
+            after = path.stat()
+        except OSError:
+            after = None
+        if after is not None:
+            written_lines = len(content.split("\n"))
+            if written_lines and content.endswith("\n"):
+                written_lines -= 1
+            read_receipts.record(
+                path,
+                size=after.st_size,
+                mtime_ns=after.st_mtime_ns,
+                start_line=1,
+                end_line=written_lines,
+                total_lines=written_lines,
+                session=arguments.get("_session_id"),
+                # The caller authored every byte, so the receipt can name them.
+                digest=read_receipts.digest_of(path),
+            )
 
         action = "Updated" if existed else "Created"
         logger.debug("write: %s %s (%d chars)", action, path, len(content))

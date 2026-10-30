@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from emrg.tools.read_tool import ReadTool
 from emrg.tools.write_tool import WriteTool
 
 
@@ -36,6 +37,12 @@ def test_write_overwrites_file(temp_dir):
     tool = WriteTool()
     filepath = temp_dir / "existing.txt"
     filepath.write_text("old content")
+
+    # An existing file is replaced only once this session has been shown it
+    # (issue #2652): the overwrite below is the one that is *allowed*, and
+    # `tests/test_write_needs_a_read.py` holds the refusal it is the control for.
+    read = _run(ReadTool().execute({"file_path": str(filepath), "intent": "read"}))
+    assert not read.error
 
     result = _run(tool.execute({
         "file_path": str(filepath),
