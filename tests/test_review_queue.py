@@ -2588,6 +2588,32 @@ def test_a_sentence_that_mentions_another_issue_is_not_read_as_this_rants_handle
     assert tool._progress_issues("") == [], "no number is not an error"
 
 
+def test_a_handle_spelled_inside_a_sentence_is_the_price_the_anchor_pays(monkeypatch):
+    """The cost of the statement rule, pinned as intended rather than as an oversight.
+
+    `progress` records finished work in prose as often as it records a handle, and a writer
+    spells the handle there as part of that sentence. The line anchor does not read it, so
+    the pairing is lost — and the issue-side fallback cannot recover it, because it looks
+    for an `Origin:` line that only the older convention wrote.
+
+    Pinned so that a change which recovers these has to say here which mention it refuses
+    instead: widening the anchor is a trade between the two groups, never a free gain. The
+    second assertion is the remedy that needs no change to the rule — the same entry pairs
+    as soon as its handle is what the line begins with.
+    """
+    tool = _fresh_tool()
+
+    assert tool._progress_issues(
+        "Merged. Issue #2565 closed by PR #2566 (squash ffdf65f1)"
+    ) == [], "a handle spelled mid-sentence is the pairing the anchor gives up"
+    assert tool._progress_issues(
+        "issue #2565 — merged by PR #2566 (squash ffdf65f1)"
+    ) == [2565], "the same pairing survives once the handle begins the line"
+    assert tool._progress_issues(
+        "registered as SILICON SCIENCE issue #142"
+    ) == [], "another project's number is not this entry's handle"
+
+
 def test_the_handle_is_read_where_a_statement_may_begin(monkeypatch):
     """Every spelling that *is* the handle pairs; every spelling that mentions one does not.
 

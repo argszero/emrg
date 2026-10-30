@@ -535,10 +535,19 @@ class Rant:
 #: and because the issue-side fallback below runs only for an entry that names **no**
 #: number, the wrong pairing also suppresses the reading that would have answered.
 #:
-#: The cost is the entries written before the pairing moved into `progress`, which report
-#: finished work in prose (`Merged. Issue #2565 closed by PR #2566 …`). They lose their
-#: pairing here; every one of them in this host's ledger is `completed`, so no rendered row
-#: changes, and an entry that states the handle the way R5 defines it keeps it.
+#: The cost is entries that spell the handle inside a sentence rather than at the start of
+#: a line (`Merged. Issue #2565 closed by PR #2566 …`, `Done: issue #2352 -> PR #2362`).
+#: They lose their pairing here, and the fallback below does not recover them: it reads an
+#: `Origin:` line, which only the older convention wrote. Whether that costs a rendered row
+#: depends on the number, not on the spelling. A number belonging to another project — `the
+#: research direction of journal issue #124` — was never this entry's handle, so refusing it
+#: is this predicate working, not a price it pays. A number of this repository's own,
+#: spelled mid-sentence, is a pairing lost; a `completed` entry renders no row, so the loss
+#: appears only if such an entry returns to an open state, where nothing else answers it.
+#: Measured on the 13-entry ledger of the host that wrote this rule: 10 pairings change,
+#: every one of them `completed`, and no rendered row moves. A ledger carrying another
+#: agent's open rants is where an open row moves, and there the number decides which of the
+#: two groups that row falls in.
 _PROGRESS_ISSUE = re.compile(
     r"(?im)^[ \t]*[*_]{0,2}issues?[ \t]*#(\d+)((?:\s*(?:,|/|&|\band\b)\s*#\d+)*)"
 )
