@@ -434,6 +434,15 @@ class ReadTool(ToolExecutor):
             # A file that vanished between the read and here cannot be
             # overwritten either, so there is nothing for the receipt to protect.
             stat = None
+        # The digest is taken whenever this reading reaches the end of the file,
+        # because it describes the bytes on disk — and `record` keeps it only if the
+        # merged coverage then covers the whole file, so a window that stops short
+        # of line 1 (or of the last line) drops it rather than vouching for a
+        # version nobody saw. Tying this to "the call started at line 1" instead
+        # starved the ordinary way of reading a long file: the second, continuing
+        # call does not start at line 1, yet it is the call that completes the
+        # coverage and the only one that could have filed the digest.
+        digest = read_receipts.digest_of(path) if end >= total_lines else None
         if stat is not None:
             read_receipts.record(
                 path,
@@ -443,6 +452,7 @@ class ReadTool(ToolExecutor):
                 end_line=end,
                 total_lines=total_lines,
                 session=arguments.get("_session_id"),
+                digest=digest,
             )
 
         return ToolResult(name="read", content="\n".join(result_lines))

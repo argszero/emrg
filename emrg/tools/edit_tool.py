@@ -9,6 +9,7 @@ from pathlib import Path
 from emrg.sandbox.fence import file_refusal
 from emrg.sandbox.policy import grants_from_arguments, resolve_policy
 from emrg.server.tool_types import ToolDefinition, ToolResult
+from emrg.tools import read_receipts
 from emrg.tools.base import (
     ToolExecutor,
     boolean_argument,
@@ -126,7 +127,8 @@ class EditTool(ToolExecutor):
         # name the directory alone, so the rest reached `open` and never returned
         # (measured 2026-10-10, `cyc20261010-215146`: `edit` on a `mkfifo` named pipe did
         # not return within 10 s, in its own process, while a regular file's edit did).
-        special = special_file_kind(path.stat().st_mode)
+        before = path.stat()
+        special = special_file_kind(before.st_mode)
         if special is not None:
             return ToolResult(
                 name="edit", content=special_file_refusal(path, special), error=True
@@ -190,4 +192,49 @@ class EditTool(ToolExecutor):
             )
 
         desc = f"{count} replacements" if replace_all else "1 replacement"
+
+        # ── The receipt this replacement produced ──
+        #
+        # `edit` is a writer, so it moves the file's version out from under any
+        # receipt filed for the old one — and before this rule it left the receipt
+        # stale rather than moving it, which broke the loop a code-writing agent
+        # lives in: write a file, edit it, then rewrite it whole, and the rewrite
+        # was refused with "none of them has been shown to this session" about text
+        # the session had itself just written (measured 2026-10-30, the review that
+        # found it; the memory-index shape hits it — write the index, three edits,
+        # the whole-file rewrite refused).
+        #
+        # It is recorded **only when the version being replaced had been shown in
+        # full**. Then every byte of the new version is known to the caller too: the
+        # text it is the old text with one named string replaced. A file nobody read,
+        # or one read only in part, keeps no receipt and therefore keeps the refusal
+        # — which is the direction that cannot destroy anything.
+        previous = read_receipts.coverage(
+            path,
+            size=before.st_size,
+            mtime_ns=before.st_mtime_ns,
+            session=arguments.get("_session_id"),
+        )
+        if previous is not None and previous[0] >= previous[1]:
+            try:
+                after = path.stat()
+            except OSError:
+                after = None
+            if after is not None:
+                # Counted the way the read and write tools count, so the number this
+                # receipt holds is the number those tools would print back.
+                written_lines = len(new_content.split("\n"))
+                if written_lines and new_content.endswith("\n"):
+                    written_lines -= 1
+                read_receipts.record(
+                    path,
+                    size=after.st_size,
+                    mtime_ns=after.st_mtime_ns,
+                    start_line=1,
+                    end_line=written_lines,
+                    total_lines=written_lines,
+                    session=arguments.get("_session_id"),
+                    digest=read_receipts.digest_of(path),
+                )
+
         return ToolResult(name="edit", content=f"Made {desc} in {path}")

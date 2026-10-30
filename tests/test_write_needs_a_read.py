@@ -18,6 +18,7 @@ import asyncio
 import pytest
 
 from emrg.tools import read_receipts
+from emrg.tools.edit_tool import EditTool
 from emrg.tools.read_tool import DEFAULT_MAX_LINES, ReadTool
 from emrg.tools.write_tool import WriteTool
 
@@ -201,3 +202,91 @@ def test_an_empty_existing_file_needs_no_reading(tmp_path):
 
     assert not result.error, result.content
     assert target.read_text(encoding="utf-8") == "content\n"
+
+
+# ── The receipt is the bytes, not just the numbers ────────────────────────
+#
+# Review of this branch found two states the first version could not tell apart,
+# and both are the harm direction: one let a write through, the other refused a
+# write that had no unseen content behind it.
+
+
+def test_a_same_length_same_mtime_change_is_not_the_version_that_was_read(tmp_path):
+    """Size and `mtime_ns` agreeing is not the file agreeing.
+
+    A replacement that keeps the length *and* the modification time is ordinary
+    rather than exotic — `cp -p`, `rsync -a`, `tar -x` and `git checkout` all put
+    the old timestamp back onto new bytes — and a receipt keyed on those two
+    numbers alone answers it as though nothing moved. Measured on the first
+    version of this guard: `'AAAAAAAAAA'` read, `'BBBBBBBBBB'` put in its place at
+    the same length and the same `mtime_ns`, whole-file write answered, and
+    content the session never saw destroyed.
+    """
+    import os
+
+    target = tmp_path / "same.txt"
+    target.write_text("AAAAAAAAAA\n", encoding="utf-8")
+    filed = target.stat()
+
+    assert not _read(target).error
+
+    target.write_text("BBBBBBBBBB\n", encoding="utf-8")
+    os.utime(target, ns=(filed.st_atime_ns, filed.st_mtime_ns))
+    now = target.stat()
+    assert (now.st_size, now.st_mtime_ns) == (filed.st_size, filed.st_mtime_ns), (
+        "the fixture must reach the state under test: identical size and mtime_ns"
+    )
+
+    result = _write(target, "CCCCCCCCCC\n")
+
+    assert result.error, "a write over bytes this session never saw must be refused"
+    assert target.read_text(encoding="utf-8") == "BBBBBBBBBB\n"
+
+
+def test_a_file_this_session_wrote_and_then_edited_stays_writable(tmp_path):
+    """`edit` is a writer too, and it must not leave a stale receipt behind.
+
+    Every byte of the new version is known to a session that authored the text and
+    then replaced a string it named, so the loop write → edit → write has to stay
+    open; before this rule it was refused with "none of them has been shown to this
+    session" about text the session had just written.
+    """
+    target = tmp_path / "edited.txt"
+
+    assert not _write(target, "alpha\nbeta\n", _session_id="s1").error
+    edit = _run(EditTool().execute({
+        "file_path": str(target), "old_string": "beta", "new_string": "gamma",
+        "intent": "edit", "_session_id": "s1",
+    }))
+    assert not edit.error, edit.content
+    assert target.read_text(encoding="utf-8") == "alpha\ngamma\n"
+
+    result = _write(target, "alpha\ngamma\ndelta\n", _session_id="s1")
+
+    assert not result.error, result.content
+    assert target.read_text(encoding="utf-8") == "alpha\ngamma\ndelta\n"
+
+
+def test_an_edit_does_not_license_a_rewrite_of_a_file_read_only_in_part(tmp_path):
+    """The other direction: the receipt `edit` files is only for a complete reading.
+
+    A session shown the first 1,000 lines of a longer file has not seen the rest,
+    and an edit to a line it did see does not change that — so the whole-file
+    rewrite stays refused, which is the direction that cannot destroy anything.
+    """
+    target = tmp_path / "long.txt"
+    total = DEFAULT_MAX_LINES + 50
+    original = "".join(f"line {i}\n" for i in range(1, total + 1))
+    target.write_text(original, encoding="utf-8")
+
+    assert not _read(target).error                       # lines 1..1000 only
+    edit = _run(EditTool().execute({
+        "file_path": str(target), "old_string": "line 5\n", "new_string": "line five\n",
+        "intent": "edit", "_session_id": "s1",
+    }))
+    assert not edit.error, edit.content
+
+    result = _write(target, "replaced\n", _session_id="s1")
+
+    assert result.error
+    assert target.read_text(encoding="utf-8").startswith("line 1\nline 2\n")

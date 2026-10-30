@@ -221,6 +221,31 @@ class WriteTool(ToolExecutor):
                     mtime_ns=before.st_mtime_ns,
                     session=arguments.get("_session_id"),
                 )
+            # ── The numbers are the cheap half of the key; the bytes are the half
+            #    that cannot be preserved by accident ──
+            #
+            # A whole-file replacement that keeps the length *and* the
+            # modification time is ordinary: `cp -p`, `rsync -a`, `tar -x` and
+            # `git checkout` all put the old timestamp back onto new bytes. A
+            # receipt keyed on the two numbers alone answered that state as though
+            # nothing had moved — measured 2026-10-30: `'AAAAAAAAAA'` read,
+            # `'BBBBBBBBBB'` written back at the same length and same `mtime_ns`,
+            # whole-file write answered, and content this session never saw was
+            # destroyed. So a receipt that claims completeness is only believed
+            # once the bytes agree with the ones it was filed on, and a subject
+            # whose bytes cannot be read is refused rather than assumed unchanged.
+            # The bytes are asked about only where a loss is possible: a subject
+            # holding nothing cannot be destroyed, and the synthetic `(0, 0)` above
+            # is completeness with no receipt behind it — asking it about bytes would
+            # turn the empty-file carve-out back into the refusal it replaced.
+            if before.st_size and coverage is not None and coverage[0] >= coverage[1]:
+                if not read_receipts.content_matches(
+                    path,
+                    size=before.st_size,
+                    mtime_ns=before.st_mtime_ns,
+                    session=arguments.get("_session_id"),
+                ):
+                    coverage = None
             if coverage is None or coverage[0] < coverage[1]:
                 return ToolResult(
                     name="write",
@@ -251,6 +276,8 @@ class WriteTool(ToolExecutor):
                 end_line=written_lines,
                 total_lines=written_lines,
                 session=arguments.get("_session_id"),
+                # The caller authored every byte, so the receipt can name them.
+                digest=read_receipts.digest_of(path),
             )
 
         action = "Updated" if existed else "Created"
