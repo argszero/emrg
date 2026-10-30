@@ -2566,6 +2566,92 @@ def test_an_entry_that_names_its_own_issue_is_not_re_read_from_the_issue_side(mo
     assert links.states_asked == [], "and an open issue is answered by the listing already"
 
 
+def test_a_sentence_that_mentions_another_issue_is_not_read_as_this_rants_handle(monkeypatch):
+    """The handle and the prose share one field, so the shape has to be where it sits.
+
+    A cycle writes a sentence into `progress` whenever it decides not to take a rant up
+    yet — the gate is closed, another issue is open, so this rant has no issue. A
+    substring search read that mention as this entry's pairing: `_progress_issues` answered
+    the mentioned number, the row rendered as filed, and the next cycle neither opened the
+    issue nor took the rant, so it stopped moving without anyone deciding to stop it
+    (issue #2658).
+
+    A pairing is a statement, and a statement begins its line.
+    """
+    tool = _fresh_tool()
+
+    assert tool._progress_issues(
+        "R5 is closed this cycle because issue #2633 is open, and a rant becomes work "
+        "only by opening its issue first."
+    ) == [], "a mention inside a sentence is not a handle"
+    assert tool._progress_issues("issue #2637") == [2637], "the statement R5 defines pairs"
+    assert tool._progress_issues("") == [], "no number is not an error"
+
+
+def test_the_handle_is_read_where_a_statement_may_begin(monkeypatch):
+    """Every spelling that *is* the handle pairs; every spelling that mentions one does not.
+
+    The accepting side is what keeps the anchor from becoming a false absence: entries are
+    written by hand into a free-text field, so the token arrives with markdown emphasis, on
+    its own line after a newline, or with the numbers continued in the three forms a writer
+    uses. The rejecting side is the defect itself, and each case is a sentence that names a
+    number while saying something else about it.
+    """
+    tool = _fresh_tool()
+
+    paired = {
+        "issue #2637": [2637],
+        "  issue #2637 → PR #2640 merged": [2637],
+        "**issue #2637** → PR #2640 merged": [2637],
+        "issue #1985/#1986": [1985, 1986],
+        "issue #1985, #1986": [1985, 1986],
+        "issue #1985 and #1986": [1985, 1986],
+        "done in two parts:\nissue #1985 → PR #1986 merged": [1985],
+    }
+    for progress, expected in paired.items():
+        assert tool._progress_issues(progress) == expected, progress
+
+    unpaired = {
+        "the gate is closed because issue #2633 is open": [],
+        "Merged. Issue #2565 closed by PR #2566": [],
+        "issue #1985 → PR #1986 merged": [1985],  # control: the same text, stated
+        "Half 1 (#1086 age alarm): PR #1088 MERGED, issue #1086 CLOSED": [],
+        "no number here at all": [],
+    }
+    for progress, expected in unpaired.items():
+        assert tool._progress_issues(progress) == expected, progress
+
+
+def test_a_narrated_number_leaves_the_rant_looking_unfiled(monkeypatch):
+    """Which is the honest row: the rant has no issue, so the next cycle should file one.
+
+    The end-to-end shape of the defect, and the direction the fix has to move — the row
+    must offer the work rather than report it done. The issue-side reading is spent, and
+    finds nothing, because the issue the sentence mentioned is not this rant's origin.
+    """
+    tool = _fresh_tool()
+    stamp = "2026-10-29T09:23:40+08:00"
+    links = _links(
+        monkeypatch,
+        tool,
+        [_row(stamp, "pending",
+              progress="R5 is closed this cycle because issue #2633 is open, and a rant "
+                       "becomes work only by opening its issue first.")],
+        issues=[(2633, "another rant's issue, with no origin line of this one")],
+    )
+
+    (rant,) = tool.open_rant_rows(None, tool.REPO)
+
+    assert (rant.issues, rant.closed_issues, rant.unread_issues) == ([], [], [])
+    assert "no issue yet" in tool.render_rant(rant), (
+        "a rant with no issue must render as work to do, not as work already filed"
+    )
+    assert links.origins_asked != [], (
+        "the fallback runs precisely because the entry stated no handle — the wrong pair "
+        "used to suppress it"
+    )
+
+
 def test_an_entry_with_no_progress_still_reads_the_issue_side(monkeypatch):
     """The fallback is what keeps older entries from rendering as never filed.
 

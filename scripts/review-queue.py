@@ -519,12 +519,29 @@ class Rant:
     agent: str = ""
 
 
-#: The handle R5 writes into a rant's `progress`: the word `issue` and the number. Anchored
-#: on that word rather than on a bare `#N`, because the same line normally names the PR too
-#: (`issue #2110 (closed) → PR #2111 merged`) and a PR number is not what this row reports.
-#: The tail continues the list only in the forms a writer actually uses for it — `#1/#2`,
-#: `#1, #2`, `#1 and #2` — so a sentence that mentions an unrelated number later stays out.
-_PROGRESS_ISSUE = re.compile(r"(?i)\bissues?\s*#(\d+)((?:\s*(?:,|/|&|\band\b)\s*#\d+)*)")
+#: The handle R5 writes into a rant's `progress`: the word `issue` and the number **as the
+#: statement the line begins with**. Anchored on that word rather than on a bare `#N`,
+#: because the same line normally names the PR too (`issue #2110 (closed) → PR #2111
+#: merged`) and a PR number is not what this row reports. The tail continues the list only
+#: in the forms a writer actually uses for it — `#1/#2`, `#1, #2`, `#1 and #2`.
+#:
+#: Line-anchored, and not merely word-anchored, because `progress` is prose as well as a
+#: record. A cycle writes a sentence there whenever it decides *not* to take a rant up yet
+#: — "the gate is closed because issue #2633 is open" — and a substring rule reads that
+#: mention as this entry's handle. Measured on issue #2658: `_progress_issues` answered
+#: `[2633]` for that sentence and `[2637]` for `issue #2637`. A false pair is not cosmetic:
+#: this row is the reading R5's fail-closed rule rests on, so it tells the next cycle the
+#: rant was already filed and the rant stops moving without anyone deciding to stop it —
+#: and because the issue-side fallback below runs only for an entry that names **no**
+#: number, the wrong pairing also suppresses the reading that would have answered.
+#:
+#: The cost is the entries written before the pairing moved into `progress`, which report
+#: finished work in prose (`Merged. Issue #2565 closed by PR #2566 …`). They lose their
+#: pairing here; every one of them in this host's ledger is `completed`, so no rendered row
+#: changes, and an entry that states the handle the way R5 defines it keeps it.
+_PROGRESS_ISSUE = re.compile(
+    r"(?im)^[ \t]*[*_]{0,2}issues?[ \t]*#(\d+)((?:\s*(?:,|/|&|\band\b)\s*#\d+)*)"
+)
 _PROGRESS_MORE = re.compile(r"#(\d+)")
 
 
@@ -541,6 +558,14 @@ def _progress_issues(progress: object) -> list[int]:
     written as its continuation. A `progress` that names no issue is not an error — it is
     a rant that has not been taken on (or one filed under the older convention, which the
     caller resolves from the issue side).
+
+    **It has to begin its line.** The handle and the prose share one field, so the shape
+    that tells them apart is where the token sits: a pairing R5 wrote is a statement
+    (`issue #2637 → PR #2640 …`), while a number inside a sentence is a mention
+    (`… because issue #2633 is open …`), and only the first one says this rant became an
+    issue. `^` is applied with `re.M`, so a `progress` that appends a correction after a
+    newline still carries the handle written earlier, and a mention anywhere on a line
+    that already holds other words pairs with nothing.
     """
     text = progress if isinstance(progress, str) else ""
     first = _PROGRESS_ISSUE.search(text)
