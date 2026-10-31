@@ -48,8 +48,9 @@ Each skill is a file of instructions. When one bears on what the host asked, rea
 ## Memory
 
 A memory is frontmatter, then a Markdown body under a title; an existing entry shows the fields and the values they take. After a response, write or update one when something in the exchange belongs there.
-{% if has_memories %}
 
+- **The index is a pointer list**: one short line per entry, at most {{ index_title_max_chars }} characters each, no duplicated content. Past {{ memory_index_row_cap }} lines it is consolidated — detail files may be long, the index may not.
+{% if has_memories %}
 - **Two stores**: agent memory is long-term and shared across sessions; session memory belongs to this session alone.
 {% if agent_memory_index_path %}
 - **Agent memory**: `{{ agent_memory_dir }}/`, index `{{ agent_memory_index_path }}`
@@ -58,7 +59,6 @@ A memory is frontmatter, then a Markdown body under a title; an existing entry s
 - **Session memory**: `{{ session_memory_dir }}/`, index `{{ session_memory_index_path }}`
 {% endif %}
 - **A write is two steps**: the file, then its row in the index. To retire one, set its `status`; never delete it.
-- **The index is a pointer list**: one short line per entry, at most {{ index_title_max_chars }} characters each, no duplicated content. Past {{ memory_index_row_cap }} lines it is consolidated — detail files may be long, the index may not.
 - **Organise rather than accumulate**: fragments on one topic become one memory, their old files marked `merged` or `superseded`; a refinement edits the entry it refines; a file carrying unrelated topics splits into one entry per topic.
 - **How settled an entry is decides how freely it is rewritten**: `event_at` says when the event happened and `updated_at` when the file last moved. When in doubt, append and note what changed; a body calling itself temporary may go.
 - **Promotion**: a session memory worth keeping moves to the agent store, and both indexes learn of it.
