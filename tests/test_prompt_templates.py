@@ -2626,21 +2626,53 @@ def test_the_promote_method_pin_reads_position_and_absence() -> None:
 # The gate is pinned as a **property, not a spelling**. A rule may be legitimately reworded, and a
 # literal pin would then answer "this sentence has not changed" rather than "the gate is still
 # stated" — the defect a guard that pins literals has (a rewrite that keeps the rule reds, and the
-# red points at the wrong thing). So the accepted spellings are enumerated below, and the control
-# rewrites the rule in a spelling the template did not carry and requires the guard to accept it.
+# red points at the wrong thing). A list of patterns is not enough either: the first version of
+# this guard enumerated three wordings, and a sweep of twelve rewordings that keep the gate found
+# **8 of them read as stating none of it** (`requires approval from the host`, `needs the host to
+# approve it`, `only runs on the host's authorisation`). So the rule is read as **two signals in
+# one item** — a host and an approval word — and the twelve rewordings plus seven gate-free rules
+# ship as fixtures below, so the arm that would have caught this runs whenever this file does.
 #
 # The count is pinned as a **reading of the list**. The parenthetical is a claim about the items
 # beneath it, so the items settle it: measured before this guard, a heading claiming "8 rules" over
 # seven items passed every test in this file, which made the claim prose. Nothing restates the
 # number — deriving it is what keeps it from drifting.
 
-#: Spellings this guard accepts for the gate. Enumerated rather than narrowed to one, because the
-#: question is whether the rule is stated, not whether one wording survived an edit.
-HOST_GATE_SPELLINGS = (
-    re.compile(r"\bhost'?s?[ -]?(?:approv|sign-?off)", re.I),
-    re.compile(r"\bapprov\w* by the host\b", re.I),
-    re.compile(r"\bauthoris\w* by the host\b", re.I),
+#: A reference to the host — the party a promotion action is proposed to. A word rather than a
+#: phrase, because `the host's`, `the host to` and `ask the host` are one subject written three ways.
+_HOST_REFERENCE = re.compile(r"\bhost(?:'s|s')?\b", re.I)
+
+#: The approval family: the verbs a round may use to say the host lets it act. Stems rather than
+#: sentences, because which verb an author picks is the author's business and the subject is this
+#: guard's.
+_APPROVAL_FAMILY = re.compile(
+    r"\bapprov\w*|\bauthoris\w*|\bauthoriz\w*|\bpermission\b|\bconsent\w*"
+    r"|\bsign[ -]?off\b|\bclearance\b|\bask\b[^.!?]{0,40}\bfirst\b",
+    re.I,
 )
+
+
+def _states_the_host_gate(line: str) -> bool:
+    """Whether this item states the gate: a host and an approval word, in one item.
+
+    Two signals in one item, never one wording. A guard that enumerates the sentences a rule may be
+    written in answers "this sentence has not changed" rather than "the rule is still stated": a
+    legitimate rewrite reddens it, and the red points at a rule that is present. Measured on this
+    template's own item 8, the three patterns this replaced read **8 of 12** gate-keeping rewrites
+    as stating no gate at all.
+
+    Neither signal is enough alone, which is the other half of the reading: `the host's account is
+    an asset` names the host and asks no permission, and `post only with permission from the
+    channel's moderators` states a permission and names no host. Both are fixtures below, and both
+    must read as gate-free.
+
+    What it does not do: it cannot tell this gate from prose that happens to name a host and an
+    authorisation (`the host's authorization dialog stays open` reads as a gate). That is why the
+    position arm — the item must sit inside `§1` — and the exactly-once arm carry the rest.
+    """
+    collapsed = " ".join(line.lower().split())
+    return bool(_HOST_REFERENCE.search(collapsed) and _APPROVAL_FAMILY.search(collapsed))
+
 
 #: The red-lines heading. The count is not written here — it is read out of the heading and
 #: compared with the list, so this constant names a section and never a number.
@@ -2655,6 +2687,9 @@ _RED_LINE_COUNT_WORDS = {
 
 #: A numbered red-line item, as the list writes one.
 _RED_LINE_ITEM = re.compile(r"^\d+\. \*\*")
+
+#: Any numbered item, whatever section it sits under — the population the duplicate arm reads.
+_NUMBERED_ITEM = re.compile(r"^\d+\. ")
 
 
 def _red_lines_region(text: str) -> str:
@@ -2674,7 +2709,39 @@ def _red_line_items(text: str) -> list[str]:
 
 def _host_gate_items(text: str) -> list[str]:
     """The numbered red-line items that state the host's approval gate."""
-    return [line for line in _red_line_items(text) if any(p.search(line) for p in HOST_GATE_SPELLINGS)]
+    return [line for line in _red_line_items(text) if _states_the_host_gate(line)]
+
+
+def _numbered_items(text: str) -> list[str]:
+    """Every numbered item in the whole template, whatever section it sits under.
+
+    The duplicate arm asks whether a *second rule* states the gate, so its population is numbered
+    items and not lines. Scoped to lines the reading is wrong in both directions: this template
+    discusses host actions of its own (`an authorization dialog`, `host-authorized registration`),
+    which name a host and an approval without stating this gate, so a line-scoped reading reddens
+    on legitimate prose and points at nothing — the defect the predicate above was repaired for.
+    """
+    return [line for line in text.splitlines() if _NUMBERED_ITEM.match(line)]
+
+
+def _require_red_lines(text: str) -> str:
+    """The red-lines region, or a failure that names what is missing instead of comparing empty.
+
+    Every gate reading in this block is scoped to `§1`. Without this, a renamed heading makes
+    `_red_lines_region` answer `""`, and a guard that compares against `""` passes while measuring
+    nothing at all.
+    """
+    region = _red_lines_region(text)
+    assert region, (
+        f"the promotion template carries no {RED_LINES_HEADING!r}. That section is where a round "
+        "reads what it may never do, and every reading below compares against it — so a heading "
+        "this file cannot find is a failure to measure, never a rule that is absent."
+    )
+    assert _red_line_items(text), (
+        f"{RED_LINES_HEADING!r} is there and holds no numbered item. The list is that section's "
+        "content, so an empty one leaves both the count and the gate with nothing to read."
+    )
+    return region
 
 
 def test_the_promote_prompt_gates_a_promotion_action_on_the_host() -> None:
@@ -2685,9 +2752,7 @@ def test_the_promote_prompt_gates_a_promotion_action_on_the_host() -> None:
     round's closing summary, which no text assertion can answer.
     """
     text = _PROMOTE_TEMPLATE.read_text(encoding="utf-8")
-    assert RED_LINES_HEADING in text, (
-        "the red-lines section is gone, so the readings below would compare against nothing"
-    )
+    _require_red_lines(text)
 
     items = _host_gate_items(text)
     assert len(items) == 1, (
@@ -2705,87 +2770,126 @@ def test_the_promote_prompt_gates_a_promotion_action_on_the_host() -> None:
         f"place, and two copies drift: {body[:220]!r}"
     )
 
-    whole_file = [
-        line for line in text.splitlines() if any(p.search(line) for p in HOST_GATE_SPELLINGS)
-    ]
-    assert len(whole_file) == 1, (
-        "the host's gate is also stated outside the red lines "
-        f"({len(whole_file)} line(s) carry it). The list is where a round looks for what it may "
-        "never do; a second statement elsewhere is the duplicate the same work refuses."
+    for banned in ("\u2265200", "3\u00d7", "three readings"):
+        assert banned not in text, (
+            f"the template carries {banned!r}, an installation's threshold written into a rule "
+            "meant to own none. Which readings settle the gate belongs to the installation that "
+            "runs this task; a copy here is a second owner that cannot be kept current."
+        )
+
+    every_item = _numbered_items(text)
+    stating = [line for line in every_item if _states_the_host_gate(line)]
+    assert len(stating) == 1, (
+        "the host's gate is stated by more than one numbered rule in this template "
+        f"({len(stating)} of them carry it, of {len(every_item)} items). The list is where a round "
+        "looks for what it may never do, so a second rule elsewhere is the copy that drifts from it."
     )
 
 
-#: The gate phrase as a whole, so a rewrite can swap the rule's wording without cutting a word in
-#: half. `HOST_GATE_SPELLINGS` matches prefixes — `host's approv` inside `host's approval` — which
-#: is right for a presence reading and wrong for a span one.
-_GATE_PHRASE = re.compile(
-    r"(?:the\s+)?host'?s?\s+(?:approv\w*|sign-?off)"
-    r"|\b(?:approv\w*|authoris\w*)\s+by\s+the\s+host\b",
-    re.I,
+#: Twelve rewordings of one rule, every one of them still stating the gate.
+#:
+#: They are fixtures rather than a matching device: the reading must accept all twelve, so a
+#: wording the author has not used yet cannot turn a present rule into an absent one. The first
+#: three are rewordings the spelling list this replaces refused while the rule stood in the file,
+#: which is the failure these fixtures exist to keep from returning unmeasured.
+GATE_STATING_ITEMS = (
+    "8. **Gate**: a promotion action requires the host's approval before it clears the channel's.",
+    "8. **Gate**: a promotion action must be approved by the host before it clears the channel's.",
+    "8. **Gate**: a promotion action requires approval from the host before it runs.",
+    "8. **Gate**: a promotion action needs the host to approve it before it runs.",
+    "8. **Gate**: a promotion action only runs on the host's authorisation.",
+    "8. **Gate**: a promotion action only runs with the host's authorization.",
+    "8. **Gate**: sending anything to a channel needs the host's sign-off first.",
+    "8. **Gate**: the host must consent before a promotion action runs.",
+    "8. **Gate**: no promotion action runs without the host's permission.",
+    "8. **Gate**: a promotion action needs the host's clearance before the channel's.",
+    "8. **Gate**: ask the host first; a promotion action is proposed, not decided here.",
+    "8. **Gate**: the host approves a promotion action before it happens.",
 )
 
-#: The spellings the control restates the gate in, tried in order.
-_GATE_REWRITES = ("the host's sign-off", "the host's approval")
-
-
-def _reword_gate(item: str) -> str:
-    """The item with the gate stated in a different accepted spelling, or unchanged.
-
-    The phrase is located **in the item**, never written out here. A hardcoded sentence makes this
-    control report "that spelling is not in the file" the moment the rule is legitimately
-    reworded — the defect the guard exists to catch, reproduced in the guard's own control.
-    """
-    match = _GATE_PHRASE.search(item)
-    if not match:
-        return item
-    for candidate in _GATE_REWRITES:
-        if candidate.lower() == match.group(0).lower():
-            continue
-        reworded = item[: match.start()] + candidate + item[match.end() :]
-        if any(p.search(reworded) for p in HOST_GATE_SPELLINGS):
-            return reworded
-    return item
+#: Seven rules that state no gate — the other direction, and the one a loose reading fails.
+#:
+#: The fifth names the host and asks no permission; the sixth states a permission and names no
+#: host. A reading that fires on either is reading one word instead of the rule.
+GATE_FREE_ITEMS = (
+    "2. **Participatory**: mention the project as a participant; the round decides for itself "
+    "when a discussion is relevant.",
+    "4. **Honest**: a mention in a thread is the round's call once the thread has asked for it.",
+    "1. **Value first**: a project link is worth posting when the reader's problem is the one the "
+    "project solves.",
+    "3. **No spamming**: at most two promotion actions per round.",
+    "7. **Long-term**: the host's account is an asset; keep following up on every thread.",
+    "5. **Respect**: post only with permission from the channel's moderators.",
+    "6. **No bashing**: only talk about the project's differentiators.",
+)
 
 
 def test_the_gate_pin_reads_the_rule_not_its_wording() -> None:
-    """The controls: a reworded rule must stay green, a deleted one and a moved one must not.
+    """The controls: twelve rewrites stay green, seven gate-free rules stay out, three destructive
+    edits redden.
 
-    Deletion is what a rewrite does, relocation is what a busy edit does, and a reword is what a
-    reviewer asked for — the three are different arms, and only the first two may redden.
+    Deletion is what a rewrite does, relocation is what a busy edit does, a duplicate is what an
+    addition does, and a reword is what a reviewer asks for — four arms, and only the last of them
+    may stay green.
+
+    What this measures and what it does not: it measures that the reading follows the rule's
+    substance across wordings this template does not use today. Whether a round asked the host
+    before acting is that round's closing summary, which no text assertion can answer.
     """
     text = _PROMOTE_TEMPLATE.read_text(encoding="utf-8")
+    _require_red_lines(text)
     items = _host_gate_items(text)
-    assert items, (
-        "the red lines state no gate for this control to reword, so it cannot run — the pin above "
-        "owns that reading and names it; an IndexError here would name nothing"
+    assert len(items) == 1, (
+        "the red lines state no single gate for this control to rewrite, so the arms below cannot "
+        "run — the pin above owns that reading and names it; an IndexError here would name nothing"
     )
     item = items[0]
 
-    reworded_item = _reword_gate(item)
-    assert reworded_item != item, (
-        "the gate's phrasing is not one this control can restate in another accepted spelling, so "
-        "the rewrite arm cannot run — that is unmeasurable, not passed"
-    )
-    reworded = text.replace(item, reworded_item)
-    assert reworded != text, "the item is pinned but absent, so this arm measured nothing"
-    assert len(_host_gate_items(reworded)) == 1, (
-        "a rewrite that keeps the gate but changes its wording reddened the pin, so the guard is "
-        "reading one sentence rather than the rule — the defect it exists to avoid"
-    )
+    # Arm 1 — a rewrite that keeps the gate must stay green, for every fixture and not one of
+    # them. The version of this arm that shipped with the guard tried two spellings, both close to
+    # the file's own wording, which is why it stayed green while the reading refused two thirds of
+    # the rewordings a reviewer would write.
+    for candidate in GATE_STATING_ITEMS:
+        reworded = text.replace(item, candidate)
+        assert reworded != text, f"{item!r} is pinned but absent, so this arm measured nothing"
+        assert len(_host_gate_items(reworded)) == 1, (
+            "a rewrite that keeps the gate was read as stating none of it: "
+            f"{candidate!r}. The guard is reading one sentence rather than the rule, which is the "
+            "defect it exists to avoid — and it reddens a file that is correct."
+        )
 
+    # Arm 2 — the opposite error, which a loose reading makes: a rule that states no gate must not
+    # be read as stating one.
+    for candidate in GATE_FREE_ITEMS:
+        gate_free = text.replace(item, candidate)
+        assert gate_free != text, f"{item!r} is pinned but absent, so this arm measured nothing"
+        assert _host_gate_items(gate_free) == [], (
+            f"a rule that states no gate was read as stating one: {candidate!r}. A reading loose "
+            "enough to accept it answers `a gate is mentioned`, not `this rule is the gate`."
+        )
+
+    # Arm 3 — deletion: the rule is gone from the section and from the file.
     deleted = text.replace(item, "")
-    assert deleted != text, f"the gate item is pinned but absent, so this arm measured nothing"
+    assert deleted != text, "the gate item is pinned but absent, so this arm measured nothing"
     assert _host_gate_items(deleted) == [], (
         "a deleted gate still reads as present, so the pin would not notice its own rule going"
     )
 
+    # Arm 4 — relocation: present in the file, absent from the section that owns it.
     moved = text.replace(item, "").rstrip() + f"\n\n{item}\n"
     assert _host_gate_items(moved) == [], (
         "moving the gate out of the red lines left it reading as stated there, so the pin is "
         "reading presence in the file rather than position in the section that owns it"
     )
-    assert len([l for l in moved.splitlines() if any(p.search(l) for p in HOST_GATE_SPELLINGS)]) == 1, (
-        "the relocation arm lost the phrase it moved, so it measured the wrong thing"
+    assert len([line for line in _numbered_items(moved) if _states_the_host_gate(line)]) == 1, (
+        "the relocation arm lost the rule it moved, so it measured the wrong thing"
+    )
+
+    # Arm 5 — duplication: the same rule twice is the copy that drifts.
+    duplicated = text.replace(item, f"{item}\n{item}")
+    assert duplicated != text, "the duplicate arm measured nothing"
+    assert len(_host_gate_items(duplicated)) == 2, (
+        "a duplicated gate reads as stated once, so the exactly-once arm could not fail"
     )
 
 
@@ -2796,8 +2900,7 @@ def test_the_red_lines_heading_counts_the_items_below_it() -> None:
     items agree. It says nothing about whether any of the rules was obeyed.
     """
     text = _PROMOTE_TEMPLATE.read_text(encoding="utf-8")
-    region = _red_lines_region(text)
-    assert region, "the red-lines section is gone, so its heading has no list to count"
+    region = _require_red_lines(text)
     heading = region.splitlines()[0]
 
     claim = re.search(r"\((\d+|[A-Za-z]+) rules?\b", heading)
