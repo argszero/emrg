@@ -2283,7 +2283,7 @@ def test_the_inbound_pin_answers_both_ways():
 #
 # The replacement states one question, answerable before typing, at both sites, and gives the
 # pull-request lane an owner inside red line 1 instead of adding a rule: the heading above that
-# list counts them ("7 rules"), and a rule nobody counts is a rule that drifts from the count.
+# list counts them, and a rule nobody counts is a rule that drifts from the count.
 #
 # Pinned as verbatim phrases for the reason the pins above state. The retired pair is pinned the
 # other way round, as strings the file must no longer carry — a rewrite that restores one of them
@@ -2608,6 +2608,215 @@ def test_the_promote_method_pin_reads_position_and_absence() -> None:
     assert not _heading_matches(found, expected), (
         f"moving {phrase!r} to the end of the file left it reading as {expected!r} — the pin is "
         "reading presence, not position"
+    )
+
+
+# ── the gate the red lines left out, and the count the heading claims ───────────────────────
+#
+# An installation's `extra_prompt` for this task carried the gate its rounds are run by: a
+# promotion action is proposed to the host rather than decided by the round, the readings that
+# settle it are stated per installation, and a reading that falls short is recorded as not through
+# the gate. Measured against the template before this change: `approv` returned **0** occurrences
+# in 474 lines, under a heading reading "Promotion Red Lines (7 rules — never violate; violating
+# any fails this cycle)". A list that announces itself as the complete set and omits the one gate
+# the host wrote down is the gap: the rule was untested here and had no home in the repository.
+#
+# Two readings, because the defect has two halves.
+#
+# The gate is pinned as a **property, not a spelling**. A rule may be legitimately reworded, and a
+# literal pin would then answer "this sentence has not changed" rather than "the gate is still
+# stated" — the defect a guard that pins literals has (a rewrite that keeps the rule reds, and the
+# red points at the wrong thing). So the accepted spellings are enumerated below, and the control
+# rewrites the rule in a spelling the template did not carry and requires the guard to accept it.
+#
+# The count is pinned as a **reading of the list**. The parenthetical is a claim about the items
+# beneath it, so the items settle it: measured before this guard, a heading claiming "8 rules" over
+# seven items passed every test in this file, which made the claim prose. Nothing restates the
+# number — deriving it is what keeps it from drifting.
+
+#: Spellings this guard accepts for the gate. Enumerated rather than narrowed to one, because the
+#: question is whether the rule is stated, not whether one wording survived an edit.
+HOST_GATE_SPELLINGS = (
+    re.compile(r"\bhost'?s?[ -]?(?:approv|sign-?off)", re.I),
+    re.compile(r"\bapprov\w* by the host\b", re.I),
+    re.compile(r"\bauthoris\w* by the host\b", re.I),
+)
+
+#: The red-lines heading. The count is not written here — it is read out of the heading and
+#: compared with the list, so this constant names a section and never a number.
+RED_LINES_HEADING = "### 1. Promotion Red Lines"
+
+#: Spelled-out counts a heading may use instead of a digit, so the reading accepts both forms the
+#: file's own history uses.
+_RED_LINE_COUNT_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+}
+
+#: A numbered red-line item, as the list writes one.
+_RED_LINE_ITEM = re.compile(r"^\d+\. \*\*")
+
+
+def _red_lines_region(text: str) -> str:
+    """The red-lines section — heading through the list — excluding the next `### ` section."""
+    start = text.find(RED_LINES_HEADING)
+    if start == -1:
+        return ""
+    rest = text[start:]
+    end = rest.find("\n### ", len(RED_LINES_HEADING))
+    return rest if end == -1 else rest[:end]
+
+
+def _red_line_items(text: str) -> list[str]:
+    """Every numbered item of the red-lines list, one line each."""
+    return [line for line in _red_lines_region(text).splitlines() if _RED_LINE_ITEM.match(line)]
+
+
+def _host_gate_items(text: str) -> list[str]:
+    """The numbered red-line items that state the host's approval gate."""
+    return [line for line in _red_line_items(text) if any(p.search(line) for p in HOST_GATE_SPELLINGS)]
+
+
+def test_the_promote_prompt_gates_a_promotion_action_on_the_host() -> None:
+    """The one gate the section omitted, stated once, inside the list that owns it.
+
+    What this measures and what it does not: it pins that the rule is **stated in the red lines**
+    and that it owns no threshold of its own. Whether a round asked the host before acting is that
+    round's closing summary, which no text assertion can answer.
+    """
+    text = _PROMOTE_TEMPLATE.read_text(encoding="utf-8")
+    assert RED_LINES_HEADING in text, (
+        "the red-lines section is gone, so the readings below would compare against nothing"
+    )
+
+    items = _host_gate_items(text)
+    assert len(items) == 1, (
+        f"the red lines state the host's approval gate {len(items)} time(s) (found: {items!r}). "
+        "Zero is the defect this guard exists for: the section announces itself as the complete "
+        "list of what a round may never do, so a gate it omits is one a round has no instruction "
+        "to read before acting. More than one is a duplicate, and the copy is the one that drifts."
+    )
+
+    item = items[0]
+    body = _RED_LINE_ITEM.sub("", item)
+    assert not re.search(r"\d", body), (
+        "the gate's item carries a number, which makes the template a second owner of thresholds "
+        "the installation states. A reading with no edge is a licence to argue the case in its "
+        f"place, and two copies drift: {body[:220]!r}"
+    )
+
+    whole_file = [
+        line for line in text.splitlines() if any(p.search(line) for p in HOST_GATE_SPELLINGS)
+    ]
+    assert len(whole_file) == 1, (
+        "the host's gate is also stated outside the red lines "
+        f"({len(whole_file)} line(s) carry it). The list is where a round looks for what it may "
+        "never do; a second statement elsewhere is the duplicate the same work refuses."
+    )
+
+
+#: The gate phrase as a whole, so a rewrite can swap the rule's wording without cutting a word in
+#: half. `HOST_GATE_SPELLINGS` matches prefixes — `host's approv` inside `host's approval` — which
+#: is right for a presence reading and wrong for a span one.
+_GATE_PHRASE = re.compile(
+    r"(?:the\s+)?host'?s?\s+(?:approv\w*|sign-?off)"
+    r"|\b(?:approv\w*|authoris\w*)\s+by\s+the\s+host\b",
+    re.I,
+)
+
+#: The spellings the control restates the gate in, tried in order.
+_GATE_REWRITES = ("the host's sign-off", "the host's approval")
+
+
+def _reword_gate(item: str) -> str:
+    """The item with the gate stated in a different accepted spelling, or unchanged.
+
+    The phrase is located **in the item**, never written out here. A hardcoded sentence makes this
+    control report "that spelling is not in the file" the moment the rule is legitimately
+    reworded — the defect the guard exists to catch, reproduced in the guard's own control.
+    """
+    match = _GATE_PHRASE.search(item)
+    if not match:
+        return item
+    for candidate in _GATE_REWRITES:
+        if candidate.lower() == match.group(0).lower():
+            continue
+        reworded = item[: match.start()] + candidate + item[match.end() :]
+        if any(p.search(reworded) for p in HOST_GATE_SPELLINGS):
+            return reworded
+    return item
+
+
+def test_the_gate_pin_reads_the_rule_not_its_wording() -> None:
+    """The controls: a reworded rule must stay green, a deleted one and a moved one must not.
+
+    Deletion is what a rewrite does, relocation is what a busy edit does, and a reword is what a
+    reviewer asked for — the three are different arms, and only the first two may redden.
+    """
+    text = _PROMOTE_TEMPLATE.read_text(encoding="utf-8")
+    items = _host_gate_items(text)
+    assert items, (
+        "the red lines state no gate for this control to reword, so it cannot run — the pin above "
+        "owns that reading and names it; an IndexError here would name nothing"
+    )
+    item = items[0]
+
+    reworded_item = _reword_gate(item)
+    assert reworded_item != item, (
+        "the gate's phrasing is not one this control can restate in another accepted spelling, so "
+        "the rewrite arm cannot run — that is unmeasurable, not passed"
+    )
+    reworded = text.replace(item, reworded_item)
+    assert reworded != text, "the item is pinned but absent, so this arm measured nothing"
+    assert len(_host_gate_items(reworded)) == 1, (
+        "a rewrite that keeps the gate but changes its wording reddened the pin, so the guard is "
+        "reading one sentence rather than the rule — the defect it exists to avoid"
+    )
+
+    deleted = text.replace(item, "")
+    assert deleted != text, f"the gate item is pinned but absent, so this arm measured nothing"
+    assert _host_gate_items(deleted) == [], (
+        "a deleted gate still reads as present, so the pin would not notice its own rule going"
+    )
+
+    moved = text.replace(item, "").rstrip() + f"\n\n{item}\n"
+    assert _host_gate_items(moved) == [], (
+        "moving the gate out of the red lines left it reading as stated there, so the pin is "
+        "reading presence in the file rather than position in the section that owns it"
+    )
+    assert len([l for l in moved.splitlines() if any(p.search(l) for p in HOST_GATE_SPELLINGS)]) == 1, (
+        "the relocation arm lost the phrase it moved, so it measured the wrong thing"
+    )
+
+
+def test_the_red_lines_heading_counts_the_items_below_it() -> None:
+    """The parenthetical is a claim about the list; the list is what decides it.
+
+    What this measures and what it does not: it pins that the announced count and the numbered
+    items agree. It says nothing about whether any of the rules was obeyed.
+    """
+    text = _PROMOTE_TEMPLATE.read_text(encoding="utf-8")
+    region = _red_lines_region(text)
+    assert region, "the red-lines section is gone, so its heading has no list to count"
+    heading = region.splitlines()[0]
+
+    claim = re.search(r"\((\d+|[A-Za-z]+) rules?\b", heading)
+    assert claim, (
+        "the heading no longer states how many rules it heads, so a reader cannot tell whether "
+        f"the list below is complete. It reads: {heading!r}"
+    )
+    token = claim.group(1).lower()
+    claimed = int(token) if token.isdigit() else _RED_LINE_COUNT_WORDS.get(token)
+    assert claimed is not None, (
+        f"the heading's count {token!r} is not one this guard can read, so it cannot measure the "
+        "claim — a number the instrument cannot parse is not a number nobody has to meet"
+    )
+
+    items = _red_line_items(text)
+    assert claimed == len(items), (
+        f"the heading claims {claimed} rules and the list holds {len(items)}. The count is the "
+        "section's own statement that a reader has seen all of them, so a list longer than its "
+        "heading hides a rule behind a number that says it is not there."
     )
 
 
