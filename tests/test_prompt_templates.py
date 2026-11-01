@@ -2283,7 +2283,7 @@ def test_the_inbound_pin_answers_both_ways():
 #
 # The replacement states one question, answerable before typing, at both sites, and gives the
 # pull-request lane an owner inside red line 1 instead of adding a rule: the heading above that
-# list counts them ("7 rules"), and a rule nobody counts is a rule that drifts from the count.
+# list counts them, and a rule nobody counts is a rule that drifts from the count.
 #
 # Pinned as verbatim phrases for the reason the pins above state. The retired pair is pinned the
 # other way round, as strings the file must no longer carry — a rewrite that restores one of them
@@ -2608,6 +2608,206 @@ def test_the_promote_method_pin_reads_position_and_absence() -> None:
     assert not _heading_matches(found, expected), (
         f"moving {phrase!r} to the end of the file left it reading as {expected!r} — the pin is "
         "reading presence, not position"
+    )
+
+
+# ── the gate the red lines left out, and the count the heading claims ───────────────────────
+#
+# An installation's `extra_prompt` for this task carried the gate its rounds are run by: a
+# promotion action is proposed to the host rather than decided by the round, the readings that
+# settle it are stated per installation, and a reading that falls short is recorded as not through
+# the gate. Measured against the template before this change: `approv` returned **0** occurrences
+# in 474 lines, under a heading reading "Promotion Red Lines (7 rules — never violate; violating
+# any fails this cycle)". A list that announces itself as the complete set and omits the one gate
+# the host wrote down is the gap, and the template now states it as item 8.
+#
+# What these guards assert, and what they deliberately do not — the second half is the part a
+# reader of item 8 needs, and it is written down rather than left to be inferred from silence.
+#
+# They assert **structure**. The heading's announced count agrees with the numbered items below
+# it, in both directions; the template carries none of the thresholds an installation states for
+# the gate; and the list survives a render through the real builder with those two readings still
+# true. That last one is not decoration: a `{% if %}` selects one branch, so a section can render
+# empty while the file still holds every line of it — "the file has eight items" and "the prompt a
+# round receives has eight items" are two readings, and only the second is what a round acts on.
+#
+# **They do not assert that item 8 states the gate, and that is a measurement rather than a
+# preference.** Five readings were tried, each repairing the failure the one before it named, and
+# each was wrong in both directions on sentences written outside its own fixtures. An enumerated
+# spelling list refused **8 of 12** rewordings that kept the rule (`requires approval from the
+# host`, `needs the host to approve it`). Its replacement read two signals in one item — a host and
+# an approval word — and refused `asks the host first` and `signs it off` while accepting `needs no
+# approval from the host`; the refusals were **inflection** and the acceptances were **semantics**,
+# so a repair aimed at one side moved nothing on the other. The last reading answered both: the
+# approval verb by **stem**, a **negator window** that disqualifies an item, and the **host
+# required as the approval's owner** — and it scored 14 of 14 in each direction on its own corpus.
+#
+# Then it was measured against sixteen statements written from the rule's meaning, never used while
+# building it: it read **2 of 10** gate statements as the gate, and the widest repair built
+# afterwards read **3 of 10**, against 14 of 14 each on the fixtures they were built from. The class
+# is not the wording. `the host decides whether a promotion action happens` and `the round proposes;
+# the host decides` state the gate in words no word list would hold, so a lexical presence test
+# cannot decide whether a sentence *requires* the host's approval, and widening the list buys one
+# sentence at a time. A corpus drawn from a reading's own vocabulary cannot refute it, which is how
+# the 14-of-14 readings above stayed green over a rule no test could see.
+#
+# So the gate's presence is a **review obligation**: a reviewer reads item 8 and judges it, and the
+# pull request that added the item says so in its body. That is weaker than a test, and it is what
+# is true; the alternative on record is an assertion that agrees with itself.
+#
+# **The limit that follows, stated rather than left to be found.** The count catches a deleted item
+# only while the heading still claims the old number. Deleting item 8 *and* correcting the heading
+# to seven leaves every guard in this block green: the count agrees with the list, no threshold was
+# added, and the render still carries every item the file holds. Nothing here can tell that edit
+# from a legitimate removal of a rule the section no longer needs — the same reason the presence
+# reading is gone rather than repaired.
+
+#: The red-lines heading. The count is not written here — it is read out of the heading and
+#: compared with the list, so this constant names a section and never a number.
+RED_LINES_HEADING = "### 1. Promotion Red Lines"
+
+#: Spelled-out counts a heading may use instead of a digit, so the reading accepts both forms the
+#: file's own history uses.
+_RED_LINE_COUNT_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+}
+
+#: A numbered red-line item, as the list writes one.
+_RED_LINE_ITEM = re.compile(r"^\d+\. \*\*")
+
+
+def _red_lines_region(text: str) -> str:
+    """The red-lines section — heading through the list — excluding the next `### ` section."""
+    start = text.find(RED_LINES_HEADING)
+    if start == -1:
+        return ""
+    rest = text[start:]
+    end = rest.find("\n### ", len(RED_LINES_HEADING))
+    return rest if end == -1 else rest[:end]
+
+
+def _red_line_items(text: str) -> list[str]:
+    """Every numbered item of the red-lines list, one line each."""
+    return [line for line in _red_lines_region(text).splitlines() if _RED_LINE_ITEM.match(line)]
+
+
+def _require_red_lines(text: str) -> str:
+    """The red-lines region, or a failure that names what is missing instead of comparing empty.
+
+    Every count reading in this block is scoped to `§1`. Without this, a renamed heading makes
+    `_red_lines_region` answer `""`, and a guard that compares against `""` passes while measuring
+    nothing at all.
+    """
+    region = _red_lines_region(text)
+    assert region, (
+        f"the promotion template carries no {RED_LINES_HEADING!r}. That section is where a round "
+        "reads what it may never do, and every reading below compares against it — so a heading "
+        "this file cannot find is a failure to measure, never a rule that is absent."
+    )
+    assert _red_line_items(text), (
+        f"{RED_LINES_HEADING!r} is there and holds no numbered item. The list is that section's "
+        "content, so an empty one leaves the count with nothing to read."
+    )
+    return region
+
+
+def _announced_count(region: str) -> int:
+    """The number the red-lines heading says it heads."""
+    heading = region.splitlines()[0]
+    claim = re.search(r"\((\d+|[A-Za-z]+) rules?\b", heading)
+    assert claim, (
+        "the heading no longer states how many rules it heads, so a reader cannot tell whether "
+        f"the list below is complete. It reads: {heading!r}"
+    )
+    token = claim.group(1).lower()
+    claimed = int(token) if token.isdigit() else _RED_LINE_COUNT_WORDS.get(token)
+    assert claimed is not None, (
+        f"the heading's count {token!r} is not one this guard can read, so it cannot measure the "
+        "claim — a number the instrument cannot parse is not a number nobody has to meet"
+    )
+    return claimed
+
+
+def _red_line_count(text: str) -> tuple[int, int]:
+    """(the count the heading announces, the count the list holds), read off one text.
+
+    One reading applied to two populations — the file and the rendered prompt — so that the two
+    answers are comparable rather than each being its own instrument.
+    """
+    region = _require_red_lines(text)
+    return _announced_count(region), len(_red_line_items(text))
+
+
+#: Thresholds an installation states for the gate. A copy written into the template becomes a
+#: second owner of a value it cannot keep current, and the two copies drift.
+_INSTALLATION_THRESHOLDS = ("\u2265200", "3\u00d7", "three readings")
+
+
+def test_the_promotion_template_owns_no_threshold_of_an_installation() -> None:
+    """The gate's numbers belong to the installation that runs the task, not to the list.
+
+    What this measures and what it does not: it pins that the three thresholds this file's history
+    carried are absent. It cannot tell a fourth spelling of a threshold from ordinary prose, and it
+    does not try — item 8 states the rule (which readings settle the gate is the installation's),
+    and a reviewer reads the item.
+    """
+    text = _PROMOTE_TEMPLATE.read_text(encoding="utf-8")
+    _require_red_lines(text)
+    for banned in _INSTALLATION_THRESHOLDS:
+        assert banned not in text, (
+            f"the template carries {banned!r}, an installation's threshold written into a rule "
+            "meant to own none. Which readings settle the gate belongs to the installation that "
+            "runs this task; a copy here is a second owner that cannot be kept current."
+        )
+
+
+def test_the_red_lines_heading_counts_the_items_below_it() -> None:
+    """The parenthetical is a claim about the list; the list is what decides it.
+
+    Both directions are one assertion, and they are two different defects: a list longer than its
+    heading hides a rule behind a number saying it is not there, and a heading larger than its list
+    announces rules that do not exist.
+
+    What this measures and what it does not: it pins that the announced count and the numbered
+    items agree. It says nothing about whether any of the rules was obeyed, and nothing about which
+    rules they are — a corrected heading buys this reading and is exactly what it cannot see past.
+    """
+    text = _PROMOTE_TEMPLATE.read_text(encoding="utf-8")
+    claimed, actual = _red_line_count(text)
+    assert claimed == actual, (
+        f"the heading claims {claimed} rules and the list holds {actual}. The count is the "
+        "section's own statement that a reader has seen all of them."
+    )
+
+
+def test_the_red_lines_reach_the_round_with_their_count(tmp_path, monkeypatch) -> None:
+    """The prompt a round reads is the rendered one, and a render can drop a whole section.
+
+    A `{% if %}` selects one branch, so a list can render empty while the file still holds every
+    line of it: the round is handed a red-lines section with nothing under it, and no test that
+    reads the file alone can tell. So the same two readings are taken on the rendered prompt, and
+    the item count the file holds must be the item count the round receives.
+    """
+    rendered = _make_handler(
+        tmp_path, monkeypatch, "promote_prompt.md", {"agent": "demoproj"}
+    )._build_evolution_prompt()
+
+    leftover = LEFTOVER_TAG.search(rendered)
+    assert leftover is None, (
+        f"an unrendered {leftover.group()!r} is left in the promotion prompt (Jinja saw it as "
+        "text, so the round would too)"
+    )
+
+    claimed, actual = _red_line_count(rendered)
+    assert claimed == actual, (
+        f"the rendered heading claims {claimed} rules and the rendered list holds {actual}"
+    )
+
+    raw_items = _red_line_items(_PROMOTE_TEMPLATE.read_text(encoding="utf-8"))
+    assert actual == len(raw_items), (
+        f"the render dropped red-line items: the file holds {len(raw_items)} and the prompt hands "
+        f"the round {actual}. A section that renders short is a rule the round never reads."
     )
 
 
