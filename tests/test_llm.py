@@ -31,6 +31,7 @@ from emrg.server.llm import (
     escape_astral_messages,
     escape_astral_text,
     is_overlong_error,
+    provider_error_message,
     space_out_messages,
     space_out_text,
 )
@@ -1049,9 +1050,9 @@ class _RecordingStreamClient(_FakeStreamClient):
 class _RefusingStream:
     """A non-200 on the streaming path, where the body is read with `aread()`."""
 
-    def __init__(self, body: bytes):
-        self.status_code = 400
-        self.headers = {}
+    def __init__(self, body: bytes, status_code: int = 400, headers=None):
+        self.status_code = status_code
+        self.headers = headers or {}
         self._body = body
 
     async def __aenter__(self):
@@ -1536,3 +1537,148 @@ def test_stream_does_not_retry_a_filter_once_a_tool_call_has_been_streamed(
     assert chunks[-1]["finish_reason"] == CONTENT_FILTER_FINISH
     assert chunks[-1]["tool_calls"][0]["id"] == "c1"
     assert fake.calls == 1, "a refusal after a streamed tool call was re-sent"
+
+
+# ── a refusal reports the provider's own sentence ──────────────────────────
+#
+# Issue #2675 (rant 2026-11-02T18:47:04). A gateway refuses a request with the
+# reason already written down — `{"error": {"message": "..."}}` — and none of the
+# places that should show it showed it readably. Both request paths built their
+# message from the whole response instead: `chat()` from the body as text,
+# `chat_stream()` from the **bytes** `aread()` answers, which an f-string renders
+# as the object's repr, so every non-ASCII byte arrived escaped (`body=b'...\xe7
+# \x82\xb9...'`) and the response headers rode along in front of it. A host could
+# not tell whether to top up or to change a setting.
+#
+# Two halves are asserted, and either one alone is satisfiable by a broken fix: a
+# message that carries the sentence can still stitch `content-length` onto it, and
+# a message that pins today's exact bytes can be one that never learned to
+# extract anything. So the absence half asserts **equality** with what the two
+# paths produced before the change, truncation included.
+
+_PROVIDER_SAYS = "点数余额不足"
+_SENTENCE_BODY = json.dumps({"error": {"message": _PROVIDER_SAYS}}).encode()
+_OPAQUE_BODY = b"internal server error"
+_REFUSING_HEADERS = {"content-length": "42"}
+
+
+def _refusal_from(client, path: str, body: bytes, status: int = 402) -> str:
+    """The message that path raises for a refused response."""
+    import asyncio
+
+    if path == "chat":
+        client._client = _FakeHttpClient([_FakeResponse(status, body, _REFUSING_HEADERS)])
+        with pytest.raises(RuntimeError) as caught:
+            asyncio.run(client.chat([{"role": "user", "content": "hi"}]))
+    else:
+        client._client = _FakeStreamClient([_RefusingStream(body, status, _REFUSING_HEADERS)])
+        with pytest.raises(RuntimeError) as caught:
+            asyncio.run(_drain_stream(client, client._client))
+    return str(caught.value)
+
+
+@pytest.mark.parametrize("path", ["chat", "chat_stream"])
+def test_a_refusal_reports_the_providers_own_sentence(client, caplog, path):
+    """The sentence the provider wrote is what the error and the log carry."""
+    import logging
+
+    caplog.set_level(logging.ERROR, logger="emrg.server.llm")
+
+    message = _refusal_from(client, path, _SENTENCE_BODY)
+
+    assert _PROVIDER_SAYS in message, (
+        f"{path}: the provider's own sentence is not in the error a host reads: "
+        f"{message!r}"
+    )
+    assert _PROVIDER_SAYS in caplog.text, (
+        f"{path}: the log carries no readable reason — and the log is where the host "
+        f"looks when the client line is cut: {caplog.text!r}"
+    )
+    for rendered in (message, caplog.text):
+        assert "\\x" not in rendered, (
+            f"{path}: an escaped byte string reached the host: {rendered!r}"
+        )
+        assert "content-length" not in rendered, (
+            f"{path}: the response headers are still stitched onto the reason, which "
+            f"is the same unreadable line one step later: {rendered!r}"
+        )
+
+
+@pytest.mark.parametrize("path", ["chat", "chat_stream"])
+def test_a_body_without_a_sentence_keeps_todays_message_exactly(client, caplog, path):
+    """The other half: with nothing to extract, nothing about the output moves.
+
+    Equality rather than a substring, because the requirement is that the old
+    line survives **byte for byte** — its headers, its truncation and, on the
+    streaming path, its `b'...'` repr. A fix that quietly widened the fallback to
+    the raw body would satisfy any weaker reading of this.
+    """
+    import logging
+
+    caplog.set_level(logging.ERROR, logger="emrg.server.llm")
+
+    message = _refusal_from(client, path, _OPAQUE_BODY)
+
+    assert message == {
+        "chat": "LLM request failed: 402 headers={'content-length': '42'} "
+                "body=internal server error",
+        "chat_stream": "LLM stream request failed: 402 headers={'content-length': '42'} "
+                       "body=b'internal server error'",
+    }[path], f"{path}: the no-sentence output changed: {message!r}"
+    # The log line's own shape, which the two paths never shared: the
+    # non-streaming one prints the headers and the body as text, the streaming one
+    # prints the body's `repr` and no headers at all. Both are unchanged here.
+    assert {
+        "chat": "headers={'content-length': '42'} body=internal server error",
+        "chat_stream": "LLM stream error: 402 b'internal server error'",
+    }[path] in caplog.text, (
+        f"{path}: the no-sentence log lost the shape it had before this change: "
+        f"{caplog.text!r}"
+    )
+
+
+@pytest.mark.parametrize("path,kept", [("chat", 500), ("chat_stream", 1000)])
+def test_the_truncation_of_a_sentence_less_body_is_unchanged(client, path, kept):
+    """Each path's own cut, measured rather than assumed: 500 and 1000.
+
+    A body with no sentence is still cut where it was cut before, so a refusal
+    that answers nothing new cannot become a full-body dump.
+    """
+    message = _refusal_from(client, path, b"Z" * 3000)
+
+    assert message.count("Z") == kept, (
+        f"{path}: the body is now cut at {message.count('Z')} characters instead of "
+        f"{kept} — the extraction widened what a refusal reports"
+    )
+
+
+@pytest.mark.parametrize("body,expected", [
+    ('{"error": {"message": "点数余额不足"}}', _PROVIDER_SAYS),
+    (b'{"error": {"message": "bytes body"}}', "bytes body"),
+    ('{"error": {"message": "  padded  "}}', "padded"),
+    ('{"message": "no error object"}', ""),
+    ('{"error": "a string, not an object"}', ""),
+    ('{"error": {"message": 42}}', ""),
+    ('{"error": {"message": ""}}', ""),
+    ('{"error": {"message": null}}', ""),
+    ("not json at all", ""),
+    ("", ""),
+    (None, ""),
+])
+def test_the_helper_answers_only_a_provider_sentence(body, expected):
+    """One question, answered for every shape a gateway actually returns."""
+    assert provider_error_message(body) == expected
+
+
+def test_a_sentence_that_echoes_a_credential_is_redacted():
+    """A provider may quote the request back, including the key it was given.
+
+    The sentence is the one part of a response that reaches both a log and a
+    client, so it goes through the same redaction as the body it came from.
+    """
+    echoed = json.dumps({"error": {"message": "denied for sk-livekey1234567890123456789012345678"}})
+
+    out = provider_error_message(echoed)
+
+    assert "sk-livekey" not in out, f"a credential survived the extraction: {out!r}"
+    assert out.startswith("denied for "), out

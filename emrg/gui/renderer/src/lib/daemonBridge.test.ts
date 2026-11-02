@@ -277,6 +277,22 @@ describe("createDaemonBridge", () => {
     expect(entriesText(transcript, "s1")).toContain("s:err:boom");
   });
 
+  it("失败轮的裸 {error} 帧 → 原因文本非空地渲染出来（issue #2675）", () => {
+    // The daemon announces a failed turn as a bare `{error}` frame, and the reason
+    // rides `error` — not `message`. Reading only `message` rendered this template
+    // with nothing in it, so a refused turn showed an empty error line in the GUI
+    // while the TUI showed the reason (rant 2026-11-02T18:47:04). The assertion is
+    // that the *reason text* reaches the transcript, because an empty render is
+    // exactly the defect.
+    const { emit, transcript } = setup();
+    const reason = "LLM error: LLM request failed: 402 — 点数余额不足";
+    emit({ type: "error", data: { error: reason }, sid: "s1" });
+
+    const txt = entriesText(transcript, "s1");
+    expect(txt).toContain(`s:err:${reason}`);
+    expect(txt.some((x) => x === "s:err:")).toBe(false);
+  });
+
   it("disconnected → 按 sid 标记 + 清锁 + 清队列；无 sid → 全局 connected=false", () => {
     const { emit, bridge } = setup();
     emit({ type: "status", data: { connected: true }, sid: null });
