@@ -163,6 +163,45 @@ def classify_llm_error(exc: BaseException) -> str:
     return OTHER_ERROR
 
 
+def provider_error_message(body) -> str:
+    """The provider's own sentence from an error body, or ``""`` when it has none.
+
+    A gateway refuses a request with the reason already written down —
+    ``{"error": {"message": "点数余额不足"}}`` is what a balance refusal looks
+    like — and that sentence is short, accurate and actionable, while the body
+    around it is none of those: it carries the response headers, escapes every
+    non-ASCII byte, and is cut at an arbitrary column. A host reading
+    ``body=b'...\\xe7\\x82\\xb9...'`` cannot tell whether to top up, to change a
+    setting, or to retry, and re-sends the same request (rant 2026-11-02T18:47:04).
+
+    This answers *only* the extraction question, so ``chat()``, ``chat_stream()``
+    and their log lines ask it in one place and cannot drift apart. An empty
+    answer is not a failure: it is the signal to keep the existing message
+    exactly as it was, escapes and truncation included.
+
+    ``body`` may be the ``str`` the non-streaming path reads or the ``bytes``
+    the streaming path gets from ``aread()``. A body that is not JSON, or that
+    has no ``error`` object, or whose ``message`` is not a non-empty string,
+    answers ``""``.
+    """
+    if isinstance(body, (bytes, bytearray)):
+        body = bytes(body).decode("utf-8", "replace")
+    if not isinstance(body, str) or not body:
+        return ""
+    try:
+        parsed = json.loads(body)
+    except (TypeError, ValueError):
+        return ""
+    error = parsed.get("error") if isinstance(parsed, dict) else None
+    message = error.get("message") if isinstance(error, dict) else None
+    if not isinstance(message, str):
+        return ""
+    # The sentence is quoted from the provider, and a provider may echo the
+    # request back — including the key it was given. Redact before it reaches a
+    # log line or a client.
+    return _redact_text(message.strip())
+
+
 def is_overlong_error(exc: BaseException) -> bool:
     """Whether a failure is "the request did not fit" — asked of
     :func:`classify_llm_error`, never respelled at the call site.
@@ -657,6 +696,20 @@ class LlmClient:
 
             # 错误日志与异常信息脱敏：response headers 可能回显 set-cookie/auth，
             # body 可能含敏感回显；统一经脱敏 + 截断（防止 API key 等泄露到 emrgd.log / 会话）。
+            reason = provider_error_message(text)
+            if reason:
+                # The provider wrote the answer down, and it is the only part of
+                # this response a host can act on (rant 2026-11-02T18:47:04). The
+                # headers stay out of this message on purpose: a reason with
+                # `content-length` stitched onto it is the same unreadable line one
+                # step later. When there is no reason the lines below are reachable
+                # exactly as before, escapes and truncation included.
+                logger.error("LLM error: %s %s", resp.status_code, reason)
+                raise RuntimeError(
+                    with_content_risk_hint(
+                        f"LLM request failed: {resp.status_code} — {reason}"
+                    )
+                )
             hdr = _redact_headers(dict(resp.headers))
             text_redacted = _redact_text(text)
             logger.error("LLM error: %s headers=%s body=%s", resp.status_code, hdr, text_redacted[:2000])
@@ -781,6 +834,20 @@ class LlmClient:
                                 f"LLM stream request failed: {resp.status_code} - {_redact_text(text)[:500]}"
                             )
                             continue
+                        reason = provider_error_message(text)
+                        if reason:
+                            # `text` here is `bytes` from `aread()`, which is why this
+                            # branch printed `b'...\xe7\x82\xb9...'` before: the body
+                            # is handed to a redactor that takes str, so the f-string
+                            # rendered the object's repr (rant 2026-11-02T18:47:04).
+                            # The same extraction answers both paths, so they cannot
+                            # drift apart.
+                            logger.error("LLM stream error: %s %s", resp.status_code, reason)
+                            raise RuntimeError(
+                                with_content_risk_hint(
+                                    f"LLM stream request failed: {resp.status_code} — {reason}"
+                                )
+                            )
                         logger.error("LLM stream error: %s %s", resp.status_code, _redact_text(text)[:500])
                         hdr = _redact_headers(dict(resp.headers))
                         raise RuntimeError(

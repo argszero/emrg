@@ -879,10 +879,24 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
           transcript.addSystemMessage(tt("app.queuedCancelled"), sid);
         }
         break;
-      case "error":
-        transcript.addSystemMessage(tt("app.error", { msg: (data as ErrorData).message ?? "" }), sid);
+      case "error": {
+        // A failed turn is announced as a bare `{error}` frame (`daemon.py`), which is
+        // the same shape every command refusal uses — the sentence rides `error`, not
+        // `message`. Reading only `message` rendered this template with nothing in it,
+        // so a refused turn showed an empty error line in the GUI while the TUI showed
+        // the reason (rant 2026-11-02T18:47:04). A frame that does carry `message`
+        // still wins, because that is the shape the type-specific events use.
+        const failure = data as { message?: unknown; error?: unknown };
+        const reason =
+          typeof failure.message === "string" && failure.message
+            ? failure.message
+            : typeof failure.error === "string"
+              ? failure.error
+              : "";
+        transcript.addSystemMessage(tt("app.error", { msg: reason }), sid);
         releaseOwnStream(sid, null, true);
         break;
+      }
       case "pong": {
         const pong = data as PongData;
         store.update((s) => ({
