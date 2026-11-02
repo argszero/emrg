@@ -153,6 +153,13 @@ so the report names the Feishu message id and the `oc_…` conversation it was a
 request without them is one the host has not been told about, and the round counts it as unasked
 rather than as progress.
 
+A conclusion about how something ran carries the evidence it rests on. When the report says
+which step failed, who errored or what the cause was, it names the file that answer was read
+from and an address the reader can open for that file — one per file involved, because a
+conclusion drawn from three of them is three readings and a reader checking one alone cannot
+tell which of them said it. A file the round could not retrieve is named as well, with the step
+it could not pass: leaving it out reads as though it had been read and found to say nothing.
+
 ### Forbidden
 
 - 🛑 Never message anyone but the host's own account without the host's approval for that exact message
