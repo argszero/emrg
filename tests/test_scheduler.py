@@ -1567,6 +1567,51 @@ def test_open_source_template_reads_the_extension_surface():
     assert "I'd like to work on this" in out, "§1.1 认领规则仍在"
 
 
+def test_open_source_template_settles_a_disagreement_between_its_sources():
+    """open_source_prompt.md §1.5 states the order among the sources it names (issue #2666).
+
+    §1.5 makes the session history and the memory index "where the last cycle left off",
+    and both are written by earlier cycles. Nothing in the section said which governs when
+    they disagree: a memory entry recording a PR as open survives that PR's merge, two
+    entries can hold different answers to one question, and the history and the index
+    disagree by construction. The full-code-study section's "never work from memory or a
+    stale tree" governs the code just fetched, not the state — so the order a cycle happened
+    to read the sources in decided the outcome, and a stale claim won exactly when it was
+    the one read.
+
+    Pinned as the rules' presence, not as a reading of their meaning: this guard reddens
+    when the paragraph is deleted and also when it is reworded, which is the deliberate
+    trade for a prompt — a prompt's risk here is silent deletion, and a semantic reading of
+    prose is the thing this repository has already measured as unreachable.
+    """
+    import jinja2
+
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "emrg" / "server" / "open_source_prompt.md"
+    )
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(template_path.read_text(encoding="utf-8"))
+    out = template.render(
+        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
+        timestamp="20261102",
+        task={"role": "committer", "agent": "aitokenpool"},
+        agent={}, git_path="git", gh_path="gh",
+    )
+    # 1) the repository outranks a note, for the state as well as for the code
+    assert "The repository decides: a tree, a pull request, an issue and a check run" in out, \
+        "§1.5 须写明仓库裁决笔记"
+    # 2) among the notes the later stamp governs, and restating does not refresh a claim
+    assert "the later stamp governs" in out, "§1.5 须写明笔记之间以较晚时刻为准"
+    assert "does not make it newer" in out, "§1.5 须写明重述不刷新"
+    # 3) what could not be re-measured is reported as unmeasured, not repeated
+    assert "a note restated is not a reading" in out, "§1.5 须写明未测即报未测"
+    # 4) the code rule it must not displace still stands. Deleting the new paragraph
+    #    leaves this one green **on purpose**: the two govern different subjects.
+    assert "re-read the latest code before every contribution" in out, "全代码研读节仍在"
+
+
 def test_promote_template_learn_latest_state_04():
     """promote_prompt.md §0.4 requires learning the agent's latest state
     before promoting (rant 2026-08-14T22:13:57, mirrors open-source B.2b #790)."""
