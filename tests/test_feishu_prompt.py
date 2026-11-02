@@ -78,6 +78,18 @@ HEADING = "### 0. Cadence"
 #: The first step of the round — the thing the rule has to precede to bind it.
 FIRST_STEP = "### 1. Read"
 
+#: §4 defines the report, so it is where the obligation to name evidence belongs.
+REPORT_HEADING = "### 4. Report"
+
+#: One half of that obligation: a conclusion points at the file it was read from.
+LOG_ADDRESS_MARK = "an address the reader can open"
+
+#: The other half: a file that could not be read is said to be unread, not left out.
+UNRETRIEVED_MARK = "could not retrieve"
+
+#: And the reason the clause is not satisfied by one address: three files are three readings.
+PER_FILE_MARK = "one per file"
+
 #: The agent name the render fixture asks for — a name in no template, so "the render
 #: carries it" proves a placeholder resolved rather than a string being copied through.
 PROMPT_PROJECT = "demoproj"
@@ -93,19 +105,24 @@ CADENCE_OWNERS = ("interval", "schedule")
 EMPTY_ROUND_MARK = "a correct round"
 
 
-def _cadence_block(text: str) -> str | None:
-    """The `### 0. Cadence` block as a reader meets it, or `None` when it is absent.
+def _section(text: str, heading: str) -> str | None:
+    """The block under `heading` as a reader meets it, or `None` when it is absent.
 
-    Deliberately answers rather than asserting, so the both-ways control below can show
+    Deliberately answers rather than asserting, so the both-ways controls below can show
     that a missing block is reported as missing instead of as nothing to check.
     """
-    marker = f"\n{HEADING}"
+    marker = f"\n{heading}"
     start = text.find(marker)
     if start < 0:
         return None
     rest = text[start + len(marker) :]
     end = re.search(r"\n#{2,3} ", rest)
     return rest[: end.start()] if end else rest
+
+
+def _cadence_block(text: str) -> str | None:
+    """The `### 0. Cadence` block — the section this file's first rule binds."""
+    return _section(text, HEADING)
 
 
 def _require_block(text: str, subject: str) -> str:
@@ -333,4 +350,71 @@ def test_the_cadence_scanner_answers_both_ways():
     )
     assert _cadence_block("\n### 1. Read\n") is None, (
         "a template without the block was reported as carrying one"
+    )
+
+
+def test_the_template_says_a_conclusion_names_the_file_it_was_read_from():
+    """§4 owes the report an evidence clause, and its halves are asserted separately.
+
+    One string carrying all three would pass on a sentence that kept the words and lost
+    the requirement, so each half is its own reading (issue #2670).
+    """
+    block = _section(PROMPT.read_text(encoding="utf-8"), REPORT_HEADING)
+    assert block is not None, (
+        f"`emrg/server/feishu_prompt.md` carries no `{REPORT_HEADING}` block — the report is "
+        "defined nowhere, so a conclusion about how something ran is free to arrive with no "
+        "evidence behind it (issue #2670)"
+    )
+    assert LOG_ADDRESS_MARK in block, (
+        "§4 no longer says a conclusion names an address the reader can open for the file it "
+        "was read from — an unverifiable conclusion cannot be told from a guess, and the host "
+        "acts on it either way"
+    )
+    assert PER_FILE_MARK in block, (
+        "§4 lost the one-address-per-file clause: a conclusion drawn from three files is three "
+        "readings, and a reader who can open only one cannot tell which of them said it"
+    )
+    assert UNRETRIEVED_MARK in block, (
+        "§4 no longer says a file the round could not retrieve is named as such — leaving it "
+        "out reads exactly like having read it and found nothing in it, so the one case where "
+        "the round is blind is the case that looks cleanest"
+    )
+
+
+def test_the_report_rule_reaches_the_round_and_not_merely_the_file(rendered):
+    """The same clause asserted on the prompt a round is sent: a Jinja construct hides it in the file."""
+    block = _section(rendered, REPORT_HEADING)
+    assert block is not None, (
+        f"the rendered Feishu prompt has no `{REPORT_HEADING}` block at all — whether or not "
+        "the file still carries one"
+    )
+    missing = [
+        mark for mark in (LOG_ADDRESS_MARK, PER_FILE_MARK, UNRETRIEVED_MARK) if mark not in block
+    ]
+    assert not missing, (
+        f"the rendered report section does not carry {missing}: the clause is in the file and "
+        "in no render, which is the one failure a file-level guard cannot see"
+    )
+
+
+def test_the_report_scanner_answers_both_ways():
+    """The both-ways control for the section this file's second rule binds.
+
+    A scanner that answered the whole text for a missing marker would make the assertions
+    above pass on a template that had lost §4, so its absence is measured too — and so is a
+    block that runs to the end of the file, where there is no following heading to stop at.
+    """
+    present = "\n### 4. Report\n\nrule text\n\n### Forbidden\n\nbody\n"
+    block = _section(present, REPORT_HEADING)
+    assert block is not None
+    assert "rule text" in block
+    assert "### Forbidden" not in block, (
+        "the scanner ran past the next heading, so a deleted block would be read as its "
+        "neighbours"
+    )
+    assert _section(present, "### 5. Absent") is None, (
+        "a heading the template does not carry was reported as present"
+    )
+    assert _section("\n### 4. Report\n\nrule text", REPORT_HEADING) is not None, (
+        "a block that is last in the file, with no heading after it, was reported as missing"
     )
