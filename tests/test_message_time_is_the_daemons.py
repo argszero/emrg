@@ -43,7 +43,7 @@ import pytest
 
 from emrg.client.python_tui.pending_rows import ParkedUserRows
 from emrg.client.python_tui.widgets.base import RenderContext
-from emrg.client.python_tui.widgets.chat_row import ChatRow, format_message_time
+from emrg.client.python_tui.widgets.chat_row import ChatRow, clock_width, format_message_time
 from emrg.client.python_tui.widgets.markdown import StreamingMarkdown, UserMarkdown
 from emrg.client.widgets import ChatHistory
 from emrg.config import LlmConfig
@@ -533,3 +533,88 @@ def test_a_row_with_no_moment_still_fits_the_width_it_is_painted_into(kind, miss
         assert ":" not in "".join(s.text for s in lines[0].spans).split(_LONG[:10])[-1], (
             f"{kind}/{missing!r}: a row with no readable moment rendered a clock"
         )
+
+
+# ── the client: a clockless row reserves no columns for a clock ─────────────
+#
+# Issue #2672. The reserve is a function of the clock, and a record written before
+# the moment was carried has none, so `clock_width("")` must answer 0 — otherwise a
+# legacy row wraps short of the terminal for a reason its reader cannot see.
+#
+# The reading above cannot separate the two cases: `test_a_row_with_no_moment_still_
+# fits_the_width_it_is_painted_into` asks only that every line fit and that no clock
+# be rendered, and a renderer that reserved the clock's columns unconditionally
+# satisfies both — it wraps seven cells short, still fits, and still shows no clock.
+# Line count does separate them, and only at some widths, so the widths are found by
+# measuring here rather than listed: a hard-coded pair would answer "rich wraps as it
+# did on the day this was written" instead of "the reserve follows the clock".
+
+
+def _row_for(kind: str, timestamp):
+    """The row `kind` draws for `_LONG`, with the clock it is or is not given."""
+    if kind == "user":
+        return UserMarkdown(_LONG, timestamp=timestamp)
+    return _streaming_with(_LONG, timestamp)
+
+
+def _streaming_with(text: str, timestamp):
+    row = StreamingMarkdown()
+    row.feed(text)
+    row.timestamp = timestamp or ""
+    row.dirty = True
+    return row
+
+
+def _widest(lines) -> int:
+    return max(len("".join(span.text for span in line.spans)) for line in lines)
+
+
+def test_the_reserved_columns_are_the_clocks_own_and_none_for_an_absent_clock():
+    """Both directions of the unit reading: a clock costs its text plus its gap, absent costs 0."""
+    assert clock_width("") == 0, (
+        "a row with no moment reserves columns for one, so a legacy record wraps short of "
+        "the terminal for a reason its reader cannot see (issue #2672)"
+    )
+    assert clock_width("09:25") == len(_GAP) + len("09:25"), (
+        f"the reserve reads {clock_width('09:25')} cells for a five-cell clock behind a "
+        f"{len(_GAP)}-cell gap, so the budget a row subtracts is not the clock's own width"
+    )
+
+
+@pytest.mark.parametrize("kind", ["user", "assistant"])
+def test_a_clockless_row_wraps_to_the_whole_terminal(kind):
+    """The rendered consequence: with no clock to place, the content gets the columns back.
+
+    Measured rather than asserted per width, because the line count separates the two
+    rows only at some — with this content and this tree the user row separates at 80 and
+    the assistant row at 60, 80 and 100. A renderer that reserved the clock's columns
+    unconditionally separates at none of them, so "no width separates" is the failure
+    this asks for, and it names the counts it saw.
+    """
+    separating: list[int] = []
+    for width in _WIDTHS:
+        clockless = _row_for(kind, None).render(_ctx(width))
+        clocked = _row_for(kind, "2026-10-09T09:25:00").render(_ctx(width))
+        assert "09:25" in "".join(span.text for span in clocked[0].spans), (
+            f"{kind} at width {width}: the clocked row renders no clock, so this width "
+            "measures nothing about what a clock costs"
+        )
+        if len(clockless) < len(clocked):
+            separating.append(width)
+            assert _widest(clockless) > _widest(clocked), (
+                f"{kind} at width {width}: the clockless row takes {len(clockless)} lines "
+                f"against {len(clocked)}, but its widest line is {_widest(clockless)} cells "
+                f"against {_widest(clocked)} — it is not using the columns the clock would "
+                "have taken"
+            )
+
+    assert separating, (
+        f"the {kind} row renders to the same number of lines with a clock and without one "
+        f"at every width in {list(_WIDTHS)}: the content is being wrapped to the same budget "
+        "either way, so a row that has no clock is reserving the clock's columns anyway "
+        f"(issue #2672; at width {_WIDTHS[1]} the clockless row took "
+        f"{len(_row_for(kind, None).render(_ctx(_WIDTHS[1])))} lines and the clocked one "
+        f"{len(_row_for(kind, '2026-10-09T09:25:00').render(_ctx(_WIDTHS[1])))}). If the "
+        "reserve still follows the clock, then rich is wrapping this content differently "
+        "from the day this reading was written — measure again rather than widen the bound"
+    )
