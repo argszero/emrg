@@ -15,7 +15,11 @@ from rich.markdown import Markdown as RichMarkdown
 
 from emrg.client.python_tui.theme import code_theme
 from emrg.client.python_tui.widgets.base import Line, RenderContext, Widget
-from emrg.client.python_tui.widgets.chat_row import format_message_time
+from emrg.client.python_tui.widgets.chat_row import (
+    clock_width,
+    format_message_time,
+    place_clock,
+)
 
 
 class Markdown(Widget):
@@ -86,7 +90,11 @@ class UserMarkdown(Markdown):
         prefix = self._ROLE_PREFIX
         indent = " " * len(prefix)
         role_style = Style.parse(self._ROLE_STYLE)
-        avail = max(1, ctx.width - len(prefix))
+        # The clock's columns are part of this line's budget, not an addition to
+        # it: content wrapped to the full width leaves the clock past the last
+        # column, where the terminal clips it (issue #2668).
+        clock = format_message_time(self.timestamp)
+        avail = max(1, ctx.width - len(prefix) - clock_width(clock))
 
         md = RichMarkdown(_preserve_line_breaks(self.text), code_theme=code_theme())
         md_lines = rich_renderable_to_lines(md, avail)
@@ -99,9 +107,8 @@ class UserMarkdown(Markdown):
 
         # Same placement and format as `ChatRow`, from the one formatter, so the
         # two halves of a conversation read alike (rant 2026-10-09T09:25:00).
-        clock = format_message_time(self.timestamp)
         if clock and lines:
-            lines[0].spans.append(Span(text=f"  {clock}", style="dim"))
+            place_clock(lines[0], clock)
 
         self._dirty = False
         return lines
@@ -196,16 +203,17 @@ class StreamingMarkdown(Widget):
             last_fence = text.rfind("```")
             text = text[:last_fence]
 
+        # The clock's columns are reserved before the markdown is wrapped, so the
+        # settled row's moment lands inside the terminal width rather than past it
+        # (issue #2668). While the reply streams there is no moment and no reserve.
+        clock = format_message_time(self.timestamp)
         md = RichMarkdown(text, code_theme=self.code_theme or code_theme())
-        lines = rich_renderable_to_lines(md, ctx.width)
+        lines = rich_renderable_to_lines(md, max(1, ctx.width - clock_width(clock)))
         for line in lines:
             line.style = ctx.style
 
-        clock = format_message_time(self.timestamp)
         if clock and lines:
-            from emrg.client.python_tui.widgets.base import Span
-
-            lines[0].spans.append(Span(text=f"  {clock}", style="dim"))
+            place_clock(lines[0], clock)
 
         self._last_rendered = lines
         self._dirty = False
