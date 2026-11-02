@@ -43,7 +43,7 @@ import pytest
 
 from emrg.client.python_tui.pending_rows import ParkedUserRows
 from emrg.client.python_tui.widgets.base import RenderContext
-from emrg.client.python_tui.widgets.chat_row import ChatRow, format_message_time
+from emrg.client.python_tui.widgets.chat_row import ChatRow, clock_width, format_message_time
 from emrg.client.python_tui.widgets.markdown import StreamingMarkdown, UserMarkdown
 from emrg.client.widgets import ChatHistory
 from emrg.config import LlmConfig
@@ -533,3 +533,68 @@ def test_a_row_with_no_moment_still_fits_the_width_it_is_painted_into(kind, miss
         assert ":" not in "".join(s.text for s in lines[0].spans).split(_LONG[:10])[-1], (
             f"{kind}/{missing!r}: a row with no readable moment rendered a clock"
         )
+
+
+# ── the client: reserving nothing is measured, not merely permitted ────────
+#
+# Issue #2672. The test above states the rule in its own docstring but measures one
+# side of it: a line at most `width` wide that renders no clock is equally satisfied
+# by a renderer that reserved the clock's columns anyway and wrapped seven cells
+# short — a narration narrowed for a reason its reader cannot see. What separates the
+# two is how much of the terminal the content was allowed to use, and the observable
+# form of that is the line count of content with **no word boundary**: every cell not
+# reserved is a cell such content fills.
+#
+# Width and content are chosen here rather than inherited, because the inherited pair
+# cannot see the difference: a word-wrapped paragraph of the same length takes 6 lines
+# at 60 columns with a clock and 6 without, and at 120 the assistant row does not
+# differ either — an instrument that reads equal on both arms proves nothing about
+# either. At 60 columns the unbreakable blob takes 18 lines without a clock and 20
+# with one on the user row, 17 and 19 on the assistant row.
+
+_BLOB = "x" * 1000
+_DISCRIMINATING_WIDTH = 60
+
+
+def test_the_clock_budget_is_nothing_when_there_is_no_clock():
+    """The number the renderers subtract: zero for an absence, the gap plus the clock."""
+    assert clock_width("") == 0, (
+        "a row with no clock reserved columns for one, so it wraps narrower than the "
+        "terminal it is painted into"
+    )
+    assert clock_width("09:25") == len(_GAP) + len("09:25"), (
+        "the budget a clocked row reserves is not the gap plus the clock, so the clock "
+        "is placed by a number that does not describe it"
+    )
+
+
+@pytest.mark.parametrize("missing", [None, "", "not a timestamp"])
+@pytest.mark.parametrize("kind", ["user", "assistant"])
+def test_a_clockless_row_wraps_to_the_whole_terminal(kind, missing):
+    """The rendered consequence of a zero budget: the same content needs fewer lines.
+
+    The control is the *same content carrying a clock*, so the only thing between the
+    two readings is the reservation itself — not a different string, not a different
+    row kind.
+    """
+    if kind == "user":
+        bare = UserMarkdown(_BLOB, timestamp=missing)
+        clocked = UserMarkdown(_BLOB, timestamp="2026-10-09T09:25:00")
+    else:
+        bare, clocked = StreamingMarkdown(), StreamingMarkdown()
+        for row in (bare, clocked):
+            row.feed(_BLOB)
+        bare.timestamp = missing or ""
+        clocked.timestamp = "2026-10-09T09:25:00"
+        bare.dirty = clocked.dirty = True
+
+    width = _DISCRIMINATING_WIDTH
+    bare_lines = len(bare.render(_ctx(width)))
+    clocked_lines = len(clocked.render(_ctx(width)))
+
+    assert bare_lines < clocked_lines, (
+        f"{kind}/{missing!r}: the clockless row took {bare_lines} lines at width "
+        f"{width} and the same content with a clock took {clocked_lines} — it is "
+        f"reserving columns for a clock it will never place, so it wraps narrower "
+        f"than the terminal for a reason the reader cannot see"
+    )
