@@ -424,3 +424,112 @@ def test_clearing_drops_every_row_that_was_waiting():
 
     assert len(parked) == 0
     assert parked.fill("req-first", "2026-10-09T09:25:00") is False
+
+
+# ── the client: the clock lands inside the width it is painted into ────────
+#
+# Issue #2668. The readings above prove the clock is *carried*: they join a row's
+# span text and ask whether `09:25` is in it — which an overflowing tail satisfies.
+# So the suite stayed green while the host saw no time at all, on every path, for
+# every message: the clock is appended after the content has already been wrapped to
+# the full width, so it begins past the last column and the terminal clips it.
+#
+# The only reading that decides whether a person can see the clock is the rendered
+# line against the terminal it is painted into. Both halves are asserted, because
+# either one alone is satisfiable by a broken row: a line that fits can have padded
+# the clock off the end, and a line carrying the clock can be too wide to show it.
+
+_GAP = "  "
+_WIDTHS = (60, 80, 100, 120)
+_LONG = "word " * 60
+
+
+def _assert_clock_inside(rows, width: int, label: str) -> None:
+    """Every rendered line fits `width`, and the first carries the clock after the text."""
+    for row in rows:
+        lines = row.render(_ctx(width))
+        assert lines, f"{label}: rendered no lines at width {width}"
+        for index, line in enumerate(lines):
+            text = "".join(span.text for span in line.spans)
+            assert len(text) <= width, (
+                f"{label}: line {index} is {len(text)} cells wide at terminal width {width} "
+                f"— its tail is clipped, so anything sitting there is invisible: {text!r}"
+            )
+        first = "".join(span.text for span in lines[0].spans)
+        assert "09:25" in first, (
+            f"{label}: the clock is not on the row's first line at width {width}: {first!r}"
+        )
+        body = first[: first.rindex("09:25")]
+        before_clock = len(body) - len(body.rstrip(" "))
+        assert before_clock == len(_GAP), (
+            f"{label}: the clock sits {before_clock} cells after the text at width {width}, "
+            f"not the {len(_GAP)}-cell gap — the line's trailing padding is ahead of the "
+            f"clock, which is what pushes the moment out of view: {first!r}"
+        )
+
+
+@pytest.mark.parametrize("width", _WIDTHS)
+def test_a_live_user_row_keeps_its_clock_inside_the_terminal(width):
+    """The row a typed message draws, wrapped to fill the line it has to share."""
+    _assert_clock_inside([UserMarkdown(_LONG, timestamp="2026-10-09T09:25:00")],
+                         width, "live user message")
+
+
+@pytest.mark.parametrize("width", _WIDTHS)
+def test_a_settled_reply_keeps_its_clock_inside_the_terminal(width):
+    """The live assistant row, taken from streaming to the moment the frame lands."""
+    row = StreamingMarkdown()
+    row.feed(_LONG)
+    row.timestamp = "2026-10-09T09:25:00"
+    row.dirty = True
+
+    _assert_clock_inside([row], width, "live assistant reply")
+
+
+@pytest.mark.parametrize("width", _WIDTHS)
+def test_a_replayed_transcript_keeps_each_clock_inside_the_terminal(width):
+    """`/resume` and `/rewind` rebuild the screen through the app's own replay path.
+
+    Driven through `_replay_rows` / `_paint_replay_rows` rather than by building the
+    rows here: a row constructed by this test would prove the widgets, not that the
+    transcript a reopen paints is the same reading.
+    """
+    from emrg.client.app import _paint_replay_rows, _replay_rows
+
+    records = [
+        {"kind": "message", "role": "user", "content": _LONG,
+         "timestamp": "2026-10-09T09:25:00"},
+        {"kind": "message", "role": "assistant", "content": _LONG,
+         "timestamp": "2026-10-09T09:25:00"},
+    ]
+    chat = ChatHistory()
+    _paint_replay_rows(chat, _replay_rows(records))
+
+    assert len(chat.rows) == 2, "the replay did not rebuild both halves of the transcript"
+    _assert_clock_inside(chat.rows, width, "replayed transcript")
+
+
+@pytest.mark.parametrize("missing", [None, "", "not a timestamp"])
+@pytest.mark.parametrize("kind", ["user", "assistant"])
+def test_a_row_with_no_moment_still_fits_the_width_it_is_painted_into(kind, missing):
+    """A legacy record renders no clock — and must not reserve columns for one either.
+
+    The absence is the interesting half: a renderer that reserved the clock's width
+    unconditionally would wrap a clockless row narrower than the terminal for a
+    reason the reader cannot see.
+    """
+    if kind == "user":
+        row = UserMarkdown(_LONG, timestamp=missing)
+    else:
+        row = StreamingMarkdown()
+        row.feed(_LONG)
+        row.timestamp = missing or ""
+
+    for width in _WIDTHS:
+        lines = row.render(_ctx(width))
+        for line in lines:
+            text = "".join(span.text for span in line.spans)
+            assert len(text) <= width, f"{kind}/{missing!r}: {len(text)} cells at {width}"
+        assert ":" not in "".join(s.text for s in lines[0].spans).split(_LONG[:10])[-1], (
+            f"{kind}/{missing!r}: a row with no readable moment rendered a clock"
+        )

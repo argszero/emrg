@@ -61,6 +61,42 @@ def format_message_time(timestamp) -> str:
     return at.strftime("%H:%M")
 
 
+_CLOCK_GAP = "  "
+
+
+def clock_width(clock: str) -> int:
+    """Columns `clock` needs on a line, its gap included — the budget a row reserves.
+
+    A clock is placed on a line **after** the content has been wrapped, so a row
+    that wraps its content to the full width leaves the clock nowhere to go: it
+    begins past the last column and the terminal clips it, which reads as "no
+    clock at all" however faithfully the value was carried (issue #2668). Every
+    renderer therefore subtracts this from the width it wraps to, and places the
+    clock ahead of any padding the renderer left on the line.
+    """
+    return len(_CLOCK_GAP) + len(clock) if clock else 0
+
+
+def place_clock(line: Line, clock: str) -> None:
+    """Append `clock` to `line`, ahead of the padding already on it.
+
+    The padding a markdown renderer pads a line with is part of its content span,
+    so appending the clock after it puts the clock at the far edge and, once the
+    clock's own width is in the wrap budget, still leaves the padding between the
+    text and the moment. Trimming it first lets the clock follow the text, and it
+    keeps the line within the width the row reserved (issue #2668).
+    """
+    if not clock or not line.spans:
+        return
+    last = line.spans[-1]
+    stripped = last.text.rstrip()
+    if stripped != last.text:
+        last.text = stripped
+        if not last.text and len(line.spans) > 1:
+            line.spans.pop()
+    line.spans.append(Span(text=f"{_CLOCK_GAP}{clock}", style="dim"))
+
+
 class ChatRow(Widget):
     """A single chat message row.
 
@@ -114,7 +150,7 @@ class ChatRow(Widget):
         # and a trailing clock reads as a margin note rather than as content.
         clock = format_message_time(self.timestamp)
         if clock and lines:
-            lines[0].spans.append(Span(text=f"  {clock}", style="dim"))
+            place_clock(lines[0], clock)
 
         self._dirty = False
         return lines
