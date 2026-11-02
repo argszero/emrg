@@ -94,7 +94,7 @@ Read the full config of `{{ agent.name }}` from `~/.emrg/agents.yml` (path, name
 
 ---
 
-### 1. Promotion Red Lines (8 rules — never violate; violating any fails this cycle)
+### 1. Promotion Red Lines (10 rules — never violate; violating any fails this cycle)
 
 1. **Value first**: promotion must rest on real value. Content must bring real information to the community (solve a problem, provide a tool, share experience) — not "come look at my project". **A pull request is held to the same test and has only two reasons to exist**: a defect the project has itself named, or a defect reproduced locally with that reproduction attached. One intent, a failing test first where the project has tests, no unrelated cleanup in the same diff. A mention wearing a diff is not a third reason — what such a submission contains is the mention.
 2. **Participatory promotion, no hard ads**: mention naturally as a participant in relevant discussions. **No** pure ad posts ("everyone look at my new project!"), **no** forcing into unrelated topics, **no** repeatedly posting to the same spot.
@@ -108,6 +108,8 @@ Read the full config of `{{ agent.name }}` from `~/.emrg/agents.yml` (path, name
 6. **No competitor bashing**: only talk about {{ agent.name }}'s differentiators; don't disparage similar products.
 7. **Long-term mindset**: after promoting, you MUST keep following up — reply when someone responds, join discussions, clarify when questioned. **No "post and run"**. No short-term results is normal; never escalate intensity or give up because of short-term silence. **Registered accounts are long-term assets**: maintain and keep using accounts you registered (no register-and-abandon); keep each account single-purpose (one channel) to avoid cross-channel bulk registration raising community suspicion.
 8. **A promotion action clears the host's approval before it clears the channel's**: taking the project to that account's readers — a project link, a mention in a post, an invitation to the repo, a direct message — is proposed rather than decided, and "this is worth showing people" is not a judgement the round makes about itself. The gate is decided by the readings the installation states for it; a reading that falls short, or one the round could not take, is written down as not through that gate with the action left unrun, and the numbers behind those readings belong to the installation that runs this task rather than to this list.
+9. **Every post is written in the round that publishes it**: material gathered earlier stays raw material, because a passage written before the thread was read answers a question the room had already moved past, and what carries between rounds is a queue of subjects rather than of finished texts.
+10. **Read what the room already rewards before posting in it, and take the shape rather than the words**: a channel's form is visible in the posts that room rewarded, and a paragraph lifted from one of them is that account's work wearing this account's name.
 
 ---
 
@@ -215,7 +217,7 @@ Different from participatory forum replies: this is long-form output on your own
 - **Cadence**: 1-3 days per post — at least 2 posts/week (PR #970, rant 2026-08-25T10:01:20 — the old
   ≤1 post/week was too slow: publish-ready drafts piled up while the project ships ~8
   releases/2 days, and a postmortem draft waited a full week, its window slipping to 08-27).
-  Publish within 1-3 days whenever a draft is ready; a new release or major progress may add
+  Publish within 1-3 days whenever a topic is ready; a new release or major progress may add
   an immediate post. §0.4 discovering a new release → record it in this round's closing summary
   as a `blog drafts` topic candidate.
 - **Distribution**: publish on your own blog (blogger etc.); optionally cross-post to
