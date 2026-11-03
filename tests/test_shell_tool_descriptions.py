@@ -33,6 +33,8 @@ tool description that no test holds is how a claim survived review*.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from emrg.tools import bash_tool_v2 as bash
@@ -48,8 +50,17 @@ CONTRACT_SENTENCE = "Non-zero exits are reported as `[exit code: N]`"
 #: leaves the next call in the session's working directory, under a different pid.
 FRESH_PROCESS_SENTENCE = (
     "Each call is a fresh process — no state (working directory, variables, functions) "
-    "persists between calls, so pass `workdir` instead of using `cd`."
+    "persists between calls, so `cd` inside the command rather than expecting "
+    "the next call to inherit it: every run starts in the session's working directory."
 )
+
+#: What the sentence must **not** advise, and why it is a separate reading rather than a wording
+#: preference. The daemon writes ``args["workdir"] = session.cwd`` for every shell call,
+#: unconditionally, so a caller that followed *"pass `workdir` instead of using `cd`"* was telling the
+#: run where to start and being answered about somewhere else (issue #2698). The unconditional write
+#: is deliberate and stays — with ``and "workdir" not in args`` a model could name the root it was
+#: trusted in — so the sentence is the side that was wrong.
+MISDIRECTING_ADVICE = "pass `workdir` instead of using `cd`"
 
 #: The denial marker, as both descriptions write it. `<mode>` is the variable half; the fixed half is
 #: what the reading below matches, and `sandbox_denial_marker` is the one function that writes it —
@@ -70,6 +81,31 @@ DIALECTS = (
     pytest.param(bash, bash.BashToolV2(), id="bash"),
     pytest.param(pwsh, pwsh.PwshToolV2(), id="pwsh"),
 )
+
+
+def _injecting_server():
+    """The daemon's injection, the session it reads, and a request for it to read.
+
+    ``_inject_tool_arguments`` is a ``staticmethod``, so this reads the real owner without building a
+    daemon — which is the point: a model of that rule inside this file would prove the model, not
+    that it describes what the daemon does (issue #2698's third requirement).
+    """
+    from types import SimpleNamespace
+
+    from emrg.server.daemon import EmrgServer
+
+    session = SimpleNamespace(cwd="/the/session/working/directory", session_id="s1",
+                              sandbox_grants=[], sandbox_roots=[])
+    req = SimpleNamespace(sandbox="workspace-write")
+    return EmrgServer, session, req
+
+
+def _where_am_i() -> str:
+    """A command, in either dialect's own words, that reports the directory the run started in.
+
+    The two shells spell it differently; anything else here would be a claim about one of them.
+    """
+    return "Get-Location" if os.name == "nt" else "pwd"
 
 
 @pytest.mark.parametrize("module,tool", DIALECTS)
@@ -114,15 +150,41 @@ def test_each_dialect_tells_the_model_a_call_is_a_fresh_process(module, tool):
 
 
 @pytest.mark.parametrize("module,tool", DIALECTS)
-def test_the_fresh_process_sentence_advises_a_parameter_that_exists(module, tool):
-    """The other half, and the reason this one is not only a string match.
+def test_the_fresh_process_sentence_advises_what_the_injection_leaves_possible(module, tool):
+    """Read against the behaviour, not against the schema (issue #2698).
 
-    The sentence's actionable clause is *"pass `workdir` instead of using `cd`"*, so the definition it
-    appears in has to really accept `workdir` — a description that tells the model to pass a parameter
-    the schema does not declare is worse than the silence it replaces.
+    The sentence's actionable clause used to be *"pass `workdir` instead of using `cd`"*, and this
+    test used to assert only that the definition declares a `workdir` property — an assertion that
+    cannot fail while the parameter exists, whatever the daemon does with its value. What the daemon
+    does is replace it: ``_inject_tool_arguments`` writes ``args["workdir"] = session.cwd`` for every
+    shell call, so the directory a caller names here never reaches the run.
+
+    So the reading is driven through that injection and then through the tool: a call carrying a
+    directory of its own is answered about the session's working directory, and the description must
+    advise the thing that therefore works — changing directory inside the command.
     """
-    parameters = tool.definition().parameters
-    assert "workdir" in parameters.get("properties", {}), parameters
+    server, session, req = _injecting_server()
+
+    asked = {"workdir": "/nonexistent/dir/the/caller/named"}
+    server._inject_tool_arguments(tool.definition().name, asked, session, req)
+    assert asked["workdir"] == str(session.cwd), asked
+
+    description = tool.definition().description
+    assert FRESH_PROCESS_SENTENCE in description, description
+    assert MISDIRECTING_ADVICE not in description, description
+
+
+@pytest.mark.parametrize("module,tool", DIALECTS)
+def test_the_workdir_field_says_the_daemon_supplies_and_replaces_it(module, tool):
+    """A reader who sees the field must not be left thinking it is theirs to set.
+
+    The description no longer offers the directory, and the field remains declared — so the field's
+    own words are the only place left to say that the daemon writes it. Without this, a model that
+    noticed the parameter would be back to the defect the sentence above cures.
+    """
+    field = tool.definition().parameters["properties"]["workdir"]["description"]
+    assert "replaces any value given" in field, field
+    assert "not the caller's to set" in field, field
 
 
 @pytest.mark.parametrize("module,tool", DIALECTS)
