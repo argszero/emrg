@@ -6,8 +6,11 @@ round or two, after which the model went back to one call per round: a
 requirement stated in the prompt sits too far from the point where the next
 round's calls are decided.
 
-So the daemon appends `{"role": "user", "content": "batch call"}` to the
-**request** that follows a round dispatching exactly one call. The readings here
+So the daemon appends `{"role": "system", "content": "batch call"}` to the
+**request** that follows a round dispatching exactly one call. A **system** turn
+and not a user one: the reminder is the daemon's instruction, while a user turn
+is the host's voice — the role a client renders as the host's bubble and a
+transcript attributes to the host. The readings here
 are the `messages` lists the provider was actually handed — captured where the
 stream is consumed — so nothing asserts the shape of the code that built them:
 removing the append, inverting its condition, or moving it ahead of the tool
@@ -36,7 +39,7 @@ from emrg.server.tool_types import ToolResult
 from emrg.session import Session
 
 SESSION_ID = "batch-call-nudge"
-NUDGE = {"role": "user", "content": BATCH_CALL_NUDGE}
+NUDGE = {"role": "system", "content": BATCH_CALL_NUDGE}
 
 
 class _StubTool:
@@ -124,7 +127,7 @@ def _drive(
 
 
 def _nudges(messages: list[dict]) -> int:
-    return sum(1 for m in messages if m.get("role") == "user"
+    return sum(1 for m in messages if m.get("role") == "system"
                and m.get("content") == BATCH_CALL_NUDGE)
 
 

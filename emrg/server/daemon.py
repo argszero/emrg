@@ -714,6 +714,16 @@ def _with_batch_call_nudge(
     states it at the tail of the next request, where the next round's calls are
     actually decided.
 
+    It is a **system** message, not a user one. The content is what the model
+    reads; the role is what every *other* reader reads. A user turn is the
+    host's voice: it is the role a client renders as the host's bubble, the role
+    a transcript attributes to the host, and the role a compaction summarises as
+    something the host said. This reminder is the daemon's instruction to the
+    model, so a user role tells every one of those readers that the host said
+    something the host never typed (reported 2026-11-03). A trailing system
+    message is accepted where it is needed: measured against the configured
+    provider, `{"role": "system"}` after the user turn answers normally.
+
     A **new list** is returned and `messages` is never touched, and that is the
     whole of "the reminder exists only in this request": the loop's own list is
     what `_log_llm_exchange` writes and what a rebuild is rebuilt from, so a
@@ -727,7 +737,7 @@ def _with_batch_call_nudge(
     """
     request = [dict(m) for m in messages]
     if previous_round_tool_calls == 1:
-        request.append({"role": "user", "content": BATCH_CALL_NUDGE})
+        request.append({"role": "system", "content": BATCH_CALL_NUDGE})
     return request
 
 
