@@ -700,6 +700,37 @@ def _tool_call_labels(tool_calls) -> list[str]:
     return [f"({index}/{total}) " for index in range(1, total + 1)]
 
 
+BATCH_CALL_NUDGE = "batch call"
+
+
+def _with_batch_call_nudge(
+    messages: list[dict], previous_round_tool_calls: int
+) -> list[dict]:
+    """The request to send after a round that dispatched `previous_round_tool_calls`.
+
+    Issue #2683. "A round may carry several tool calls" lived only in the system
+    prompt, which sits too far from the decision point to hold: it decayed within
+    a round or two and the model went back to one call per round. So the daemon
+    states it at the tail of the next request, where the next round's calls are
+    actually decided.
+
+    A **new list** is returned and `messages` is never touched, and that is the
+    whole of "the reminder exists only in this request": the loop's own list is
+    what `_log_llm_exchange` writes and what a rebuild is rebuilt from, so a
+    reminder that is not in it cannot reach session history, cannot be read back
+    by reopening the session, and cannot accumulate — every round derives its
+    request from the same list, so each carries exactly one, or none.
+
+    Exactly one call is the condition, not "fewer than two": a round that issued
+    none took no action to batch, and a round that already issued several did the
+    thing being asked for.
+    """
+    request = [dict(m) for m in messages]
+    if previous_round_tool_calls == 1:
+        request.append({"role": "user", "content": BATCH_CALL_NUDGE})
+    return request
+
+
 def build_shell_tool(
     sandbox_config: Optional[SandboxConfig] = None,
     platform_name: str | None = None,
@@ -4596,6 +4627,11 @@ class EmrgServer:
         # a local read before its binding there — UnboundLocalError, not an
         # empty string. Same class as issue #1759 in the TUI.
         full_content = ""
+        # Issue #2683: how many tool calls the previous round dispatched, so the
+        # next request can carry the batching reminder (`_with_batch_call_nudge`).
+        # 0 is "no previous round", which is the same answer as a round that
+        # issued none: the first request of a turn never carries it.
+        previous_round_tool_calls = 0
         # Issue #1336 (item 2), rant 2026-09-17T18:19:45: a round the provider
         # rejected for *body length* — a proxy 413 the local estimate never
         # predicted — used to surface as `LLM error: ...` and end the turn, so a
@@ -4746,6 +4782,14 @@ class EmrgServer:
                     except Exception:
                         logger.exception("auto-compact failed")
 
+            # Issue #2683: built here, after every rebuild above (pending
+            # injection, auto-compact, the overlong and content-risk retries),
+            # so the request is derived from the list this round actually starts
+            # from — nothing is left over from the previous one.
+            request_messages = _with_batch_call_nudge(
+                messages, previous_round_tool_calls
+            )
+
             # Streaming call to LLM
             content_parts: list[str] = []
             reasoning_parts: list[str] = []  # think block, llm.jsonl only (rant 2026-08-18T09:43:23)
@@ -4754,7 +4798,7 @@ class EmrgServer:
             final_usage: dict | None = None
 
             try:
-                async for delta in self.llm.chat_stream(messages, tools=tools_openai):
+                async for delta in self.llm.chat_stream(request_messages, tools=tools_openai):
                     # Check for cancellation mid-stream (ESC in client)
                     if cancel_event and cancel_event.is_set():
                         raise asyncio.CancelledError()
@@ -4933,13 +4977,16 @@ class EmrgServer:
 
             # Rant 2026-08-23T13:28:50 + issue #1078: refresh the usage anchor
             # from the provider's real prompt_tokens + the local estimate of
-            # exactly what was sent (messages is still the sent set here —
-            # assistant reply / tool results are appended below). The next
-            # round's auto-compact projection uses this as its base. Every
+            # exactly what was sent (`request_messages` is still the sent set
+            # here — assistant reply / tool results are appended below, and the
+            # issue #2683 reminder is in it because the provider saw it). The
+            # next round's auto-compact projection uses this as its base. Every
             # round emits exactly one anchor-bias-heartbeat with an explicit
             # state (anchored=true / anchored=false + reason) so a skipped
             # round is a labeled observation, not an absence.
-            self._refresh_usage_anchor(session, final_usage, messages, tools_openai)
+            self._refresh_usage_anchor(
+                session, final_usage, request_messages, tools_openai
+            )
 
             full_content = "".join(content_parts)
             # llm.py yields the ACCUMULATED reasoning snapshot on every chunk
@@ -5262,6 +5309,11 @@ class EmrgServer:
                         "content": result.content,
                         "error": result.error,
                     })
+
+                # Issue #2683: this response's own count, recorded for the next
+                # request only. The reminder is about a single call, so a batch
+                # of two or more clears it as surely as an empty round does.
+                previous_round_tool_calls = len(openai_tool_calls)
 
                 # Log LLM request for this round (before continuing).
                 # Tool rounds consume the round budget; injection rounds do
