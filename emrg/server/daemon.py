@@ -64,6 +64,7 @@ from emrg.server.llm import (
     CONTEXT_TOO_LONG,
     EMPTY_ANSWER_ERROR,
     LlmClient,
+    carries_provider_reason,
     classify_llm_error,
     is_overlong_error,
     with_content_risk_hint,
@@ -4888,10 +4889,16 @@ class EmrgServer:
                 # host after the wrong thing. The refusal travels as its own
                 # sentence, which names what happened and which retries were
                 # already spent (rant 2026-09-28T16:58:08, requirement D).
+                #
+                # A refusal that carries the provider's own sentence is the same
+                # shape and gets the same treatment: the advice is *one* remedy,
+                # and it is the right one only while nobody has said what failed.
+                # A balance refusal printed as "check your config" sends the host
+                # to edit a file that was never wrong — the account was empty. The
+                # question is asked of `llm.py` (`carries_provider_reason`), never
+                # re-derived here from the message's spelling.
                 error_text = str(e)
-                if CONTENT_FILTER_ERROR not in error_text:
-                    error_text = f"LLM error: {e}. Check config at ~/.emrg/config.toml"
-                else:
+                if CONTENT_FILTER_ERROR in error_text:
                     # The ladder being spent is one abort, and *a run* of them is
                     # the fact worth reporting (rant 2026-09-28T15:57:31,
                     # requirement L3): the generic `logger.exception` above names
@@ -4908,6 +4915,11 @@ class EmrgServer:
                             round_num,
                         ),
                     )
+                elif carries_provider_reason(e):
+                    # The provider said why: that sentence is the whole remedy.
+                    error_text = f"LLM error: {e}"
+                else:
+                    error_text = f"LLM error: {e}. Check config at ~/.emrg/config.toml"
                 await self._broadcast(session.session_id, {
                     "error": error_text,
                 })
