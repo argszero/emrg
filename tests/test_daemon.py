@@ -4286,6 +4286,57 @@ def test_a_content_filter_finish_is_reported_not_read_as_the_answer(tmp_path, mo
     )
 
 
+def test_a_refusal_that_states_its_reason_is_not_sent_to_the_config_file(
+    tmp_path, monkeypatch
+):
+    """A balance refusal must not carry "check your config".
+
+    The advice is one remedy for every failure, and it is the right one only
+    while nobody has said what went wrong. A 402 whose body says the account is
+    empty is answered; printing "Check config at ~/.emrg/config.toml" beside it
+    sends the host to edit a file that was never wrong.
+    """
+    from emrg.server.llm import _with_provider_reason
+
+    async def stream(messages, tools=None):
+        raise _with_provider_reason(
+            RuntimeError("LLM stream request failed: 402 — the account is empty"),
+            "the account is empty",
+        )
+        yield  # pragma: no cover - unreachable; makes this an async generator
+
+    _, frames = _drive_tool_loop_with_stream(tmp_path, monkeypatch, stream)
+
+    errors = [f for f in frames if "error" in f]
+    assert len(errors) == 1, frames
+    assert "the account is empty" in errors[0]["error"], errors[0]["error"]
+    assert "Check config" not in errors[0]["error"], (
+        "the host was sent to the config file for a refusal that said why"
+    )
+
+
+def test_a_refusal_without_a_reason_keeps_the_config_pointer(tmp_path, monkeypatch):
+    """The other direction: the advice is not removed wholesale.
+
+    A failure that says nothing about its cause is exactly when the host needs
+    to be told where the configuration lives, so this arm must stay green while
+    the one above changes.
+    """
+    async def stream(messages, tools=None):
+        raise RuntimeError(
+            "LLM stream request failed: 500 headers={} body=an opaque failure"
+        )
+        yield  # pragma: no cover - unreachable; makes this an async generator
+
+    _, frames = _drive_tool_loop_with_stream(tmp_path, monkeypatch, stream)
+
+    errors = [f for f in frames if "error" in f]
+    assert len(errors) == 1, frames
+    assert "Check config at ~/.emrg/config.toml" in errors[0]["error"], (
+        f"a refusal that named no cause lost its one pointer: {errors[0]['error']!r}"
+    )
+
+
 def test_an_exhausted_content_filter_ladder_reports_once_with_one_terminal_frame(
     tmp_path, monkeypatch
 ):

@@ -25,6 +25,7 @@ from emrg.server.llm import (
     CONTEXT_TOO_LONG,
     OTHER_ERROR,
     LlmClient,
+    carries_provider_reason,
     classify_llm_error,
     content_filter_retry_messages,
     content_risk_retry,
@@ -1562,8 +1563,8 @@ _OPAQUE_BODY = b"internal server error"
 _REFUSING_HEADERS = {"content-length": "42"}
 
 
-def _refusal_from(client, path: str, body: bytes, status: int = 402) -> str:
-    """The message that path raises for a refused response."""
+def _refusal_exception_from(client, path: str, body: bytes, status: int = 402) -> BaseException:
+    """The exception that path raises for a refused response."""
     import asyncio
 
     if path == "chat":
@@ -1574,7 +1575,12 @@ def _refusal_from(client, path: str, body: bytes, status: int = 402) -> str:
         client._client = _FakeStreamClient([_RefusingStream(body, status, _REFUSING_HEADERS)])
         with pytest.raises(RuntimeError) as caught:
             asyncio.run(_drain_stream(client, client._client))
-    return str(caught.value)
+    return caught.value
+
+
+def _refusal_from(client, path: str, body: bytes, status: int = 402) -> str:
+    """The message that path raises for a refused response."""
+    return str(_refusal_exception_from(client, path, body, status))
 
 
 @pytest.mark.parametrize("path", ["chat", "chat_stream"])
@@ -1602,6 +1608,38 @@ def test_a_refusal_reports_the_providers_own_sentence(client, caplog, path):
             f"{path}: the response headers are still stitched onto the reason, which "
             f"is the same unreadable line one step later: {rendered!r}"
         )
+
+
+@pytest.mark.parametrize("path", ["chat", "chat_stream"])
+def test_a_sentence_marks_the_refusal_as_self_explaining(client, path):
+    """The sentence *is* the remedy, so a caller has to be able to tell it exists.
+
+    Both raise sites mark it: the tool loop takes the streaming path while the
+    summariser takes the other, and the question is asked once for either.
+    """
+    exc = _refusal_exception_from(client, path, _SENTENCE_BODY)
+
+    assert carries_provider_reason(exc) is True, (
+        f"{path}: a refusal carrying the provider's own sentence is not marked as "
+        f"explaining itself, so a generic remedy will be appended to it"
+    )
+
+
+@pytest.mark.parametrize("path", ["chat", "chat_stream"])
+def test_a_body_without_a_sentence_is_not_marked(client, path):
+    """The other direction: nothing was extracted, so the generic pointer is still owed."""
+    exc = _refusal_exception_from(client, path, _OPAQUE_BODY)
+
+    assert carries_provider_reason(exc) is False, (
+        f"{path}: a refusal that says nothing about its cause was marked as "
+        f"self-explaining, and the host loses the one pointer it had"
+    )
+
+
+def test_an_error_raised_outside_a_refusal_is_not_self_explaining():
+    """Anything that did not come from an extracted sentence answers False."""
+    assert carries_provider_reason(RuntimeError("boom")) is False
+    assert carries_provider_reason(ValueError("boom")) is False
 
 
 @pytest.mark.parametrize("path", ["chat", "chat_stream"])

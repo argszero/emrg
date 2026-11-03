@@ -202,6 +202,41 @@ def provider_error_message(body) -> str:
     return _redact_text(message.strip())
 
 
+#: The attribute a refusal carries its provider's sentence on. Set where the
+#: sentence is extracted, read by :func:`carries_provider_reason` — one writer,
+#: one reader, so a caller never re-derives it from the exception's text.
+_PROVIDER_REASON_ATTR = "provider_reason"
+
+
+def _with_provider_reason(exc: BaseException, reason: str) -> BaseException:
+    """Return ``exc`` marked with the provider's sentence it was built from."""
+    setattr(exc, _PROVIDER_REASON_ATTR, reason)
+    return exc
+
+
+def carries_provider_reason(exc: BaseException) -> bool:
+    """Whether the provider itself said why it refused — so no generic remedy is owed.
+
+    A refusal that arrives with a sentence is answered: ``{"error": {"message":
+    "点数余额不足"}}`` tells a host to top up, and "invalid api key" tells it to
+    replace the key. Appending one generic remedy to every failure is the defect
+    this answers — a balance refusal was reported as a configuration problem,
+    sending the host to edit a file that was never wrong (a 402 read as "check
+    your config", when the config was fine and the account was empty).
+
+    The answer is a *fact about the failure*, not a policy: it says the cause is
+    already written down. What to print instead is the caller's, and the daemon
+    prints the provider's sentence alone.
+
+    Read through :data:`_PROVIDER_REASON_ATTR` rather than off the message text,
+    because the message is the one thing that changes spelling when a provider
+    rewords itself: the mark is set by the raise site that extracted the
+    sentence, at both the streaming and the non-streaming path, and an error
+    raised anywhere else answers ``False`` and keeps the generic remedy.
+    """
+    return bool(getattr(exc, _PROVIDER_REASON_ATTR, ""))
+
+
 def is_overlong_error(exc: BaseException) -> bool:
     """Whether a failure is "the request did not fit" — asked of
     :func:`classify_llm_error`, never respelled at the call site.
@@ -705,10 +740,13 @@ class LlmClient:
                 # step later. When there is no reason the lines below are reachable
                 # exactly as before, escapes and truncation included.
                 logger.error("LLM error: %s %s", resp.status_code, reason)
-                raise RuntimeError(
-                    with_content_risk_hint(
-                        f"LLM request failed: {resp.status_code} — {reason}"
-                    )
+                raise _with_provider_reason(
+                    RuntimeError(
+                        with_content_risk_hint(
+                            f"LLM request failed: {resp.status_code} — {reason}"
+                        )
+                    ),
+                    reason,
                 )
             hdr = _redact_headers(dict(resp.headers))
             text_redacted = _redact_text(text)
@@ -843,10 +881,13 @@ class LlmClient:
                             # The same extraction answers both paths, so they cannot
                             # drift apart.
                             logger.error("LLM stream error: %s %s", resp.status_code, reason)
-                            raise RuntimeError(
-                                with_content_risk_hint(
-                                    f"LLM stream request failed: {resp.status_code} — {reason}"
-                                )
+                            raise _with_provider_reason(
+                                RuntimeError(
+                                    with_content_risk_hint(
+                                        f"LLM stream request failed: {resp.status_code} — {reason}"
+                                    )
+                                ),
+                                reason,
                             )
                         logger.error("LLM stream error: %s %s", resp.status_code, _redact_text(text)[:500])
                         hdr = _redact_headers(dict(resp.headers))
