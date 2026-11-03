@@ -3204,3 +3204,37 @@ def test_the_not_run_rule_has_one_home_and_the_zone_list_points_at_it() -> None:
         "the zone list names the owner but not where its lines are defined, so a reader who "
         "follows it still has to search"
     )
+
+
+def test_the_claim_provenance_rule_lives_in_the_section_that_writes_into_a_project() -> None:
+    """A claim written into a project's documents says who decided it (issue #2687).
+
+    Three facts are asserted together because each can go missing on its own: the rule is
+    *present*, it sits in the section that owns writing into the project rather than appended
+    at the end of the file, and it states the test a claim passes — a message that can be
+    pointed at, with its instant and its text. A rule that says "distinguish the host's
+    rulings from your proposals" without naming that test leaves the reader exactly where it
+    found them, because a proposal in the agent's own context reads like a ruling.
+    """
+    text = (PROMPTS_DIR / "open_source_prompt.md").read_text(encoding="utf-8")
+    section = _bounded_section(text, "##### 3.1.5 ", "##### 3.1.6 ")
+
+    assert "says who decided it" in section, (
+        "§3.1.5 no longer carries the provenance rule, so a task writes its own proposal into "
+        "the project's decisions file as the maintainer's and the next reader acts on it"
+    )
+    assert "its instant and its text" in section, (
+        "the rule no longer names the test a claim passes — a message that can be pointed at, "
+        "named by instant and text; without it the distinction is advice rather than a check"
+    )
+    assert "pull request body" in section, (
+        "the rule no longer names where it binds; memory is not the boundary, the project's "
+        "documents are, and a reader given no surface reads it as being about memory only"
+    )
+
+    # One home: the phrase that opens the rule must appear once in the whole template, or the
+    # file states the rule twice and a reader holds two answers with no way to choose.
+    assert text.count("says who decided it") == 1, (
+        f"the provenance rule is stated {text.count('says who decided it')} times in "
+        "open_source_prompt.md; this template's own rule is that a fact lives in exactly one place"
+    )
