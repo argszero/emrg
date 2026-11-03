@@ -924,14 +924,30 @@ class Session:
         if size < _LLM_LOG_MAX_BYTES:
             return
 
-        # Shift existing backups: .2 → .3 (delete), .1 → .2, main → .1
-        for i in range(_LLM_LOG_BACKUP_COUNT, 0, -1):
+        # Shift the backups down, dropping the oldest: .{n-1} → .n, …, .1 → .2,
+        # main → .1. The oldest generation is removed outright, so the file set
+        # is the live log plus _LLM_LOG_BACKUP_COUNT backups and no more.
+        #
+        # Every generation numbered at or above the count goes, not only the one
+        # the count names. A session written by the loop this replaces already
+        # carries a third generation, and leaving it would keep three backups
+        # for the rest of that session's life — while the shift below would then
+        # delete the second-newest and preserve the oldest, which is the wrong
+        # two to keep.
+        generation = _LLM_LOG_BACKUP_COUNT + 1
+        while True:
+            stray = Path(str(self._llm_path) + f".{generation}")
+            if not stray.exists():
+                break
+            stray.unlink()
+            generation += 1
+        oldest = Path(str(self._llm_path) + f".{_LLM_LOG_BACKUP_COUNT}")
+        if oldest.exists():
+            oldest.unlink()
+        for i in range(_LLM_LOG_BACKUP_COUNT - 1, 0, -1):
             old = Path(str(self._llm_path) + f".{i}")
-            new = Path(str(self._llm_path) + f".{i + 1}")
-            if i == _LLM_LOG_BACKUP_COUNT and new.exists():
-                new.unlink()
             if old.exists():
-                old.rename(new)
+                old.rename(Path(str(self._llm_path) + f".{i + 1}"))
 
         # Rename current to .1
         backup_path = Path(str(self._llm_path) + ".1")
