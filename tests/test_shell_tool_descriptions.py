@@ -29,12 +29,24 @@ is a declaration about behaviour. Pinning the sentence alone would leave a descr
 promise a marker no renderer writes; pinning the renderer alone is what left the two dialects
 disagreeing in the first place. ``tests/test_glob_tool.py`` records the same lesson — *a promise in a
 tool description that no test holds is how a claim survived review*.
+
+A fourth promise was held the same way and still failed, because the half it was read against was the
+schema rather than the behaviour (issue #2698). The fresh-process sentence's actionable clause told the
+model to *"pass ``workdir``"*, and the daemon replaces a shell call's ``workdir`` with the session cwd
+on every call — so the clause advised an action that could not work, and a model following it had its
+directory discarded without being told. The guard standing there asserted only that ``workdir`` was a
+declared **property** of the definition, a reading that cannot fail while the parameter exists, so the
+sentence stood while every call ignored it. It is now read against the injection that decides the value.
 """
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
+from emrg.protocol import TaskRequest
+from emrg.server.daemon import EmrgServer
 from emrg.tools import bash_tool_v2 as bash
 from emrg.tools import pwsh_tool_v2 as pwsh
 
@@ -45,10 +57,14 @@ CONTRACT_SENTENCE = "Non-zero exits are reported as `[exit code: N]`"
 #: The execution model, in the words both dialects must share (issue #2051). `bash_tool_v2` was
 #: silent about it while `pwsh_tool_v2` stated it, though both run one command in a **new** process
 #: per call and carry nothing between them — measured through the tool itself: `cd /tmp` in one call
-#: leaves the next call in the session's working directory, under a different pid.
+#: leaves the next call in the session's working directory, under a different pid. Its actionable
+#: clause used to advise ``workdir``, which the daemon replaces on every call (issue #2698), so what
+#: it names now is the mechanism that works and who decides the directory.
 FRESH_PROCESS_SENTENCE = (
     "Each call is a fresh process — no state (working directory, variables, functions) "
-    "persists between calls, so pass `workdir` instead of using `cd`."
+    "persists between calls, so a command that needs another directory must `cd` into it "
+    "itself: every run starts in the session's working directory, and the daemon supplies "
+    "`workdir` rather than the call."
 )
 
 #: The denial marker, as both descriptions write it. `<mode>` is the variable half; the fixed half is
@@ -114,15 +130,58 @@ def test_each_dialect_tells_the_model_a_call_is_a_fresh_process(module, tool):
 
 
 @pytest.mark.parametrize("module,tool", DIALECTS)
-def test_the_fresh_process_sentence_advises_a_parameter_that_exists(module, tool):
-    """The other half, and the reason this one is not only a string match.
+def test_the_fresh_process_sentence_does_not_offer_a_directory_the_daemon_replaces(
+    module, tool, tmp_path
+):
+    """The other half, read against the behaviour that decides it — where the last one failed.
 
-    The sentence's actionable clause is *"pass `workdir` instead of using `cd`"*, so the definition it
-    appears in has to really accept `workdir` — a description that tells the model to pass a parameter
-    the schema does not declare is worse than the silence it replaces.
+    The sentence's actionable clause used to be *"pass `workdir` instead of using `cd`"*, and the
+    daemon replaces a shell call's ``workdir`` with the session cwd **unconditionally**
+    (``EmrgServer._inject_tool_arguments``) — as it must, because honouring a model-supplied directory
+    let the model name the root it was trusted in. So the clause advised an action that could not work:
+    measured on the host that filed issue #2698, a call carrying ``workdir=<session>/tmp`` — an
+    existing directory — answered ``Get-Location`` = the session root, and a second call naming a
+    directory that holds a ``package.json`` was told ``Test-Path`` = false.
+
+    The guard this replaced asserted only that ``workdir`` was a **declared property** of the
+    definition, a reading that cannot fail while the parameter exists, whatever the daemon does with
+    its value — a presence reading of a sentence about behaviour. So the injection is driven here, and
+    the pair is stated as one fact: while this tool's directory is the daemon's, its description may
+    not offer that directory to the caller.
     """
-    parameters = tool.definition().parameters
-    assert "workdir" in parameters.get("properties", {}), parameters
+    session = SimpleNamespace(cwd=tmp_path, sandbox_grants=[], sandbox_roots=[], session_id="stub")
+    args = {"command": "echo hi", "workdir": "/a/directory/the/caller/named"}
+    EmrgServer._inject_tool_arguments(
+        tool.definition().name, args, session, TaskRequest(sandbox=None)
+    )
+    assert args["workdir"] == str(tmp_path), (
+        "the daemon did not replace this shell tool's workdir, so the negative reading below is about "
+        "nothing — a description offering the parameter would then be telling the truth"
+    )
+    description = tool.definition().description
+    assert "pass `workdir`" not in description, (
+        "the description advises a parameter the daemon replaces on every call, so the directory the "
+        f"model names is silently discarded: {description[:240]!r}"
+    )
+    assert "supplies " in description and "rather than the call" in description, (
+        "the description has to say who decides the directory, not only stop advising the parameter: "
+        f"{description[:240]!r}"
+    )
+
+
+@pytest.mark.parametrize("module,tool", DIALECTS)
+def test_the_workdir_field_says_the_daemon_replaces_it(module, tool):
+    """A reader who sees the field is told it is not theirs to set (issue #2698).
+
+    The field stays declared: both executors honour it when called directly, and the kernel fills it on
+    every call through the daemon. So the schema's own sentence is where a caller learns that a value
+    given there is replaced rather than used — the silent half of the old promise, which said only that
+    the value would not widen the boundary and left the reader to assume it moved the command.
+    """
+    field = tool.definition().parameters["properties"]["workdir"]["description"]
+    assert "daemon" in field and "replaces" in field, (
+        f"the workdir field does not say the daemon supplies and replaces it: {field!r}"
+    )
 
 
 @pytest.mark.parametrize("module,tool", DIALECTS)

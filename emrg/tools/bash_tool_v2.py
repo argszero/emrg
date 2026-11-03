@@ -638,7 +638,9 @@ class BashToolV2(ToolExecutor):
                 "installing packages, and other shell operations. The command "
                 "runs under `bash -c`. Each call is a fresh process — no "
                 "state (working directory, variables, functions) persists "
-                "between calls, so pass `workdir` instead of using `cd`. "
+                "between calls, so a command that needs another directory must "
+                "`cd` into it itself: every run starts in the session's working "
+                "directory, and the daemon supplies `workdir` rather than the call. "
                 "Non-zero exits are reported as "
                 "`[exit code: N]`. The kernel confines it to the session's "
                 "working directory: writes outside it (and outside the OS temp "
@@ -667,8 +669,11 @@ class BashToolV2(ToolExecutor):
                     "workdir": {
                         "type": "string",
                         "description": "Working directory for the command. The daemon "
-                        "supplies the session's working directory, which is also the "
-                        "writable boundary; passing another value does not widen it.",
+                        "supplies it — the session's working directory, which is also "
+                        "the writable boundary — and replaces whatever value the call "
+                        "gives here, so a value from the call never moves the command. "
+                        "To work in another directory under that boundary, `cd` into "
+                        "it inside the command.",
                     },
                     "sandbox_permissions": {
                         "type": "string",

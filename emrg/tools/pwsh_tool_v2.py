@@ -746,7 +746,9 @@ class PwshToolV2(ToolExecutor):
                 "runs under `pwsh -Command`: PowerShell parses the text itself, "
                 "with no intermediate shell. Each call is a fresh process — no "
                 "state (working directory, variables, functions) persists "
-                "between calls, so pass `workdir` instead of using `cd`. Paths "
+                "between calls, so a command that needs another directory must "
+                "`cd` into it itself: every run starts in the session's working "
+                "directory, and the daemon supplies `workdir` rather than the call. Paths "
                 "use native Windows form (`C:\\...`); read environment variables "
                 "with `$env:NAME`. Non-zero exits are reported as "
                 "`[exit code: N]`. The kernel confines the run to the session's "
@@ -785,8 +787,11 @@ class PwshToolV2(ToolExecutor):
                     "workdir": {
                         "type": "string",
                         "description": "Working directory for the command. The daemon "
-                        "supplies the session's working directory, which is also the "
-                        "writable boundary; passing another value does not widen it.",
+                        "supplies it — the session's working directory, which is also "
+                        "the writable boundary — and replaces whatever value the call "
+                        "gives here, so a value from the call never moves the command. "
+                        "To work in another directory under that boundary, `cd` into "
+                        "it inside the command.",
                     },
                     "sandbox_permissions": {
                         "type": "string",
