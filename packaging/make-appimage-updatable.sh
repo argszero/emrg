@@ -93,6 +93,14 @@ APPDIR="$WORK/squashfs-root"
   exit 1
 }
 
+# 1.5 权限归一化：解出来的目录可能沿用了打包者的私有 mode（0700），而 AppImage 是**给别人
+#     跑的**——别人读不进、进不去，就等于装了个打不开的文件。`appimagetool` 的合规检查会逐条
+#     点名这种目录，并且会因此让这一步失败（同一个 AppDir，旧的 continuous 版本只警告、新的
+#     直接退出 1，所以这不是「某次构建的偶发」而是产物本身不成立）。
+#     `a+rX` 是上游给的那条修法：读权限全部放开，执行权限只加在目录与本来就可执行的文件上，
+#     因此可执行位这种真正重要的 mode 不会被抹平。
+chmod -R a+rX "$APPDIR"
+
 # 2. 重新封装：`-u` 同时内嵌更新信息并在 zsyncmake 在场时生成 `.zsync`。
 #    `-n`（--no-appstream）是刻意的：本步骤的主语是**更新信息**，而 electron-builder
 #    的 AppImage 不提供 AppStream 元数据；让 AppStream 校验决定这一步的成败，会让
