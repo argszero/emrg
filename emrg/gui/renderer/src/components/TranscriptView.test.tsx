@@ -562,7 +562,7 @@ describe("TranscriptView", () => {
     });
     // 更早一页插到最前 → DOM 变高 400（2 条 → 1200）
     act(() => {
-      store.prependEntries([{ kind: "user", text: "older" }], "s1");
+      store.prependEntries([{ kind: "user", id: "t-prepended-older", text: "older" }], "s1");
     });
     expect(viewport.scrollTop).toBe(400); // 0 + (1200 - 800)
   });
@@ -626,5 +626,122 @@ describe("消息时刻", () => {
     store.addUserMessage("bad clock", "s1", { requestId: "req-1", timestamp: "not a date" });
     const { container } = setup(store, "s1");
     expect(container.querySelector(".msg-time")).toBeNull();
+  });
+});
+
+/**
+ * 流式隔离：一个 token 只重渲染正在变化的那一条。
+ *
+ * 断言数的是**每条条目各自的重渲染次数**。`useSyncExternalStore` 的 getSnapshot 只在该
+ * 条目的组件渲染时被调用，所以「某个 id 的 getEntryVersion 被调了几次」就是它被重渲染了
+ * 几次 —— 这正是宿主看见的成本：旧实现每来一个 token 就把整条会话的条目全部渲染一遍，
+ * 会话越长越慢。
+ *
+ * 判别力（两向都量过）：把 `TranscriptView` 的订阅改回 `store.getVersion`（父组件每帧
+ * 重渲染、条目元素整批重建），下面第一条与第三条立刻变红 —— 那时每个条目的 getSnapshot
+ * 都会被各调一次。只加 `React.memo` 挡不住它：那挡的是 props 未变的子组件，而这里父组件
+ * 的每帧重渲染会把新元素交给每一个条目。
+ */
+describe("流式只重渲染正在变化的那一条", () => {
+  /** 把 getEntryVersion 包成计数器：每条条目被渲染几次，就记几次 */
+  function withRenderCounter(store: TranscriptStore): {
+    store: TranscriptStore;
+    rendersOf: (id: string) => number;
+    reset: () => void;
+  } {
+    const renders = new Map<string, number>();
+    const wrapped: TranscriptStore = {
+      ...store,
+      getEntryVersion: (id) => {
+        renders.set(id, (renders.get(id) ?? 0) + 1);
+        return store.getEntryVersion(id);
+      },
+    };
+    return {
+      store: wrapped,
+      rendersOf: (id) => renders.get(id) ?? 0,
+      reset: () => renders.clear(),
+    };
+  }
+
+  /** 若干条已结束的历史 + 一条刚开流的助手条目 */
+  function historyThenStream(history = 2): { base: TranscriptStore; liveId: string; otherIds: string[] } {
+    const base = createTranscriptStore({ t: (k) => k });
+    for (let n = 0; n < history; n += 1) {
+      base.addUserMessage(`q${n}`, "s1");
+      base.handleDelta([{ request_id: `r${n}`, content: `a${n}` }], "s1");
+      base.handleDone({ request_id: `r${n}` }, "s1");
+    }
+    base.handleDelta([{ request_id: "live", content: "hello" }], "s1");
+    const entries = base.getEntries("s1");
+    return {
+      base,
+      liveId: entries[entries.length - 1].id,
+      otherIds: entries.slice(0, -1).map((e) => e.id),
+    };
+  }
+
+  it("一个 token 只重渲染正在写的那一条；其余历史条目一次都不重渲染", () => {
+    const { base, liveId, otherIds } = historyThenStream();
+    const { store, rendersOf, reset } = withRenderCounter(base);
+    setup(store, "s1");
+    // 非空主体：没有历史条目时「其余条目零渲染」什么都证明不了
+    expect(otherIds.length).toBeGreaterThan(1);
+    const structure = base.getStructureVersion();
+    reset();
+
+    act(() => {
+      base.handleDelta([{ request_id: "live", content: " world" }], "s1");
+    });
+
+    expect(rendersOf(liveId)).toBeGreaterThan(0);
+    for (const id of otherIds) expect(rendersOf(id)).toBe(0);
+    // 另一半：文本增长不算结构变化，列表不必重读
+    expect(base.getStructureVersion()).toBe(structure);
+  });
+
+  it("会话有多长都不影响每帧：50 条历史里一个 token 仍然只渲染那一条", () => {
+    const { base, liveId, otherIds } = historyThenStream(50);
+    const { store, rendersOf, reset } = withRenderCounter(base);
+    setup(store, "s1");
+    expect(otherIds.length).toBe(100); // 50 轮 → 每条提问一条回复，加一条在流式里
+    reset();
+
+    act(() => {
+      base.handleDelta([{ request_id: "live", content: "!" }], "s1");
+    });
+
+    expect(rendersOf(liveId)).toBeGreaterThan(0);
+    // 长会话的每帧成本 = 1 条，不是 101 条
+    expect(otherIds.reduce((acc, id) => acc + rendersOf(id), 0)).toBe(0);
+  });
+
+  it("条目集合变化时列表照旧更新：新条目出现在 DOM 里（结构通道没被焊死）", async () => {
+    const { base } = historyThenStream();
+    const { store } = withRenderCounter(base);
+    setup(store, "s1");
+
+    await act(async () => {
+      base.addUserMessage("brand new", "s1");
+    });
+
+    await waitFor(() => expect(screen.getByText("brand new")).toBeInTheDocument());
+  });
+
+  it("两次 delta 的文本都进了渲染产物（订阅下沉之后流式没有冻住）", () => {
+    const base = createTranscriptStore({ t: (k) => k });
+    const { store } = withRenderCounter(base);
+    setup(store, "s1");
+
+    act(() => {
+      base.handleDelta([{ request_id: "live", content: "hello" }], "s1");
+    });
+    expect(screen.getByText("hello")).toBeInTheDocument();
+
+    act(() => {
+      base.handleDelta([{ request_id: "live", content: " world" }], "s1");
+    });
+    // 第二个 token 的文本必须出现在屏幕上：订阅下沉后若某一帧没重渲染，流式就冻在那里了
+    expect(screen.getByText("hello world")).toBeInTheDocument();
   });
 });
