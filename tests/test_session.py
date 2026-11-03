@@ -1509,3 +1509,58 @@ class TestInputHistory:
 
     def _session_dir(self, tmp_path, name="s1"):
         return tmp_path / ".emrg" / "sessions" / name
+
+
+# Which generations a session already holds, and which two must remain afterwards.
+# The numbering is the one the code writes — `llm.jsonl.1` is the newest backup —
+# and the last two rows are the states a count-up sweep read wrongly.
+ROTATION_STARTING_STATES = [
+    ((), {1: "live"}),
+    ((1,), {1: "live", 2: "old-1"}),
+    ((1, 2), {1: "live", 2: "old-1"}),
+    ((1, 2, 3), {1: "live", 2: "old-1"}),
+    ((1, 2, 3, 4, 5), {1: "live", 2: "old-1"}),
+    ((1, 2, 4), {1: "live", 2: "old-1"}),
+    ((1, 3), {1: "live", 2: "old-1"}),
+]
+
+
+@pytest.mark.parametrize("backups, expected", ROTATION_STARTING_STATES)
+def test_the_rotation_keeps_the_newest_backups_whatever_the_starting_state(
+    tmp_path, monkeypatch, backups, expected
+):
+    """The survivors are named, because a count cannot tell "wrong two" from "one too many".
+
+    Each backup's first line names the generation that wrote it, so this asserts which
+    generations remain rather than how many files there are — the two readings that come
+    apart when a shift keeps the oldest instead of the newest.
+
+    The row carrying a gap past the count (`live .1 .2 .4`, with no `.3`) is the one a
+    sweep that stopped at the first absent name read wrongly: `.4` survived and the set
+    never came back to the two generations the count declares, so that row fails against
+    such a sweep while the other six pass. A gap *below* the count is not the same case —
+    `.2` is overwritten by the shift whatever was there — and `live .1 .3` is carried to
+    say so, since it passes either way.
+    """
+    monkeypatch.setattr("emrg.session._LLM_LOG_MAX_BYTES", 64)
+
+    session = Session("s1", tmp_path)
+    live = session._llm_path
+    live.write_text("live\n" + "x" * 80, encoding="utf-8")
+    for generation in backups:
+        Path(str(live) + f".{generation}").write_text(
+            f"old-{generation}\n" + "x" * 80, encoding="utf-8"
+        )
+
+    session._rotate_llm_log()
+
+    survivors = {}
+    for entry in sorted(live.parent.iterdir()):
+        if not entry.name.startswith(live.name + "."):
+            continue
+        survivors[entry.name] = entry.read_text(encoding="utf-8").splitlines()[0]
+
+    assert survivors == {
+        f"{live.name}.{number}": generation
+        for number, generation in expected.items()
+    }

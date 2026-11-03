@@ -913,6 +913,31 @@ class Session:
         with open(self._llm_path, "a", encoding="utf-8") as f:
             f.write(line)
 
+    def _stray_generations(self) -> list[Path]:
+        """Backup generations numbered at or above ``_LLM_LOG_BACKUP_COUNT``.
+
+        The directory is listed and each name read, rather than the numbering being
+        counted up to the first absent one: a gap must not hide the generations past
+        it. Only a name that is exactly ``<live>.<digits>`` is a generation — the
+        suffix has to be ASCII digits, so no other file and no spelled-out numeral is
+        taken for one.
+        """
+        prefix = self._llm_path.name + "."
+        try:
+            entries = list(self._llm_path.parent.iterdir())
+        except OSError:
+            return []
+        strays = []
+        for entry in entries:
+            if not entry.name.startswith(prefix):
+                continue
+            suffix = entry.name[len(prefix):]
+            if not (suffix.isascii() and suffix.isdigit()):
+                continue
+            if int(suffix) >= _LLM_LOG_BACKUP_COUNT:
+                strays.append(entry)
+        return strays
+
     def _rotate_llm_log(self) -> None:
         """Rotate llm.jsonl if it exceeds _LLM_LOG_MAX_BYTES."""
         if not self._llm_path.exists():
@@ -925,25 +950,19 @@ class Session:
             return
 
         # Shift the backups down, dropping the oldest: .{n-1} → .n, …, .1 → .2,
-        # main → .1. The oldest generation is removed outright, so the file set
-        # is the live log plus _LLM_LOG_BACKUP_COUNT backups and no more.
+        # main → .1. Every generation numbered at or above the count goes, wherever
+        # it sits in the numbering, so the set that remains is the live log plus
+        # _LLM_LOG_BACKUP_COUNT backups and no more.
         #
-        # Every generation numbered at or above the count goes, not only the one
-        # the count names. A session written by the loop this replaces already
-        # carries a third generation, and leaving it would keep three backups
-        # for the rest of that session's life — while the shift below would then
-        # delete the second-newest and preserve the oldest, which is the wrong
-        # two to keep.
-        generation = _LLM_LOG_BACKUP_COUNT + 1
-        while True:
-            stray = Path(str(self._llm_path) + f".{generation}")
-            if not stray.exists():
-                break
-            stray.unlink()
-            generation += 1
-        oldest = Path(str(self._llm_path) + f".{_LLM_LOG_BACKUP_COUNT}")
-        if oldest.exists():
-            oldest.unlink()
+        # The strays are enumerated, not counted up to. A session can hold .4 with
+        # no .3 — a numbering left by a directory that was restored, copied or
+        # edited by hand — and a sweep that stopped at the first absent name would
+        # leave that generation behind for the rest of the session's life, while
+        # the shift below deleted the second-newest and preserved the oldest: the
+        # wrong two to keep. A session written by the loop this replaces carries a
+        # third generation too, which the same list removes.
+        for stray in self._stray_generations():
+            stray.unlink(missing_ok=True)
         for i in range(_LLM_LOG_BACKUP_COUNT - 1, 0, -1):
             old = Path(str(self._llm_path) + f".{i}")
             if old.exists():
