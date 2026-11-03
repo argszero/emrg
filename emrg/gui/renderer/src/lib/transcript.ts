@@ -78,6 +78,11 @@ export interface AssistantSegment {
 export interface AssistantEntry {
   kind: "assistant";
   rid: string;
+  /**
+   * 稳定条目标识：跨 delta、工具边界、回放都不变。渲染层拿它当 React key，也当
+   * 「只重渲染这一条」的订阅键（见 `TranscriptStore.subscribeEntry`）。见 `nextEntryId`。
+   */
+  id: string;
   segments: AssistantSegment[];
   /**
    * 这条回复的时刻 —— **daemon 记下的那一个**，取自收尾帧的 `timestamp`
@@ -90,6 +95,8 @@ export interface AssistantEntry {
 
 export interface UserEntry {
   kind: "user";
+  /** 稳定条目标识（说明见 `AssistantEntry.id`） */
+  id: string;
   text: string;
   /**
    * 这一行的时刻 —— daemon 写记录的那一刻（`user_message` / `steer_committed` 帧带来）。
@@ -102,14 +109,20 @@ export interface UserEntry {
 }
 export interface SystemEntry {
   kind: "system";
+  /** 稳定条目标识（说明见 `AssistantEntry.id`） */
+  id: string;
   text: string;
 }
 export interface ToolRowEntry {
   kind: "tool-row";
+  /** 稳定条目标识（说明见 `AssistantEntry.id`） */
+  id: string;
   row: ToolRow;
 }
 export interface ToolGroupEntry {
   kind: "tool-group";
+  /** 稳定条目标识（说明见 `AssistantEntry.id`） */
+  id: string;
   group: ToolGroup;
 }
 
@@ -184,6 +197,18 @@ export interface TranscriptStore {
   subscribe(listener: () => void): () => void;
   /** 单调版本号：每次变更 +1（getSnapshot 缓存值，稳定引用） */
   getVersion(): number;
+  /**
+   * **结构**版本号：只在条目集合本身变化时 +1（新增 / 前插 / 清空、顶部历史条、换会话）。
+   *
+   * 与 `getVersion` 的分工就是流式输出的成本：`getVersion` 每个 token 都动，订阅它的组件
+   * 因此整棵树重渲染；列表只关心「有没有多/少一条」，所以它读这一条。文本增长归条目自己的
+   * `getEntryVersion`，于是每帧的渲染成本与条目数无关。
+   */
+  getStructureVersion(): number;
+  /** 单条目版本号：只有这一个条目被写过时才 +1（未知 id 恒为 0） */
+  getEntryVersion(id: string): number;
+  /** 订阅单个条目：只为该条目的写入通知，别的条目被写动不了它 */
+  subscribeEntry(id: string, listener: () => void): () => void;
   /** 草稿独立变更通道（#1100 次要项：击键不 bump 主版本 → TranscriptView 不因打字重渲染） */
   subscribeDraft(listener: () => void): () => void;
   /** 草稿版本号：仅 setComposerDraft 递增，与主版本互不干扰 */
@@ -232,6 +257,18 @@ export interface TranscriptStore {
 }
 
 const SID_NULL = "__emrg_null_sid__";
+
+/**
+ * 条目 id 的发号器是**模块级**的，不是每 store 一个：回放路径在一个临时 store 里跑实时
+ * handler，再把得到的条目整块 `prependEntries` 交给真正的 store（`historyReplay.ts`），
+ * 所以同一条目会换 store —— 发号器若按 store 计，跨 store 就撞号，而 id 同时是渲染层的
+ * React key 和订阅键，撞号等于两条消息共用一个订阅。
+ */
+let entrySeq = 0;
+function nextEntryId(): string {
+  entrySeq += 1;
+  return `e${entrySeq}`;
+}
 
 function assistantHasText(entry: AssistantEntry): boolean {
   return entry.segments.some((seg) => seg.hasText);
@@ -318,12 +355,25 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
   const t = opts.t ?? ((key: string): string => key);
   const sessions = new Map<string, SessionTranscript>();
   let version = 0;
+  let structureVersion = 0;
   let draftVersion = 0;
   const listeners = new Set<() => void>();
   const draftListeners = new Set<() => void>();
+  /** 条目 id → 该条目自己的版本号（只在该条目被写过时 +1） */
+  const entryVersions = new Map<string, number>();
+  /** 条目 id → 只订阅这一个条目的监听器 */
+  const entryListeners = new Map<string, Set<() => void>>();
+  /** 本次 mutation 已写过的条目 id（mutation 外的写入不回滚也不通知） */
+  let dirtyEntries: Set<string> | null = null;
 
-  function notify(): void {
+  function notify(dirty: Set<string>): void {
     version++;
+    // 条目通道：只通知被写过的条目。流式一个 token 只脏一条 → 只有那一条重渲染。
+    for (const id of dirty) {
+      entryVersions.set(id, (entryVersions.get(id) ?? 0) + 1);
+      const set = entryListeners.get(id);
+      if (set) for (const listener of [...set]) listener();
+    }
     for (const listener of [...listeners]) listener();
   }
 
@@ -356,10 +406,34 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
     return s;
   }
 
-  /** 变更包装：所有 mutation 走这里统一通知订阅者 */
+  /**
+   * 变更包装：所有 mutation 走这里统一通知订阅者。
+   *
+   * 一次变更里「哪些条目被写过」必须由 mutation 自己登记（`touchEntry`）—— 就地改的对象
+   * 没有引用变化可供比较，显式登记是唯一不会漏的判据；「条目集合本身变了」同样显式登记
+   * （`structural`）。登记错漏不会静默：视图那侧的守卫按条目数计渲染，漏登记会读成
+   * 「整条会话都重渲染了」。
+   */
   function mutate(fn: () => void): void {
-    fn();
-    notify();
+    const prev = dirtyEntries;
+    const dirty = new Set<string>();
+    dirtyEntries = dirty;
+    try {
+      fn();
+    } finally {
+      dirtyEntries = prev;
+    }
+    notify(dirty);
+  }
+
+  /** 登记「这个条目被写过了」（mutation 之外调用是空操作） */
+  function touchEntry(entry: { id: string } | undefined | null): void {
+    if (entry && dirtyEntries) dirtyEntries.add(entry.id);
+  }
+
+  /** 登记「条目集合本身变了」：列表组件据此重读 entries */
+  function structural(): void {
+    structureVersion++;
   }
 
   /** 草稿变更包装：只通知草稿订阅者（不触发聊天区重渲染） */
@@ -395,9 +469,10 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
         let entryIndex = s.groupIndex.get(rid);
         let entry = entryIndex !== undefined ? s.entries[entryIndex] : undefined;
         if (!entry || entry.kind !== "assistant") {
-          const e: AssistantEntry = { kind: "assistant", rid, segments: [] };
+          const e: AssistantEntry = { kind: "assistant", id: nextEntryId(), rid, segments: [] };
           s.entries.push(e);
           s.groupIndex.set(rid, s.entries.length - 1);
+          structural();
         }
         let as = s.entries[s.groupIndex.get(rid)!] as AssistantEntry;
         const active = as.segments[as.segments.length - 1];
@@ -409,10 +484,11 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
             // 文本会经 groupIndex 回挂到工具上方的旧 entry，被渲染在工具上方
             // （“文本→工具”错序：工具后文本永远在工具之上）。新 entry 排在工具行
             // 之后，与 TUI 的到达顺序语义对齐（文本1→工具→文本2）。
-            const e: AssistantEntry = { kind: "assistant", rid, segments: [] };
+            const e: AssistantEntry = { kind: "assistant", id: nextEntryId(), rid, segments: [] };
             s.entries.push(e);
             s.groupIndex.set(rid, s.entries.length - 1);
             as = e;
+            structural();
           }
           as.segments.push({ text: "", hasText: false, sealed: false, typing: true });
         }
@@ -420,6 +496,8 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
         const content = chunk.content || "";
         if (content) seg.hasText = true;
         seg.text += content;
+        // 流式的一个 chunk 只写这一条 —— 视图因此只重渲染这一条（每条成本与条目数无关）
+        touchEntry(as);
       }
     });
   }
@@ -440,13 +518,16 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
             // 最后一个助手条目，工具把一轮回复切成多段时，时刻属于消息而非每段。
             // 帧不带时刻（取消/超轮次/出错，本就没有回复落盘）→ 行上留空。
             if (data.timestamp) entry.timestamp = data.timestamp;
+            // 收尾同样只改这一条：封口（typing=false）+ 时刻
+            touchEntry(entry);
           }
           s.groupIndex.delete(rid); // 渲染完成 → 移除映射（chat.js groupNodes.delete）
         }
       }
       // 工具调用次数上限中断（跨项目教训：截断的工作不提示 = 用户拿半成品）
       if (data.content && /exceeded/i.test(data.content) && /max|limit|round/i.test(data.content)) {
-        s.entries.push({ kind: "system", text: t("chat.maxRoundsHint") });
+        s.entries.push({ kind: "system", id: nextEntryId(), text: t("chat.maxRoundsHint") });
+        structural();
       }
     });
   }
@@ -470,6 +551,7 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
           active.sealed = true;
           // rant 21:09：已结束的文本段不再闪烁——封存时移除 typing
           active.typing = false;
+          touchEntry(entry);
         }
       }
       const row: ToolRow = {
@@ -496,20 +578,23 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
           barHidden: true,
           summary: null,
         };
-        s.entries[s.entries.length - 1] = { kind: "tool-group", group };
+        s.entries[s.entries.length - 1] = { kind: "tool-group", id: nextEntryId(), group };
+        structural();
         s.toolRowIndex.set(last.row.callId, { entry: s.entries.length - 1, row: 0 });
         s.toolRowIndex.set(row.callId, { entry: s.entries.length - 1, row: 1 });
         updateToolGroup(group);
       } else if (last && last.kind === "tool-group") {
         const g = last.group;
         g.rows.push(row);
+        touchEntry(last);
         // 不展开、不收起了：宿主收起过的组，新工具也保持收起（rant 2026-10-17T19:23:08）。
         // 正在跑的那一行如果要一直看得见，那是另一条"常显"行的事，不是把上面的行翻开的理由。
         s.toolRowIndex.set(row.callId, { entry: s.entries.length - 1, row: g.rows.length - 1 });
         updateToolGroup(g);
       } else {
-        s.entries.push({ kind: "tool-row", row });
+        s.entries.push({ kind: "tool-row", id: nextEntryId(), row });
         s.toolRowIndex.set(row.callId, { entry: s.entries.length - 1, row: null });
+        structural();
       }
     });
   }
@@ -529,6 +614,8 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
         const entry = s.entries[found.entry];
         if (entry && entry.kind === "tool-group") updateToolGroup(entry.group);
       }
+      // 状态 / 耗时 / 输出都写在这一条上：只让它重渲染
+      touchEntry(s.entries[found.entry]);
     });
   }
 
@@ -538,6 +625,7 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
       for (const e of s.entries) {
         if (e.kind === "assistant") {
           for (const seg of e.segments) seg.typing = false;
+          touchEntry(e);
         }
       }
     });
@@ -552,6 +640,7 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
       s.toolRowIndex.clear();
       s.doneRids.clear();
       s.loadBar = null;
+      structural();
     });
   }
 
@@ -563,6 +652,22 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
       };
     },
     getVersion: () => version,
+    getStructureVersion: () => structureVersion,
+    getEntryVersion: (id) => entryVersions.get(id) ?? 0,
+    subscribeEntry: (id, listener) => {
+      let bucket = entryListeners.get(id);
+      if (!bucket) {
+        bucket = new Set();
+        entryListeners.set(id, bucket);
+      }
+      const set = bucket;
+      set.add(listener);
+      return () => {
+        set.delete(listener);
+        // 空桶回收：条目被清掉的会话不能让监听器表无限长
+        if (!set.size && entryListeners.get(id) === set) entryListeners.delete(id);
+      };
+    },
     subscribeDraft: (listener) => {
       draftListeners.add(listener);
       return () => {
@@ -591,10 +696,11 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
     clear,
     addUserMessage: (text, sid, meta) => {
       mutate(() => {
-        const entry: UserEntry = { kind: "user", text };
+        const entry: UserEntry = { kind: "user", id: nextEntryId(), text };
         if (meta?.requestId) entry.rid = meta.requestId;
         if (meta?.timestamp) entry.timestamp = meta.timestamp;
         st(sid).entries.push(entry);
+        structural();
       });
     },
     stampUserMessage: (rid, timestamp, sid) => {
@@ -606,6 +712,7 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
         if (e.kind === "user" && e.rid === rid) {
           mutate(() => {
             e.timestamp = timestamp;
+            touchEntry(e);
           });
           return;
         }
@@ -614,7 +721,8 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
     },
     addSystemMessage: (text, sid) => {
       mutate(() => {
-        st(sid).entries.push({ kind: "system", text });
+        st(sid).entries.push({ kind: "system", id: nextEntryId(), text });
+        structural();
       });
     },
     prependEntries: (entries, sid) => {
@@ -624,11 +732,13 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
         s.prepends++;
         shiftIndexes(s, entries.length);
         s.entries.unshift(...entries);
+        structural();
       });
     },
     setLoadBar: (text, sid) => {
       mutate(() => {
         st(sid).loadBar = text;
+        structural();
       });
     },
     setComposerDraft: (text, sid) => {
@@ -639,14 +749,23 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
     },
     toggleRowOutput: (sid, callId) => {
       mutate(() => {
-        const found = findRow(st(sid), callId);
-        if (found) found.row.outputExpanded = !found.row.outputExpanded;
+        const s = st(sid);
+        const found = findRow(s, callId);
+        if (found) {
+          found.row.outputExpanded = !found.row.outputExpanded;
+          // 展开的是这一行所在的条目：只让它重渲染
+          touchEntry(s.entries[found.entry]);
+        }
       });
     },
     expandRowContent: (sid, callId) => {
       mutate(() => {
-        const found = findRow(st(sid), callId);
-        if (found) found.row.fullExpanded = true;
+        const s = st(sid);
+        const found = findRow(s, callId);
+        if (found) {
+          found.row.fullExpanded = true;
+          touchEntry(s.entries[found.entry]);
+        }
       });
     },
     toggleGroup: (sid, entryIndex) => {
@@ -655,6 +774,7 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
         if (!entry || entry.kind !== "tool-group") return;
         // 唯一会改变展开状态的地方（rant 2026-10-17T19:23:08）：一个布尔量，一个写入点。
         entry.group.collapsed = !entry.group.collapsed;
+        touchEntry(entry);
       });
     },
   };

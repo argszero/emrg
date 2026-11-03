@@ -157,9 +157,11 @@ describe("流式 delta", () => {
     expect(e!.segments).toHaveLength(1);
     expect(e!.segments[0].text).toBe("Hello");
     expect(e!.segments[0].typing).toBe(true);
-    // 条目不带「谁的消息」字段（rant 2026-09-29T15:52:49 要求 3）：形状就是这三个键。
+    // 条目不带「谁的消息」字段（rant 2026-09-29T15:52:49 要求 3）：形状就是这四个键。
     // 这条断言是可判的守卫——把 isOwn 之类的所有权字段加回来即红。
-    expect(Object.keys(e!).sort()).toEqual(["kind", "rid", "segments"]);
+    // `id` 是条目的稳定标识（渲染层的 key 与订阅键），不是所有权字段：它只说"是哪一条"，
+    // 不说"是谁的"。
+    expect(Object.keys(e!).sort()).toEqual(["id", "kind", "rid", "segments"]);
   });
 
   it("上一文本段被工具封存后，新 delta 开新 AssistantEntry（rant 2026-08-31T12:30:33）", () => {
@@ -443,5 +445,105 @@ describe("消息时刻", () => {
     expect(rows[0].timestamp).toBeUndefined();
     // 没有盖章就不该通知订阅者：一次没发生的变更不该触发一次渲染
     expect(st.getVersion()).toBe(before);
+  });
+});
+
+/**
+ * 条目级订阅：**流式一个 token 只脏一条**。
+ *
+ * 契约有两半，缺任何一半都修不好那件事：
+ * - **写入**只登记被写的那一条（`subscribeEntry` / `getEntryVersion`）——文本增长走这里；
+ * - **集合**变化才前进结构版本（`getStructureVersion`）——新增/前插/清空/顶部条走这里。
+ *
+ * 视图那侧的验收（每条条目各自重渲染几次）在 `TranscriptView.test.tsx`；这里钉住状态机
+ * 这一半，并钉住 id 的稳定与唯一——它是渲染层的 React key 与订阅键。
+ */
+describe("条目级订阅：流式只脏一条", () => {
+  it("一次 delta 只 bump 正在写的那一条，别的条目一次都不动", () => {
+    const s = store();
+    s.addUserMessage("q", "s1");
+    s.handleDelta([{ request_id: "r1", content: "a" }], "s1");
+    const [user, live] = s.getEntries("s1");
+    expect(user.kind).toBe("user");
+    expect(live.kind).toBe("assistant");
+    const userBefore = s.getEntryVersion(user.id);
+    const liveBefore = s.getEntryVersion(live.id);
+
+    s.handleDelta([{ request_id: "r1", content: "b" }], "s1");
+
+    expect(s.getEntryVersion(live.id)).toBe(liveBefore + 1);
+    expect(s.getEntryVersion(user.id)).toBe(userBefore); // 历史条目：零写入、零通知
+    // 未知 id 恒为 0，绝不是一个会随别的条目跳动的数
+    expect(s.getEntryVersion("no-such-entry")).toBe(0);
+  });
+
+  it("subscribeEntry 只为那一条通知；退订后不再通知", () => {
+    const s = store();
+    s.handleDelta([{ request_id: "r1", content: "a" }], "s1");
+    s.handleDelta([{ request_id: "r2", content: "b" }], "s1");
+    const [first, second] = s.getEntries("s1");
+    let firstCalls = 0;
+    let secondCalls = 0;
+    const un1 = s.subscribeEntry(first.id, () => firstCalls++);
+    const un2 = s.subscribeEntry(second.id, () => secondCalls++);
+
+    s.handleDelta([{ request_id: "r2", content: "!" }], "s1");
+    expect(secondCalls).toBe(1);
+    expect(firstCalls).toBe(0);
+
+    un1();
+    un2();
+    s.handleDelta([{ request_id: "r2", content: "?" }], "s1");
+    expect(secondCalls).toBe(1); // 退订后不再通知
+    expect(firstCalls).toBe(0);
+  });
+
+  it("结构版本只在条目集合变化时前进：新增 / 前插 / 顶部条 / 清空；纯文本增长与收尾都不动", () => {
+    const s = store();
+    const v0 = s.getStructureVersion();
+
+    s.addUserMessage("q", "s1");
+    expect(s.getStructureVersion()).toBe(v0 + 1);
+    s.handleDelta([{ request_id: "r1", content: "a" }], "s1"); // 新条目
+    expect(s.getStructureVersion()).toBe(v0 + 2);
+
+    const before = s.getStructureVersion();
+    s.handleDelta([{ request_id: "r1", content: "b" }], "s1"); // 文本增长
+    expect(s.getStructureVersion()).toBe(before);
+    s.handleDone({ request_id: "r1", timestamp: "2026-11-03T15:00:00+08:00" }, "s1"); // 封口
+    expect(s.getStructureVersion()).toBe(before);
+
+    s.prependEntries([{ kind: "user", id: "t-prepended", text: "old" }], "s1");
+    expect(s.getStructureVersion()).toBe(before + 1);
+    s.setLoadBar("加载历史中…", "s1");
+    expect(s.getStructureVersion()).toBe(before + 2);
+    s.clear("s1");
+    expect(s.getStructureVersion()).toBe(before + 3);
+  });
+
+  it("主版本号仍然是「每次变更 +1」——既有订阅者读到的语义没变", () => {
+    const s = store();
+    const v0 = s.getVersion();
+    s.addUserMessage("q", "s1");
+    s.handleDelta([{ request_id: "r1", content: "a" }], "s1");
+    s.handleDelta([{ request_id: "r1", content: "b" }], "s1");
+    expect(s.getVersion()).toBe(v0 + 3);
+  });
+
+  it("条目 id 跨 delta / 收尾不变，且两个 store 之间的 id 不撞号（回放把条目交给另一个 store）", () => {
+    const a = store();
+    a.handleDelta([{ request_id: "r1", content: "a" }], "s1");
+    const id = a.getEntries("s1")[0].id;
+    a.handleDelta([{ request_id: "r1", content: "b" }], "s1");
+    a.handleDone({ request_id: "r1" }, "s1");
+    expect(a.getEntries("s1")[0].id).toBe(id);
+    // 同一会话里两条条目的 id 必须不同（撞号 = 两条消息共用一个 React key 与订阅）
+    a.handleDelta([{ request_id: "r2", content: "c" }], "s1");
+    const ids = a.getEntries("s1").map((e) => e.id);
+    expect(new Set(ids).size).toBe(ids.length);
+
+    const b = store();
+    b.handleDelta([{ request_id: "r1", content: "a" }], "s1");
+    expect(b.getEntries("s1")[0].id).not.toBe(id);
   });
 });

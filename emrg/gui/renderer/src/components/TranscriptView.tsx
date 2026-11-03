@@ -62,14 +62,17 @@ export function TranscriptView({
   loading = false,
   onLoadOlder,
 }: TranscriptViewProps) {
-  // 版本号快照：每次 store 变更 +1（getSnapshot 稳定引用，满足 useSyncExternalStore 要求）
-  const version = useSyncExternalStore(store.subscribe, store.getVersion);
+  // 版本号快照：订阅的是**结构**版本 —— 条目集合变了才 +1。流式的文本增长不动它，所以
+  // 每来一个 token 都不用把整条会话重新渲染一遍；条目自己的版本由 EntryView 单独订阅
+  // （`useEntryVersion`）。订阅仍然走 `store.subscribe`：它只是触发一次取值，值没变
+  // React 就跳过渲染，每帧成本因此与条目数无关。
+  const structureVersion = useSyncExternalStore(store.subscribe, store.getStructureVersion);
   const { t } = useI18n();
   const md = useMemo(() => renderer ?? createMarkdownRenderer({ t }), [renderer, t]);
   const entries = store.getEntries(sid);
   const loadBar = store.getLoadBar(sid);
 
-  void version; // 版本号变化 → 重新读取 entries（同一数组引用被原地变更）
+  void structureVersion; // 版本号变化 → 重新读取 entries（同一数组引用被原地变更）
 
   // ── 滚动跟随（rant 2026-08-28T22:36:18：React 迁移丢失 vanilla 的 autoScroll/回到底部） ──
   // React 版之前无任何 scroll/autoScroll 追踪 → 新消息不断落到底部遮罩区，需手动滚动。
@@ -103,18 +106,10 @@ export function TranscriptView({
     return () => el.removeEventListener("scroll", onScroll, { capture: true });
   }, [updateAutoScroll, hasMore, loading, onLoadOlder]);
 
-  // 新消息 append/流入 → 若 autoScroll 为 true 则滚到底。
-  // 依赖 version（每次 store 变更 +1）而非 entries.length：流式文本是原地 append
-  // 进已有 assistant 段（数组长度不变），依赖 length 会让流式期间不跟随 → 新消息
-  // 落到底部遮罩区。version 变化覆盖 delta/tool/done 全部写入，autoScroll 为真即贴底。
-  useEffect(() => {
-    const el = viewportRef.current;
-    if (!el) return;
-    if (autoScrollRef.current) {
-      el.scrollTop = el.scrollHeight;
-    }
-    // 首次无条目时不误滚；version 变更即触发
-  }, [version]);
+  // 新消息 append/流入 → 若 autoScroll 为 true 则滚到底。这一件事订阅的是每次变更都动的
+  // `getVersion`（流式文本是原地 append 进已有段，结构不变），所以它住在独立的
+  // `AutoScroll` 里：每个 token 只重渲染那一棵返回 null 的子树，条目列表不在它的渲染路径上。
+  // 旧版把它放在本组件里、依赖 version —— 于是每帧重渲染整条会话，正是要修的那个成本。
 
   const scrollToBottom = () => {
     const el = viewportRef.current;
@@ -170,7 +165,7 @@ export function TranscriptView({
         updateAutoScroll(el);
       }
     }
-  }, [version, prepends, sidKey, updateAutoScroll]);
+  }, [structureVersion, prepends, sidKey, updateAutoScroll]);
 
   return (
     <div className="transcript-view" data-testid="transcript-view" ref={viewportRef}>
@@ -196,8 +191,10 @@ export function TranscriptView({
         )
       ) : null}
       {entries.map((entry, i) => (
-        <EntryView key={i} entry={entry} index={i} t={t} md={md} store={store} sid={sid} />
+        <EntryView key={entry.id} entry={entry} index={i} t={t} md={md} store={store} sid={sid} />
       ))}
+      {/* 跟随滚动：订阅每次变更（含每个 token），但它只重渲染自己 */}
+      <AutoScroll store={store} viewportRef={viewportRef} autoScrollRef={autoScrollRef} />
       {!atBottom ? (
         <button
           type="button"
@@ -213,6 +210,47 @@ export function TranscriptView({
   );
 }
 
+/**
+ * 流式跟随滚动（rant 2026-08-28T22:36:18：React 迁移丢失 vanilla 的 autoScroll/回到底部）。
+ *
+ * 单独成一个组件是为了**成本**，不是为了美观：它必须对每个 token 都反应一次（流式文本是
+ * 原地 append，条目集合不变），于是它订阅每次变更都动的 `getVersion`。它返回 null，所以
+ * 每个 token 重渲染的只有这一棵子树；放在 `TranscriptView` 里订阅就是每帧重渲染整条会话。
+ */
+function AutoScroll({
+  store,
+  viewportRef,
+  autoScrollRef,
+}: {
+  store: TranscriptStore;
+  viewportRef: { current: HTMLDivElement | null };
+  autoScrollRef: { current: boolean };
+}) {
+  const version = useSyncExternalStore(store.subscribe, store.getVersion);
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    // 首次无条目时不误滚；version 变更即触发（覆盖 delta/tool/done 全部写入）
+    if (autoScrollRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [version, viewportRef, autoScrollRef]);
+  return null;
+}
+
+/**
+ * 条目自己的版本号 —— 订阅**下沉到条目级**。
+ *
+ * `getEntryVersion` 只在这一条被写过时才变，所以一次 delta 只通知它自己的监听器：会话里
+ * 有 5 条还是有 500 条，每帧重渲染的都只有正在变的那一条。父组件读的是
+ * `getStructureVersion`，条目文本增长不动它，整棵树因此也不跟着重渲染。
+ */
+function useEntryVersion(store: TranscriptStore, id: string): number {
+  const subscribe = useCallback((listener: () => void) => store.subscribeEntry(id, listener), [store, id]);
+  const get = useCallback(() => store.getEntryVersion(id), [store, id]);
+  return useSyncExternalStore(subscribe, get);
+}
+
 interface EntryViewProps {
   entry: TranscriptEntry;
   index: number;
@@ -223,6 +261,8 @@ interface EntryViewProps {
 }
 
 function EntryView({ entry, index, t, md, store, sid }: EntryViewProps): ReactNode {
+  // 这一条的语言：只有它自己被写过时才重渲染（流式隔离的落点）
+  useEntryVersion(store, entry.id);
   switch (entry.kind) {
     case "user":
       // Stage 1（rant 2026-08-28T14:07:29）：用户消息为 markdown 字符串（tiptap 序列化），

@@ -28,7 +28,12 @@ const SID = "s1";
  * 没有了（rant 2026-09-29T15:52:49 要求 3），条目形状里不再有可剥的东西。
  */
 function comparable(entries: TranscriptEntry[]): unknown {
-  return JSON.parse(JSON.stringify(entries, (k, v) => (k === "rid" ? undefined : v)));
+  // `rid` 与 `id` 都随来路而定，都不是内容：前者由回放按「一条用户记录开一轮」合成，
+  // 后者是 **store 局部**的条目标识（发号器造一条 +1，两条来路各造一次必然不同号）。
+  // 这里要验的是「同一段记录喂进来，条目内容逐项一致」，所以两样坐标一并剥掉。
+  return JSON.parse(
+    JSON.stringify(entries, (k, v) => (k === "rid" || k === "id" ? undefined : v)),
+  );
 }
 
 /** 一条工具调用在两条来路上的公共来源：`args` 会以对象进实时帧、以 JSON 字符串进记录。 */
