@@ -481,6 +481,97 @@ def test_every_guard_advertising_a_root_flag_is_accounted_for() -> None:
     )
 
 
+def test_every_guard_that_takes_a_tree_as_its_argument_is_pointable_at_one() -> None:
+    """`TAKES_A_TREE_ARGUMENT`'s members are pointable, by the table's own statement.
+
+    `POINTABLE_AT_A_TREE`'s comment puts them there — "`TAKES_A_TREE_ARGUMENT`'s members
+    are here as the guards whose tree *is* their argument" — and until this leg nothing
+    measured the sentence: the leg above derives its subject from `--help`'s `--root`, and
+    these two members point with a positional and with `--repo`, so it never asks about
+    either. Deleting one of those two rows left every leg green (measured 2026-11-04:
+    9 passed for the `--repo` member and 9 passed for the positional one, each restored
+    byte-identically), while deleting either of the two `--root` rows reddened the leg
+    above — the table's two halves were held in step by prose alone.
+
+    The fence is the containment, and it is **derived**: the file already classifies these
+    guards as taking a tree, so asking the pointable table to list them needs no new
+    vocabulary, and it cannot go stale the way a second list of names would. That is also
+    why the derivation stops here rather than matching `ROOT`/`TREE`/`PATH` in help text —
+    `check-citation-resolves.py`'s positional is spelled lowercase with no metavar, while
+    `check-issue-links.py` advertises `--repo REPO` for a GitHub slug and no tree at all,
+    so a vocabulary would miss the first and wrongly claim the second.
+    """
+    missing = sorted(set(TAKES_A_TREE_ARGUMENT) - set(POINTABLE_AT_A_TREE))
+    assert not missing, (
+        f"{missing} takes a tree as its own argument and is not in "
+        "POINTABLE_AT_A_TREE — so the empty-tree leg below never points it at one, and "
+        "the family's refusal rule is never asked of it. Add it there with the argument "
+        "that points it at a tree: these guards point with their own argument, which is "
+        "the entry TAKES_A_TREE_ARGUMENT already carries."
+    )
+
+
+def test_every_pointing_row_names_a_guard_that_accepts_what_it_names(tmp_path) -> None:
+    """Each row of both tables is a claim about argv, read from the guard's own `--help`.
+
+    Both tables are hand-written, and their second column — the argument that points a
+    guard at a tree — was prose nothing checked: a guard that renamed or dropped the flag
+    its row names would have been found by the empty-tree leg crashing into an argparse
+    error, reported as a wrong verdict rather than as a stale row. The leg above pins
+    `ROOT_FLAG_BUT_NOT_POINTABLE`'s names to disk; neither of these two tables' names was
+    pinned, so a row outliving its guard kept a leg pointing at nothing.
+
+    `--help` is the subject, for the reason the leg above gives: the flag set argparse
+    accepts is not the flag set the source shows. A guard whose help cannot be read is a
+    failure that names it — never a skip, because a row nobody can read is not a row that
+    holds.
+
+    An **empty** flag tuple means "this guard's first argument is a tree", and that is
+    checkable too: pointed at a path that is not there it must refuse with a reason, which
+    an argparse usage error does not carry.
+    """
+    tables = {
+        "POINTABLE_AT_A_TREE": POINTABLE_AT_A_TREE,
+        "TAKES_A_TREE_ARGUMENT": TAKES_A_TREE_ARGUMENT,
+    }
+    on_disk = _guards_on_disk()
+    for table_name, table in tables.items():
+        stale = sorted(set(table) - on_disk)
+        assert not stale, (
+            f"{table_name} names guard(s) that are not in scripts/: {stale} — a row for a "
+            "guard that is gone keeps a leg pointing at nothing, and a leg that quietly "
+            "asks fewer guards reads exactly like one that passes"
+        )
+        for name, flags in table.items():
+            proc = _run([str(SCRIPTS_DIR / name), "--help"], cwd=REPO_ROOT)
+            help_text = proc.stdout or ""
+            assert proc.returncode == 0 and help_text.strip(), (
+                f"{name}: --help answered rc={proc.returncode} with {len(help_text)} "
+                f"bytes of text, so what {table_name} claims about its arguments cannot be "
+                "measured:\n" + _refusal(proc)[:400]
+            )
+            if flags:
+                absent = [
+                    flag
+                    for flag in flags
+                    if not re.search(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", help_text)
+                ]
+                assert not absent, (
+                    f"{name}: {table_name} says {absent} points it at a tree, and its own "
+                    "`--help` does not advertise that argument — the row names an argv the "
+                    "guard does not accept:\n" + help_text[:400]
+                )
+                continue
+            absent_path = tmp_path / f"absent-{name}"
+            pointed = _run([str(SCRIPTS_DIR / name), str(absent_path)], cwd=REPO_ROOT)
+            out = _refusal(pointed)
+            assert pointed.returncode == 2 and _refusal_reason(out), (
+                f"{name}: {table_name} records `()` — a tree taken as this guard's own "
+                f"argument — and pointed at a path that is not there it answered "
+                f"rc={pointed.returncode} without a refusal:\n{out[:400]}"
+            )
+
+
 def test_every_guard_in_the_family_is_classified() -> None:
     """A new `scripts/check-*.py` must be classified here before it can pass.
 
