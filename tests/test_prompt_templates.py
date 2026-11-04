@@ -1933,6 +1933,63 @@ def test_a_top_level_copy_that_cannot_render_is_named(tmp_path, monkeypatch, cap
         )
 
 
+# ── A template's prose about where `extra_prompt` may sit is a claim about the builder ──
+#
+# The behaviour is pinned above through the real builder: a top-level block reaches every
+# template, `config:` wins when both are present, the losing copy is named in a warning.
+# What those legs cannot see is the *sentence a round reads*, and a round cannot run the
+# builder to check its own prompt — so a template stating the opposite of the mechanism
+# sends it looking for silence that no longer happens, or reporting a `blocked` item about
+# a section that rendered correctly.
+#
+# The two carriers really did disagree in this tree. `evolution_prompt.md` stated the
+# precedence; `ios_app_prompt.md` — written after `_template_task_context` began honouring
+# the top-level position — still said a top-level block "reads as absent" and renders
+# "empty and silent", which is the state *before* that change. The builder is what decides
+# between two claims about it, and it said the top-level block renders.
+_STALE_PLACEMENT_CLAIM = "reads as absent"
+
+#: The halves of the mechanism a reader of the ios-app template depends on: the fallback
+#: exists, and the canonical home still wins. Pinning only the removal of the stale sentence
+#: would let the paragraph be deleted instead of corrected.
+_IOS_APP_PLACEMENT_CLAIMS = ("top level is honoured too", "`config:` wins")
+
+
+def test_no_template_says_a_top_level_extra_prompt_renders_nothing() -> None:
+    """A template must not describe the mechanism as it was before it was fixed.
+
+    The false sentence is the whole failure mode: a host who believes it will write the
+    field in the canonical position and never learn the fallback exists, and an agent who
+    believes it will report a missing section as a placement fault when the real cause is
+    something else. This leg names the sentence, so a template that reintroduces it fails
+    here rather than in a round that could not measure it.
+    """
+    offenders = [
+        f"{task_type}/{filename}"
+        for task_type, filename in _builtin_templates()
+        if _STALE_PLACEMENT_CLAIM in (PROMPTS_DIR / filename).read_text(encoding="utf-8")
+    ]
+    assert not offenders, (
+        f"{offenders} still say a top-level `extra_prompt` {_STALE_PLACEMENT_CLAIM!r} — "
+        "`_template_task_context` renders it when `config:` carries none and warns when both "
+        "are set, so the sentence teaches expectation of silence that nothing produces"
+    )
+
+
+def test_the_ios_app_template_states_the_placement_rule_it_depends_on() -> None:
+    """Correcting the sentence is not enough — the paragraph must carry the real rule.
+
+    Named limit: this pins the presence of both halves, not that a reader acts on them.
+    """
+    text = (PROMPTS_DIR / "ios_app_prompt.md").read_text(encoding="utf-8")
+    missing = [claim for claim in _IOS_APP_PLACEMENT_CLAIMS if claim not in text]
+    assert not missing, (
+        f"ios_app_prompt.md no longer states {missing} about `extra_prompt` placement — the "
+        "paragraph is what tells its reader that the canonical position wins and that the "
+        "top-level fallback renders, and dropping either half restores the ambiguity"
+    )
+
+
 # ── The vetoed absolute mention ban stays out of the promotion template ──
 #
 # Measured 2026-10-19 on head a7087f61 (veto cyc20261019-073746): the new bullet said

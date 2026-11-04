@@ -36,7 +36,7 @@ This template ships identically to every EMRG instance, so it carries **no insta
 
 - Read them from the **Task-specific Instructions** section above (it is rendered from `extra_prompt`).
 - If a value you need is not there, that is a `blocked` item for the host naming exactly which value is missing — **never invent one, never substitute a default you guessed**.
-- ⚠️ **The placement of `extra_prompt` is a measured trap** (issue #2110, 2026-10-11): it must be written **under the record's `config:` block** in `tasks.yml`. Placed at the record's top level it reads as absent, so the section above renders **empty and silent** — no error, no log line, nothing to notice. If this section is missing or clearly truncated, say so in the closing summary as a `blocked` item.
+- ⚠️ **Where `extra_prompt` may sit** (issue #2110, 2026-10-11): write it **under the record's `config:` block** in `tasks.yml`, which is the canonical home of everything this prompt reads about your task. The record's top level is honoured too — a block there renders when `config:` carries none — so **a section that appears is not evidence the field is in the wrong place**. When a record carries both, `config:` wins and the copy it ignores is named in a warning that gives its size; that warning, not the section's presence or absence, is what tells you a block went unused. If this section is missing or clearly truncated, say so in the closing summary as a `blocked` item.
 
 #### 0.2 Credentials
 
