@@ -46,11 +46,15 @@ Usage
 
 Exit codes
 ----------
-    0  a failed job was found and its cause was printed
-    1  the run has no failed job - a determinate reading, not a failure to measure
+    0  a failed job was found and its cause was printed, **or** the run failed while no job
+       did, and the job that accounts for it was printed instead (a job cancelled before it
+       was assigned a runner is that case: it never started, so there is no step output)
+    1  the run has no failed job **and** no unstarted job to blame - a determinate reading,
+       not a failure to measure
     2  the question could not be answered (bad run id, gh failed, no jobs listed, a job's
-       log could not be fetched or came back empty) - fail loud; never report "no cause"
-       for a log nobody read
+       log could not be fetched or came back empty, a run whose own conclusion could not be
+       read while a job had not succeeded) - fail loud; never report "no cause" for a log
+       nobody read
 
 The empty-log case is the one that looks like a pass and is not: the fetch succeeded, so
 `gh` exits 0 and there is no error to surface, but a failed job with nothing in its log has
@@ -95,6 +99,7 @@ names the channel that answered it.
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import re
 import subprocess
@@ -276,6 +281,93 @@ def _clean(line: str) -> str:
     """One log line, ANSI stripped and bounded - the form this tool prints."""
     text = _ANSI.sub("", line).rstrip()
     return text if len(text) <= _MAX_LINE else text[: _MAX_LINE - 3] + "..."
+
+
+def _run_conclusion(run_id: int, repo: str) -> str:
+    """The run's own `conclusion` - the field that says whether there is a failure at all.
+
+    Read from the run, not inferred from its jobs: a run that succeeded while some jobs were
+    skipped (`workflow_dispatch` on a branch skips `verify-*` and `release` by design) and a
+    run that failed with a cancelled job have the same thing to see in the job list, and the
+    run's conclusion is what tells them apart.
+    """
+    payload = json.loads(_gh_api(f"repos/{repo}/actions/runs/{run_id}"))
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"the run object for {run_id} is not a mapping")
+    conclusion = payload.get("conclusion")
+    status = payload.get("status")
+    if conclusion is None:
+        raise RuntimeError(
+            f"run {run_id} reports status `{status}` and no conclusion yet"
+        )
+    return str(conclusion)
+
+
+def _elapsed(job: dict) -> str:
+    """How long the job held, from its own timestamps; `unknown` when they are absent."""
+    started, ended = job.get("started_at"), job.get("completed_at")
+    if not isinstance(started, str) or not isinstance(ended, str):
+        return "unknown"
+    try:
+        seconds = int(
+            (datetime.datetime.fromisoformat(ended.replace("Z", "+00:00"))
+             - datetime.datetime.fromisoformat(started.replace("Z", "+00:00"))).total_seconds()
+        )
+    except ValueError:
+        return "unknown"
+    if seconds < 0:
+        return "unknown"
+    return f"{seconds // 60}m{seconds % 60:02d}s"
+
+
+def _otherwise_lines(job: dict) -> list[str]:
+    """The lines that explain a job which did not fail but accounts for a failed run.
+
+    The distinction this keeps is the one that decides the remedy: a job **cancelled after a
+    step failed** is a code or environment problem with a log, while a job **cancelled with
+    no step executed and no runner assigned** never started at all - its cause is scheduling,
+    and no amount of reading its (nonexistent) output would find it.
+    """
+    name = str(job.get("name"))
+    conclusion = str(job.get("conclusion") or "(none)")
+    steps = [step for step in (job.get("steps") or []) if isinstance(step, dict)]
+    runner = job.get("runner_name")
+    lines = [f"  {name} [{conclusion}] held {_elapsed(job)}"]
+    if not steps:
+        lines.append(
+            "    no step executed - the job never started, so there is no step output to read"
+        )
+    else:
+        last = steps[-1]
+        lines.append(
+            f"    {len(steps)} step(s) recorded; the last was {last.get('number')}. "
+            f"{last.get('name')} [{last.get('conclusion') or '(none)'}]"
+        )
+    if not runner:
+        lines.append(
+            "    no runner was ever assigned to it (runner_name is null) - this is a "
+            "scheduling outcome, not a step failure, and re-running is what asks the "
+            "scheduler again"
+        )
+    else:
+        lines.append(f"    it ran on {runner}")
+    return lines
+
+
+def _otherwise_report(job: dict) -> dict:
+    """The same explanation, as data, for `--json`."""
+    steps = [step for step in (job.get("steps") or []) if isinstance(step, dict)]
+    return {
+        "name": job.get("name"),
+        "conclusion": job.get("conclusion"),
+        "elapsed": _elapsed(job),
+        "runner_name": job.get("runner_name"),
+        "steps_executed": len(steps),
+        "last_step": (
+            f"{steps[-1].get('number')}. {steps[-1].get('name')} "
+            f"[{steps[-1].get('conclusion') or '(none)'}]" if steps else None
+        ),
+    }
 
 
 def _step_cause(job: dict) -> tuple[list[str], list[str]]:
@@ -480,6 +572,73 @@ def main(argv: list[str] | None = None) -> int:
             print(f"transport: {', '.join(transports_used())}")
 
     if not failed_jobs:
+        # A run can conclude `failure` while **no job's** conclusion is a failure: a job that
+        # was cancelled before it was ever assigned a runner is that case, and it is not
+        # exotic - measured 2026-11-04 on run 41862508461 (the `v0.3.37` release), where
+        # `verify-credentials` was queued from the run's first second, never acquired a
+        # runner, and was cancelled after 15m02s; `build` then ran because its own `if:`
+        # admits a cancelled dependency, and `release` was skipped because it needs `build`,
+        # which needs that job. Answering "nothing to explain" there is the same defect as
+        # reporting "could not measure" as a pass, and it costs more, because the reading
+        # that recommends this command (`check-release-published.py`'s FAULT remedy) is the
+        # one an operator reaches *after* the run has already been reported as failed.
+        #
+        # The run's own conclusion is what separates this from a run that succeeded with
+        # some jobs skipped (`workflow_dispatch` on a branch skips `verify-*` and `release`
+        # by design). It is fetched only here, so the ordinary paths keep one request.
+        if other_jobs:
+            try:
+                run = _run_conclusion(args.run_id, args.repo)
+            except Exception as exc:  # noqa: BLE001 - a report, not a crash
+                print(
+                    f"error: run {args.run_id} lists {len(other_jobs)} job(s) that did not "
+                    f"succeed and its own conclusion could not be read ({exc}) - whether this "
+                    "run failed is exactly the question, so it is unmeasured rather than "
+                    "'nothing to explain'",
+                    file=sys.stderr,
+                )
+                return 2
+            if run != "success":
+                # A `skipped` job is a **consequence**, never a cause: `release` is skipped
+                # exactly because the job it needs did not succeed, and telling a reader that
+                # "re-running asks the scheduler again" about it would send them after the
+                # wrong job. The causes are the ones that were cancelled or otherwise ended
+                # without success; the skipped ones are named, once, as what followed.
+                blocking = [
+                    job for job in other_jobs
+                    if str(job.get("conclusion") or "") != "skipped"
+                ]
+                consequent = [
+                    job for job in other_jobs
+                    if str(job.get("conclusion") or "") == "skipped"
+                ]
+                if args.json:
+                    print(json.dumps({
+                        "run": args.run_id, "repo": args.repo, "failed": True,
+                        "run_conclusion": run, "transport": transports_used(),
+                        "without_a_failed_job": [
+                            _otherwise_report(job) for job in blocking
+                        ],
+                        "skipped_as_a_consequence": [
+                            {"name": job.get("name"),
+                             "conclusion": job.get("conclusion")} for job in consequent
+                        ],
+                    }, indent=2))
+                else:
+                    print(
+                        f"no failed job in run {args.run_id} - the run itself concluded "
+                        f"`{run}`, and the job(s) that account for it are:"
+                    )
+                    for job in blocking:
+                        for line in _otherwise_lines(job):
+                            print(line)
+                    if consequent:
+                        names = ", ".join(str(job.get("name")) for job in consequent)
+                        print(
+                            f"  {names} [skipped] - downstream of the job(s) above, which is "
+                            "what skipping means here; the cause is not in them"
+                        )
+                return 0
         # A determinate reading: nothing failed. Exit 1, not 0 - "no failure" is not the
         # answer this tool was asked for, and a caller scripting it should see the
         # difference rather than a silent success.

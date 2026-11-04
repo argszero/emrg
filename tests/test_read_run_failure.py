@@ -110,11 +110,14 @@ class FakeGh:
     """
 
     def __init__(self, jobs: list[dict], logs: dict[int, str] | None = None,
-                 jobs_rc: int = 0, total_count: int | None = None):
+                 jobs_rc: int = 0, total_count: int | None = None,
+                 run_conclusion: str | None = "success", run_rc: int = 0):
         self.jobs = jobs
         self.logs = logs or {}
         self.jobs_rc = jobs_rc
         self.total_count = total_count
+        self.run_conclusion = run_conclusion
+        self.run_rc = run_rc
         self.calls: list[str] = []
 
     def __call__(self, path: str) -> str:
@@ -129,6 +132,14 @@ class FakeGh:
             if self.total_count is not None:
                 payload["total_count"] = self.total_count
             return json.dumps(payload)
+        if re.search(r"/actions/runs/\d+$", path):
+            if self.run_rc:
+                raise RuntimeError(
+                    f"gh api {path} failed (rc=1): gh: Server Error (HTTP 502)"
+                )
+            return json.dumps(
+                {"id": 42, "status": "completed", "conclusion": self.run_conclusion}
+            )
         if "/logs" in path:
             job_id = int(path.split("/actions/jobs/")[1].split("/")[0])
             if job_id not in self.logs:
@@ -189,6 +200,130 @@ def test_a_silent_step_is_still_named_by_the_job_payload(mod, monkeypatch, capsy
     assert rc == 0
     assert "18. Notarize pkg (macOS only)" in out
     assert "APPLE_ID: ***" in out, "the step's own block is what got printed"
+
+
+# --- a run that failed with no failed job -----------------------------------
+#
+# Measured 2026-11-04 on run 41862508461 (the v0.3.37 release): `verify-credentials` was
+# queued from the run's first second, never acquired a runner, and was cancelled after
+# 15m02s. `build` ran anyway - its own `if:` admits a cancelled dependency - and `release`
+# was skipped because it needs `build`, which needs that job. Every job's own conclusion was
+# therefore success, cancelled or skipped, so `failed_jobs` was empty and the tool answered
+# "nothing to explain" about a run whose conclusion is `failure`. The reading that sends an
+# operator here (`check-release-published.py`'s FAULT remedy) is the one reached *after* the
+# failure, so that answer is the whole cause they get.
+
+#: The starved job exactly as the API reports it: no steps, no runner, 15m02s held.
+_STARVED = {
+    "id": 9,
+    "name": "verify-credentials",
+    "conclusion": "cancelled",
+    "runner_name": None,
+    "started_at": "2026-11-04T19:05:01Z",
+    "completed_at": "2026-11-04T19:20:03Z",
+    "steps": [],
+}
+
+
+def test_a_failed_run_whose_only_other_job_never_started_is_explained(
+    mod, monkeypatch, capsys
+):
+    """The run failed, no job did: the unstarted job is the cause, and it must be named.
+
+    Exit 0 because the question *was* answered - not 1, which means "there is nothing to
+    explain".
+    """
+    fake = FakeGh(
+        [_job(name="verify-tag", conclusion="success"), _STARVED],
+        run_conclusion="failure",
+    )
+    rc = _run(mod, monkeypatch, fake, ["42"])
+    out = capsys.readouterr().out
+    assert rc == 0, f"a failed run was reported as having nothing to explain:\n{out}"
+    assert "verify-credentials [cancelled]" in out
+    assert "15m02s" in out, "the elapsed time is the reading that says it was starved"
+    assert "no step executed" in out
+    assert "no runner was ever assigned" in out, (
+        "the distinction that decides the remedy is scheduling, not a step failure, so "
+        "the runner field is the fact to print"
+    )
+    assert "nothing to explain" not in out
+
+
+def test_a_run_that_succeeded_with_skipped_jobs_still_says_nothing_to_explain(
+    mod, monkeypatch, capsys
+):
+    """The control: a branch dispatch skips `verify-*` and `release` by design.
+
+    Without this leg the new branch would fire on every `workflow_dispatch` run and turn a
+    normal skip into a reported failure.
+    """
+    fake = FakeGh(
+        [_job(conclusion="success"), _job(name="release", conclusion="skipped", job_id=2)],
+        run_conclusion="success",
+    )
+    rc = _run(mod, monkeypatch, fake, ["42"])
+    out = capsys.readouterr().out
+    assert rc == 1, "a run that succeeded has no failure to explain"
+    assert "nothing to explain" in out
+
+
+def test_an_unreadable_run_conclusion_is_unmeasured_not_explained(
+    mod, monkeypatch, capsys
+):
+    """Whether the run failed is the question, so failing to read it is exit 2.
+
+    Without this the tool would fall through to "nothing to explain" whenever the second
+    request failed - the same shape as the defect the branch exists to remove.
+    """
+    fake = FakeGh(
+        [_job(conclusion="success"), _STARVED],
+        run_conclusion="failure",
+        run_rc=1,
+    )
+    rc = _run(mod, monkeypatch, fake, ["42"])
+    captured = capsys.readouterr()
+    assert rc == 2, f"an unread run conclusion was answered as a verdict:\n{captured.out}"
+    assert "unmeasured" in captured.err
+    assert "nothing to explain" not in captured.out
+
+
+def test_a_skipped_job_is_named_as_a_consequence_not_a_cause(
+    mod, monkeypatch, capsys
+):
+    """`release` is skipped *because* the job it needs did not succeed.
+
+    Reported as a cause it would send the reader after the wrong job: the line that explains
+    a starved job says re-running asks the scheduler again, which is true of the cancelled
+    preflight and false of a job the graph skipped.
+    """
+    skipped = _job(name="release", conclusion="skipped", job_id=3)
+    skipped["steps"] = []
+    fake = FakeGh([_STARVED, skipped], run_conclusion="failure")
+    rc = _run(mod, monkeypatch, fake, ["42"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "verify-credentials [cancelled]" in out
+    assert "release [skipped]" in out and "downstream" in out
+    consequence_at = out.index("release [skipped]")
+    assert "no runner was ever assigned" not in out[consequence_at:], (
+        "the skipped job was explained with the starved job's reasoning:\n" + out
+    )
+
+
+def test_the_explanation_is_machine_readable(mod, monkeypatch, capsys):
+    """`--json` carries the same facts, so a caller need not parse the prose."""
+    fake = FakeGh([_STARVED], run_conclusion="failure")
+    rc = _run(mod, monkeypatch, fake, ["42", "--json"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["failed"] is True and payload["run_conclusion"] == "failure"
+    job = payload["without_a_failed_job"][0]
+    assert job["name"] == "verify-credentials"
+    assert job["runner_name"] is None
+    assert job["steps_executed"] == 0
+    assert job["elapsed"] == "15m02s"
 
 
 # --- the three-valued outcome ----------------------------------------------
