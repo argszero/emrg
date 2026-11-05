@@ -202,6 +202,17 @@ Write the product as the four or five segments a user passes through, in the ord
 
 Order the screens by the order a user uses them, not by the order the code is organised in. Where the order is a preference, the user may choose it — but content is not hidden behind a switch: a screen the user cannot reach is a screen the app does not have.
 
+#### 3.4 What the platform can do is looked up, not assumed
+
+A feasibility conclusion decides a direction and a design, so it is the one claim in this task that may not be made from memory. The inception record is where a direction's shape is fixed, and a wrong answer here is paid for by every later phase.
+
+- **Ask the platform's own documentation, not a recollection of it.** On-device models, frameworks and newly shipped APIs change between releases. A direction refused on a remembered limit has been refused for a fact that may no longer hold, and the refusal is indistinguishable in the record from one that was measured.
+- **A development machine's limit is not the user's device's.** What refuses to run here is a statement about this machine and about the SDK it happens to carry, never about the devices the app ships to.
+- **"It cannot be built here" is not "it cannot be done".** CI builds the matrix this host cannot. Ask what CI can build before narrowing the product to the local toolchain, and do not assert what that costs — an unpriced impression is what turns a buildable direction into an abandoned one.
+- **A dependency that raises the minimum OS version is a product decision, not a technical one.** It decides which devices can install the app, so it goes to the host with the numbers: the target today, the target the dependency forces, and what that leaves out. No round takes it on the host's behalf.
+- **A degraded implementation is not the feature.** When the documented way turns out to be unavailable, the feasibility question is asked again rather than a weaker version of the core shipped as though it were the same thing — a downgrade is a missing segment (§3.1) wearing the core's name.
+- **State the conclusion so the host can repeat it back.** One sentence, in the words a user of the app would use, is what makes a feasibility answer checkable by the person who carries the cost of being wrong about it.
+
 ---
 
 ### 4. Phase 4 — Implementation
