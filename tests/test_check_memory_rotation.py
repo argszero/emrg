@@ -966,3 +966,82 @@ def test_the_bookmark_default_names_the_file_this_installation_writes(mod):
         "renamed constant points at nothing and step 0 answers `not measurable` every cycle"
     )
 
+
+
+def _noted(path: Path, rows: list[tuple[str, str]], count: int) -> Path:
+    """A bookmark carrying `count` per-cycle notes above its table, one cycle id each."""
+    notes = "".join(f"`cyc2026102{i}-120000` read two projects at index level: the note.\n\n"
+                    for i in range(count))
+    lines = ["# Bookmark", "", notes.rstrip("\n"), "",
+             "| agent | newest read | files |", "| --- | --- | --- |"]
+    lines += [f"| {key} | {value} | 0 |" for key, value in rows]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def test_a_second_narration_block_is_a_fault_the_section_reading_cannot_show(mod, tmp_path):
+    """Measured 2026-11-05 on this host's own bookmark: 43 of them, structure reading 0.
+
+    A cycle's note carries no heading - each cycle replaces the paragraph before it - so
+    `cycle_sections()` was blind to all 43 while the file reached 729 lines and 94,482
+    characters. One subject, two shapes: this asserts the fault **beside** an empty `faults`
+    list, because every row still parses and a fix for one reading must not be read as a fix
+    for the other. Exit 1 is the file-shape complaint, never 2 - the rows were measured.
+    """
+    root = _root(tmp_path, "narrated")
+    _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
+    register = _agents(tmp_path / "agents.yml", [{"name": "narrated", "path": root}])
+    one = _noted(tmp_path / "one.md", [("`narrated`", BASE)], 1)
+    three = _noted(tmp_path / "three.md", [("`narrated`", BASE)], 3)
+
+    single = mod.read(register, one)
+    assert single["structure"] == [], single["structure"]
+    assert single["narration_blocks"] == 1
+    assert "1 narration block(s)" in mod.render(single, False)
+    assert mod.main(["--agents", str(register), "--bookmark", str(one)]) == 0
+
+    many = mod.read(register, three)
+    assert many["faults"] == [], many["faults"]          # every row still parses...
+    assert many["narration_blocks"] == 3
+    assert len(many["structure"]) == 1, many["structure"]  # ...and the prose was appended to
+    assert "3 per-cycle narration blocks" in many["structure"][0]
+    assert "structure faults: 1" in mod.render(many, False)
+    assert mod.main(["--agents", str(register), "--bookmark", str(three)]) == 1
+
+
+def test_contract_prose_and_a_mid_sentence_cycle_id_are_not_narration(mod, tmp_path):
+    """The other directions: only a block that **opens** on the code span is a cycle's note.
+
+    The file keeps rules of its own above the table, and those rules quote cycle ids as
+    evidence mid-sentence. Reading them as narration would fault the prose that states the
+    contract, so the match is anchored to the block's first line. A note indented under a
+    heading is still a note - the code span decides, not the heading - and a bookmark whose
+    prose carries none of them stays at zero.
+    """
+    root = _root(tmp_path, "prosing")
+    _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
+    register = _agents(tmp_path / "agents.yml", [{"name": "prosing", "path": root}])
+
+    contract = tmp_path / "contract.md"
+    contract.write_text(
+        "# Bookmark\n\n"
+        "**Two agents can carry one name.** Measured `cyc20261103-183416`: the register\n"
+        "lists it twice.\n\n"
+        "## Notes\n\n"
+        "- the qualifier matters, as `cyc20261020-120000` found\n\n"
+        "| agent | newest read | files |\n| --- | --- | --- |\n"
+        f"| `prosing` | {BASE} | 0 |\n", encoding="utf-8")
+    reading = mod.read(register, contract)
+    assert reading["structure"] == [], reading["structure"]
+    assert reading["narration_blocks"] == 0
+    assert mod.main(["--agents", str(register), "--bookmark", str(contract)]) == 0
+
+    nested = tmp_path / "nested.md"
+    nested.write_text(
+        "# Bookmark\n\n## Notes\n\n"
+        "`cyc20261021-120000` a note under a heading is still a per-cycle note.\n\n"
+        "| agent | newest read | files |\n| --- | --- | --- |\n"
+        f"| `prosing` | {BASE} | 0 |\n", encoding="utf-8")
+    nested_reading = mod.read(register, nested)
+    assert nested_reading["structure"] == [], nested_reading["structure"]
+    assert nested_reading["narration_blocks"] == 1
