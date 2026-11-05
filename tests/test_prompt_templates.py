@@ -3296,3 +3296,71 @@ def test_the_claim_provenance_rule_lives_in_the_section_that_writes_into_a_proje
         f"the provenance rule is stated {text.count('says who decided it')} times in "
         "open_source_prompt.md; this template's own rule is that a fact lives in exactly one place"
     )
+
+
+# ── the ios-app template's platform-feasibility rules ───────────────────────────────────────
+#
+# A feasibility conclusion decides a direction and a design, so it is the claim this template
+# can least afford to leave to memory. Measured on master `6f233a51`: the template answered
+# zero for `official doc`, `documentation`, `developer.apple`, `deployment target`,
+# `minimum os`, `CI` and `downgrade`, while the installation's own block for this task carried
+# every one of them as general method — the single concept of fifteen the two did not share.
+# These pins hold the section that now carries them, and the control below keeps the pin from
+# being satisfied by a section that has been emptied.
+
+_IOS_FEASIBILITY_HEADING = "#### 3.4 What the platform can do is looked up, not assumed"
+_IOS_FEASIBILITY_ENDS_AT = "### 4. Phase 4"
+
+IOS_FEASIBILITY_PHRASES = (
+    "Ask the platform's own documentation",
+    "not the user's device's",
+    'is not "it cannot be done"',
+    "raises the minimum OS version is a product decision",
+    "A degraded implementation is not the feature",
+    "repeat it back",
+)
+
+
+def _ios_feasibility_section(text: str) -> str:
+    return _bounded_section(text, _IOS_FEASIBILITY_HEADING, _IOS_FEASIBILITY_ENDS_AT)
+
+
+def test_the_ios_app_template_answers_a_capability_question_from_the_platform() -> None:
+    """§3.4 must send a capability question to the platform, to CI and to the host.
+
+    Not decoration: without this section the task decides what is buildable from what it
+    remembers, and the two ways that goes wrong are both silent. A remembered limit refuses a
+    direction on a fact that may no longer hold, and the refusal is indistinguishable in the
+    record from one that was measured; a limit of this development machine is read as a limit
+    of the user's device, which narrows the product to the local toolchain and to nothing real.
+    """
+    text = _IOS_TEMPLATE.read_text(encoding="utf-8")
+    section = _ios_feasibility_section(text)
+    missing = _missing_phrases(section, IOS_FEASIBILITY_PHRASES)
+    assert not missing, (
+        f"ios_app_prompt.md §3.4 no longer answers a capability question: {missing}. Without "
+        "these the section states a subject and gives the reader nothing to do with it."
+    )
+
+    # One home: a rule stated twice leaves a reader holding two answers with no way to choose.
+    assert text.count("Ask the platform's own documentation") == 1, (
+        "the platform-lookup rule is stated "
+        f"{text.count(chr(65) + 'sk the platform' + chr(39) + 's own documentation')} times in "
+        "ios_app_prompt.md; this template's own rule is that a fact lives in exactly one place"
+    )
+
+
+def test_the_ios_feasibility_pin_answers_both_ways() -> None:
+    """The control: a section that has lost a rule reads as missing, not as passing.
+
+    Without it, a section emptied of its content and a reader pointed at the wrong region read
+    the same as a section that still carries the rule — which is the defect the bounded-section
+    helper exists to prevent, one level up.
+    """
+    section = _ios_feasibility_section(_IOS_TEMPLATE.read_text(encoding="utf-8"))
+    for phrase in IOS_FEASIBILITY_PHRASES:
+        stripped = section.replace(phrase, "")
+        assert phrase in _missing_phrases(stripped, IOS_FEASIBILITY_PHRASES), (
+            f"deleting {phrase!r} from §3.4 still reads as present, so the pin above would "
+            "stay green on a section that had lost the rule"
+        )
