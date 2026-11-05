@@ -1493,6 +1493,51 @@ def test_open_source_entry_check_reads_the_claim_thread():
     assert "say so on the issue itself" in out, "§1.1 的留言认领规则仍在"
 
 
+def test_open_source_large_change_asks_without_waiting_for_a_reply():
+    """§3.1.1 raises a large change as a step, never as a wait (issue #2728).
+
+    A cycle is one scheduled run: nothing suspends it and nothing resumes it when a reply
+    lands, so "wait for a maintainer's word" had no executable meaning. Followed literally
+    it ended in one of two ways — a cycle idling on an answer that arrives tomorrow, or the
+    question asked with nothing recorded, so the next cycle could not tell "raised, awaiting"
+    from "nothing done" and asked again. `feishu_prompt.md` states the shape a run can
+    execute ("carry on … without waiting"); this pins the sibling template to the same rule.
+
+    Both directions, over a subject the test first shows to be there: the replacement
+    renders, **and** the phrase it replaced is gone — a fix that added the new sentence
+    beside the old one would leave both instructions standing.
+    """
+    import jinja2
+
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "emrg" / "server" / "open_source_prompt.md"
+    )
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(template_path.read_text(encoding="utf-8"))
+    out = template.render(
+        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
+        timestamp="20260824",
+        task={"role": "committer", "agent": "aitokenpool"},
+        agent={}, git_path="git", gh_path="gh",
+    )
+    # 0) the subject is there at all — a template that failed to render past this point must
+    #    not be read as "the forbidden phrase is absent"
+    assert "A large change is discussed before it is built" in out, "大幅度改动须先讨论"
+    # 1) what the cycle does instead of waiting
+    assert "carry on with the rest of this cycle without waiting for a reply" in out, \
+        "提问不得阻塞本轮：一轮只有一次运行，等待的答案不可能在本次运行内到达"
+    # 2) where the question is kept, so the next cycle inherits it as state
+    assert "Record the question under §4 item 4" in out, "未答复的提问须记入 §4 第 4 项"
+    # 3) and the instruction it replaces is gone — not merely accompanied
+    assert "wait for a maintainer's word" not in out, "不得保留『等待维护者回复』"
+    # 4) the rule the ask protects survives the rewrite: an uninvited PR is still the one
+    #    that gets closed, so "do not wait" cannot be read as "do not ask"
+    assert "a PR nobody asked for, on a direction nobody agreed to, is the one that gets closed" in out, \
+        "先问后做的实质规则须保留"
+
+
 def test_open_source_template_empty_recon_names_the_extension_surface():
     """§2's empty-Recon sentence counts §1.6 among the readings that showed nothing (issue #2371).
 
