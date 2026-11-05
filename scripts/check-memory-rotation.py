@@ -326,6 +326,14 @@ def _read_by_of(cells: list[str]) -> str | None:
 #: answers "32 of 32" while the file it is embedded from grows every cycle.
 CYCLE_SECTION = re.compile(r"^##\s+Cycle\b")
 
+#: The opening of a **per-cycle narration block** above the bookmark's table.
+#:
+#: A cycle's note is usually a paragraph, not a heading: it opens with its own id in a code
+#: span and the next cycle replaces it. `CYCLE_SECTION` cannot see that shape, and measured
+#: 2026-11-05 the gap was 43 blocks over 729 lines and 94,482 characters while the structure
+#: reading answered `0 cycle section(s)` and exited 0.
+CYCLE_NARRATION = re.compile(r"^`cyc\d{8}-\d{6}`")
+
 
 def parse_bookmark(path: Path) -> list[dict]:
     """Every body row of the bookmark's table, in file order, as key/value pairs.
@@ -447,6 +455,49 @@ def cycle_sections(path: Path) -> list[str]:
     return [line.strip() for line in text.splitlines() if CYCLE_SECTION.match(line)]
 
 
+def narration_blocks(path: Path) -> list[str]:
+    """The per-cycle narration above the bookmark's table, one entry per block.
+
+    A block is a run of non-blank lines, and it counts as narration when its **first** line
+    opens with a cycle id in a code span (:data:`CYCLE_NARRATION`) - the shape a cycle's own
+    note has taken. The reading stops at the table's first row, because below it the file is
+    rows and not prose.
+
+    This exists because :func:`cycle_sections` reads only `## Cycle` headings, and the
+    ordinary note carries none: a cycle replaces the paragraph that came before it rather
+    than opening a section. Measured 2026-11-05, this file carried **43** such blocks over
+    729 lines and 94,482 characters while the structure reading answered `0 cycle
+    section(s)` and exited 0 - growth the guard was written to catch, in the shape it could
+    not see.
+
+    An absent or unreadable bookmark answers `[]` for the reason :func:`cycle_sections`
+    gives: `parse_bookmark` owns that complaint, and a second reading that raised would
+    replace a precise sentence with a vaguer one.
+
+    :param path: the bookmark to read.
+    :returns: the first line of each narration block, stripped, in file order.
+    """
+    if not path.is_file():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return []
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in text.splitlines():
+        if _is_table_line(line):
+            break                       # the table is what the file exists for
+        if line.strip():
+            current.append(line)
+        elif current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+    return [block[0].strip() for block in blocks if CYCLE_NARRATION.match(block[0].strip())]
+
+
 def structure_faults(headings: list[str]) -> list[str]:
     """The faults in the bookmark's structure **above** its table, not in its rows.
 
@@ -475,6 +526,33 @@ def structure_faults(headings: list[str]) -> list[str]:
         f"avoid (measured 2026-10-21: 359 lines, eight sections, one duplicated), and this "
         f"file is embedded in every cycle's prompt, so each appended section is paid for on "
         f"every round that reads it"
+    ]
+
+
+def narration_faults(blocks: list[str]) -> list[str]:
+    """The faults in the bookmark's per-cycle narration: it keeps **one**, replaced in place.
+
+    The same subject as :func:`structure_faults` - growth above the table - given the same
+    treatment and for the same reason: a fault, never a refusal, so every row is still
+    measured and the exit code carries the file-shape complaint without throwing away a
+    valid rotation reading.
+
+    One block is the contract's shape (the current cycle's note) and none is a minimal or
+    first-ever bookmark. Only a second block is the growth the file's own rule forbids, and
+    it is the shape the section reading cannot see.
+
+    :param blocks: the block first lines, from :func:`narration_blocks`.
+    :returns: one sentence per fault, empty when the file keeps one note and no more.
+    """
+    if len(blocks) < 2:
+        return []
+    named = ", ".join(blocks[:5]) + (f", and {len(blocks) - 5} more" if len(blocks) > 5 else "")
+    return [
+        f"the bookmark carries {len(blocks)} per-cycle narration blocks above its table "
+        f"({named}): it keeps one and replaces it in place - an appended note is the same "
+        f"growth the cycle-section reading forbids, in the shape that reading cannot see "
+        f"(measured 2026-11-05: 43 blocks over 729 lines and 94,482 characters, while the "
+        f"structure reading answered 0), and every cycle that edits this file reads past them"
     ]
 
 
@@ -698,7 +776,8 @@ def read(agents_path: Path, bookmark_path: Path) -> dict:
               for p in agents]
     faults = []
     sections = cycle_sections(bookmark_path)
-    structure = structure_faults(sections)
+    notes = narration_blocks(bookmark_path)
+    structure = structure_faults(sections) + narration_faults(notes)
     for state in states:
         if state["state"] == "no bookmark row":
             faults.append(f"{state['name']} ({state['path']}) has a line in the register and none in "
@@ -726,6 +805,7 @@ def read(agents_path: Path, bookmark_path: Path) -> dict:
         "states": states,
         "faults": faults,
         "cycle_sections": len(sections),
+        "narration_blocks": len(notes),
         "structure": structure,
     }
 
@@ -785,10 +865,12 @@ def render(reading: dict, show_all: bool) -> str:
         out.append(f"structure faults: {len(reading['structure'])}")
         out.extend(f"  {fault}" for fault in reading["structure"])
         out.append("the rows above are still readable - this is the prose above them: keep one "
-                   "cycle section and replace it in place, never append a second")
+                   "cycle section and one narration block, and replace them in place, never "
+                   "append a second")
     else:
-        out.append(f"structure: {reading['cycle_sections']} cycle section(s) above the table - "
-                   f"the file keeps at most one, replaced in place")
+        out.append(f"structure: {reading['cycle_sections']} cycle section(s) and "
+                   f"{reading['narration_blocks']} narration block(s) above the table - "
+                   f"the file keeps at most one of each, replaced in place")
     return "\n".join(out)
 
 
