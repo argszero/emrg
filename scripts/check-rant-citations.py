@@ -168,6 +168,7 @@ INSTRUCTION_FILES = (
     "emrg/server/journal_prompt.md",
     "emrg/server/open_source_prompt.md",
     "emrg/server/promote_prompt.md",
+    "emrg/server/self_media_prompt.md",      # a task template (#2714)
     "emrg/server/paper_prompt.md",
     "emrg/server/prompts/boss.j2",               # rendered per `boss` call (#2467)
     "emrg/server/prompts/memory_compaction.j2",  # rendered by daemon.COMPACTION_TEMPLATE
