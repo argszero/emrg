@@ -400,7 +400,7 @@ it does.
 | Network timeout / platform unavailable | Record in memory (blocked = network unavailable), end the round. **Do not retry** — a repeated call that already failed is not a route, and hammering it is what this row forbids. A *different* route to the same reading is the blocker rule's first case, and is worth one attempt if it cannot touch the score |
 | Rules text unobtainable (login wall, render failure) | **Reject by default** (§3.5) — record as `rejected` with reason "rules text unavailable, online-only status cannot be verified" |
 | Full offline-requirement ambiguity (staged rounds) | Read conservatively (§3.6) → do not enter |
-| Needs a human action (real-name, SMS, card authorization) | Write into `blocked` with what the host must do; **do not retry, do not work around it** |
+| Needs a human action (real-name, SMS, card authorization) | **Check it in the real browser first** — the platform's own page shows whether the record already exists, and a logged-out probe is not evidence about the account. Then write into `blocked` naming the step that blocks and what the host must do; **do not retry, do not work around it** |
 | Submission fails / score unavailable | Record the exact failure; if no score can be obtained, stop iterating and record `blocked` — never iterate without a score anchor |
 | Compute infeasible (GPU-heavy) | Mark `rejected` with reason "not solvable on the available compute (no NVIDIA GPU)" |
 | Deadline passed | Freeze (Phase E), record the final standing, archive (Phase F) |

@@ -278,6 +278,23 @@ Failing → fix, re-test, until green; a failure you cannot fix does not get hid
 
 **A suite that could not be run is not a suite that failed.** `command not found`, an exec-format error or an interpreter that is simply absent says nothing about the project — the shell never started the runner, so no test was collected. Record it as a skip: name the command and its exact error in the closing summary, state that the suite did not run, and finish the cycle without a verdict about that tree. Read as a failure it invents a defect the project does not have; read as green it claims a run that never happened.
 
+**The same rule covers the host's side of the ledger.** Before this cycle concludes that a step is
+**the host's own** — a CLA or contributor agreement, an account status, a repository setting, a
+maintainer-only page — check that state in the real browser: those pages render the account's actual
+record, while an API or CLI probe answers about a logged-out view and is not evidence about the
+account. A conclusion that only the host can act is a claim like any other, and it is the expensive
+kind, because it spends the host's time on work the cycle could have done.
+
+An agreement signed years ago, a verification already completed, a setting already carried — each is
+invisible from the outside and decisive from the browser. So the working order is: **drive the browser,
+read the actual record, and only then decide.** Where automation genuinely cannot perform the step —
+a password only the host knows, a 2FA prompt, a legal-entity signature — the fallback **names that
+step and why**, never a bare "this one is the host's". `§4` item 4 is where it is then written down.
+
+This is a rule about **capability**, and it is not a licence about **permission**: a step that would
+spend money, change an account setting or sign anything as the host stays a stop-and-ask, whatever the
+browser shows.
+
 ##### 3.1.7 Commit and open the pull request
 
 Commit and branch names follow the project's conventions (§3.1.3); with none specified, use `fix/<description>` and `<scope>: <description>`.
