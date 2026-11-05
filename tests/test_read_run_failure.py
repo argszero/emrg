@@ -111,13 +111,15 @@ class FakeGh:
 
     def __init__(self, jobs: list[dict], logs: dict[int, str] | None = None,
                  jobs_rc: int = 0, total_count: int | None = None,
-                 run_conclusion: str | None = "success", run_rc: int = 0):
+                 run_conclusion: str | None = "success", run_rc: int = 0,
+                 run_status: str = "completed"):
         self.jobs = jobs
         self.logs = logs or {}
         self.jobs_rc = jobs_rc
         self.total_count = total_count
         self.run_conclusion = run_conclusion
         self.run_rc = run_rc
+        self.run_status = run_status
         self.calls: list[str] = []
 
     def __call__(self, path: str) -> str:
@@ -138,7 +140,7 @@ class FakeGh:
                     f"gh api {path} failed (rc=1): gh: Server Error (HTTP 502)"
                 )
             return json.dumps(
-                {"id": 42, "status": "completed", "conclusion": self.run_conclusion}
+                {"id": 42, "status": self.run_status, "conclusion": self.run_conclusion}
             )
         if "/logs" in path:
             job_id = int(path.split("/actions/jobs/")[1].split("/")[0])
@@ -285,6 +287,36 @@ def test_an_unreadable_run_conclusion_is_unmeasured_not_explained(
     captured = capsys.readouterr()
     assert rc == 2, f"an unread run conclusion was answered as a verdict:\n{captured.out}"
     assert "unmeasured" in captured.err
+    assert "nothing to explain" not in captured.out
+
+
+def test_a_run_that_has_not_concluded_is_unmeasured_not_a_failure(
+    mod, monkeypatch, capsys
+):
+    """A run still in progress carries `conclusion: null`. That is not a verdict.
+
+    The branch this pins is the null check: without it `str(None)` is the string "None",
+    which is not "success", so an unfinished run falls into the branch that explains a
+    *failed* run - the same defect as answering "nothing to explain", one step further
+    along. The unread-run test above cannot catch it, because it hands the reader a
+    transport error rather than a payload whose conclusion is null.
+
+    Measured live on run 41938836857 while it was still running: exit 2, not a verdict.
+    """
+    fake = FakeGh([_STARVED], run_conclusion=None, run_status="in_progress")
+    rc = _run(mod, monkeypatch, fake, ["42"])
+    captured = capsys.readouterr()
+    assert rc == 2, (
+        f"a run that has not concluded was answered as a verdict:\n{captured.out}"
+    )
+    assert "unmeasured" in captured.err
+    assert "no conclusion yet" in captured.err
+    assert "in_progress" in captured.err, (
+        "the reason must name the state such a run actually has, not `completed`"
+    )
+    assert "the run itself concluded" not in captured.out, (
+        "an unfinished run was explained as though it had failed:\n" + captured.out
+    )
     assert "nothing to explain" not in captured.out
 
 
