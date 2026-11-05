@@ -4816,13 +4816,13 @@ def test_self_media_is_a_builtin_task_type():
     assert path.stat().st_size > 0, "a template that renders nothing is not a built-in type"
 
 
-def test_self_media_template_carries_its_four_steps():
-    """The round's four steps, in order, with the rules that make each one checkable."""
+def test_self_media_template_carries_its_five_steps():
+    """The round's five steps, in order, with the rules that make each one checkable."""
     text = _self_media_template_text()
     flat = " ".join(text.split())
 
     steps = ["### 1. Read the trends", "### 2. Choose the topic",
-             "### 3. Draft", "### 4. Archive"]
+             "### 3. Draft", "### 4. Publish", "### 5. Archive"]
     positions = [flat.find(step) for step in steps]
     assert all(position >= 0 for position in positions), (
         f"every step must have its own section; missing: "
@@ -4830,7 +4830,8 @@ def test_self_media_template_carries_its_four_steps():
     )
     assert positions == sorted(positions), (
         "the steps are read in order — a round that drafts before it chooses a topic has "
-        "already decided what the piece is about"
+        "already decided what the piece is about, and a round that archives before it "
+        "publishes records a reading of an act it never took"
     )
 
     for phrase, why in (
@@ -4848,24 +4849,110 @@ def test_self_media_template_carries_its_four_steps():
          "the chosen structure carries a reason: without it the choice is habit, and no "
          "later round can learn which structure worked"),
         ("<YYYY-MM-DD>-<platform>-<slug>.md",
-         "§4's file-name rule is what makes a directory of drafts sortable a month later; "
+         "§5's file-name rule is what makes a directory of drafts sortable a month later; "
          "a name without the date or the platform cannot be searched for either"),
         ("One file per round", "one round is one product (§0)"),
         ("never appended to",
          "a second round appending to the first one's file makes every reading in it describe "
          "two pieces"),
-        ("`topic_source`", "§4 lists the readings the file must carry"),
-        ("`word_count`", "§4 lists the readings the file must carry"),
-        ("`trend_data`", "§4 lists the readings the file must carry"),
+        ("`topic_source`", "§5 lists the readings the file must carry"),
+        ("`word_count`", "§5 lists the readings the file must carry"),
+        ("`trend_data`", "§5 lists the readings the file must carry"),
         ("measured", "a count that was estimated is not a reading"),
-        ("No publishing",
-         "the round ends at a draft: publication is the host's decision, and a template that "
-         "leaves it implicit is how a task posts on its own"),
-        ("No account login",
-         "a task that signs in holds the host's credentials; §0 refuses that outright and "
-         "makes a login-gated step a blocked item instead"),
+        ("`publish`",
+         "§5 lists the readings the file must carry, and the publish outcome is one of them"),
+        ("declared in `extra_prompt`",
+         "a draft-only channel is the installation's decision, and extra_prompt is the only "
+         "place the template lets it be made"),
     ):
         assert phrase in flat, f"the self-media template must state that {why}; {phrase!r} is missing"
+
+
+def test_self_media_publish_reuses_the_hosts_session_and_never_touches_a_credential():
+    """Both sides of §0's rule, because a guard that pins one side passes a wrong template.
+
+    The template used to state only the prohibition, so a round that posted from the browser
+    the host was already signed in with read as a violation of it. A permission with no
+    prohibition is the opposite defect: it invites a round to sign in. Neither half alone
+    survives here.
+    """
+    flat = " ".join(_self_media_template_text().split())
+
+    assert "session this machine already holds" in flat, (
+        "publishing must reuse the session already signed in on this machine — without that "
+        "half the only way left to publish is a login the same section forbids"
+    )
+    for phrase in ("never signs in again", "no password", "no cookie", "no token",
+                   "no account setting"):
+        assert phrase in flat, (
+            f"the credential side must be stated too, and name {phrase!r}: a template that only "
+            f"permits the session reads as permission to sign in"
+        )
+    assert "`blocked`" in flat and "never worked around" in flat, (
+        "a step only the account holder can take is a blocked item, and the round does not get "
+        "around it"
+    )
+
+
+def test_self_media_publishes_once_and_verbatim():
+    """One post per piece and the draft's own words: the two rules a re-run can break."""
+    flat = " ".join(_self_media_template_text().split())
+
+    for phrase, why in (
+        ("One publishing act per round",
+         "a second post of one piece is what a retry after a `failed` reading produces"),
+        ("never published twice",
+         "a re-run must find the earlier post rather than make a second one"),
+        ("Read the earlier rounds",
+         "the re-run rule needs the archive read before the round acts"),
+        ("word for word",
+         "the posted body is the archived draft; a reflowed post is a second, unarchived piece"),
+    ):
+        assert phrase in flat, f"the template must state that {why}; {phrase!r} is missing"
+
+
+def test_self_media_readings_block_carries_the_publish_outcome():
+    """§5 is where the publish reading lands, and the closing summary reports it."""
+    flat = " ".join(_self_media_template_text().split())
+
+    archive = flat[flat.find("### 5. Archive"):]
+    assert archive, "there is no §5 to hold the readings block"
+    for phrase in ("| `publish` |", "`posted`", "`failed`", "`not attempted`",
+                   "post's id or link"):
+        assert phrase in archive, (
+            f"§5's readings block must carry the publish outcome; {phrase!r} is missing from it"
+        )
+    summary = flat[flat.find("### Closing summary"):]
+    assert summary, "there is no closing summary to report the outcome in"
+    assert "§4's outcome" in summary, (
+        "the closing summary reports the publish outcome — a round that published and did not "
+        "say so is one the host cannot act on"
+    )
+
+
+def test_self_media_template_no_longer_forbids_publishing():
+    """The abolished prohibitions, asserted absent, over a subject that is really there.
+
+    "No publishing" made the task's own output impossible, and "publication is the host's own
+    decision" handed the round to a process this repository does not define. A synonym left
+    behind is the same rule in another spelling, so the sentences they lived in go too.
+    """
+    flat = " ".join(_self_media_template_text().split())
+
+    assert "Publish" in flat, (
+        "the absence assertions below are readings of a real template; a failed read would pass "
+        "every one of them"
+    )
+    for phrase, why in (
+        ("No publishing", "publishing is the round's fourth step"),
+        ("No account login", "a session already signed in may be reused; the rule is credentials"),
+        ("Never publish anything", "only a second publish is forbidden"),
+        ("not sent anywhere", "the round sends the piece"),
+        ("Nothing leaves the machine", "the round sends the piece"),
+        ("the host's own decision", "no configured process makes that decision"),
+        ("publication is a separate capability", "publishing is this task's own step"),
+    ):
+        assert phrase not in flat, f"the template must no longer say {phrase!r}: {why}"
 
 
 def test_self_media_builtin_cannot_be_shadowed_by_a_custom_template(tmp_path, monkeypatch):
