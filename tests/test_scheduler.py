@@ -1244,7 +1244,7 @@ def test_task_extra_prompt_conditional_all_templates():
     extra = "插件开发（plugin）也是对本项目的合法贡献，不应被排除在贡献范围之外"
     heading = "Task-specific Instructions (extra_prompt from tasks.yml)"
     for name in ("evolution_prompt.md", "paper_prompt.md", "open_source_prompt.md",
-                 "promote_prompt.md", "journal_prompt.md"):
+                 "promote_prompt.md", "journal_prompt.md", "self_media_prompt.md"):
         tpl = env.from_string((server_dir / name).read_text(encoding="utf-8"))
         # positive: extra_prompt configured → injected near the top
         out = tpl.render(task={"extra_prompt": extra, "role": "committer"}, **base)
@@ -4780,3 +4780,175 @@ class TestSchedulerWritersAskTheKindBeforeOpening:
                 f"{method.split('_', 1)[1]} is called outside {method}() by {sorted(unexpected)} "
                 f"— every open in this module asks its subject's kind first (issue #2095)"
             )
+
+
+# ── self-media task type (issue #2714) ─────────────────────────────
+
+
+def _self_media_template_text() -> str:
+    """The built-in self-media prompt, read through the mapping rather than a path.
+
+    Reading it through ``TASK_TEMPLATES`` is deliberate: a test that hard-codes
+    ``emrg/server/self_media_prompt.md`` keeps passing after the mapping is renamed,
+    which is the half of the pair that actually renders.
+    """
+    from emrg.server.scheduler import TASK_TEMPLATES
+
+    path = (Path(__file__).resolve().parent.parent / "emrg" / "server"
+            / TASK_TEMPLATES["self-media"])
+    return path.read_text(encoding="utf-8")
+
+
+def test_self_media_is_a_builtin_task_type():
+    """The key, the file name and the file are one fact; either half alone renders nothing."""
+    from emrg.server import scheduler as mod
+
+    assert "self-media" in mod.TASK_TEMPLATES, (
+        "self-media must be a built-in type: a tasks.yml record naming it has to work on an "
+        "installation that has no ~/.emrg/task-templates/ at all"
+    )
+    assert mod.TASK_TEMPLATES["self-media"] == "self_media_prompt.md", (
+        "the key spells the type with a hyphen and the file with underscores, like every "
+        "sibling in this mapping"
+    )
+    path = (Path(__file__).resolve().parent.parent / "emrg" / "server" / "self_media_prompt.md")
+    assert path.exists(), f"the mapping names a file that does not exist: {path.name}"
+    assert path.stat().st_size > 0, "a template that renders nothing is not a built-in type"
+
+
+def test_self_media_template_carries_its_four_steps():
+    """The round's four steps, in order, with the rules that make each one checkable."""
+    text = _self_media_template_text()
+    flat = " ".join(text.split())
+
+    steps = ["### 1. Read the trends", "### 2. Choose the topic",
+             "### 3. Draft", "### 4. Archive"]
+    positions = [flat.find(step) for step in steps]
+    assert all(position >= 0 for position in positions), (
+        f"every step must have its own section; missing: "
+        f"{[s for s, p in zip(steps, positions) if p < 0]}"
+    )
+    assert positions == sorted(positions), (
+        "the steps are read in order — a round that drafts before it chooses a topic has "
+        "already decided what the piece is about"
+    )
+
+    for phrase, why in (
+        ("no real-time data was obtained",
+         "§1's fallback level needs a fixed marker: a round without live data must still "
+         "produce a product, and the host must be able to tell that product apart from one "
+         "built on a signal"),
+        ("List-style",
+         "§3 must name all three structures — one missing is a structure no round can pick"),
+        ("Single-point long form",
+         "§3 must name all three structures — one missing is a structure no round can pick"),
+        ("Narrative",
+         "§3 must name all three structures — one missing is a structure no round can pick"),
+        ("state why that one for this topic",
+         "the chosen structure carries a reason: without it the choice is habit, and no "
+         "later round can learn which structure worked"),
+        ("<YYYY-MM-DD>-<platform>-<slug>.md",
+         "§4's file-name rule is what makes a directory of drafts sortable a month later; "
+         "a name without the date or the platform cannot be searched for either"),
+        ("One file per round", "one round is one product (§0)"),
+        ("never appended to",
+         "a second round appending to the first one's file makes every reading in it describe "
+         "two pieces"),
+        ("`topic_source`", "§4 lists the readings the file must carry"),
+        ("`word_count`", "§4 lists the readings the file must carry"),
+        ("`trend_data`", "§4 lists the readings the file must carry"),
+        ("measured", "a count that was estimated is not a reading"),
+        ("No publishing",
+         "the round ends at a draft: publication is the host's decision, and a template that "
+         "leaves it implicit is how a task posts on its own"),
+        ("No account login",
+         "a task that signs in holds the host's credentials; §0 refuses that outright and "
+         "makes a login-gated step a blocked item instead"),
+    ):
+        assert phrase in flat, f"the self-media template must state that {why}; {phrase!r} is missing"
+
+
+def test_self_media_builtin_cannot_be_shadowed_by_a_custom_template(tmp_path, monkeypatch):
+    """Built-in resolution wins over a same-named user template.
+
+    Inverting the two lookups in ``_resolve_task_template`` reddens this: the host's local
+    file would then silently replace a prompt that ships with the version.
+    """
+    from emrg.server import scheduler as mod
+
+    (tmp_path / "task-templates").mkdir()
+    (tmp_path / "task-templates" / "self-media.md").write_text(
+        "# evil override\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(mod, "config_dir", lambda: tmp_path)
+
+    resolved = mod._resolve_task_template("self-media")
+    assert resolved.name == "self_media_prompt.md", (
+        "a local self-media.md must not shadow the built-in prompt"
+    )
+    assert "task-templates" not in str(resolved)
+    assert resolved.exists()
+
+
+def test_self_media_record_is_creatable_and_unknown_types_still_fail(tmp_path):
+    """The point of the built-in registration: creatable with no user template on disk."""
+    mod, orig = _p2_env(tmp_path)  # tmp_path has NO task-templates/ dir
+    try:
+        sched = TaskScheduler(InstanceIdentity())
+        sched._tasks_file = tmp_path / "tasks.yml"
+        ok, task = sched.task_create("media-task", "self-media", "emrg", 3600)
+        assert ok, task
+        assert task["type"] == "self-media"
+        # the guard this changes nothing about: an unknown type is still refused
+        ok, err = sched.task_create("other", "no-such-type", "emrg", 60)
+        assert not ok and "unknown task type" in err
+    finally:
+        mod.config_dir = orig
+
+
+def test_self_media_template_renders_in_both_extra_prompt_states():
+    """Positive AND negative: configured renders the section, absent leaves no residue."""
+    import jinja2
+
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(_self_media_template_text())
+    base = dict(
+        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git",
+        owner="x", repo="y", local_source="/tmp/os", source_dir="/tmp/os",
+        session_id="media-task", timestamp="20261105-114423",
+        current_time_human="2026-11-05 11:44", agent={"name": "emrg"},
+    )
+    extra = "voice: plain and specific; nothing about pricing"
+
+    out = template.render(task={"extra_prompt": extra, "platform": "xiaohongshu"}, **base)
+    assert "Task-specific Instructions" in out
+    assert extra in out
+    assert "xiaohongshu" in out, "the platform reaches the round from tasks.yml"
+    assert "media-task" in out, "the archive directory is named after the task"
+    assert "{{" not in out, "an unrendered placeholder means the context lost a name"
+
+    out2 = template.render(task={"platform": "xiaohongshu"}, **base)
+    assert "Task-specific Instructions" not in out2
+    assert extra not in out2
+
+
+def test_self_media_is_listed_as_a_viewable_builtin(tmp_path):
+    """`builtin: true` plus a non-empty body is what the GUI's read-only viewer shows."""
+    mod, orig = _p2_env(tmp_path)
+    try:
+        sched = TaskScheduler(InstanceIdentity())
+        sched._tasks_file = tmp_path / "tasks.yml"
+        rows = {row["name"]: row for row in sched.list_templates()}
+        assert "self-media" in rows, "the GUI lists types from list_templates()"
+        row = rows["self-media"]
+        assert row["builtin"] is True
+        assert row["template"] == "self_media_prompt.md"
+        assert row["prompt"].strip(), "a built-in with an empty body cannot be viewed"
+        assert "no real-time data was obtained" in row["prompt"]
+        # and the CRUD verbs treat it as read-only, like every other built-in
+        ok, err = sched.template_update("self-media", "x")
+        assert not ok and "read-only" in err
+        ok, err = sched.template_delete("self-media")
+        assert not ok and "read-only" in err
+    finally:
+        mod.config_dir = orig

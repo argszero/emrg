@@ -66,6 +66,7 @@ FULL_TASK_CONFIG: dict = {
     "role": "committer",
     "author_id": "argszero",
     "keywords": "demo, wiring",
+    "platform": "xiaohongshu",
     "extra_prompt": "EXTRA-PROMPT-MARKER",
     "allow_self_merge": True,
 }
