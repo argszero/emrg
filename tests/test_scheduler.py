@@ -1359,6 +1359,46 @@ def test_open_source_template_measures_the_shipped_artifact():
     assert out.index("A defect is a claim about what the project ships") < out.index("##### 3.1.4 Fork, clone and branch"), "规则应落在 §3.1.3 内"
 
 
+def test_open_source_template_forbids_backgrounding_a_command():
+    """open_source_prompt.md §Forbidden says how a command must be run (issue #2736).
+
+    Three task configurations independently refiled this rule into their own
+    `extra_prompt` — the one field an installation has for a rule its prompt is
+    missing — in three unrelated phrasings, while two of them also restated the
+    resident-process ban the template already carries. A background child inherits
+    the tool call's stdout pipe and holds it open after the direct child exits, so
+    the call never returns and the round dies with the work queued behind it.
+    """
+    import jinja2
+
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "emrg" / "server" / "open_source_prompt.md"
+    )
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(template_path.read_text(encoding="utf-8"))
+    out = template.render(
+        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
+        timestamp="20260814",
+        task={"role": "committer", "agent": "aitokenpool"},
+        agent={}, git_path="git", gh_path="gh",
+    )
+    # 1) the rule names every form a reader could exempt itself with
+    assert "Never start a background process" in out, "应禁止后台进程"
+    for form in ("`&`", "`nohup`", "`disown`", "`setsid`", "detached `subprocess`/`Popen`"):
+        assert form in out, f"应点名形式 {form}"
+    # 2) the habit that replaces them, the mechanism behind the ban, and the fallback
+    assert "runs in the **foreground**, one at a time, and is waited for" in out, "应给出前台单发的习惯"
+    assert "holds it open after the direct child exits" in out, "应说明管道被子进程持有这一机制"
+    assert "do less and report it" in out, "应说明测不完时怎么办"
+    # 3) it stays inside the section that owns prohibitions, grouped with the red lines
+    assert out.index("Never start a background process") > out.index("### Forbidden"), \
+        "规则应落在 ### Forbidden 内"
+    assert out.index("Never start a background process") > out.index("_guard_upgrade_hermeticity"), \
+        "规则应与两条最高原则同处一节"
+
+
 def test_open_source_template_distinguishes_an_unrunnable_toolchain():
     """open_source_prompt.md §3.1.6 resolves the runner before reading a result, and
     treats a suite that could not start as a skip rather than a failure (issue #2515).
