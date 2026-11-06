@@ -1950,10 +1950,19 @@ def test_a_top_level_copy_that_cannot_render_is_named(tmp_path, monkeypatch, cap
 # between two claims about it, and it said the top-level block renders.
 _STALE_PLACEMENT_CLAIM = "reads as absent"
 
-#: The halves of the mechanism a reader of the ios-app template depends on: the fallback
-#: exists, and the canonical home still wins. Pinning only the removal of the stale sentence
-#: would let the paragraph be deleted instead of corrected.
-_IOS_APP_PLACEMENT_CLAIMS = ("top level is honoured too", "`config:` wins")
+#: The section that owns the subject, bounded at its next heading: the rule is read where it is
+#: stated, not anywhere in the document. `_bounded_section` control-asserts both ends, so a
+#: renamed heading fails here instead of widening the region to the rest of the file.
+_IOS_PLACEMENT_HEADING = "#### 0.1 Instance values come from `extra_prompt`, never from this file"
+_IOS_PLACEMENT_ENDS_AT = "#### 0.2 Credentials"
+
+#: The two homes the rule must name, in whatever words it uses. A position name is what a reword
+#: cannot drop without losing half the mechanism — unlike the two whole sentences this leg used
+#: to pin, which any reword replaced. Each is a spelling-tolerant pattern, not a phrase.
+_IOS_APP_PLACEMENT_HOMES = (
+    ("the canonical `config:` home", re.compile(r"config:", re.IGNORECASE)),
+    ("the record's top level", re.compile(r"top[\s-]level", re.IGNORECASE)),
+)
 
 
 def test_no_template_says_a_top_level_extra_prompt_renders_nothing() -> None:
@@ -1978,16 +1987,34 @@ def test_no_template_says_a_top_level_extra_prompt_renders_nothing() -> None:
 
 
 def test_the_ios_app_template_states_the_placement_rule_it_depends_on() -> None:
-    """Correcting the sentence is not enough — the paragraph must carry the real rule.
+    """§0.1 must still name both homes `extra_prompt` may sit in.
 
-    Named limit: this pins the presence of both halves, not that a reader acts on them.
+    Two defects lived in this leg, one in each direction, and both decide how it is read. It
+    pinned two whole sentences, so a reword of the bullet that kept the rule — the fallback
+    renders, the `config:` copy is canonical — reddened and reported the rule as gone about a
+    document that still stated it twice. And it searched the whole file, so the bullet could be
+    cut out of §0.1 and pasted at the end of the document, leaving the leg green while its
+    message spoke about "the paragraph". A paragraph is prose, and prose is rewritten for
+    meaning: a guard whose message says a sentence is gone must fail only when the property is.
+
+    Named limit: naming both homes is not stating which one wins. A token reading cannot read the
+    direction of a claim, and a leg that pretended to would be the next pin of the same family.
+    The direction is a review duty; the behaviour behind it is pinned above through the real
+    builder — `test_a_record_level_extra_prompt_reaches_the_prompt`,
+    `test_the_control_extra_prompt_under_config_still_reaches_the_prompt` and
+    `test_both_positions_warn_and_config_wins`.
     """
-    text = (PROMPTS_DIR / "ios_app_prompt.md").read_text(encoding="utf-8")
-    missing = [claim for claim in _IOS_APP_PLACEMENT_CLAIMS if claim not in text]
+    body = _bounded_section(
+        (PROMPTS_DIR / "ios_app_prompt.md").read_text(encoding="utf-8"),
+        _IOS_PLACEMENT_HEADING,
+        _IOS_PLACEMENT_ENDS_AT,
+    )
+    missing = [label for label, pattern in _IOS_APP_PLACEMENT_HOMES if not pattern.search(body)]
     assert not missing, (
-        f"ios_app_prompt.md no longer states {missing} about `extra_prompt` placement — the "
-        "paragraph is what tells its reader that the canonical position wins and that the "
-        "top-level fallback renders, and dropping either half restores the ambiguity"
+        f"the §0.1 paragraph no longer names {missing} as a home for `extra_prompt` — that "
+        "paragraph is what tells its reader where the field goes, and losing either home drops "
+        "half the mechanism (a fallback that renders, a canonical position that wins), restoring "
+        "the ambiguity that made a correctly rendered section read as a placement fault"
     )
 
 
