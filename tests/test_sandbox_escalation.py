@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -33,7 +34,7 @@ import pytest
 from emrg.config import LlmConfig
 from emrg.protocol import TaskRequest
 from emrg.sandbox import escalation
-from emrg.sandbox.policy import DANGER_FULL_ACCESS
+from emrg.sandbox.policy import DANGER_FULL_ACCESS, resolve_policy
 from emrg.server import daemon as daemon_mod
 from emrg.server.daemon import EmrgServer
 from emrg.server.tool_types import ToolDefinition, ToolResult
@@ -882,3 +883,200 @@ def test_the_tool_tells_a_denied_model_how_to_ask_at_the_tier_it_ran(
         {"command": "echo x > /tmp/nope", "sandbox": "read-only", "workspace": str(tmp_path)},
     ))
     assert escalation.RETRY_HINT in denied.content, denied.content
+
+
+# ── the file tools may ask for the same one hop ─────────────────────────────
+#
+# The shell was the only tool whose call could escalate, and the refusal a
+# `write` got named no way out — so a model blocked on a file path had one move
+# left: echo the content from `bash`, the tool that *can* ask. The escalation
+# then happened through the side door, with the host told in neither case
+# (issue #2734). Three things have to hold at once and each is asserted on its
+# own: the gate recognizes the file tools, their schema says the field exists,
+# and the refusal names the same next step the shell's does.
+
+_FILE_CALL_ARGS = {
+    "write": {"path": "out.txt", "content": "x"},
+    "edit": {"path": "out.txt", "old_string": "a", "new_string": "b"},
+}
+
+
+@pytest.mark.parametrize("tool_name", ("write", "edit"))
+def test_a_file_tool_advertises_the_pair_the_gate_will_accept(tool_name):
+    """Requirement 2: the model has to know it may ask.
+
+    A schema is the only place a model learns a field exists, so a gate that
+    accepted the pair while the schema advertised nothing would grant a hop
+    nobody can request. `read` is asserted on the other side of the line: it
+    consumes no root, so it has no tier to widen and must not advertise one —
+    "one remedy for every cause" is the defect this pair of assertions keeps
+    out.
+    """
+    from emrg.tools.edit_tool import EditTool
+    from emrg.tools.read_tool import ReadTool
+    from emrg.tools.write_tool import WriteTool
+
+    tool = {"write": WriteTool, "edit": EditTool}[tool_name]()
+    properties = tool.definition().parameters["properties"]
+
+    assert set(properties["sandbox_permissions"]["enum"]) == set(
+        escalation.ESCALATION_TARGETS
+    )
+    assert "Required with" in properties["justification"]["description"]
+
+    read_properties = ReadTool().definition().parameters["properties"]
+    assert "sandbox_permissions" not in read_properties
+    assert "justification" not in read_properties
+
+
+@pytest.mark.parametrize("tool_name", ("write", "edit"))
+def test_a_file_tool_call_that_names_a_hop_asks_before_it_runs(
+    tmp_path, monkeypatch, tool_name,
+):
+    """Requirement 1: the gate recognizes the file tools.
+
+    `_apply_escalation` keyed on `SHELL_TOOL_NAMES` alone, so the identical
+    request from `write` was a stray argument — no question, no widening, and
+    nothing said. The stub is registered under the real tool's name for the
+    same reason the shell stand-in is: the gate keys on a name set.
+    """
+    stub, ws, _session = _drive_shell_call(
+        tmp_path, monkeypatch, tool_name=tool_name,
+        args={**_FILE_CALL_ARGS[tool_name],
+              "sandbox_permissions": "workspace-write",
+              "justification": "the target sits outside every root this tier grants"},
+        answer=True,
+    )
+
+    asked = [f for f in ws.sent if f.get("type") == "approval_request"]
+    assert len(asked) == 1, "the daemon widened nothing without asking"
+    assert "read-only" in asked[0]["question"]
+    assert stub.calls, "an approved escalation did not run the call"
+    assert stub.calls[0]["sandbox"] == "workspace-write"
+
+
+def test_a_refused_file_tool_escalation_does_not_run_the_call(tmp_path, monkeypatch):
+    """A hop nobody granted must not be granted by accident, and the refusal
+    must say where the call stands rather than reading as a broken tool."""
+    stub, ws, session = _drive_shell_call(
+        tmp_path, monkeypatch, tool_name="write",
+        args={**_FILE_CALL_ARGS["write"],
+              "sandbox_permissions": "workspace-write",
+              "justification": "needs one hop"},
+        answer=False,
+    )
+
+    assert [f for f in ws.sent if f.get("type") == "approval_request"]
+    assert stub.calls == [], "a refused escalation ran the call anyway"
+    results = [m for m in session.get_messages_for_llm() if m.get("role") == "tool"]
+    assert any("escalation refused" in r["content"] for r in results), results
+    # The sentence is the shell's own, which is why it says "call" and no longer
+    # "command" — one producer, one wording, whichever tool was refused.
+    assert any("this call runs at" in r["content"] for r in results), results
+
+
+def _drive_two_file_calls(tmp_path, monkeypatch, *, first: dict, second: dict):
+    """Two rounds, two `write` calls, one question — the widening is the first
+    call's alone."""
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", tmp_path / "marker")
+    monkeypatch.setattr(
+        daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH", tmp_path / "round-complete"
+    )
+    server = _server()
+    session = Session.create_with_id("esc-two-calls", tmp_path)
+    ws = _subscribe(server, session)
+    stub = _StubTool("write")
+    server.tools._tools["write"] = stub
+
+    payloads = [first, second]
+    round_no = 0
+
+    async def fake_stream(messages, tools=None):
+        nonlocal round_no
+        if round_no < len(payloads):
+            index = round_no
+            round_no += 1
+            yield {
+                "content": "", "finish_reason": "tool_calls",
+                "usage": {"prompt_tokens": 10, "completion_tokens": 1},
+                "tool_calls": [{
+                    "index": 0, "id": f"call_{index + 1}", "type": "function",
+                    "function": {
+                        "name": "write",
+                        "arguments": json.dumps(payloads[index]),
+                    },
+                }],
+            }
+        else:
+            yield {"content": "done", "tool_calls": None, "finish_reason": "stop",
+                   "usage": {"prompt_tokens": 10, "completion_tokens": 1}}
+
+    server.llm.chat_stream = fake_stream
+    req = TaskRequest(id="req-esc-two", session_id=session.session_id,
+                      prompt="go", sandbox="read-only")
+
+    async def scenario():
+        task = asyncio.create_task(server._run_tool_loop(req, None, session))
+        await _answer_next_question(server, ws, True)
+        await asyncio.wait_for(task, 10)
+
+    asyncio.run(scenario())
+    return stub, ws, session
+
+
+def test_the_widening_is_that_one_call_and_the_next_goes_back(tmp_path, monkeypatch):
+    """The requirement's second half: the next call runs at the session's own
+    tier again. A grant that stuck would be a session silently widened by one
+    approved call — the default written back through the side door."""
+    stub, _ws, session = _drive_two_file_calls(
+        tmp_path, monkeypatch,
+        first={**_FILE_CALL_ARGS["write"],
+               "sandbox_permissions": "workspace-write",
+               "justification": "one call needs the wider tier"},
+        second={**_FILE_CALL_ARGS["write"], "path": "second.txt"},
+    )
+
+    assert len(stub.calls) == 2, stub.calls
+    assert stub.calls[0]["sandbox"] == "workspace-write"
+    assert stub.calls[1]["sandbox"] == "read-only", (
+        "the widening stuck to the next call"
+    )
+    assert session.session_id == "esc-two-calls"
+
+
+def test_a_file_refusal_names_the_way_to_ask_and_the_protected_one_does_not(
+    tmp_path, monkeypatch,
+):
+    """Requirement 3: the refusal a blocked `write` gets offers the same escape
+    the shell's does — at the tier the call actually stands at.
+
+    The other side of the assertion is the cause. A protected daemon file is
+    refused for being the host's own state, not for crossing a root, so "ask for
+    one wider tier" is not its remedy and the refusal carries no hint: one
+    remedy for every cause is false for most of them.
+    """
+    from emrg.sandbox import fence
+    from emrg.tools import file_policy
+
+    victim = tmp_path / "protected.toml"
+    victim.write_text("host state", encoding="utf-8")
+    monkeypatch.setattr(
+        file_policy, "protected_paths", lambda: [os.path.realpath(victim)]
+    )
+    workspace = resolve_policy(mode="workspace-write", workspace_root=str(tmp_path))
+
+    outside = os.path.join(
+        os.path.abspath(os.sep), "not-a-granted-root", "notes.txt"
+    )
+    refusal = fence.file_refusal(outside, workspace)
+    assert refusal is not None
+    assert escalation.RETRY_HINT in refusal, refusal
+    # The hint names what this call can reach, not the whole target set: a
+    # `workspace-write` call may go to `danger-full-access` and no further.
+    assert DANGER_FULL_ACCESS in refusal
+    assert "available here: workspace-write" not in refusal
+
+    protected_refusal = fence.file_refusal(str(victim), workspace)
+    assert protected_refusal is not None
+    assert "protected daemon file" in protected_refusal
+    assert escalation.RETRY_HINT not in protected_refusal, protected_refusal

@@ -6,6 +6,7 @@ import logging
 import os
 from pathlib import Path
 
+from emrg.sandbox.escalation import ESCALATION_TARGETS
 from emrg.sandbox.fence import file_refusal
 from emrg.sandbox.policy import grants_from_arguments, resolve_policy
 from emrg.server.tool_types import ToolDefinition, ToolResult
@@ -118,6 +119,22 @@ class WriteTool(ToolExecutor):
                     "content": {
                         "type": "string",
                         "description": "The complete content to write to the file.",
+                    },
+                    "sandbox_permissions": {
+                        "type": "string",
+                        "enum": list(ESCALATION_TARGETS),
+                        "description": "Ask for a one-hop wider sandbox tier for THIS "
+                        "call only. Must be sent together with `justification`, and it "
+                        "is refused unless the host approves: it never changes the "
+                        "session's default tier, and it reaches only the tiers the "
+                        "call's current one lists (from `read-only`: `workspace-write` "
+                        "or `danger-full-access`).",
+                    },
+                    "justification": {
+                        "type": "string",
+                        "description": "Why this call needs the wider tier — a non-empty "
+                        "sentence the host reads before approving. Required with "
+                        "`sandbox_permissions`.",
                     },
                     "intent": {
                         "type": "string",
