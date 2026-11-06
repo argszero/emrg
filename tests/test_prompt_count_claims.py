@@ -32,8 +32,9 @@ correct:
 A false red is how a guard gets weakened or deleted, so the introducer — a paragraph ending in a
 colon — is the decidable subset: it is what "the list this sentence introduces" actually means in
 prose. The cost is stated rather than hidden: a count whose paragraph is not colon-terminated is not
-measured here, and the promote template's "these 9 questions" is one of those, which is why it keeps
-its own pin in `tests/test_prompt_templates.py`.
+measured here, and the promote template's reflection heading is one of those — it states its count
+inside a paragraph that runs on — which is why that count keeps its own pin in
+`tests/test_prompt_templates.py`.
 
 A colon-terminated count with **no list after it** is also not a failure, and that was measured
 rather than assumed: exactly one claim in today's templates has that shape — `ios_app`'s "the loop is
@@ -57,7 +58,7 @@ import pytest
 
 _TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "emrg" / "server"
 
-#: Spelled-out counts, plus digits, which one template already uses ("these 9 questions").
+#: Spelled-out counts, plus digits — one template states its count as a digit.
 _WORD_COUNTS = {
     word: number
     for number, word in enumerate(
