@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "APPROVAL_TIMEOUT_SECONDS",
+    "ESCALATION_PARAMETERS",
     "ESCALATION_TARGETS",
     "ApprovalOutcome",
     "EscalationRefused",
@@ -68,6 +69,41 @@ __all__ = [
 #: the model is told what is *reachable in principle* and the hop table decides
 #: what is reachable from where it actually stands.
 ESCALATION_TARGETS: tuple[str, ...] = ("workspace-write", "danger-full-access")
+
+#: The two fields a tier-limited tool advertises, **as one object**.
+#:
+#: ``bash``, ``pwsh``, ``write`` and ``edit`` each consume the tier (``write``
+#: and ``edit`` the writable roots with it, ``_ROOT_CONSUMING_TOOLS``), so all
+#: four may ask for one hop and all four must say so in the same words: a model
+#: reading two schemas that describe one mechanism two ways has to decide which
+#: one it is. Four hand-written copies were what this replaced — **equal by
+#: value**, which is precisely why a value comparison could not tell them apart
+#: from one source (issue #2734). Each tool spreads this dict into its
+#: ``properties``, so the dicts that reach the wire *are* these dicts and a fifth
+#: copy is a failure at the moment it is written rather than an equivalence
+#: somebody has to notice later.
+#:
+#: ``enum`` is the whole target set, not the current tier's row: the blueprint
+#: advertises what is reachable in principle and lets :func:`validate_hop` decide
+#: what *this* call may reach (``escalation.ts:41``).
+ESCALATION_PARAMETERS: dict[str, dict] = {
+    "sandbox_permissions": {
+        "type": "string",
+        "enum": list(ESCALATION_TARGETS),
+        "description": "Ask for a one-hop wider sandbox tier for THIS "
+        "call only. Must be sent together with `justification`, and it "
+        "is refused unless the host approves: it never changes the "
+        "session's default tier, and it reaches only the tiers the "
+        "call's current one lists (from `read-only`: `workspace-write` "
+        "or `danger-full-access`).",
+    },
+    "justification": {
+        "type": "string",
+        "description": "Why this call needs the wider tier — a non-empty "
+        "sentence the host reads before approving. Required with "
+        "`sandbox_permissions`.",
+    },
+}
 
 #: The strict-wider table, verbatim from ``escalation.ts:28-31``.  A mode with
 #: no entry has nowhere to escalate to, and an entry listing no mode is the same

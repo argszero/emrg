@@ -62,7 +62,7 @@ from emrg.server.git_utils import no_prompt_env
 from emrg.server.redaction import redact_argv
 from emrg.server.tool_types import ToolDefinition, ToolResult
 from emrg.tools import command_scan
-from emrg.sandbox.escalation import ESCALATION_TARGETS
+from emrg.sandbox.escalation import ESCALATION_PARAMETERS
 from emrg.sandbox.escalation import hops_from as escalation_hops
 from emrg.tools.base import ToolExecutor
 
@@ -674,22 +674,7 @@ class BashToolV2(ToolExecutor):
                         "caller's to set: it is also the writable boundary, and a "
                         "value passed here does not widen it.",
                     },
-                    "sandbox_permissions": {
-                        "type": "string",
-                        "enum": list(ESCALATION_TARGETS),
-                        "description": "Ask for a one-hop wider sandbox tier for THIS "
-                        "call only. Must be sent together with `justification`, and it "
-                        "is refused unless the host approves: it never changes the "
-                        "session's default tier, and it reaches only the tiers the "
-                        "call's current one lists (from `read-only`: `workspace-write` "
-                        "or `danger-full-access`).",
-                    },
-                    "justification": {
-                        "type": "string",
-                        "description": "Why this call needs the wider tier — a non-empty "
-                        "sentence the host reads before approving. Required with "
-                        "`sandbox_permissions`.",
-                    },
+                    **ESCALATION_PARAMETERS,
                     "intent": {
                         "type": "string",
                         "description": "The purpose of this call: why you are invoking it and what you want to achieve. "

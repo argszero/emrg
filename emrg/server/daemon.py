@@ -4497,7 +4497,12 @@ class EmrgServer:
 
         :returns: ``None`` to run the call, or the refusal text to report instead.
         """
-        if tc_name not in SHELL_TOOL_NAMES:
+        # The set that may ask is the set the tier and the roots reach, not the
+        # shell's names: `write` and `edit` consume both, so a refusal that told
+        # them apart from a command was an answer about the tool rather than
+        # about the boundary (issue #2734). One name for the set, read here and
+        # at the injection site, so the two cannot drift.
+        if tc_name not in _ROOT_CONSUMING_TOOLS:
             return None
         raw_target = args.get("sandbox_permissions")
         raw_reason = args.get("justification")
@@ -4523,7 +4528,7 @@ class EmrgServer:
             # The command does NOT run at the wider tier, and saying so is the
             # whole point: a silent "no" reads as a broken command.
             return (
-                f"⛔ escalation refused ({outcome.reason}): this command runs at "
+                f"⛔ escalation refused ({outcome.reason}): this call runs at "
                 f"{hop.from_mode!r}. Nothing was widened, and the session's "
                 "default tier is unchanged."
             )

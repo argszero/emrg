@@ -6,6 +6,7 @@ import logging
 import os
 from pathlib import Path
 
+from emrg.sandbox.escalation import ESCALATION_PARAMETERS
 from emrg.sandbox.fence import file_refusal
 from emrg.sandbox.policy import grants_from_arguments, resolve_policy
 from emrg.server.tool_types import ToolDefinition, ToolResult
@@ -70,6 +71,7 @@ class EditTool(ToolExecutor):
                             "edit writes to."
                         ),
                     },
+                    **ESCALATION_PARAMETERS,
                     "intent": {
                         "type": "string",
                         "description": "The purpose of this call: why you are invoking it and what you want to achieve. "

@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import os
 
+from emrg.sandbox.escalation import with_retry_hint
 from emrg.sandbox.grants import GrantKindNotEnforced
 from emrg.sandbox.policy import DANGER_FULL_ACCESS, SandboxPolicy
 from emrg.sandbox.roots import canonical_path, named_grants, writable_roots
@@ -132,10 +133,26 @@ def file_refusal(file_path: str, policy: SandboxPolicy) -> str | None:
     # the same file. Compared as the canonical identity both sides of the
     # comparison use, so one assertion holds on either platform.
     resolved = f" (resolves to {target!r})" if target != file_path else ""
-    return (
+    refusal = (
         f"{policy.mode} sandbox: blocked file write to {file_path!r}{resolved} — "
         f"outside every root this tier grants ({granted})"
     )
+    # A file refusal that names no way out reads as a dead end, and a dead end
+    # invites the workaround rather than the question: the model would echo the
+    # file from `bash`, which is the tool that *can* ask — the escalation moving
+    # from the front door to the side door, with the host told in neither case
+    # (issue #2734). So the sentence carries the shell's own next step, through
+    # the one producer of it; `with_retry_hint` appends nothing at a tier with no
+    # hop, which is why a `danger-full-access` refusal stays as it was — it
+    # already returned above, and an instruction that could only fail is not
+    # advice.
+    #
+    # The two branches above keep no hint, and the reason is the cause rather
+    # than the shape: a protected daemon file is refused for being the host's own
+    # state, and an unenforceable grant for a platform that cannot apply it.
+    # Neither is a root boundary, so "ask for one wider tier" is not their
+    # remedy — one remedy for every cause is false for most of them.
+    return with_retry_hint(refusal, mode=policy.mode)
 
 
 def _is_within_root(target: str, root: str) -> bool:
