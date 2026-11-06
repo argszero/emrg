@@ -4423,7 +4423,7 @@ class EmrgServer:
             args["workdir"] = cwd
         elif tc_name == "grep" and "path" not in args and "workdir" not in args:
             args["path"] = cwd
-        if tc_name in SHELL_TOOL_NAMES | {"write", "edit"} and req.sandbox:
+        if tc_name in _ROOT_CONSUMING_TOOLS and req.sandbox:
             args["sandbox"] = req.sandbox
             args["workspace"] = cwd
         if tc_name in _ROOT_CONSUMING_TOOLS:

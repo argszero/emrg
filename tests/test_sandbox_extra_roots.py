@@ -588,6 +588,51 @@ def test_the_roots_are_injected_into_exactly_the_tools_that_can_use_them():
     assert _ROOT_CONSUMING_TOOLS == SHELL_TOOL_NAMES | {"write", "edit"}
 
 
+def test_the_tier_and_the_roots_are_read_from_one_name(monkeypatch, outside):
+    """A tool that joins the set must receive **both** the tier and the roots.
+
+    ``_ROOT_CONSUMING_TOOLS`` exists so that "the tools a host-named root
+    reaches" and "the tools the tier reaches" are one set rather than two that
+    happen to agree, and its own comment says the injection site reads that name
+    twice for exactly that reason. The test above compares the constant against a
+    union rebuilt by hand, which cannot tell one source from two — the "equal by
+    value" reading that let four hand-written copies of one schema pass for one
+    source (issue #2734) — while the tier branch spelled its own union. A tool
+    added to the set would then have been handed the roots with the tier silently
+    omitted, and every assertion in this file would have stayed green.
+
+    The probe is a name that is in the set and nowhere else: every member of the
+    union is a name both spellings accept, so only a name from outside it can
+    tell the two apart.
+    """
+    from emrg.server import daemon as daemon_mod
+
+    monkeypatch.setattr(
+        daemon_mod,
+        "_ROOT_CONSUMING_TOOLS",
+        daemon_mod._ROOT_CONSUMING_TOOLS | {"emrg-probe-tool"},
+    )
+    ws, elsewhere = outside
+    session = Session.create_with_id("s_one_name", ws)
+    session.set_sandbox_roots([str(elsewhere)])
+    req = TaskRequest(
+        session_id=session.session_id, cwd=str(ws), prompt="hi", sandbox="workspace-write"
+    )
+
+    args = _inject(_server(), "emrg-probe-tool", {}, session, req)
+
+    assert args.get("sandbox") == "workspace-write", (
+        "a tool that joined the set received no tier: the tier branch reads a union "
+        "spelled by hand rather than the one name, so the two halves of the set drift "
+        "apart exactly where the constant's comment says they cannot"
+    )
+    assert "writable_roots" in args, (
+        "the roots half is the one the constant is named after, and it is the half the "
+        "probe expects to survive — without it this test would read as a tier claim "
+        "about a tool that receives nothing"
+    )
+
+
 def test_a_session_that_named_nothing_injects_an_empty_list(tmp_path):
     """Silence is the empty list, not a missing key: the tool reads one shape."""
     session = Session.create_with_id("s_empty", tmp_path)
