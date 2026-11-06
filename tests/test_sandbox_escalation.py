@@ -56,11 +56,14 @@ class _FakeWs:
 
 
 class _StubTool:
-    """A shell-tool stand-in: records the arguments the daemon handed it.
+    """A stand-in for one of the tools the daemon gives a tier to: it records
+    the arguments the daemon handed it.
 
-    Registered under a real shell tool's name on purpose — `_apply_escalation`
-    keys on `SHELL_TOOL_NAMES`, so a stand-in under a made-up name would test
-    the branch that skips escalation instead of the one that takes it.
+    Registered under a real tool's name on purpose — `_apply_escalation` keys on
+    `_ROOT_CONSUMING_TOOLS`, the set the tier and the writable roots are injected
+    into, so a stand-in under a made-up name would test the branch that skips
+    escalation instead of the one that takes it. The name is not restricted to
+    the shell's: `write` and `edit` are in that set too (issue #2734).
     """
 
     def __init__(self, name: str) -> None:
@@ -87,7 +90,15 @@ def _subscribe(server: EmrgServer, session: Session) -> _FakeWs:
     return ws
 
 
-async def _answer_next_question(server: EmrgServer, ws: _FakeWs, answer=object()):
+#: The "this test answers nothing" sentinel. A bare `object()` cannot be one:
+#: `answer is not object()` constructs a fresh object each time it is evaluated
+#: and so answers `True` for every value, which made "nobody answered" a state
+#: this helper could not express — it always sent *some* answer, and an unreadable
+#: one at that.
+_NO_ANSWER = object()
+
+
+async def _answer_next_question(server: EmrgServer, ws: _FakeWs, answer=_NO_ANSWER):
     """Answer the first approval question the daemon broadcasts.
 
     Mirrors what a client does rather than reaching into the future: the test
@@ -99,7 +110,7 @@ async def _answer_next_question(server: EmrgServer, ws: _FakeWs, answer=object()
                 continue
             frame["_answered"] = True
             payload: dict = {"request_id": frame.get("request_id")}
-            if answer is not object():
+            if answer is not _NO_ANSWER:
                 payload["approved"] = answer
             server._resolve_approval(payload)
             return frame
@@ -621,7 +632,7 @@ def test_a_cancel_while_the_ending_is_told_does_not_say_two_endings(tmp_path):
 
 
 def _drive_shell_call(
-    tmp_path, monkeypatch, *, args: dict, answer=object(), sandbox="read-only",
+    tmp_path, monkeypatch, *, args: dict, answer=_NO_ANSWER, sandbox="read-only",
     tool_name=None,
 ):
     """Run one tool loop whose single tool call carries `args`.
@@ -669,7 +680,7 @@ def _drive_shell_call(
 
     async def scenario():
         task = asyncio.create_task(server._run_tool_loop(req, None, session))
-        if answer is not object():
+        if answer is not _NO_ANSWER:
             await _answer_next_question(server, ws, answer)
         await asyncio.wait_for(task, 10)
 
@@ -739,16 +750,40 @@ def test_a_shell_call_without_the_pair_is_untouched(tmp_path, monkeypatch):
     assert stub.calls and stub.calls[0].get("sandbox") == "read-only", stub.calls
 
 
-def test_a_tool_the_tier_does_not_reach_cannot_escalate(tmp_path, monkeypatch):
-    """`read` is not a shell tool: the daemon injects no tier for it, so the
-    field is a stray argument rather than a request — and no question is asked."""
+#: The three tools that stay outside the escalation surface, with arguments that
+#: would otherwise run. They are in no tier's reach (`_ROOT_CONSUMING_TOOLS` omits
+#: them) because they consume no root, so there is nothing to widen and the field
+#: is a stray argument rather than a request.
+_CLAMPED_CALLS = {
+    "read": {"path": "README.md"},
+    "glob": {"pattern": "*.py"},
+    "grep": {"pattern": "def "},
+}
+
+
+@pytest.mark.parametrize("tool_name", sorted(_CLAMPED_CALLS))
+def test_a_tool_the_tier_does_not_reach_cannot_escalate(
+    tmp_path, monkeypatch, tool_name,
+):
+    """No root, no tier, no hop: the pair is inert here.
+
+    Requirement 4 of issue #2734, and the guard is the *pair* of assertions —
+    no question was asked, and the call ran exactly as it would have without the
+    two arguments. Asserting only the first would pass a build that silently
+    dropped the call.
+    """
     stub, ws, _session = _drive_shell_call(
-        tmp_path, monkeypatch, tool_name="read",
-        args={"path": "README.md", "sandbox_permissions": "workspace-write",
-              "justification": "I want to read"},
+        tmp_path, monkeypatch, tool_name=tool_name,
+        args={**_CLAMPED_CALLS[tool_name],
+              "sandbox_permissions": "workspace-write",
+              "justification": "I want a wider tier"},
     )
     assert not [f for f in ws.sent if f.get("type") == "approval_request"]
     assert stub.calls, "the tool did not run"
+    # The tier the daemon injected is the session's own, not the one the call
+    # named — a field that changed the tier without a question would be the
+    # defect this test exists for, and `read` has no tier injected at all.
+    assert stub.calls[0].get("sandbox") in (None, "read-only"), stub.calls
 
 
 # ── requirement 5: the hint line ────────────────────────────────────────────
@@ -901,32 +936,73 @@ _FILE_CALL_ARGS = {
 }
 
 
-@pytest.mark.parametrize("tool_name", ("write", "edit"))
-def test_a_file_tool_advertises_the_pair_the_gate_will_accept(tool_name):
-    """Requirement 2: the model has to know it may ask.
+#: Every tool the daemon hands a tier to, by the name the daemon injects under.
+#: The set on the left is checked against `_ROOT_CONSUMING_TOOLS` below, so a
+#: carrier added to the daemon and forgotten here is a red test rather than a
+#: tool that may ask and does not say so.
+_ADVERTISING_TOOLS: dict[str, type] = {}
 
-    A schema is the only place a model learns a field exists, so a gate that
-    accepted the pair while the schema advertised nothing would grant a hop
-    nobody can request. `read` is asserted on the other side of the line: it
-    consumes no root, so it has no tier to widen and must not advertise one —
-    "one remedy for every cause" is the defect this pair of assertions keeps
-    out.
-    """
+
+def _advertising_tools() -> dict[str, type]:
+    """The tool class behind each tier-limited name, imported lazily."""
+    from emrg.tools.bash_tool_v2 import BashToolV2
     from emrg.tools.edit_tool import EditTool
-    from emrg.tools.read_tool import ReadTool
+    from emrg.tools.pwsh_tool_v2 import PwshToolV2
     from emrg.tools.write_tool import WriteTool
 
-    tool = {"write": WriteTool, "edit": EditTool}[tool_name]()
-    properties = tool.definition().parameters["properties"]
+    return {
+        "bash": BashToolV2, "pwsh": PwshToolV2,
+        "write": WriteTool, "edit": EditTool,
+    }
 
-    assert set(properties["sandbox_permissions"]["enum"]) == set(
+
+def test_every_tier_limited_tool_advertises_the_pair_from_one_source():
+    """Requirement 2, read at the wire: the model has to know it may ask.
+
+    A gate that accepted the pair while the schema advertised nothing would grant
+    a hop nobody can request. Two things are asserted, and the second is the one
+    a value comparison could not make: **identity**, not equality. Four
+    hand-written copies of this block were equal to each other, so any test
+    comparing values stayed green while a fifth copy was written — the drift this
+    replaces (issue #2734, and the rule that one rule with several carriers needs
+    a producer rather than a comparison). A hand-copied literal is a different
+    object, and it reddens here.
+    """
+    classes = _advertising_tools()
+    assert set(classes) == set(daemon_mod._ROOT_CONSUMING_TOOLS), (
+        "the daemon and this test disagree about which tools may escalate"
+    )
+    for name, tool_class in classes.items():
+        properties = tool_class().definition().parameters["properties"]
+        assert properties["sandbox_permissions"] is (
+            escalation.ESCALATION_PARAMETERS["sandbox_permissions"]
+        ), name
+        assert properties["justification"] is (
+            escalation.ESCALATION_PARAMETERS["justification"]
+        ), name
+    # …and the enum is the module's own list, so the advertised set cannot age
+    # away from the table `validate_hop` reads.
+    assert set(escalation.ESCALATION_PARAMETERS["sandbox_permissions"]["enum"]) == set(
         escalation.ESCALATION_TARGETS
     )
-    assert "Required with" in properties["justification"]["description"]
 
-    read_properties = ReadTool().definition().parameters["properties"]
-    assert "sandbox_permissions" not in read_properties
-    assert "justification" not in read_properties
+
+@pytest.mark.parametrize("tool_name", ("read", "glob", "grep"))
+def test_a_tool_outside_the_surface_advertises_no_hop(tool_name):
+    """The other side of the line: no root, no tier, nothing to widen.
+
+    "One remedy for every cause" is the defect this keeps out — a `grep` told it
+    may ask for a wider tier would be told to do something that cannot change
+    its answer.
+    """
+    from emrg.tools.glob_tool import GlobTool
+    from emrg.tools.grep_tool import GrepTool
+    from emrg.tools.read_tool import ReadTool
+
+    tool_class = {"read": ReadTool, "glob": GlobTool, "grep": GrepTool}[tool_name]
+    properties = tool_class().definition().parameters["properties"]
+    assert "sandbox_permissions" not in properties, tool_name
+    assert "justification" not in properties, tool_name
 
 
 @pytest.mark.parametrize("tool_name", ("write", "edit"))
@@ -955,23 +1031,47 @@ def test_a_file_tool_call_that_names_a_hop_asks_before_it_runs(
     assert stub.calls[0]["sandbox"] == "workspace-write"
 
 
-def test_a_refused_file_tool_escalation_does_not_run_the_call(tmp_path, monkeypatch):
-    """A hop nobody granted must not be granted by accident, and the refusal
-    must say where the call stands rather than reading as a broken tool."""
+@pytest.mark.parametrize("tool_name", ("write", "edit"))
+@pytest.mark.parametrize(
+    "answer, why",
+    (
+        (False, "the host said no"),
+        (None, "an answer that maps to no boolean"),
+        (_NO_ANSWER, "a client that never replies"),
+    ),
+    ids=("refused", "unreadable", "silent"),
+)
+def test_a_file_tool_that_was_not_approved_does_not_run(
+    tmp_path, monkeypatch, tool_name, answer, why,
+):
+    """Fail closed, three ways, with the semantics the shell already has.
+
+    All three are refusals, and testing all three is not repetition: they reach
+    the refusal through different code — the host's explicit no, an answer nobody
+    can map to a boolean, and a client that never replies. A tool that escalated
+    correctly but ran on the "no" path would be worse than one that never
+    escalated, because the model would believe it had been granted something.
+
+    The question itself is asserted too: a refusal the model is never told about
+    is indistinguishable from a broken tool.
+    """
+    # The wait the silent case would otherwise spend 120 s on; the other two
+    # answer immediately and do not reach it.
+    monkeypatch.setattr(escalation, "APPROVAL_TIMEOUT_SECONDS", 0.05)
     stub, ws, session = _drive_shell_call(
-        tmp_path, monkeypatch, tool_name="write",
-        args={**_FILE_CALL_ARGS["write"],
+        tmp_path, monkeypatch, tool_name=tool_name,
+        args={**_FILE_CALL_ARGS[tool_name],
               "sandbox_permissions": "workspace-write",
               "justification": "needs one hop"},
-        answer=False,
+        answer=answer,
     )
 
-    assert [f for f in ws.sent if f.get("type") == "approval_request"]
-    assert stub.calls == [], "a refused escalation ran the call anyway"
+    assert [f for f in ws.sent if f.get("type") == "approval_request"], why
+    assert stub.calls == [], f"{why}: the call ran anyway"
     results = [m for m in session.get_messages_for_llm() if m.get("role") == "tool"]
     assert any("escalation refused" in r["content"] for r in results), results
     # The sentence is the shell's own, which is why it says "call" and no longer
-    # "command" — one producer, one wording, whichever tool was refused.
+    # "command" — one branch, one wording, whichever tool was refused.
     assert any("this call runs at" in r["content"] for r in results), results
 
 
@@ -1044,16 +1144,57 @@ def test_the_widening_is_that_one_call_and_the_next_goes_back(tmp_path, monkeypa
     assert session.session_id == "esc-two-calls"
 
 
-def test_a_file_refusal_names_the_way_to_ask_and_the_protected_one_does_not(
-    tmp_path, monkeypatch,
-):
-    """Requirement 3: the refusal a blocked `write` gets offers the same escape
-    the shell's does — at the tier the call actually stands at.
+#: A path no tier grants: outside every root, so the refusal is about the
+#: boundary rather than about a cause of its own. Not under `/tmp`, which the
+#: temp grant makes writable at `workspace-write`.
+_OUTSIDE_EVERY_ROOT = os.path.join(os.sep, "not-a-granted-root", "notes.txt")
 
-    The other side of the assertion is the cause. A protected daemon file is
-    refused for being the host's own state, not for crossing a root, so "ask for
-    one wider tier" is not its remedy and the refusal carries no hint: one
-    remedy for every cause is false for most of them.
+
+@pytest.mark.parametrize(
+    "mode, reachable, unreachable",
+    (
+        ("read-only", ("workspace-write", DANGER_FULL_ACCESS), ()),
+        ("workspace-write", (DANGER_FULL_ACCESS,), ("workspace-write",)),
+    ),
+)
+def test_a_root_refusal_names_what_that_tier_can_reach(
+    mode, reachable, unreachable, tmp_path,
+):
+    """Requirement 3: a blocked file tool is offered the shell's own next step.
+
+    And offered *its own* step — the hint is rendered from the tier the call
+    stands at, so a `workspace-write` call is not told about `workspace-write`.
+    Both halves are asserted, because a hint that names the whole target set
+    would send a model to a tier `validate_hop` will refuse.
+    """
+    from emrg.sandbox import fence
+
+    policy = resolve_policy(mode=mode, workspace_root=str(tmp_path))
+    refusal = fence.file_refusal(_OUTSIDE_EVERY_ROOT, policy)
+
+    assert refusal is not None, mode
+    assert escalation.RETRY_HINT in refusal, refusal
+    for target in reachable:
+        assert target in refusal, (mode, target, refusal)
+    for target in unreachable:
+        assert f"available here: {target}" not in refusal, (mode, refusal)
+
+
+def test_the_tier_with_nowhere_to_go_refuses_nothing_and_hints_nothing(tmp_path):
+    """`danger-full-access` checks nothing, so there is no root refusal to hint
+    at — and an instruction that could only fail is not advice."""
+    from emrg.sandbox import fence
+
+    policy = resolve_policy(mode=DANGER_FULL_ACCESS, workspace_root=str(tmp_path))
+    assert fence.file_refusal(_OUTSIDE_EVERY_ROOT, policy) is None
+
+
+def test_a_protected_file_refusal_carries_no_hint(tmp_path, monkeypatch):
+    """The cause decides the remedy, and this cause has a different one.
+
+    A protected daemon file is refused for being the host's own state, not for
+    crossing a root, so "ask for one wider tier" would be advice that cannot
+    help — one remedy for every cause is false for most of them.
     """
     from emrg.sandbox import fence
     from emrg.tools import file_policy
@@ -1063,20 +1204,9 @@ def test_a_file_refusal_names_the_way_to_ask_and_the_protected_one_does_not(
     monkeypatch.setattr(
         file_policy, "protected_paths", lambda: [os.path.realpath(victim)]
     )
-    workspace = resolve_policy(mode="workspace-write", workspace_root=str(tmp_path))
+    policy = resolve_policy(mode="workspace-write", workspace_root=str(tmp_path))
 
-    outside = os.path.join(
-        os.path.abspath(os.sep), "not-a-granted-root", "notes.txt"
-    )
-    refusal = fence.file_refusal(outside, workspace)
+    refusal = fence.file_refusal(str(victim), policy)
     assert refusal is not None
-    assert escalation.RETRY_HINT in refusal, refusal
-    # The hint names what this call can reach, not the whole target set: a
-    # `workspace-write` call may go to `danger-full-access` and no further.
-    assert DANGER_FULL_ACCESS in refusal
-    assert "available here: workspace-write" not in refusal
-
-    protected_refusal = fence.file_refusal(str(victim), workspace)
-    assert protected_refusal is not None
-    assert "protected daemon file" in protected_refusal
-    assert escalation.RETRY_HINT not in protected_refusal, protected_refusal
+    assert "protected daemon file" in refusal
+    assert escalation.RETRY_HINT not in refusal, refusal
