@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -1357,6 +1358,126 @@ def test_open_source_template_measures_the_shipped_artifact():
     assert "one reader is a hypothesis until a second, independent one agrees" in out, "应要求第二个独立读数"
     # 5) the rule lives in the section that owns establishing ground truth, not at the file's end
     assert out.index("A defect is a claim about what the project ships") < out.index("##### 3.1.4 Fork, clone and branch"), "规则应落在 §3.1.3 内"
+
+
+#: The section that owns prohibitions in `open_source_prompt.md`, and every heading that
+#: could end it. The section is the template's **last**, so an end bound exists only when a
+#: later edit adds a heading after it — which is exactly the case that has to fail.
+_FORBIDDEN_HEADING = "### Forbidden"
+_HEADING_AFTER = re.compile(r"\n#{2,4} ")
+
+#: Every form a reader could exempt itself with, verbatim. These are already keywords, so a
+#: reword of the sentence around them cannot drop one without dropping the form itself.
+_BACKGROUND_FORMS = (
+    "`&`", "`nohup`", "`disown`", "`setsid`", "detached `subprocess`/`Popen`",
+)
+
+#: What the rule must still say, as keyword sets rather than pinned sentences: each entry is
+#: (what it carries, groups that must each match) and a group is satisfied by any of its
+#: members. A reword that keeps a requirement keeps every one of its groups; a reword that
+#: drops it loses one, and the failure names which.
+_BACKGROUND_CLAIMS = (
+    ("the ban itself", (("background",),)),
+    ("the foreground habit", (("foreground",), ("one at a time", "waited"))),
+    ("the mechanism", (("pipe", "stdout"), ("child",), ("exits",))),
+    ("the fallback when it does not fit", (("do less", "cut it short"), ("report",))),
+)
+
+
+def _forbidden_section(text: str) -> str:
+    """One rendered template's `### Forbidden` region, with both ends controlled.
+
+    `text.split(heading, 1)[1]` returns the whole tail when no heading follows, so a region
+    written as "everything after the heading" reads as a tightening and behaves as none:
+    this section is the template's *last*, and `out.index(rule) > out.index(heading)` stays
+    true for anything appended after it — including the rule itself, moved out. So the
+    region is the section up to the next heading when one exists, and the control below
+    refuses a region that is not a prohibitions list, which is what a renamed section, an
+    emptied one, or a heading that lost its bullets produces.
+    """
+    after_heading = text.split(_FORBIDDEN_HEADING, 1)
+    assert len(after_heading) == 2, (
+        f"the template must still carry the {_FORBIDDEN_HEADING!r} heading — this region is "
+        "anchored on it"
+    )
+    rest = after_heading[1]
+    heading_after = _HEADING_AFTER.search(rest)
+    region = rest[: heading_after.start()] if heading_after else rest
+    assert "\U0001f6d1" in region, (
+        f"{_FORBIDDEN_HEADING!r} must still be followed by the prohibitions it owns: without "
+        "them the region is empty or holds something else, and the assertions below would be "
+        "reading nothing"
+    )
+    return region
+
+
+def test_open_source_template_forbids_backgrounding_a_command():
+    """open_source_prompt.md §Forbidden says how a command must be run (issue #2736).
+
+    Three task configurations independently refiled this rule into their own
+    `extra_prompt` — the one field an installation has for a rule its prompt is
+    missing — in three unrelated phrasings, while two of them also restated the
+    resident-process ban the template already carries. A background child inherits
+    the tool call's stdout pipe and holds it open after the direct child exits, so
+    the call never returns and the round dies with the work queued behind it.
+
+    Two grains are deliberate, and both were measured rather than chosen. The assertions
+    are **keywords, not sentences**: three whole-sentence pins reddened on a reword that
+    kept every requirement — the defect a neighbouring guard in this same tree fixed
+    (#2733): a guard whose message says the rule is gone must fail only when it is. And
+    they are **scoped to the section**: `report` alone occurs nine times before
+    `### Forbidden`, so an unscoped search would satisfy the fallback with text that has
+    nothing to do with this rule.
+
+    Named limits. A reword that drops the concept words themselves is not caught: the words
+    are the property here, so a rule restated without them is a rule this guard cannot read.
+    And a waiver appended *contiguously* after the bullet stays inside the region, because
+    the section is the template's last and nothing structural separates the two — the bound
+    catches a moved rule and a trailing section, not a softened one.
+    """
+    import jinja2
+
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "emrg" / "server" / "open_source_prompt.md"
+    )
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(template_path.read_text(encoding="utf-8"))
+    out = template.render(
+        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
+        timestamp="20260814",
+        task={"role": "committer", "agent": "aitokenpool"},
+        agent={}, git_path="git", gh_path="gh",
+    )
+    region = _forbidden_section(out)
+    folded = region.lower()
+
+    # 1) the rule names every form a reader could exempt itself with
+    missing_forms = [form for form in _BACKGROUND_FORMS if form not in region]
+    assert not missing_forms, (
+        f"§Forbidden no longer names {missing_forms} as a form a command must not take — "
+        "a reader that cannot see its own case named here decides that case is different"
+    )
+
+    # 2) each requirement the issue states, as the words that carry it
+    missing_claims = []
+    for label, groups in _BACKGROUND_CLAIMS:
+        for group in groups:
+            if not any(member.lower() in folded for member in group):
+                missing_claims.append((label, group))
+    assert not missing_claims, (
+        "§Forbidden no longer carries these requirements of the rule "
+        f"(requirement, words that must appear): {missing_claims} — the ban needs the habit "
+        "that replaces the forms, the mechanism behind it, and what to do when a measurement "
+        "does not fit, or the next round trades the rule away"
+    )
+
+    # 3) it stays inside the section that owns prohibitions, grouped after the two red lines
+    assert region.index("`nohup`") > region.index("_guard_upgrade_hermeticity"), (
+        "the rule must sit with the two manifest red lines, under §Forbidden — above them it "
+        "is a different section's rule, and the region stops containing it"
+    )
 
 
 def test_open_source_template_distinguishes_an_unrunnable_toolchain():
