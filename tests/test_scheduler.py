@@ -25,6 +25,44 @@ from emrg.server.scheduler import (
 from tests.task_handler_factory import make_handler
 
 
+
+def _test_context(**overrides) -> dict:
+    """The context a built-in template is rendered with here.
+
+    One definition, in `emrg.server.scheduler.evolution_context`, is what a cycle
+    actually renders with. A test that writes its own copy of that mapping is a
+    second reader of the same template, and `jinja2.Undefined` renders an omitted
+    name as the empty string, so the copy drifts without a single red test: nineteen
+    of the sites below still passed `git_path` / `gh_path` (retired 2026-09-29, read
+    by no built-in template) while only four passed `current_time_human`, which every
+    cycle supplies (issue #2752).
+
+    So this starts from the real definition and refuses a name the real definition
+    does not supply — an invented key is the drift, and it must be loud.
+    """
+    from emrg.server.scheduler import evolution_context
+
+    base = evolution_context(
+        instance_id="test",
+        host_name="host",
+        repo_url="https://github.com/argszero/emrg.git",
+        local_source="/tmp/evo",
+        owner="argszero",
+        repo="emrg",
+        source_dir="/tmp/evo",
+        session_id="s1",
+        task={},
+        agent={},
+    )
+    invented = sorted(set(overrides) - set(base))
+    assert not invented, (
+        f"render context supplies {invented}, which the real builder does not: "
+        f"{sorted(base)}. A key the builder never supplies is a copy that has drifted "
+        "(issue #2752)."
+    )
+    return {**base, **overrides}
+
+
 # ── _resolve_agent_path ─────────────────────────────────────────
 
 
@@ -726,7 +764,7 @@ def test_journal_template_renders_with_context():
         current_time_human="2026-08-24 18:29",
         task={"role": "author", "agent": "j", "author_id": "author-a"},
     )
-    out = template.render(**ctx)
+    out = template.render(**_test_context(**ctx))
     # Current-time injection (rant 18:19:08)
     assert "Current time:" in out and "20260824-182903" in out
     assert "2026-08-24 18:29" in out, "human-readable time must render"
@@ -750,7 +788,7 @@ def test_journal_template_renders_with_context():
     assert "Irrelevant-rant exclusion" in out
     # Editor role renders too (diversity/adversarial text is author-side)
     ctx2 = dict(ctx); ctx2["task"] = {"role": "editor", "agent": "j"}
-    out2 = template.render(**ctx2)
+    out2 = template.render(**_test_context(**ctx2))
     assert "Editor Work Cycle" in out2
     assert "Contribution-level consistency" in out2 or "contribution-level" in out2
 
@@ -1102,9 +1140,7 @@ def test_paper_template_renders_with_context():
     )
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
-    out = template.render(
-        instance_id="test", host_name="host", source_dir="/tmp/paper", session_id="s1", timestamp="20260806",
-        task={}, agent={}, )
+    out = template.render(**_test_context(instance_id="test", host_name="host", source_dir="/tmp/paper", session_id="s1", timestamp="20260806", task={}, agent={}))
     # The per-round `paper_state.md` was retired (rant 2026-09-14T14:35:47): the
     # session is the state now, so the template must render the continuity contract
     # and the closing summary that replaces the file — and must not name the file.
@@ -1125,11 +1161,7 @@ def test_journal_template_renders_the_continuity_contract():
     )
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
-    out = template.render(
-        instance_id="test", host_name="host", source_dir="/tmp/journal", session_id="s1", timestamp="20260919-100129",
-        current_time_human="2026-09-19 10:01", task={"role": "editor", "agent": "silicon-science-cs"},
-        agent={}, owner="argszero", repo="silicon-science-cs",
-    )
+    out = template.render(**_test_context(instance_id="test", host_name="host", source_dir="/tmp/journal", session_id="s1", timestamp="20260919-100129", current_time_human="2026-09-19 10:01", task={"role": "editor", "agent": "silicon-science-cs"}, agent={}, owner="argszero", repo="silicon-science-cs"))
     # The state and reflection files were retired (rant 2026-09-14T14:35:47): the
     # session is the state now, so the template must render the continuity contract
     # and the closing summary that replaced them — and must not name either file.
@@ -1152,13 +1184,7 @@ def test_open_source_template_renders_with_context():
     )
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
-    out = template.render(
-        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
-        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
-        timestamp="20260813",
-        task={"role": "committer", "agent": "aitokenpool"},
-        agent={}, git_path="git", gh_path="gh",
-    )
+    out = template.render(**_test_context(instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y", local_source="/tmp/os", source_dir="/tmp/os", session_id="s1", timestamp="20260813", task={"role": "committer", "agent": "aitokenpool"}, agent={}))
     assert "The rant queue" in out, "rant-scan 0.5 节应渲染"
     assert "rants.jsonl" in out, "rant 扫描命令应渲染"
     assert "config.agent" in out, "agent 匹配过滤应渲染"
@@ -1200,26 +1226,22 @@ def test_open_source_template_allow_self_merge_conditional():
         instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
         timestamp="20260814",
-        agent={}, git_path="git", gh_path="gh",
+        agent={},
     )
 
     # default (allow_self_merge absent) → rule stands, no override
-    out_default = template.render(task={"role": "committer", "agent": "aitokenpool"}, **base)
+    out_default = template.render(**_test_context(task={"role": "committer", "agent": "aitokenpool"}, **base))
     assert "Do not merge your own PRs (wait for other Committers to review)" in out_default
     assert "allow_self_merge: true" not in out_default
 
     # explicit true → override text appears + opt-in note in role section
-    out_true = template.render(
-        task={"role": "committer", "agent": "aitokenpool", "allow_self_merge": True}, **base
-    )
+    out_true = template.render(**_test_context(task={"role": "committer", "agent": "aitokenpool", "allow_self_merge": True}, **base))
     assert "allow_self_merge" in out_true, "allow_self_merge 说明应渲染"
     assert "may review and merge their own PRs" in out_true, "self-merge 允许说明应渲染"
     assert "**overridden**: this task configures" in out_true, "Forbidden 条件化覆盖应渲染"
 
     # explicit false → same as default
-    out_false = template.render(
-        task={"role": "committer", "agent": "aitokenpool", "allow_self_merge": False}, **base
-    )
+    out_false = template.render(**_test_context(task={"role": "committer", "agent": "aitokenpool", "allow_self_merge": False}, **base))
     assert "Do not merge your own PRs (wait for other Committers to review)" in out_false
     assert "**overridden**" not in out_false
 
@@ -1240,7 +1262,7 @@ def test_task_extra_prompt_conditional_all_templates():
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
         timestamp="20260824",
         current_time_human="2026-08-24 22:00",
-        agent={"name": "x"}, git_path="git", gh_path="gh",
+        agent={"name": "x"},
     )
     extra = "插件开发（plugin）也是对本项目的合法贡献，不应被排除在贡献范围之外"
     heading = "Task-specific Instructions (extra_prompt from tasks.yml)"
@@ -1248,11 +1270,11 @@ def test_task_extra_prompt_conditional_all_templates():
                  "promote_prompt.md", "journal_prompt.md", "self_media_prompt.md"):
         tpl = env.from_string((server_dir / name).read_text(encoding="utf-8"))
         # positive: extra_prompt configured → injected near the top
-        out = tpl.render(task={"extra_prompt": extra, "role": "committer"}, **base)
+        out = tpl.render(**_test_context(task={"extra_prompt": extra, "role": "committer"}, **base))
         assert heading in out, f"{name}: 条件节应渲染"
         assert extra in out, f"{name}: extra_prompt 文本应注入 prompt"
         # negative: absent → no section, no residue
-        out2 = tpl.render(task={"role": "committer"}, **base)
+        out2 = tpl.render(**_test_context(task={"role": "committer"}, **base))
         assert heading not in out2, f"{name}: 未配置 extra_prompt 不得出现条件节"
         assert extra not in out2, f"{name}: 未配置 extra_prompt 不得注入文本"
 
@@ -1269,13 +1291,7 @@ def test_open_source_template_never_stashes_host_work():
     )
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
-    out = template.render(
-        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
-        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
-        timestamp="20260820",
-        task={"role": "committer", "agent": "aitokenpool"},
-        agent={}, git_path="git", gh_path="gh",
-    )
+    out = template.render(**_test_context(instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y", local_source="/tmp/os", source_dir="/tmp/os", session_id="s1", timestamp="20260820", task={"role": "committer", "agent": "aitokenpool"}, agent={}))
     # the old data-losing instruction is gone
     assert "→ `git stash`" not in out, "no more 'git stash' action instruction"
     assert "→ `git pull --rebase`" not in out or "dirty tree" in out, \
@@ -1301,13 +1317,7 @@ def test_open_source_template_full_code_study_b2b():
     )
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
-    out = template.render(
-        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
-        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
-        timestamp="20260814",
-        task={"role": "committer", "agent": "aitokenpool"},
-        agent={}, git_path="git", gh_path="gh",
-    )
+    out = template.render(**_test_context(instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y", local_source="/tmp/os", source_dir="/tmp/os", session_id="s1", timestamp="20260814", task={"role": "committer", "agent": "aitokenpool"}, agent={}))
     # 1) the new section exists (positive discrimination: absent section → red)
     assert "Read the full codebase" in out, "B.2b 全代码研读节应渲染"
     # 2) must read the complete codebase, not just the target file
@@ -1335,13 +1345,7 @@ def test_open_source_template_measures_the_shipped_artifact():
     )
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
-    out = template.render(
-        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
-        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
-        timestamp="20260814",
-        task={"role": "committer", "agent": "aitokenpool"},
-        agent={}, git_path="git", gh_path="gh",
-    )
+    out = template.render(**_test_context(instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y", local_source="/tmp/os", source_dir="/tmp/os", session_id="s1", timestamp="20260814", task={"role": "committer", "agent": "aitokenpool"}, agent={}))
     # 1) a defect is measured on the shipped artifact, not only on the checkout
     assert "A defect is a claim about what the project ships, so measure it there." in out, "shipped 产物节应渲染"
     # 2) the report names which artifact the reading came from
@@ -1443,13 +1447,7 @@ def test_open_source_template_forbids_backgrounding_a_command():
     )
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
-    out = template.render(
-        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
-        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
-        timestamp="20260814",
-        task={"role": "committer", "agent": "aitokenpool"},
-        agent={}, git_path="git", gh_path="gh",
-    )
+    out = template.render(**_test_context(instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y", local_source="/tmp/os", source_dir="/tmp/os", session_id="s1", timestamp="20260814", task={"role": "committer", "agent": "aitokenpool"}, agent={}))
     region = _forbidden_section(out)
     folded = region.lower()
 
@@ -1499,13 +1497,7 @@ def test_open_source_template_distinguishes_an_unrunnable_toolchain():
     )
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
-    out = template.render(
-        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
-        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
-        timestamp="20260814",
-        task={"role": "committer", "agent": "aitokenpool"},
-        agent={}, git_path="git", gh_path="gh",
-    )
+    out = template.render(**_test_context(instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y", local_source="/tmp/os", source_dir="/tmp/os", session_id="s1", timestamp="20260814", task={"role": "committer", "agent": "aitokenpool"}, agent={}))
     # 1) the resolver runs before the suite and says what an absent tool is not
     assert "command -v <the tool the suite needs>" in out, "应先解析运行器再读结果"
     assert "not on PATH — resolve it, this is not a test result" in out, "缺工具不得被当成测试结果"
@@ -1538,13 +1530,7 @@ def test_open_source_template_parallel_recon_c15():
     )
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
-    out = template.render(
-        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
-        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
-        timestamp="20260824",
-        task={"role": "committer", "agent": "aitokenpool"},
-        agent={}, git_path="git", gh_path="gh",
-    )
+    out = template.render(**_test_context(instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y", local_source="/tmp/os", source_dir="/tmp/os", session_id="s1", timestamp="20260824", task={"role": "committer", "agent": "aitokenpool"}, agent={}))
     # 1) the new section exists
     assert "The healthy rule" in out, "C.1.5 并行 Recon 节应渲染"
     assert "not maintenance-only" in out, "Tracking 非纯维护说明应渲染"
@@ -1592,13 +1578,7 @@ def test_open_source_entry_check_reads_the_claim_thread():
     )
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
-    out = template.render(
-        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
-        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
-        timestamp="20260824",
-        task={"role": "committer", "agent": "aitokenpool"},
-        agent={}, git_path="git", gh_path="gh",
-    )
+    out = template.render(**_test_context(instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y", local_source="/tmp/os", source_dir="/tmp/os", session_id="s1", timestamp="20260824", task={"role": "committer", "agent": "aitokenpool"}, agent={}))
     # 1) the entry check asks for the thread, which is where a claim is written
     assert "assignees,comments" in out, "入口检查应读取评论线程"
     assert "read the thread, not only the assignees" in out, "读线程的要求应渲染"
@@ -1636,13 +1616,7 @@ def test_open_source_large_change_asks_without_waiting_for_a_reply():
     )
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
-    out = template.render(
-        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
-        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
-        timestamp="20260824",
-        task={"role": "committer", "agent": "aitokenpool"},
-        agent={}, git_path="git", gh_path="gh",
-    )
+    out = template.render(**_test_context(instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y", local_source="/tmp/os", source_dir="/tmp/os", session_id="s1", timestamp="20260824", task={"role": "committer", "agent": "aitokenpool"}, agent={}))
     # 0) the subject is there at all — a template that failed to render past this point must
     #    not be read as "the forbidden phrase is absent"
     assert "A large change is discussed before it is built" in out, "大幅度改动须先讨论"
@@ -1680,13 +1654,7 @@ def test_open_source_template_empty_recon_names_the_extension_surface():
     )
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
-    out = template.render(
-        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
-        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
-        timestamp="20260824",
-        task={"role": "committer", "agent": "aitokenpool"},
-        agent={}, git_path="git", gh_path="gh",
-    )
+    out = template.render(**_test_context(instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y", local_source="/tmp/os", source_dir="/tmp/os", session_id="s1", timestamp="20260824", task={"role": "committer", "agent": "aitokenpool"}, agent={}))
     assert "no gap inside the project's extension surface" in out, "空 Recon 结论须含扩展面阅读"
 
 
@@ -1711,13 +1679,7 @@ def test_open_source_template_reads_the_extension_surface():
     )
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
-    out = template.render(
-        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
-        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
-        timestamp="20260824",
-        task={"role": "committer", "agent": "aitokenpool"},
-        agent={}, git_path="git", gh_path="gh",
-    )
+    out = template.render(**_test_context(instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y", local_source="/tmp/os", source_dir="/tmp/os", session_id="s1", timestamp="20260824", task={"role": "committer", "agent": "aitokenpool"}, agent={}))
     # 1) the section exists and says what a contribution through that layer even is
     assert "The project's extension surface" in out, "§1.6 扩展面阅读应渲染"
     assert "A contribution need not pass through the upstream" in out, "贡献不必经过上游应写明"
@@ -1758,13 +1720,7 @@ def test_open_source_template_settles_a_disagreement_between_its_sources():
     )
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
-    out = template.render(
-        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
-        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
-        timestamp="20261102",
-        task={"role": "committer", "agent": "aitokenpool"},
-        agent={}, git_path="git", gh_path="gh",
-    )
+    out = template.render(**_test_context(instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y", local_source="/tmp/os", source_dir="/tmp/os", session_id="s1", timestamp="20261102", task={"role": "committer", "agent": "aitokenpool"}, agent={}))
     # 1) the repository outranks a note, for the state as well as for the code
     assert "The repository decides: a tree, a pull request, an issue and a check run" in out, \
         "§1.5 须写明仓库裁决笔记"
@@ -1789,14 +1745,7 @@ def test_promote_template_learn_latest_state_04():
     )
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
-    out = template.render(
-        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
-        local_source="/tmp/pm", source_dir="/tmp/pm", session_id="s1",
-        timestamp="20260814",
-        task={"agent": "aitokenpool"},
-        agent={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
-        git_path="git", gh_path="gh",
-    )
+    out = template.render(**_test_context(instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y", local_source="/tmp/pm", source_dir="/tmp/pm", session_id="s1", timestamp="20260814", task={"agent": "aitokenpool"}, agent={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"}))
     # 1) the new section exists (positive discrimination: absent section → red)
     assert "0.4 Learn the project's latest state" in out, "0.4 节应渲染"
     # 2) MUST every round
@@ -1825,14 +1774,7 @@ def test_promote_template_homework_first_dehardening():
     )
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
-    out = template.render(
-        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
-        local_source="/tmp/pm", source_dir="/tmp/pm", session_id="s1",
-        timestamp="20260815",
-        task={"agent": "aitokenpool"},
-        agent={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
-        git_path="git", gh_path="gh",
-    )
+    out = template.render(**_test_context(instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y", local_source="/tmp/pm", source_dir="/tmp/pm", session_id="s1", timestamp="20260815", task={"agent": "aitokenpool"}, agent={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"}))
     # A. homework-before-participating section exists (positive discrimination)
     assert "Do your homework before participating (MUST — host mandate)" in out, "§2 功课先行节应渲染"
     assert "Read the full discussion" in out, "读完整讨论要求应渲染"
@@ -1865,14 +1807,7 @@ def test_promote_template_direct_cdp_rule():
     )
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
-    out = template.render(
-        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
-        local_source="/tmp/pm", source_dir="/tmp/pm", session_id="s1",
-        timestamp="20260825",
-        task={"agent": "aitokenpool"},
-        agent={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
-        git_path="git", gh_path="gh",
-    )
+    out = template.render(**_test_context(instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y", local_source="/tmp/pm", source_dir="/tmp/pm", session_id="s1", timestamp="20260825", task={"agent": "aitokenpool"}, agent={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"}))
     # A. direct CDP endpoint mandated (positive discrimination)
     assert "127.0.0.1:57000" in out, "直连 CDP 端点应渲染"
     assert "Direct CDP connection (MUST" in out, "直连 CDP MUST 规则应渲染"
@@ -1893,14 +1828,7 @@ def test_promote_template_registration_blog_sections():
     )
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
-    out = template.render(
-        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
-        local_source="/tmp/pm", source_dir="/tmp/pm", session_id="s1",
-        timestamp="20260815",
-        task={"agent": "aitokenpool"},
-        agent={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
-        git_path="git", gh_path="gh",
-    )
+    out = template.render(**_test_context(instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y", local_source="/tmp/pm", source_dir="/tmp/pm", session_id="s1", timestamp="20260815", task={"agent": "aitokenpool"}, agent={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"}))
     # A. Account Registration (host-authorized) section with 3 preconditions
     assert "Account Registration (host-authorized)" in out, "账号注册授权节应渲染"
     assert "Never register a duplicate" in out, "禁止重复注册应渲染"
@@ -3620,13 +3548,7 @@ def test_evolution_template_renders_dual_agent_match():
     )
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
-    out = template.render(
-        instance_id="test", host_name="host", repo_url="https://github.com/argszero/emrg.git", owner="argszero",
-        repo="emrg", local_source="/tmp/evo", source_dir="/tmp/evo",
-        session_id="s1", timestamp="20260817",
-        task={"role": "committer", "agent": "emrg"},
-        agent={}, git_path="git", gh_path="gh",
-    )
+    out = template.render(**_test_context(instance_id="test", host_name="host", repo_url="https://github.com/argszero/emrg.git", owner="argszero", repo="emrg", local_source="/tmp/evo", source_dir="/tmp/evo", session_id="s1", timestamp="20260817", task={"role": "committer", "agent": "emrg"}, agent={}))
     assert "emrg" in out, "task.agent 值应渲染"
     assert "argszero/emrg" in out, "owner/repo 形式应渲染"
     assert "ignore rants without a `agent` field entirely" in out
@@ -5173,14 +5095,14 @@ def test_self_media_template_renders_in_both_extra_prompt_states():
     )
     extra = "voice: plain and specific; nothing about pricing"
 
-    out = template.render(task={"extra_prompt": extra, "platform": "xiaohongshu"}, **base)
+    out = template.render(**_test_context(task={"extra_prompt": extra, "platform": "xiaohongshu"}, **base))
     assert "Task-specific Instructions" in out
     assert extra in out
     assert "xiaohongshu" in out, "the platform reaches the round from tasks.yml"
     assert "media-task" in out, "the archive directory is named after the task"
     assert "{{" not in out, "an unrendered placeholder means the context lost a name"
 
-    out2 = template.render(task={"platform": "xiaohongshu"}, **base)
+    out2 = template.render(**_test_context(task={"platform": "xiaohongshu"}, **base))
     assert "Task-specific Instructions" not in out2
     assert extra not in out2
 
