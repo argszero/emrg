@@ -3391,3 +3391,120 @@ def test_the_ios_feasibility_pin_answers_both_ways() -> None:
             f"deleting {phrase!r} from §3.4 still reads as present, so the pin above would "
             "stay green on a section that had lost the rule"
         )
+
+
+# ── the supplement block states which side wins, in every template that renders it ────────
+#
+# Every task prompt renders an installation's `extra_prompt` under one heading. Two things can
+# be said there, and for a long time only one of them was: what to do when the block is
+# *silent* (two templates said it), and which side wins when the block *contradicts* the prompt
+# (none did). A round that reads both and finds them disagreeing picks one, and which one it
+# picks is then an accident of reading order — that is the failure this pin exists to prevent.
+#
+# The pin is deliberately **not** a blessed sentence. What it measures is that every carrier
+# states the *same* statement, that it appears once, and that it sits inside the block: a
+# rewording applied to every carrier stays green, while a rewording (or a deletion) in one
+# carrier reddens and names that file, which is exactly the drift worth catching. The statement
+# is read as the block's last paragraph, so a carrier that also explains how to read a *silent*
+# block keeps that paragraph beside this one instead of losing it.
+
+_EXTRA_PROMPT_HEADING = "Task-specific Instructions (extra_prompt from tasks.yml)"
+_EXTRA_PROMPT_INTERPOLATION = "{{ task.extra_prompt }}"
+
+#: The one template deliberately outside the pin, with the reason it is: editing it is a separate
+#: class of work (a prompt-specific change), and it already settles this subject for its own
+#: readers in §1.7 — the supplement's contradictions are adjudicated there from the source.
+_EXTRA_PROMPT_EXEMPT = {"evolution_prompt.md"}
+
+
+def _extra_prompt_block(text: str) -> str:
+    """The prose between the block's heading and the interpolation; "" when either is absent."""
+    if _EXTRA_PROMPT_HEADING not in text or _EXTRA_PROMPT_INTERPOLATION not in text:
+        return ""
+    start = text.index(_EXTRA_PROMPT_HEADING) + len(_EXTRA_PROMPT_HEADING)
+    end = text.index(_EXTRA_PROMPT_INTERPOLATION)
+    return text[start:end] if end > start else ""
+
+
+def _extra_prompt_statement(text: str) -> str:
+    """The block's last paragraph — the precedence statement, when one is there."""
+    headed = text.split("\n", 1)[-1] if text.startswith("\n") else text
+    paragraphs = [p.strip() for p in headed.split("\n\n") if p.strip()]
+    return paragraphs[-1] if paragraphs else ""
+
+
+def _extra_prompt_carriers() -> dict[str, str]:
+    """Template name -> its text, for every template that renders a supplement."""
+    found: dict[str, str] = {}
+    for path in sorted(PROMPTS_DIR.glob("*_prompt.md")):
+        text = path.read_text(encoding="utf-8")
+        if _EXTRA_PROMPT_INTERPOLATION in text:
+            found[path.name] = text
+    return found
+
+
+def test_every_template_that_renders_a_supplement_says_which_side_wins() -> None:
+    """One statement, the same in every carrier, once each, inside the block."""
+    carriers = _extra_prompt_carriers()
+    assert len(carriers) > 5, (
+        f"only {len(carriers)} template(s) render a supplement, so this walk is not reading the "
+        "family it claims to measure"
+    )
+    assert set(carriers) - _EXTRA_PROMPT_EXEMPT, "every carrier is exempt, so nothing is measured"
+
+    statements: dict[str, str] = {}
+    for name, text in carriers.items():
+        if name in _EXTRA_PROMPT_EXEMPT:
+            continue
+        statement = _extra_prompt_statement(_extra_prompt_block(text))
+        assert statement, (
+            f"{name} renders a supplement but states nothing about which side wins when the "
+            "block contradicts the prompt, so a round reading both has to pick one"
+        )
+        assert text.count(statement) == 1, (
+            f"{name} states its supplement rule {text.count(statement)} times; this template's "
+            "own rule is that a fact lives in exactly one place"
+        )
+        statements[name] = statement
+
+    distinct = set(statements.values())
+    assert len(distinct) == 1, (
+        "the carriers state different rules, so the same round reads a different answer "
+        "depending on which template it was given: "
+        + "; ".join(f"{n} differs" for n, s in statements.items() if s != max(distinct, key=list(statements.values()).count))
+    )
+
+
+def test_the_supplement_precedence_pin_answers_both_ways() -> None:
+    """The failure and the false failure, both supplied on synthetic text.
+
+    Deletion must read as a carrier that lost the rule rather than as agreement, and a rewording
+    carried into every copy must stay green — otherwise the pin would be requiring a sentence
+    rather than the rule.
+    """
+    text = (PROMPTS_DIR / "promote_prompt.md").read_text(encoding="utf-8")
+    statement = _extra_prompt_statement(_extra_prompt_block(text))
+    assert statement, "the live template carries no statement for these arms to remove"
+
+    # Arm 1 — the statement deleted: the block now has no paragraph, which is a carrier that
+    # lost the rule, not one that agrees with the others.
+    deleted = text.replace(statement, "")
+    assert _extra_prompt_statement(_extra_prompt_block(deleted)) == "", (
+        "deleting the statement still reads as a statement, so this walk would stay green on a "
+        "template that had lost the rule"
+    )
+
+    # Arm 2 — a rewording carried into every copy: still one rule, and still one value across
+    # carriers, so the pin must not be reading a sentence.
+    reworded = text.replace(statement, "A different wording of the same rule.")
+    new_statement = _extra_prompt_statement(_extra_prompt_block(reworded))
+    assert new_statement == "A different wording of the same rule.", "the arm did not land in the block"
+    assert new_statement != statement, "the arm changed nothing, so it measured nothing"
+    assert reworded.count(new_statement) == 1
+
+    # Arm 3 — the statement moved out of the block: it must no longer be read as the block's own
+    # rule, or a template could keep the words beside the block and still leave it unsettled.
+    displaced = text.replace(statement, "").rstrip() + "\n\n" + statement + "\n"
+    assert _extra_prompt_statement(_extra_prompt_block(displaced)) == "", (
+        "a statement pasted outside the block is still read as the block's rule"
+    )
