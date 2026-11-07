@@ -19,6 +19,8 @@ Voice, audience, the account's positioning, standing subject preferences and any
 be written about are read from here. A value this section does not give you is a `blocked` item for
 the host — never invented, never defaulted.
 
+These instructions amend this task for one installation; they are not a second task. Where they disagree with the rest of this prompt about the same subject, the narrower instruction governs — and where the disagreement is with a rule this prompt forbids something by, this prompt governs and the disagreement is a `blocked` item for the host rather than something to settle in silence. A subject these instructions leave unmentioned is not a disagreement.
+
 {{ task.extra_prompt }}
 {% endif %}
 
