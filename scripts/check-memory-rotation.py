@@ -456,12 +456,19 @@ def cycle_sections(path: Path) -> list[str]:
 
 
 def narration_blocks(path: Path) -> list[str]:
-    """The per-cycle narration above the bookmark's table, one entry per block.
+    """The bookmark's per-cycle narration, one entry per block, above the table or below it.
 
     A block is a run of non-blank lines, and it counts as narration when its **first** line
     opens with a cycle id in a code span (:data:`CYCLE_NARRATION`) - the shape a cycle's own
-    note has taken. The reading stops at the table's first row, because below it the file is
-    rows and not prose.
+    note has taken. A table row ends a *block*; it does not end the reading, because the
+    bookmark is not obliged to keep its prose above its table.
+
+    That boundary was once a `break`, on the assumption that below the table the file is
+    rows and not prose. Measured 2026-11-07 on this host's own bookmark, the assumption
+    failed and took the reading with it: **29** runs holding **39,411** characters of
+    per-cycle notes had accumulated below the table, and the structure reading answered
+    `0 cycle section(s) and 1 narration block(s) above the table` while exiting 0. Growth
+    that the file's own rule forbids had simply moved past the line the reader stopped at.
 
     This exists because :func:`cycle_sections` reads only `## Cycle` headings, and the
     ordinary note carries none: a cycle replaces the paragraph that came before it rather
@@ -487,7 +494,10 @@ def narration_blocks(path: Path) -> list[str]:
     current: list[str] = []
     for line in text.splitlines():
         if _is_table_line(line):
-            break                       # the table is what the file exists for
+            if current:                 # a row ends a block; it does not end the reading
+                blocks.append(current)
+                current = []
+            continue
         if line.strip():
             current.append(line)
         elif current:
@@ -548,7 +558,7 @@ def narration_faults(blocks: list[str]) -> list[str]:
         return []
     named = ", ".join(blocks[:5]) + (f", and {len(blocks) - 5} more" if len(blocks) > 5 else "")
     return [
-        f"the bookmark carries {len(blocks)} per-cycle narration blocks above its table "
+        f"the bookmark carries {len(blocks)} per-cycle narration blocks "
         f"({named}): it keeps one and replaces it in place - an appended note is the same "
         f"growth the cycle-section reading forbids, in the shape that reading cannot see "
         f"(measured 2026-11-05: 43 blocks over 729 lines and 94,482 characters, while the "
@@ -864,12 +874,12 @@ def render(reading: dict, show_all: bool) -> str:
     if reading["structure"]:
         out.append(f"structure faults: {len(reading['structure'])}")
         out.extend(f"  {fault}" for fault in reading["structure"])
-        out.append("the rows above are still readable - this is the prose above them: keep one "
+        out.append("the rows above are still readable - this is the prose around them: keep one "
                    "cycle section and one narration block, and replace them in place, never "
                    "append a second")
     else:
         out.append(f"structure: {reading['cycle_sections']} cycle section(s) and "
-                   f"{reading['narration_blocks']} narration block(s) above the table - "
+                   f"{reading['narration_blocks']} narration block(s) in the file - "
                    f"the file keeps at most one of each, replaced in place")
     return "\n".join(out)
 

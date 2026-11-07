@@ -1009,6 +1009,55 @@ def test_a_second_narration_block_is_a_fault_the_section_reading_cannot_show(mod
     assert mod.main(["--agents", str(register), "--bookmark", str(three)]) == 1
 
 
+def test_a_narration_block_below_the_table_is_read_too(mod, tmp_path):
+    """Measured 2026-11-07 on this host's own bookmark: 29 runs, 39,411 characters below it.
+
+    The reading used to stop at the table's first row, on the assumption that below it the
+    file is rows and not prose. The assumption failed the moment a cycle appended its note
+    after the table instead of before it: the file reached 358 lines carrying 39,411
+    characters of per-cycle notes while the structure reading answered `0 cycle section(s)
+    and 1 narration block(s) above the table` and exited 0. Growth the file's own rule
+    forbids had moved past the line the reader stopped at, so the boundary is a block
+    boundary and not the end of the reading.
+
+    Both directions are asserted, because a reader that counts any prose after the table
+    would fault the paragraph a bookmark uses to state its own rule.
+    """
+    root = _root(tmp_path, "belowtable")
+    _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
+    register = _agents(tmp_path / "agents.yml", [{"name": "belowtable", "path": root}])
+
+    appended = tmp_path / "appended.md"
+    appended.write_text(
+        "# Bookmark\n\n"
+        "`cyc20261102-120000` the note a cycle replaces.\n\n"
+        "| agent | newest read | files |\n| --- | --- | --- |\n"
+        f"| `belowtable` | {BASE} | 0 |\n"
+        "\n`cyc20261103-120000` a second note, appended after the table.\n", encoding="utf-8")
+    reading = mod.read(register, appended)
+    assert reading["faults"] == [], reading["faults"]
+    assert reading["narration_blocks"] == 2, (
+        "a note below the table is not counted, so growth appended after the table is "
+        "invisible to the reading that exists to catch it")
+    assert len(reading["structure"]) == 1, reading["structure"]
+    assert mod.main(["--agents", str(register), "--bookmark", str(appended)]) == 1
+
+    rule = tmp_path / "rule.md"
+    rule.write_text(
+        "# Bookmark\n\n"
+        "`cyc20261102-120000` the note a cycle replaces.\n\n"
+        "| agent | newest read | files |\n| --- | --- | --- |\n"
+        f"| `belowtable` | {BASE} | 0 |\n"
+        "\nThe rows above are replaced in place; this paragraph states the rule.\n",
+        encoding="utf-8")
+    kept = mod.read(register, rule)
+    assert kept["narration_blocks"] == 1, (
+        "prose after the table that no cycle id opens is the bookmark stating its own rule, "
+        "not a cycle's note")
+    assert kept["structure"] == [], kept["structure"]
+    assert mod.main(["--agents", str(register), "--bookmark", str(rule)]) == 0
+
+
 def test_contract_prose_and_a_mid_sentence_cycle_id_are_not_narration(mod, tmp_path):
     """The other directions: only a block that **opens** on the code span is a cycle's note.
 
