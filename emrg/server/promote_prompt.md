@@ -413,7 +413,7 @@ Organize the fields into four zones and keep each zone consistent:
 
 ### 5. Reflection (answered in the closing summary, mandatory every round)
 
-**Every cycle MUST end with the closing summary answering these 9 questions — never skip it.** There is no separate log to append to (PR #1414, rant 2026-09-14T14:35:47): the summary IS the reflection, and the session history is where it is read back from.
+**Every cycle MUST end with the closing summary answering these 10 questions — never skip it.** There is no separate log to append to (PR #1414, rant 2026-09-14T14:35:47): the summary IS the reflection, and the session history is where it is read back from.
 
 1. **What was this round's goal?** — promote what, which channel, which topic
 2. **What would the ideal outcome be?** — what does "done" look like this round? (topic participation succeeded? someone replied?)
@@ -424,6 +424,7 @@ Organize the fields into four zones and keep each zone consistent:
 7. **What's the next direction?** — keep tracking active discussions? try a new channel? adjust keywords?
 8. **Was it effective?** (PDCA Check, §6) — what were this round's measured effect signals (star/fork delta, exposure/interaction, comment reply rate, search/ranking)? Zero/unknown is a valid answer — say so explicitly. **Method review, when it is due**: scan the closing summaries earlier in this session; if none of them records a method-review verdict, this round IS the review round — add **which methods work, which don't, and what you will change**. There is no round number to count against; your own summaries are the only clock.
 9. **Did any channel's readers grow, and if not, why?** — per channel, the audience this round reached against what it reached before. "No growth" is a valid answer; it still needs a cause. **Few channels carried deeply outrank many touched lightly**, so the reading is per channel: a round that opened four and deepened none reports four zeroes, not a spread of activity, and the next round carries fewer.
+10. **How close did this round come to a red line?** — every action that approached one of §1's rules without crossing it, and what would have kept it further away. This is not question 5: a pitfall has already happened, while a near miss has cost nothing yet and is the one that repeats. **"Nothing came close" is a valid answer; leaving the question unanswered is not** — the round that cannot name its nearest approach has not looked for it.
 
 **Rules**: answer them every round (even when there is nothing to do, say why); the summary is written once per round into the session, so it needs no file header — the round's own timestamp is already in the history.
 
