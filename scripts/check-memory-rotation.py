@@ -326,7 +326,7 @@ def _read_by_of(cells: list[str]) -> str | None:
 #: answers "32 of 32" while the file it is embedded from grows every cycle.
 CYCLE_SECTION = re.compile(r"^##\s+Cycle\b")
 
-#: The opening of a **per-cycle narration block** above the bookmark's table.
+#: The opening of a **per-cycle narration block**, wherever it sits in the bookmark.
 #:
 #: A cycle's note is usually a paragraph, not a heading: it opens with its own id in a code
 #: span and the next cycle replaces it. `CYCLE_SECTION` cannot see that shape, and measured
@@ -509,7 +509,7 @@ def narration_blocks(path: Path) -> list[str]:
 
 
 def structure_faults(headings: list[str]) -> list[str]:
-    """The faults in the bookmark's structure **above** its table, not in its rows.
+    """The faults in the bookmark's structure, as against the faults in its rows.
 
     A separate list from the coverage faults because they are a different subject with a
     different remedy: a coverage fault is repaired by writing a row, this one by writing a
@@ -542,10 +542,10 @@ def structure_faults(headings: list[str]) -> list[str]:
 def narration_faults(blocks: list[str]) -> list[str]:
     """The faults in the bookmark's per-cycle narration: it keeps **one**, replaced in place.
 
-    The same subject as :func:`structure_faults` - growth above the table - given the same
-    treatment and for the same reason: a fault, never a refusal, so every row is still
-    measured and the exit code carries the file-shape complaint without throwing away a
-    valid rotation reading.
+    The same subject as :func:`structure_faults` - growth of either shape, wherever in the
+    file it sits - given the same treatment and for the same reason: a fault, never a refusal,
+    so every row is still measured and the exit code carries the file-shape complaint without
+    throwing away a valid rotation reading.
 
     One block is the contract's shape (the current cycle's note) and none is a minimal or
     first-ever bookmark. Only a second block is the growth the file's own rule forbids, and
