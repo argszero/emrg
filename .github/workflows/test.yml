@@ -37,7 +37,39 @@ jobs:
         run: |
           set -euo pipefail
           url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          curl -fsSL "$url" | tar -xz -C "$RUNNER_TEMP" actionlint
+          # One 504 from github.com's release-asset endpoint must not read as a defect in
+          # this repository. Measured 2026-11-08/09: six consecutive master runs died at
+          # this line alone on `curl: (22) The requested URL returned error: 504`
+          # (42467952308, 42468434733, 42468778799, 42469285691, 42469812076,
+          # 42469826926; issue #2760), and the same upstream answer also took down
+          # `test-windows`'s setup-uv step - while #2759's own run stayed green, which is
+          # how we know it was the fetch and not the tree. A red leg is not votable, so one
+          # upstream window froze every open PR at once with master reading red for no
+          # commit's fault.
+          #
+          # The retry is bounded, and it still fails closed: when no attempt obtains the
+          # binary the step exits non-zero naming the URL and the attempt count. A lint
+          # step that skipped itself on a failed download would keep the gate's name while
+          # checking nothing, which is worse than a red job - the red is visible.
+          # Both directions are executed by tests/test_actionlint_download_retries.py: two
+          # 504s then a success, and a curl that never succeeds.
+          archive="$RUNNER_TEMP/actionlint_${ACTIONLINT_VERSION}.tar.gz"
+          attempts=3
+          attempt=1
+          while [ "$attempt" -le "$attempts" ]; do
+            if curl -fsSL -o "$archive" "$url" &&
+               tar -xzf "$archive" -C "$RUNNER_TEMP" actionlint; then
+              break
+            fi
+            rm -f "$archive"
+            if [ "$attempt" -ge "$attempts" ]; then
+              echo "::error::cannot download ${url} after ${attempts} attempt(s) - failing rather than skipping, so an upstream fault is visible"
+              exit 1
+            fi
+            echo "attempt ${attempt}/${attempts} failed; retrying in 5s" >&2
+            sleep 5
+            attempt=$((attempt + 1))
+          done
           bin="$RUNNER_TEMP/actionlint"
           # The container this replaced bundled shellcheck; the release binary does not, and
           # actionlint runs shellcheck over `run:` blocks only when it finds one on PATH. So
