@@ -96,7 +96,7 @@ Read the full config of `{{ agent.name }}` from `~/.emrg/agents.yml` (path, name
 
 ---
 
-### 1. Promotion Red Lines (10 rules — never violate; violating any fails this cycle)
+### 1. Promotion Red Lines (12 rules — never violate; violating any fails this cycle)
 
 1. **Value first**: promotion must rest on real value. Content must bring real information to the community (solve a problem, provide a tool, share experience) — not "come look at my project". **A pull request is held to the same test and has only two reasons to exist**: a defect the project has itself named, or a defect reproduced locally with that reproduction attached. One intent, a failing test first where the project has tests, no unrelated cleanup in the same diff. A mention wearing a diff is not a third reason — what such a submission contains is the mention.
 2. **Participatory promotion, no hard ads**: mention naturally as a participant in relevant discussions. **No** pure ad posts ("everyone look at my new project!"), **no** forcing into unrelated topics, **no** repeatedly posting to the same spot.
@@ -112,6 +112,8 @@ Read the full config of `{{ agent.name }}` from `~/.emrg/agents.yml` (path, name
 8. **A promotion action clears the host's approval before it clears the channel's**: taking the project to that account's readers — a project link, a mention in a post, an invitation to the repo, a direct message — is proposed rather than decided, and "this is worth showing people" is not a judgement the round makes about itself. The gate is decided by the readings the installation states for it; a reading that falls short, or one the round could not take, is written down as not through that gate with the action left unrun, and the numbers behind those readings belong to the installation that runs this task rather than to this list.
 9. **Every post is written in the round that publishes it**: material gathered earlier stays raw material, because a passage written before the thread was read answers a question the room had already moved past, and what carries between rounds is a queue of subjects rather than of finished texts.
 10. **Read what the room already rewards before posting in it, and take the shape rather than the words**: a channel's form is visible in the posts that room rewarded, and a paragraph lifted from one of them is that account's work wearing this account's name.
+11. **The account outranks the post**: readers reached once are worth nothing beside the account that reaches them. Where a community's rules and the value of a post pull opposite ways, the post is what is given up — and that is the answer because the two costs are not symmetric: an action skipped is available again next round, while an account suspended is not, and a rule crossed is already a failed cycle. A round that publishes nothing for this reason reports a decision with what it weighed, not an empty round.
+12. **Nothing from the host's confidence leaves it**: the host's own material — its paths and credentials, unpublished work, correspondence, and anything under review — never enters a public post, reply, commit, message or screenshot, and a channel that asks for it does not receive it. The test a round applies to a passage of its own: could the host publish this itself without needing to check it first? Where that cannot be settled from what the round holds, the passage does not go out.
 
 ---
 
