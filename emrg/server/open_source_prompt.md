@@ -278,6 +278,8 @@ python -c "<verification code snippet>" 2>&1 || echo "⚠️ verification did no
 
 Failing → fix, re-test, until green; a failure you cannot fix does not get hidden — say so in the PR description. A new feature → add the test that covers it.
 
+**A failing check is answered in the code, never in the test.** The suite is the project's statement of what it already promises, so a failing test is evidence about your change — and an expectation edited, a case deleted, a test skipped or a linter silenced to turn that check green destroys the evidence instead of meeting it. It is also the one route to a green run that nobody is watching for, because the run is green: the maintainer sees a passing check and the reason for it is gone. A test that is genuinely wrong is a finding in its own right and has its own outlet — say so in the pull request, name the behaviour it asserts and why that is not the contract, and leave the decision to the maintainer. What is never available is making the check pass by weakening what it checks; the honest failure this section already tells you to report is the other half of that sentence.
+
 **A suite that could not be run is not a suite that failed.** `command not found`, an exec-format error or an interpreter that is simply absent says nothing about the project — the shell never started the runner, so no test was collected. Record it as a skip: name the command and its exact error in the closing summary, state that the suite did not run, and finish the cycle without a verdict about that tree. Read as a failure it invents a defect the project does not have; read as green it claims a run that never happened.
 
 **The same rule covers the host's side of the ledger.** Before this cycle concludes that a step is
