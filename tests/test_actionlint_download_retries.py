@@ -37,7 +37,11 @@ truth, so a future edit to it is measured rather than remembered.
 
 The failure direction is asserted on the **message**, not only on the exit code: a bare
 `exit 1` is a refusal a reader cannot act on, and the workflow's own convention for that is
-an `::error::` line.
+an `::error::` line. What the message is held to is what it **names** - the URL, and the
+number of attempts it actually made - and not the words it names them with: a step that
+printed `gave up fetching <url> after 3 tries` would have said everything the requirement
+asks for, and a guard keyed on the literal word `attempt` would redden on it while the step
+behaved exactly as required.
 
 Named limits
 ------------
@@ -45,6 +49,9 @@ Named limits
   number of attempts, only that a transient one is survived and a permanent one is not
   (the count it drives is read from the stub, and a step that gave up on the first 504
   fails the survive arm).
+* The count in the failure message is asserted as a numeral outside the URL, so a count
+  spelled out as a word (`after three tries`) is rejected. The step writes numerals, and a
+  numeral is what a reader can read off the line without counting the retries themselves.
 * Nothing here reaches the network, and no real binary is installed: the only `actionlint`
   is the one this file writes into the tarball, whose only job is to answer the step's
   `-version` probe and its self-probe the way a working linter would.
@@ -217,6 +224,24 @@ def _run_step(tmp_path: Path, *, fail_first: int) -> tuple[subprocess.CompletedP
     return result, state, runner_temp
 
 
+def _names_url_and_count(line: str, attempts: int) -> bool:
+    """Does this error line name the URL, and the number of attempts it made?
+
+    Asserted on the content of the line rather than on its wording, because the wording is
+    not what the step promises. `gave up fetching <url> after 3 tries` names both, and so
+    does `cannot download <url> after 3 attempt(s)`; a line that names only the URL, or
+    names a different number, says less than a reader of a red run needs to act on.
+
+    The number is the one the stub counted, so this reads the reading rather than a word:
+    a count in the URL itself (`v1.7.12`, `..._1.7.12_linux_amd64.tar.gz`) is stripped
+    before the digits are matched, and cannot stand in for the count of attempts.
+    """
+    if "releases/download" not in line:
+        return False
+    without_url = re.sub(r"https?://\S+", " ", line)
+    return str(attempts) in re.findall(r"\d+", without_url)
+
+
 def test_the_step_this_file_is_about_is_the_gate_and_keeps_its_pin() -> None:
     """The premise: the step exists, downloads the pin, and may not excuse itself.
 
@@ -277,13 +302,14 @@ def test_a_download_that_never_succeeds_fails_the_step_and_names_it(tmp_path) ->
         "no `::error::` line: a bare exit is a refusal a reader of the run view cannot act "
         f"on.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
-    assert any("releases/download" in line and "attempt" in line for line in errors), (
-        f"the error must name the URL and the attempt count; got {errors}"
-    )
     assert not (runner_temp / "actionlint").exists(), (
         "a linter exists although the download failed - the stub is not measuring a refusal"
     )
     attempts = int((state / "count").read_text(encoding="utf-8").strip())
     assert attempts > 1, (
         f"the step gave up after {attempts} attempt(s), so it is not retrying at all"
+    )
+    assert any(_names_url_and_count(line, attempts) for line in errors), (
+        "the error must name the URL and the number of attempts it made "
+        f"({attempts}), in whatever words it chooses; got {errors}"
     )
