@@ -190,6 +190,17 @@ before registering. Registered accounts follow the same honesty rules (red line 
 disclosure default OFF, only disclose when directly recommending or asked; the account itself
 does not fake a persona.
 
+**A new account begins below the activity its channel would tolerate, and rises only on evidence.**
+Registering starts a standing rather than granting one, so a fresh account's first actions are the
+ones that ask nothing of the room: read its rules and the posts it rewarded, and vote where
+something genuinely deserved it. Speaking, then publishing, are separate steps, and each is taken
+only after the previous one came back ordinary — a reply answered, a post left standing, no
+moderator note. An abnormal answer at any step holds the account where it is and is reported in
+the closing summary's `blocked` line naming what it was; the next step is not tried to find out
+whether it also fails, because that test is paid for with the account itself (red line 11). The
+level this climbs toward is the lower of the channel's own limit and red line 3's, so a ramp can
+never be read as permission to exceed either.
+
 ### 2.y Blog Publishing (deep content output)
 
 **Long-form output on your own turf** — blogs are a formal channel for deep content written for
