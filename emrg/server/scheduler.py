@@ -1058,6 +1058,55 @@ def _load_agent_config(name: str, source_dir: str) -> dict:
     return {}
 
 
+def evolution_context(
+    *,
+    instance_id: str,
+    host_name: str,
+    repo_url: str,
+    local_source: str,
+    owner: str,
+    repo: str,
+    source_dir: str,
+    session_id: str,
+    task: dict,
+    agent: dict,
+    now: datetime | None = None,
+) -> dict:
+    """The one definition of the context a prompt template is rendered with.
+
+    ``_build_evolution_prompt`` renders with this and nothing else, and a test that
+    renders a built-in template starts from it too. A second, hand-written copy of
+    this mapping is a second reader of the same template, and the copies drift
+    silently: `jinja2.Undefined` renders an omitted name as the empty string, so
+    "the template renders" is measured against a context no round ever supplies.
+
+    That drift was measured, not assumed (issue #2752): of the twenty-three render
+    contexts written into `tests/test_scheduler.py`, nineteen still passed
+    `git_path` / `gh_path` — retired here on 2026-09-29 and read by no built-in
+    template — while only four passed `current_time_human`, which every cycle
+    supplies. A name added to this function could not redden one of those copies,
+    and a name retired from it reddened nothing either.
+
+    The instant is taken once so `timestamp` and `current_time_human` cannot
+    disagree, which two calls to `datetime.now()` allowed across a second boundary.
+    """
+    stamp = now or datetime.now()
+    return {
+        "instance_id": instance_id,
+        "host_name": host_name,
+        "repo_url": repo_url,
+        "local_source": local_source,
+        "owner": owner,
+        "repo": repo,
+        "source_dir": source_dir,
+        "session_id": session_id,
+        "timestamp": stamp.strftime("%Y%m%d-%H%M%S"),
+        "current_time_human": stamp.strftime("%Y-%m-%d %H:%M"),
+        "task": task,
+        "agent": agent,
+    }
+
+
 # ── TaskHandler ────────────────────────────────────────────
 
 
@@ -3494,20 +3543,18 @@ class TaskHandler:
         # built-in template (the guard in tests/test_prompt_templates.py now asks the
         # reverse question, and found them). A value nothing consumes is a value nothing
         # measures — the same reason `uptime` / `evolution_count` / `evolution_cwd` went.
-        context = {
-            "instance_id": self.identity.instance_id,
-            "host_name": self.identity.host_name,
-            "repo_url": self._repo_url,
-            "local_source": str(self._source_dir),
-            "owner": self._owner,
-            "repo": self._repo,
-            "source_dir": str(self._source_dir),
-            "session_id": self._session_id,
-            "timestamp": datetime.now().strftime("%Y%m%d-%H%M%S"),
-            "current_time_human": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "task": _template_task_context(self._config, self._task),
-            "agent": _load_agent_config(self._agent_name, str(self._source_dir)),
-        }
+        context = evolution_context(
+            instance_id=self.identity.instance_id,
+            host_name=self.identity.host_name,
+            repo_url=self._repo_url,
+            local_source=str(self._source_dir),
+            owner=self._owner,
+            repo=self._repo,
+            source_dir=str(self._source_dir),
+            session_id=self._session_id,
+            task=_template_task_context(self._config, self._task),
+            agent=_load_agent_config(self._agent_name, str(self._source_dir)),
+        )
 
         env = jinja2.Environment(undefined=jinja2.Undefined)
         template = env.from_string(_read_text(self._template_path))

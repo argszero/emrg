@@ -3508,3 +3508,94 @@ def test_the_supplement_precedence_pin_answers_both_ways() -> None:
     assert _extra_prompt_statement(_extra_prompt_block(displaced)) == "", (
         "a statement pasted outside the block is still read as the block's rule"
     )
+
+
+def test_a_render_context_written_by_a_test_is_read_from_the_builder():
+    """A hand-written render context is a second reader of the same template.
+
+    ``emrg.server.scheduler.evolution_context`` is the one definition of what a task
+    prompt is rendered with. Under ``jinja2.Undefined`` an omitted name renders as the
+    empty string, so a test that writes its own mapping can neither redden when the
+    builder gains a name nor when it retires one — the two definitions are free to
+    disagree for ever while the suite reports both as covered.
+
+    That drift was measured, not assumed (issue #2752): of the twenty-three render
+    contexts written into ``tests/test_scheduler.py``, nineteen still passed
+    ``git_path`` / ``gh_path`` — retired from the builder on 2026-09-29 and read by no
+    built-in template — while only four passed ``current_time_human``, which every
+    cycle supplies.
+
+    Two legs, and neither is satisfied by the other:
+
+    1. the shape — every ``.render(...)`` in that file is fed by ``_test_context``,
+       read from the AST so a call split across lines is still one call;
+    2. the definition — ``_test_context``'s key set is *equal* to the builder's, so
+       the helper adds no key of its own and omits none of the builder's.
+
+    Named limit: the subject is ``tests/test_scheduler.py``, the file that renders the
+    task prompts with a context of its own. Tests that render the daemon's ``.j2``
+    system prompt build it through a different entry point and are not this reading's
+    subject.
+    """
+    from emrg.server.scheduler import evolution_context
+    from tests.test_scheduler import _test_context
+
+    # Leg 2 — the definition itself.
+    supplied = set(
+        _test_context()
+    )
+    real = set(
+        evolution_context(
+            instance_id="test",
+            host_name="host",
+            repo_url="https://github.com/argszero/emrg.git",
+            local_source="/tmp/evo",
+            owner="argszero",
+            repo="emrg",
+            source_dir="/tmp/evo",
+            session_id="s1",
+            task={},
+            agent={},
+        )
+    )
+    assert supplied == real, (
+        "the test helper's context is not the builder's: it invents "
+        f"{sorted(supplied - real)} and omits {sorted(real - supplied)}"
+    )
+
+    # Leg 1 — the shape, read from the AST.
+    subject = Path(__file__).resolve().parent / "test_scheduler.py"
+    tree = ast.parse(subject.read_text(encoding="utf-8"))
+    checked = 0
+    faults = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "render"):
+            continue
+        checked += 1
+        # `f(**x)` is not a Starred in the AST — CPython stores the spread as a
+        # `keyword` whose `arg` is None, so a predicate reading `node.args` alone
+        # finds no argument at all and reports every `render(**_test_context(...))`
+        # as hand-written. Measured on this file before this branch landed: that
+        # first draft reported all 28 sites as faults while every one of them was
+        # correct, which is a check that cannot pass and therefore reads nothing.
+        spread = [kw for kw in node.keywords if kw.arg is None]
+        fed_by_helper = (
+            not node.args
+            and len(node.keywords) == 1
+            and len(spread) == 1
+            and isinstance(spread[0].value, ast.Call)
+            and isinstance(spread[0].value.func, ast.Name)
+            and spread[0].value.func.id == "_test_context"
+        )
+        if not fed_by_helper:
+            faults.append(f"{subject.name}:{node.lineno}")
+
+    assert checked, "no render call was read, so this scan measured nothing"
+    assert not faults, (
+        "these render calls hand the template a context the test itself wrote: "
+        + ", ".join(faults)
+        + " — render through `_test_context`, whose keys are the real builder's"
+    )
