@@ -152,6 +152,79 @@ CARRIERS = {
     "competition_prompt.md": (COMPETITION, _competition_row),
 }
 
+#: Where each carrier's clause begins and ends as its extractor reads it, so a
+#: self-test can put a comment around the clause itself. Every entry reuses an anchor
+#: the extractor already holds — a second literal would be a second copy of one fact.
+#: `None` for the end means the carrier's clause ends with its line.
+CLAUSE_ANCHORS = {
+    "open_source_prompt.md": (OPEN_SOURCE_START, OPEN_SOURCE_END),
+    "competition_prompt.md": (COMPETITION_ROW_PREFIX, None),
+}
+
+
+def _flat_to_raw(raw: str) -> list[int]:
+    """Raw position just past each character `_normalised` keeps.
+
+    An anchor may straddle a line break: `_normalised` joins whitespace, so
+    `OPEN_SOURCE_END` is present in the reading and absent from the raw bytes, and a
+    span builder working on `raw.find` would miss it entirely. The collapse is
+    reproduced here and checked against `_normalised` itself, so the two cannot drift
+    apart without this failing first.
+    """
+    positions: list[int] = []
+    kept: list[str] = []
+    i, n = 0, len(raw)
+    while i < n and raw[i].isspace():
+        i += 1
+    while i < n:
+        if raw[i].isspace():
+            j = i
+            while j < n and raw[j].isspace():
+                j += 1
+            if j >= n:  # trailing whitespace is stripped, like `.strip()`
+                break
+            kept.append(" ")
+            positions.append(j)
+            i = j
+        else:
+            kept.append(raw[i])
+            positions.append(i + 1)
+            i += 1
+    assert "".join(kept) == _normalised(raw), (
+        "the collapse here no longer matches `_normalised`, so any span mapped through "
+        "it is not the span the extractor reads"
+    )
+    return positions
+
+
+def _clause_span(name: str, raw: str) -> tuple[int, int]:
+    """The clause's own span in the raw file, located by the extractor's anchors.
+
+    Never by a bare token: the clause's first word occurs thousands of characters
+    earlier in both carriers, so a search for it wraps from there to EOF and a case
+    built on that reds for a reason that has nothing to do with the clause.
+    """
+    start_anchor, end_anchor = CLAUSE_ANCHORS[name]
+    if end_anchor is None:
+        start = raw.find(start_anchor)
+        assert start != -1, f"{name}: the start anchor {start_anchor!r} left the file"
+        end = raw.find("\n", start)
+        assert end != -1, f"{name}: the clause no longer ends with its line"
+        return start, end
+
+    flat = _normalised(raw)
+    flat_start = flat.find(start_anchor)
+    assert flat_start != -1, f"{name}: the start anchor {start_anchor!r} left the file"
+    flat_end = flat.find(end_anchor, flat_start)
+    assert flat_end != -1, (
+        f"{name}: the end anchor {end_anchor!r} no longer follows the start — the clause "
+        "has no bound, so any region claimed for it proves nothing"
+    )
+    flat_end += len(end_anchor)
+    positions = _flat_to_raw(raw)
+    start = positions[flat_start - 1] if flat_start else 0
+    return start, positions[flat_end - 1]
+
 
 def _clause(name: str) -> str:
     """The clause, read at both levels: the committed file, and the render's text.
@@ -178,6 +251,10 @@ def _parts(name: str) -> set[str]:
 
 def test_the_carriers_are_the_two_templates_the_rule_belongs_to():
     assert set(CARRIERS) == {"open_source_prompt.md", "competition_prompt.md"}
+    assert set(CLAUSE_ANCHORS) == set(CARRIERS), (
+        "every carrier needs its clause span, or the self-test falls back to guessing "
+        f"where the clause is: carriers {sorted(CARRIERS)} vs spans {sorted(CLAUSE_ANCHORS)}"
+    )
     for name, (path, _extractor) in CARRIERS.items():
         assert path.is_file(), f"{name}: declared carrier missing at {path}"
 
@@ -262,24 +339,38 @@ def test_the_ios_templates_own_exceptions_are_untouched():
 def test_a_jinja_comment_over_the_clause_is_caught():
     """A comment hides the rule from the render while the file keeps every character.
 
-    The device that catches it must be shown to fire, or a stripped-text reading
-    that silently stopped stripping would pass for ever.
+    The device that catches it must be shown to fire, or a stripped-text reading that
+    silently stopped stripping would pass for ever. Two things make that firing a
+    reading rather than an accident: the region wrapped is the clause's own span, and
+    the same comment placed elsewhere in the file leaves the clause readable — so the
+    quantity that discriminates is where the comment sits, not that one exists.
     """
     for name, (path, extractor) in CARRIERS.items():
         raw = path.read_text(encoding="utf-8")
         assert extractor(raw), f"{name}: the extractor found nothing on the real file"
 
-        clause = extractor(raw)
-        # Wrap the clause's own first words in a comment, the shape #1904 measured.
-        head = clause.split()[0]
-        index = raw.find(head)
-        assert index != -1
-        hidden = raw[:index] + "{# " + raw[index:] + " #}"
-        # The file still carries the text …
-        extractor(hidden)
+        start, end = _clause_span(name, raw)
+        assert end > start, f"{name}: the clause span came out empty ({start}..{end})"
+        assert end - start < len(raw) / 3, (
+            f"{name}: the wrapped region is {end - start} of {len(raw)} chars — that is "
+            "not the clause, and a case that hides this much proves nothing about it"
+        )
+
+        hidden = raw[:start] + "{# " + raw[start:end] + " #}" + raw[end:]
+        # The file still carries every character of the clause …
+        assert _normalised(raw[start:end]) in _normalised(hidden), (
+            f"{name}: the region is not carried verbatim, so this is not a comment over it"
+        )
         # … and the render does not, which is what the second reading catches.
         with pytest.raises(AssertionError):
             extractor(_strip_jinja_comments(hidden))
+
+        # The same comment anywhere else leaves the clause readable.
+        elsewhere = "{# a note to the next editor #}" + raw
+        assert extractor(_strip_jinja_comments(elsewhere)), (
+            f"{name}: a comment ahead of the clause removed it from the reading, so the "
+            "case above would red for a reason that has nothing to do with the clause"
+        )
 
 
 def test_the_retired_hand_back_shape_is_absent_and_its_absence_is_meaningful():
