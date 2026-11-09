@@ -73,10 +73,11 @@ number, the four spellings this family writes. The argument is the discriminator
 what keeps the clause off prose: "update `VERSION_SOURCES` in `scripts/bump-version.py`"
 ends at the file name and is not a thing to run, while `scripts/check-vote-count.py <PR>` is.
 
-What the clause reads on this tree, measured 2026-10-24: **39** command-shaped mentions, in
-eight tools - `bump-version.py` 2, `cast-vote.py` 8, `check-merge-freshness.py` 8,
-`check-merge-landed.py` 1, `check-merge-sequence.py` 1, `check-release-published.py` 1,
-`check-vote-count.py` 1, `review-queue.py` 17. This number has gone down as well as up, and
+What the clause reads on this tree, measured 2026-11-10: **40** command-shaped mentions, in
+nine tools - `bump-version.py` 2, `cast-vote.py` 8, `check-issue-links.py` 1,
+`check-merge-freshness.py` 8, `check-merge-landed.py` 1, `check-merge-sequence.py` 1,
+`check-release-published.py` 1, `check-vote-count.py` 1, `review-queue.py` 17. This number
+has gone down as well as up, and
 it goes down the way it went up: a *printed remedy* is a printed command either way, so a
 remedy deleted together with the tool that printed it takes its mention with it.
 `review-queue.py` carried a second `abstain` branch - a head pushed below a window whose

@@ -1399,7 +1399,25 @@ def _mention_detail(refs: Refs, number: int) -> str:
     return "; ".join(clauses)
 
 
-def _declined_detail(refs: Refs, number: int) -> str:
+#: A release version an issue's own text names, e.g. `Release v0.3.46`. It is read
+#: because it is the one fact an open issue carries about what finishes *it*: a PR's own
+#: title never reaches `judge_issues`, so "was the declaring PR a bump?" cannot be answered
+#: here at all, while "does this issue's completion name a published artifact?" can.
+_RELEASE_VERSION = re.compile(r"\bv\d+\.\d+\.\d+\b")
+
+
+def release_version(*texts: str | None) -> str | None:
+    """The release version this issue's own text names, or `None` when it names none."""
+    for text in texts:
+        if not text:
+            continue
+        found = _RELEASE_VERSION.search(text)
+        if found:
+            return found.group(0)
+    return None
+
+
+def _declined_detail(refs: Refs, number: int, release: str | None = None) -> str:
     """What to do about declarers that closed with no open one left.
 
     Two facts, one sentence each, because the remedies are opposite: a **merged**
@@ -1434,6 +1452,19 @@ def _declined_detail(refs: Refs, number: int) -> str:
                 "closed it, so the reopen is the reading that says the landing did not "
                 "finish the work: do not close this issue on that merge, state here what "
                 "it still leaves"
+            )
+        elif release is not None:
+            clauses.append(
+                f"{_numbers(refs.declared_merged)} declared `Closes #{number}` and {verb} "
+                f"merged, and what finishes this issue is the published `{release}`, not "
+                "that merge - a declaring pull request can move the version string while "
+                "nothing is released, so the merge is not the reading that settles it. "
+                f"`uv run --no-sync python3 scripts/check-release-published.py {release}` "
+                "is the reading: green across the platform matrix is what says the work "
+                "is done, and this issue may be "
+                "closed on that reading; anything else, or no answer at all, means it is "
+                "not done - do not close this issue on the merge, state here what it "
+                "still leaves"
             )
         else:
             clauses.append(
@@ -1490,7 +1521,9 @@ def judge_issues(
                 )
                 continue
             if refs.declared_merged or refs.declared_abandoned:
-                detail = _declined_detail(refs, number)
+                detail = _declined_detail(
+                    refs, number, release_version(issue.get("title"), issue.get("body"))
+                )
             elif refs.mentioned_landed or refs.mentioned_abandoned or refs.mentioned_open:
                 detail = _mention_detail(refs, number)
             else:

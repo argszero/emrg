@@ -2803,3 +2803,54 @@ def test_the_ledger_path_is_overridable(mod, monkeypatch):
     monkeypatch.setenv("EMRG_RANTS", "/tmp/from-env.jsonl")
     assert mod.rants_path() == Path("/tmp/from-env.jsonl")
     assert mod.rants_path("/tmp/wins.jsonl") == Path("/tmp/wins.jsonl")
+
+
+# --- an issue finished by a published artifact, not by a merge ---------------------
+#
+# A release issue is the case where "a declaring PR merged" and "the work is done" come
+# apart: the bump PR carries the closing keyword, so its merge closes the issue while
+# nothing has been tagged or published. The row then offered "the reading that says the
+# work is done" for work that had not begun. The fix reads the one fact the issue itself
+# carries - the release version it names - and sends the reader to that artifact's own
+# reading instead of inferring completion from the merge.
+
+
+def test_a_release_issue_is_not_told_to_close_on_its_bump_merge(mod) -> None:
+    detail = mod._declined_detail(mod.Refs(declared_merged={2782}), 2781, "v0.3.46")
+    assert "scripts/check-release-published.py v0.3.46" in detail
+    assert "either close this issue with the reading that says the work is done" not in detail
+
+
+def test_an_ordinary_issue_keeps_the_remedy_it_had(mod) -> None:
+    detail = mod._declined_detail(mod.Refs(declared_merged={2779}), 2778)
+    assert "either close this issue with the reading that says the work is done" in detail
+    assert "check-release-published" not in detail
+
+
+def test_the_artifact_is_what_changes_the_sentence_not_the_branch(mod) -> None:
+    refs = mod.Refs(declared_merged={2782})
+    withheld = mod._declined_detail(refs, 2781)
+    assert withheld == mod._declined_detail(refs, 2781, None)
+    assert withheld != mod._declined_detail(refs, 2781, "v0.3.46")
+
+
+def test_the_release_version_is_read_only_where_it_is_one(mod) -> None:
+    assert mod.release_version("Release v0.3.46") == "v0.3.46"
+    assert mod.release_version("an ordinary title") is None
+    assert mod.release_version(None, "") is None
+    assert mod.release_version("0.3.46") is None
+    assert mod.release_version("xv0.3.46y") is None
+
+
+def test_judge_issues_reads_the_version_off_the_issue_it_is_judging(mod) -> None:
+    issues = [
+        {"number": 2781, "title": "Release v0.3.46", "created_at": "2026-11-09T17:35:22Z"},
+        {"number": 2778, "title": "A change that needs no release", "created_at": "2026-11-09T15:49:24Z"},
+    ]
+    refs = {
+        2781: mod.Refs(declared_merged={2782}),
+        2778: mod.Refs(declared_merged={2779}),
+    }
+    rows = {row.number: row for row in mod.judge_issues(issues, refs, {})}
+    assert "check-release-published.py v0.3.46" in rows[2781].detail
+    assert "check-release-published" not in rows[2778].detail
