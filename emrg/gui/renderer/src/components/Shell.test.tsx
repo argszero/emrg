@@ -762,6 +762,32 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     expect(screen.getByTestId("agent-session-row")).toHaveTextContent("会话一");
   });
 
+  it("项目会话切换被拒（issue #2771）：拒绝出现在人操作的项目面板上，人没有被搬走", async () => {
+    // 侧栏之外的第二条切换路径：项目面板的会话子视图（agent-session-row → onSelectAgentSession
+    // → selectProjectSession）。此前那条 catch 没有任何测试走过 —— 删掉它整套仍然 52 passed，
+    // 而「切换被拒时把拒绝显示给点的人」这句话就只剩另一半被证明。
+    const m = mockEmrg();
+    m.listAgents.mockResolvedValue([{ name: "p1", path: "/p/p1" }]);
+    (window as unknown as { emrg: { listAgentSessions?: unknown } }).emrg.listAgentSessions =
+      vi.fn().mockResolvedValue({ sessions: [{ session_id: "s1", title: "会话一" }] });
+    m.switchSession.mockRejectedValueOnce(new Error("boom-project"));
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("nav-agents"));
+    await waitFor(() => expect(screen.getByTestId("agent-row")).toBeInTheDocument());
+    const row = screen.getByTestId("agent-row");
+    fireEvent.click(row.querySelector('button[title="Sessions"]') as HTMLButtonElement);
+    await waitFor(() => expect(screen.getByTestId("agent-session-row")).toBeInTheDocument());
+    // 点那一行 —— 这一击此前在整套测试里从未发生
+    fireEvent.click(screen.getByTestId("agent-session-row"));
+    // 拒绝可见：横幅带 daemon 交来的消息
+    const banner = await screen.findByTestId("switch-error");
+    expect(banner).toHaveTextContent("boom-project");
+    // 人没有被搬走：仍在项目面板，会话视图没有被切过去
+    expect(screen.getByTestId("panel-agents")).toBeInTheDocument();
+    expect(screen.queryByTestId("composer")).not.toBeInTheDocument();
+  });
+
   // ── Batch 5 slice 8：任务表单 + Rant 对话框接线 ──
 
   it("任务面板激活时每 5s 轮询 listTasks（vanilla startTaskPoll 语义）", async () => {

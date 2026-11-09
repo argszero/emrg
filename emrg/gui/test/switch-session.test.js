@@ -39,11 +39,48 @@ function handlerRegion(src, name) {
   return next === -1 ? rest : rest.slice(0, next);
 }
 
+/**
+ * 把 `//` 与块注释从一段源码里剥掉（issue #2771）。
+ *
+ * 守卫问的是「这段处理块里还有没有**代码**读这个名字」，而子串匹配回答的是「这一段正文里还
+ * 有没有这串字符」。两者差在注释上：只点名这个名字、一行代码都没读它的注释会被读成代码
+ * ⇒ 「写一句解释为什么删掉那条拒绝」这种正当改动变红，而红字指向的代码没坏。注释不是代码，
+ * 所以先剥再匹配。
+ *
+ * 两处细节是被测出来的，不是挑好看的：
+ * - **先剥块注释**：块注释里的 `//` 不是行注释的开头。
+ * - **行注释的 `//` 不能紧跟在 `:` 后面**：`"http://…"` 里的 `//` 是字符串的一部分，从这里
+ *   一直剥到行尾会把**同一行后面的代码**一起吃掉 —— 那会让真读字段的代码读成没读。假绿比
+ *   假红贵，所以这一步有自己的判别臂（见文件末尾那条测）。
+ */
+function stripComments(src) {
+  const withoutBlocks = src.replace(/\/\*[\s\S]*?\*\//g, "");
+  return withoutBlocks.replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+}
+
+/**
+ * 这个字段名本身，按**整词**匹配。
+ *
+ * 子串匹配分不清 `ownStream` 与以它开头的更长的名字：`ownStreamRequestId` 是一次请求的 id，
+ * 读它与读流标记是两件事（issue #2771）。整词匹配把这两件事分开，而一条真拒绝不可能存在
+ * 却不出现这个名字的整词 —— 匹配变窄的代价因此为零。
+ */
+const OWN_STREAM_FIELD = /\bownStream\b/;
+
+/**
+ * 一条源码是否**在代码里**读了那个字段：先剥注释，再按整词匹配。
+ *
+ * 谓词有名字是有理由的：数测试的仪器按行首形状认「这一行是不是在定义一条测试」，
+ * `OWN_STREAM_FIELD.test(...)` 单独起一行会被它读成一条定义（issue #2771 实测）。
+ * 一个名字把「读一个字段」写成一句话，顺带让它不再长得像一条测试。
+ */
+const readsOwnStream = (text) => OWN_STREAM_FIELD.test(stripComments(text));
+
 test("emrg:switchSession 的处理块不再读 ownStream（issue #2637）", () => {
   const region = handlerRegion(source, "switchSession");
   assert.ok(region.length > 500, `the switch region must be the real handler, got ${region.length} chars`);
   assert.ok(
-    !region.includes("ownStream"),
+    !readsOwnStream(region),
     "the switch handler must not refuse on ownStream any more: switching leaves the previous " +
       "connection open, so a running turn is unaffected by moving the window to another session",
   );
@@ -78,4 +115,73 @@ test("区域取法本身会切分（换一个处理块取到的是另一块）",
   assert.notStrictEqual(switchRegion, closeRegion);
   assert.ok(closeRegion.includes("closeSession("), "the closeSession region must carry its own body");
   assert.ok(!switchRegion.includes("closeSession("), "the switch region must not run into the next handler");
+});
+
+// ── issue #2771：上面那条断言问的对象是「代码」，所以它得在注释与更长的名字上都读对 ──
+
+test("只点名 ownStream 的注释读作「没有代码读它」，真读它的一行仍然红", () => {
+  // 两向各一句，都在**字符串**上，不动 main.js：改真文件只能证明这一次，改不得下一次。
+  const commented = [
+    "async (_e, { sessionId } = {}) => {",
+    "  // the refusal removed in issue #2637 read connManager.get(prevSid).ownStream before",
+    "  // opening any connection: these lines name that field and read nothing from it.",
+    "  const prevSid = currentSessionId;",
+    "  return {};",
+    "}",
+  ].join("\n");
+  assert.ok(
+    !readsOwnStream(commented),
+    "a comment explaining why the refusal was removed must not be read as the refusal itself",
+  );
+
+  const refused = [
+    "async (_e, { sessionId } = {}) => {",
+    "  if (connManager.get(currentSessionId).ownStream) {",
+    '    throw new Error("session busy");',
+    "  }",
+    "}",
+  ].join("\n");
+  assert.ok(
+    readsOwnStream(refused),
+    "a handler that really refuses on the field must still be caught — this is the arm the guard exists for",
+  );
+
+  // 块注释同样是注释：`/* … */` 里的点名不算读。
+  const blockCommented = "  /* this used to read conn.ownStream — issue #2637 */\n  return {};";
+  assert.ok(!readsOwnStream(blockCommented), "a block comment is not code either");
+});
+
+test("以 ownStream 开头的更长的名字不是读这个字段", () => {
+  // `ownStreamRequestId` 是一次请求的 id，`_releaseOwnStream()` 是释放锁；两者都与「本处理块
+  // 是否因流标记拒绝」无关，而子串匹配会把前者读成后者（issue #2771 实测 `includes` 为 true）。
+  const longer = [
+    "  conn._releaseOwnStream();",
+    "  this.ownStreamRequestId = rid;",
+    "  if (frame.request_id === this.ownStreamRequestId) this._releaseOwnStream();",
+  ].join("\n");
+  assert.ok(
+    !readsOwnStream(longer),
+    "names that merely begin with the field are a different subject, and the guard must not redden them",
+  );
+  // 对照：这一类名字确实存在于本程序里，所以上一条不是在与一个假想的形状搏斗。
+  assert.ok(
+    source.includes("_releaseOwnStream"),
+    "control: the release helper this test excludes does exist in main.js",
+  );
+});
+
+test("字符串里的 // 不是注释起点（剥除不能吃掉同一行后面的代码）", () => {
+  // 这一条是剥除本身的判别臂，方向是**假绿**：若行注释的 `//` 不排除前面是 `:` 的那种，
+  // 一次 URL 字面量之后的所有代码都会被剥掉，于是同行的真拒绝读成「没读」。
+  const withUrl = '  const u = "http://example.test/x"; if (conn.ownStream) throw new Error("busy");';
+  assert.ok(
+    readsOwnStream(withUrl),
+    "a `//` inside a string literal must not swallow the code that follows it on the same line",
+  );
+  // 对照：同一行里真的是注释时，行尾的 `//` 之后不再算代码。
+  const withComment = '  const u = "http://example.test/x"; return {}; // ownStream lives elsewhere';
+  assert.ok(
+    !readsOwnStream(withComment),
+    "a trailing line comment is still a comment",
+  );
 });
