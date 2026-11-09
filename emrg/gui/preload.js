@@ -74,6 +74,12 @@ const api = {
   githubStatus: () => ipcRenderer.invoke("emrg:githubStatus"),
   githubConnect: (payload) => ipcRenderer.invoke("emrg:githubConnect", payload),
   githubDisconnect: () => ipcRenderer.invoke("emrg:githubDisconnect"),
+  // issue #2774：aitokenpool 用 GitHub 账号登录。出码 / 轮询 / 写配置都在 main
+  // （renderer 无网络权限），这里只开通道；服务地址有几处也由 main 说，界面不另存常量。
+  atpBases: () => ipcRenderer.invoke("emrg:atpBases"),
+  atpDeviceStart: (payload) => ipcRenderer.invoke("emrg:atpDeviceStart", payload),
+  atpDevicePoll: (payload) => ipcRenderer.invoke("emrg:atpDevicePoll", payload),
+  atpApply: (payload) => ipcRenderer.invoke("emrg:atpApply", payload),
   githubConnectWeb: () => ipcRenderer.invoke("emrg:githubConnectWeb"),
   openExternal: (payload) => ipcRenderer.invoke("emrg:openExternal", payload),
   listModels: () => ipcRenderer.invoke("emrg:listModels"),

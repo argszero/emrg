@@ -544,4 +544,205 @@ describe("SettingsPanel", () => {
       expect(screen.getByTestId("settings-msg").textContent).toContain("referenced by 2 tasks"),
     );
   });
+
+  // ── aitokenpool 账号登录（issue #2774）────────────────────
+  const ATP_BASES = {
+    default: "https://aitokenpool.args.fun",
+    alternatives: ["https://atp-dev.shenbiai.net"],
+  };
+  const ATP_CODE = {
+    ok: true,
+    deviceCode: "dev-1",
+    userCode: "ABCD-1234",
+    verificationUri: "https://aitokenpool.args.fun/device",
+    expiresIn: 900,
+    interval: 1,
+  };
+  /** 没有正在用的 key —— 覆盖确认不参与的那些用例用它 */
+  const EMPTY_SETTINGS = {
+    apiKey: "",
+    baseUrl: "",
+    model: "",
+    theme: "system",
+    modelDetails: [],
+  };
+
+  async function atpReady(over: Record<string, unknown>) {
+    setup({ atpBases: vi.fn().mockResolvedValue(ATP_BASES), ...over });
+    await waitFor(() =>
+      expect((screen.getByTestId("atp-base") as HTMLSelectElement).value).toBe(
+        "https://aitokenpool.args.fun",
+      ),
+    );
+  }
+
+  it("starts the aitokenpool login at the default address and shows a copyable code", async () => {
+    const atpDeviceStart = vi.fn().mockResolvedValue(ATP_CODE);
+    const openExternal = vi.fn().mockResolvedValue({ ok: true });
+    await atpReady({
+      atpDeviceStart,
+      openExternal,
+      atpDevicePoll: vi.fn().mockResolvedValue({ status: "pending" }),
+    });
+
+    fireEvent.click(screen.getByTestId("atp-signin"));
+    await waitFor(() =>
+      expect(atpDeviceStart).toHaveBeenCalledWith({ base: "https://aitokenpool.args.fun" }),
+    );
+    await waitFor(() => expect(screen.getByTestId("atp-device-code").textContent).toBe("ABCD-1234"));
+    expect(screen.getByTestId("atp-login-wait")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("atp-open"));
+    await waitFor(() =>
+      expect(openExternal).toHaveBeenCalledWith({ url: "https://aitokenpool.args.fun/device" }),
+    );
+
+    fireEvent.click(screen.getByTestId("atp-login-close"));
+    await waitFor(() => expect(screen.queryByTestId("atp-device-code")).toBeNull());
+  });
+
+  it("writes the aitokenpool config once the probe passes and fills the three fields", async () => {
+    const atpApply = vi.fn().mockResolvedValue({
+      ok: true,
+      model: "deepseek-flash",
+      contextWindow: 200000,
+      baseUrl: "https://aitokenpool.args.fun/v1",
+    });
+    await atpReady({
+      getSettings: vi.fn().mockResolvedValue(EMPTY_SETTINGS),
+      atpDeviceStart: vi.fn().mockResolvedValue(ATP_CODE),
+      atpDevicePoll: vi.fn().mockResolvedValue({ status: "ok", apiKey: "atp-key", login: "argszero" }),
+      atpApply,
+    });
+
+    fireEvent.click(screen.getByTestId("atp-signin"));
+    await waitFor(() => expect(atpApply).toHaveBeenCalledTimes(1), { timeout: 5000 });
+    expect(atpApply).toHaveBeenCalledWith({
+      base: "https://aitokenpool.args.fun",
+      apiKey: "atp-key",
+    });
+
+    await waitFor(() =>
+      expect((screen.getByTestId("set-api-key") as HTMLInputElement).value).toBe("atp-key"),
+    );
+    expect((screen.getByTestId("set-base-url") as HTMLInputElement).value).toBe(
+      "https://aitokenpool.args.fun/v1",
+    );
+    // 要求 9：对话框关掉，提示带 GitHub 用户名与就绪的模型名
+    await waitFor(() => expect(screen.queryByTestId("atp-device-code")).toBeNull());
+    const msg = screen.getByTestId("settings-msg").textContent || "";
+    expect(msg).toContain("argszero");
+    expect(msg).toContain("deepseek-flash");
+    // 新模型出现在模型清单里，且没有第二条同名条目
+    await waitFor(() => expect(screen.getByTestId("model-list").textContent).toContain("deepseek-flash"));
+  });
+
+  it("asks before replacing the key in use, and a cancel calls the write zero times", async () => {
+    const atpApply = vi.fn().mockResolvedValue({ ok: true, model: "deepseek-flash", baseUrl: "x" });
+    await atpReady({
+      // 默认 mock 的 getSettings 带回 sk-test：正在用的 key 非空
+      atpDeviceStart: vi.fn().mockResolvedValue(ATP_CODE),
+      atpDevicePoll: vi.fn().mockResolvedValue({ status: "ok", apiKey: "atp-key", login: "argszero" }),
+      atpApply,
+    });
+
+    fireEvent.click(screen.getByTestId("atp-signin"));
+    await waitFor(() => expect(screen.getByTestId("confirm-ok")).toBeTruthy(), { timeout: 5000 });
+    fireEvent.click(screen.getByTestId("confirm-cancel"));
+
+    // 验收 2 的原话：数调用次数，不是「文件内容没变」
+    await waitFor(() => expect(screen.queryByTestId("confirm-ok")).toBeNull());
+    expect(atpApply).toHaveBeenCalledTimes(0);
+    expect(screen.queryByTestId("atp-device-code")).toBeNull();
+  });
+
+  it("replaces the key in use once the overwrite is confirmed", async () => {
+    const atpApply = vi.fn().mockResolvedValue({
+      ok: true,
+      model: "deepseek-flash",
+      baseUrl: "https://aitokenpool.args.fun/v1",
+    });
+    await atpReady({
+      atpDeviceStart: vi.fn().mockResolvedValue(ATP_CODE),
+      atpDevicePoll: vi.fn().mockResolvedValue({ status: "ok", apiKey: "atp-key", login: "argszero" }),
+      atpApply,
+    });
+
+    fireEvent.click(screen.getByTestId("atp-signin"));
+    await waitFor(() => expect(screen.getByTestId("confirm-ok")).toBeTruthy(), { timeout: 5000 });
+    fireEvent.click(screen.getByTestId("confirm-ok"));
+    await waitFor(() => expect(atpApply).toHaveBeenCalledTimes(1), { timeout: 5000 });
+    expect(atpApply).toHaveBeenCalledWith({
+      base: "https://aitokenpool.args.fun",
+      apiKey: "atp-key",
+    });
+  });
+
+  it("a slow_down is invisible: the interval moves and the dialog keeps waiting", async () => {
+    let polls = 0;
+    const atpDevicePoll = vi.fn().mockImplementation(async () => {
+      polls += 1;
+      if (polls === 1) return { status: "slow_down", interval: 1 };
+      return { status: "ok", apiKey: "atp-key", login: "argszero" };
+    });
+    const atpApply = vi.fn().mockResolvedValue({
+      ok: true,
+      model: "deepseek-flash",
+      baseUrl: "https://aitokenpool.args.fun/v1",
+    });
+    await atpReady({
+      getSettings: vi.fn().mockResolvedValue(EMPTY_SETTINGS),
+      atpDeviceStart: vi.fn().mockResolvedValue(ATP_CODE),
+      atpDevicePoll,
+      atpApply,
+    });
+
+    fireEvent.click(screen.getByTestId("atp-signin"));
+    await waitFor(() => expect(atpDevicePoll).toHaveBeenCalled(), { timeout: 5000 });
+    // 429 不给用户看：没有错误行，对话框还在等
+    expect(screen.queryByTestId("atp-login-error")).toBeNull();
+    await waitFor(() => expect(atpApply).toHaveBeenCalledTimes(1), { timeout: 6000 });
+    expect(screen.queryByTestId("atp-login-error")).toBeNull();
+  });
+
+  it("says GitHub login is off when the address answers 503", async () => {
+    await atpReady({
+      atpDeviceStart: vi.fn().mockResolvedValue({ ok: false, error: "not_enabled", status: 503 }),
+    });
+    fireEvent.click(screen.getByTestId("atp-signin"));
+    await waitFor(() =>
+      expect(screen.getByTestId("settings-msg").textContent).toContain("not enabled at this address"),
+    );
+    expect(screen.queryByTestId("atp-device-code")).toBeNull();
+  });
+
+  it("says the code expired and what to do when the server answers 410", async () => {
+    await atpReady({
+      atpDeviceStart: vi.fn().mockResolvedValue(ATP_CODE),
+      atpDevicePoll: vi.fn().mockResolvedValue({ status: "expired", httpStatus: 410 }),
+    });
+    fireEvent.click(screen.getByTestId("atp-signin"));
+    await waitFor(() => expect(screen.getByTestId("atp-login-error")).toBeTruthy(), { timeout: 5000 });
+    expect(screen.getByTestId("atp-login-error").textContent).toContain("expired");
+  });
+
+  it("says the authorization was denied when the server answers 403", async () => {
+    await atpReady({
+      atpDeviceStart: vi.fn().mockResolvedValue(ATP_CODE),
+      atpDevicePoll: vi.fn().mockResolvedValue({ status: "denied", httpStatus: 403 }),
+    });
+    fireEvent.click(screen.getByTestId("atp-signin"));
+    await waitFor(() => expect(screen.getByTestId("atp-login-error")).toBeTruthy(), { timeout: 5000 });
+    expect(screen.getByTestId("atp-login-error").textContent).toContain("denied");
+  });
+
+  it("names the address it could not reach instead of saying it failed", async () => {
+    await atpReady({
+      atpDeviceStart: vi.fn().mockResolvedValue({ ok: false, error: "unreachable" }),
+    });
+    fireEvent.click(screen.getByTestId("atp-signin"));
+    await waitFor(() =>
+      expect(screen.getByTestId("settings-msg").textContent).toContain("aitokenpool.args.fun"),
+    );
+  });
 });

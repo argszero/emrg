@@ -48,6 +48,7 @@
       "gui-state.js",
       "daemon_client.js",
       "nav-policy.js",
+      "atp_login.js",
       "package.json",
       "scripts/**"
     ],

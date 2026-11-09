@@ -77,6 +77,12 @@ const EXPECTED_INVOKE_METHODS = [
   "githubConnect",
   "githubDisconnect",
   "githubConnectWeb",
+  // issue #2774：aitokenpool 用 GitHub 账号登录——出码、轮询、写配置都在 main
+  // （renderer 没有网络权限），地址表也由 main 说，界面不另存常量。
+  "atpBases",
+  "atpDeviceStart",
+  "atpDevicePoll",
+  "atpApply",
   "openExternal",
   "listModels",
   "openFile",
@@ -125,7 +131,7 @@ function parseApiBlock(block) {
 
 const api = parseApiBlock(extractApiBlock());
 
-test("window.emrg exposes the full contract (59 invoke + onEvent)", () => {
+test("window.emrg exposes the full contract (64 invoke + onEvent)", () => {
   // 59 invoke 方法全部存在（防误删/改名）
   for (const name of EXPECTED_INVOKE_METHODS) {
     assert.ok(api.invoke.has(name), `缺少 invoke 方法 ${name}`);
