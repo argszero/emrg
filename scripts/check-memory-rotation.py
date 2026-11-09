@@ -326,13 +326,32 @@ def _read_by_of(cells: list[str]) -> str | None:
 #: answers "32 of 32" while the file it is embedded from grows every cycle.
 CYCLE_SECTION = re.compile(r"^##\s+Cycle\b")
 
+#: How long the **label** before a cycle id may be, in characters, for the block to still be a
+#: per-cycle note.
+#:
+#: A note does not have to *open* on its id: this installation wrote ``Rotation at `cyc…`: …``
+#: for months, and an anchor demanding the id at character 0 read every one of those as ordinary
+#: prose (issue #2770). Widening to "a cycle id anywhere in the first line" answers the other way
+#: - the file's own contract prose quotes cycle ids mid-sentence as evidence, and faulting that
+#: sends the writer to rewrite the paragraph that states the rule.
+#:
+#: So the label is bounded, and the bound is measured rather than round: the longest label that
+#: must count is 12 characters (`Rotation at `) and the shortest that must not is 28
+#: (`- the qualifier matters, as `, pinned in `tests/test_check_memory_rotation.py`). 20 sits
+#: between two measured shapes instead of at a number that reads tidy.
+NARRATION_LABEL_MAX_CHARS = 20
+
 #: The opening of a **per-cycle narration block**, wherever it sits in the bookmark.
 #:
-#: A cycle's note is usually a paragraph, not a heading: it opens with its own id in a code
-#: span and the next cycle replaces it. `CYCLE_SECTION` cannot see that shape, and measured
-#: 2026-11-05 the gap was 43 blocks over 729 lines and 94,482 characters while the structure
-#: reading answered `0 cycle section(s)` and exited 0.
-CYCLE_NARRATION = re.compile(r"^`cyc\d{8}-\d{6}`")
+#: A cycle's note is usually a paragraph, not a heading: it names its cycle in a code span - at
+#: the line's start, or a short label in - and the next cycle replaces it. `CYCLE_SECTION` cannot
+#: see that shape, and measured 2026-11-05 the gap was 43 blocks over 729 lines and 94,482
+#: characters while the structure reading answered `0 cycle section(s)` and exited 0.
+#:
+#: A **table row is not a note**, and it is not at risk from the wider anchor: `narration_blocks`
+#: ends a block at a row rather than reading it, so the cycle id every bookmark row carries in its
+#: "read by" column never reaches this pattern.
+CYCLE_NARRATION = re.compile(r"^.{0,%d}?`cyc\d{8}-\d{6}`" % NARRATION_LABEL_MAX_CHARS)
 
 
 def parse_bookmark(path: Path) -> list[dict]:
@@ -459,9 +478,10 @@ def narration_blocks(path: Path) -> list[str]:
     """The bookmark's per-cycle narration, one entry per block, above the table or below it.
 
     A block is a run of non-blank lines, and it counts as narration when its **first** line
-    opens with a cycle id in a code span (:data:`CYCLE_NARRATION`) - the shape a cycle's own
-    note has taken. A table row ends a *block*; it does not end the reading, because the
-    bookmark is not obliged to keep its prose above its table.
+    names a cycle id in a code span - at the line's start, or after a label no longer than
+    :data:`NARRATION_LABEL_MAX_CHARS` characters (:data:`CYCLE_NARRATION`), which is the two
+    shapes a cycle's own note has taken. A table row ends a *block*; it does not end the
+    reading, because the bookmark is not obliged to keep its prose above its table.
 
     That boundary was once a `break`, on the assumption that below the table the file is
     rows and not prose. Measured 2026-11-07 on this host's own bookmark, the assumption
@@ -539,6 +559,24 @@ def structure_faults(headings: list[str]) -> list[str]:
     ]
 
 
+def counted_shapes() -> str:
+    """What a narration block **is**, in the words both readings use to report their number.
+
+    The reading says which shapes it counted, because a number whose extent is unstated cannot be
+    checked: `1 narration block(s)` was true of a file carrying 27 of them in the shape the anchor
+    did not recognise (issue #2770), and a reader of that line had no way to know.
+
+    One function, called by the clean line and by the fault, and built from
+    :data:`NARRATION_LABEL_MAX_CHARS` rather than spelling the number again - a bound in prose
+    beside a bound in code is two values that drift, and the test derives this sentence from the
+    constant to keep them one.
+    """
+    return (
+        f"a narration block is a block whose first line names a cycle id in a code span, either "
+        f"at its start or after a label of at most {NARRATION_LABEL_MAX_CHARS} characters"
+    )
+
+
 def narration_faults(blocks: list[str]) -> list[str]:
     """The faults in the bookmark's per-cycle narration: it keeps **one**, replaced in place.
 
@@ -559,10 +597,11 @@ def narration_faults(blocks: list[str]) -> list[str]:
     named = ", ".join(blocks[:5]) + (f", and {len(blocks) - 5} more" if len(blocks) > 5 else "")
     return [
         f"the bookmark carries {len(blocks)} per-cycle narration blocks "
-        f"({named}): it keeps one and replaces it in place - an appended note is the same "
-        f"growth the cycle-section reading forbids, in the shape that reading cannot see "
-        f"(measured 2026-11-05: 43 blocks over 729 lines and 94,482 characters, while the "
-        f"structure reading answered 0), and every cycle that edits this file reads past them"
+        f"({named}): it keeps one and replaces it in place - {counted_shapes()}, so a note "
+        f"appended in either shape is the same growth the cycle-section reading forbids, in the "
+        f"shape that reading cannot see (measured 2026-11-05: 43 blocks over 729 lines and "
+        f"94,482 characters, while the structure reading answered 0), and every cycle that edits "
+        f"this file reads past them"
     ]
 
 
@@ -880,7 +919,7 @@ def render(reading: dict, show_all: bool) -> str:
     else:
         out.append(f"structure: {reading['cycle_sections']} cycle section(s) and "
                    f"{reading['narration_blocks']} narration block(s) in the file - "
-                   f"the file keeps at most one of each, replaced in place")
+                   f"{counted_shapes()}; the file keeps at most one of each, replaced in place")
     return "\n".join(out)
 
 

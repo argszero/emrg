@@ -1059,13 +1059,16 @@ def test_a_narration_block_below_the_table_is_read_too(mod, tmp_path):
 
 
 def test_contract_prose_and_a_mid_sentence_cycle_id_are_not_narration(mod, tmp_path):
-    """The other directions: only a block that **opens** on the code span is a cycle's note.
+    """The other direction: the file's own contract prose quotes cycle ids, and is not a note.
 
-    The file keeps rules of its own above the table, and those rules quote cycle ids as
-    evidence mid-sentence. Reading them as narration would fault the prose that states the
-    contract, so the match is anchored to the block's first line. A note indented under a
-    heading is still a note - the code span decides, not the heading - and a bookmark whose
-    prose carries none of them stays at zero.
+    The file keeps rules of its own above the table, and those rules quote cycle ids as evidence
+    mid-sentence. Reading them as narration would fault the prose that states the contract, so the
+    match is anchored to the block's first line **and** bounded: both examples below put the id
+    well past the characters a short label may occupy, so both stay out. That bound is what a
+    widening of what counts has to keep, and it is measured at its own edge in
+    :func:`test_the_label_bound_is_read_in_both_directions`. A note indented under a heading is
+    still a note - the code span decides, not the heading - and a bookmark whose prose carries no
+    cycle id at all stays at zero.
     """
     root = _root(tmp_path, "prosing")
     _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
@@ -1094,3 +1097,153 @@ def test_contract_prose_and_a_mid_sentence_cycle_id_are_not_narration(mod, tmp_p
     nested_reading = mod.read(register, nested)
     assert nested_reading["structure"] == [], nested_reading["structure"]
     assert nested_reading["narration_blocks"] == 1
+
+
+def test_a_note_that_names_its_cycle_after_a_short_label_is_narration_too(mod, tmp_path):
+    """A note does not have to **open** on its cycle id: a short label before it is still a note.
+
+    Measured 2026-11-09 on this installation's own bookmark: the note shape it had written for
+    months - ``Rotation at `cyc…`: …`` - was appended to a copy of the file and the structure
+    reading answered `1 narration block(s)` and exited 0, unchanged from the copy without it. So
+    the file could accumulate the growth the reading exists to catch, one note per cycle, while
+    the reading reported the one note it recognised. The anchor was the whole cause: it demanded
+    the id at character 0 of the block's first line, and a note rarely starts with its own name.
+
+    The counter was never the problem, and that is what the other half of this test shows: the
+    label shape and the span shape are two spellings of one subject, so a file carrying one of
+    each is **one** fault and not two.
+    """
+    root = _root(tmp_path, "labelled")
+    _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
+    register = _agents(tmp_path / "agents.yml", [{"name": "labelled", "path": root}])
+
+    labelled = tmp_path / "labelled.md"
+    labelled.write_text(
+        "# Bookmark\n\n"
+        "Rotation at `cyc20991231-235959`: a note whose first line opens on prose.\n\n"
+        "| agent | newest read | files |\n| --- | --- | --- |\n"
+        f"| `labelled` | {BASE} | 0 |\n", encoding="utf-8")
+    reading = mod.read(register, labelled)
+    assert reading["narration_blocks"] == 1, (
+        "a note that names its cycle a few words in is a per-cycle note, so a reading that "
+        "misses it lets the bookmark grow one note per cycle while reporting the one note it "
+        f"recognises - the reading counted {reading['narration_blocks']}")
+    assert reading["structure"] == [], reading["structure"]
+    assert mod.main(["--agents", str(register), "--bookmark", str(labelled)]) == 0
+
+    plain = tmp_path / "plain.md"
+    plain.write_text(
+        "# Bookmark\n\n"
+        "The rows below are replaced in place; this paragraph states the rule.\n\n"
+        "| agent | newest read | files |\n| --- | --- | --- |\n"
+        f"| `labelled` | {BASE} | 0 |\n", encoding="utf-8")
+    plain_reading = mod.read(register, plain)
+    assert plain_reading["narration_blocks"] == 0, (
+        "a paragraph that names no cycle is the bookmark stating its own rule, and a reader "
+        "that counted it would fault the contract prose the file is supposed to carry")
+
+
+def test_two_notes_of_either_shape_are_one_fault_naming_what_the_file_keeps(mod, tmp_path):
+    """The two spellings of a note count as one subject, and the fault says what it counted.
+
+    Widening what is recognised must not widen what is *refused*: a file keeping its one note in
+    the label shape and gaining a second in the span shape is the growth the reading forbids, in
+    one fault rather than in two, and it is a fault rather than a refusal - every row still
+    parses, so the rotation reading survives and only the exit code carries the complaint.
+
+    The sentence names the shapes it counted, built from the bound rather than written beside it,
+    so a reader can tell what the number covers and the prose cannot drift from the predicate.
+    """
+    root = _root(tmp_path, "mixed")
+    _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
+    register = _agents(tmp_path / "agents.yml", [{"name": "mixed", "path": root}])
+
+    two = tmp_path / "two.md"
+    two.write_text(
+        "# Bookmark\n\n"
+        "Rotation at `cyc20991231-235959`: the note this cycle replaces.\n\n"
+        "`cyc20260101-120000`: a second note, appended in the span shape.\n\n"
+        "| agent | newest read | files |\n| --- | --- | --- |\n"
+        f"| `mixed` | {BASE} | 0 |\n", encoding="utf-8")
+    reading = mod.read(register, two)
+    assert reading["faults"] == [], reading["faults"]          # every row still parses...
+    assert reading["narration_blocks"] == 2, (
+        f"two notes, one of each shape: counted {reading['narration_blocks']}")
+    assert len(reading["structure"]) == 1, reading["structure"]  # ...and the prose was appended to
+    fault = reading["structure"][0]
+    assert "2 per-cycle narration blocks" in fault, fault
+    assert "it keeps one and replaces it in place" in fault, fault
+    assert str(mod.NARRATION_LABEL_MAX_CHARS) in fault, (
+        "the fault has to name the shapes it counted, and the label bound is what decides them: "
+        f"the sentence must be built from the constant, not written beside it - {fault}")
+    assert "structure faults: 1" in mod.render(reading, False)
+    assert mod.main(["--agents", str(register), "--bookmark", str(two)]) == 1
+
+
+def test_the_label_bound_is_read_in_both_directions(mod, tmp_path):
+    """The bound is the discriminator, so it is measured at its own edge and not only far from it.
+
+    A label of at most the bound is a note; one character more is the file's contract prose
+    quoting a cycle id as evidence, which must stay out. Asserting only the far side would leave
+    the boundary unpinned, and a later widening would pass every arm this file carries.
+    """
+    root = _root(tmp_path, "bounded")
+    _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
+    register = _agents(tmp_path / "agents.yml", [{"name": "bounded", "path": root}])
+    limit = mod.NARRATION_LABEL_MAX_CHARS
+
+    def counts(label_chars: int) -> int:
+        path = tmp_path / f"label-{label_chars}.md"
+        path.write_text(
+            "# Bookmark\n\n"
+            f"{'x' * label_chars}`cyc20991231-235959`: a note on a label of {label_chars}.\n\n"
+            "| agent | newest read | files |\n| --- | --- | --- |\n"
+            f"| `bounded` | {BASE} | 0 |\n", encoding="utf-8")
+        return mod.read(register, path)["narration_blocks"]
+
+    assert counts(limit) == 1, f"a label of exactly {limit} characters is still a note"
+    assert counts(limit + 1) == 0, (
+        f"a label of {limit + 1} characters is prose carrying a cycle id, not a note: the bound "
+        f"is {limit} and a reader that passed this row would count the contract prose too")
+
+
+def test_a_moved_note_belongs_to_the_file_it_was_moved_to(mod, tmp_path):
+    """The repair the bookmark actually received: its notes were moved to a neighbour file.
+
+    Two readings, because one direction is not the question. The bookmark's own count must not
+    change when an archive file appears beside it - a reader that walked the directory would
+    report the archive's notes as the bookmark's narration, which is the growth error in the
+    other direction - and the archive, read as the subject, reports **its own** notes. So the
+    moved notes stay measurable where they went, which is what makes moving them a repair rather
+    than a way to hide them.
+    """
+    folder = tmp_path / "moved"
+    folder.mkdir()
+    root = _root(tmp_path, "moving")
+    _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod))
+    register = _agents(tmp_path / "agents.yml", [{"name": "moving", "path": root}])
+
+    bookmark = folder / "bookmark.md"
+    bookmark.write_text(
+        "# Bookmark\n\n"
+        "`cyc20260901-120000`: the one note this file keeps.\n\n"
+        "| agent | newest read | files |\n| --- | --- | --- |\n"
+        f"| `moving` | {BASE} | 0 |\n", encoding="utf-8")
+    assert mod.read(register, bookmark)["narration_blocks"] == 1
+
+    archive = folder / "narration-archive.md"
+    archive.write_text(
+        "# Archive\n\n"
+        + "\n\n".join(f"Rotation at `cyc2026080{i}-120000`: moved note {i}." for i in range(1, 4))
+        + "\n", encoding="utf-8")
+    after = mod.read(register, bookmark)
+    assert after["narration_blocks"] == 1, (
+        "the archive sits beside the bookmark, not in it: a reading that counted the neighbour's "
+        f"notes would report {after['narration_blocks']} blocks for a file that kept one")
+    assert after["structure"] == [], after["structure"]
+
+    # The archive is asked the narration question and not the bookmark question: an archive is a
+    # file of notes, so it carries no table, and `read()` refuses it as unmeasurable by design.
+    assert len(mod.narration_blocks(archive)) == 3, (
+        "the moved notes are still notes, of the archive file - if they read as zero there, "
+        "moving them out of the bookmark lost them instead of storing them")
