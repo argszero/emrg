@@ -87,11 +87,12 @@ describe("词典完整性守卫（防漂移）", () => {
   // 2026-10-09T09:43:39 Part 2(a)——从 413 改为 429。
   // 2026-10-11 issue #2113：device flow 的两个提示串 → 431。
   // 2026-10-22 issue #2490：调度窗口 9 个键（含下限插值）→ 440。
-  it("zh/en 各 442 个 key 且完全对齐", () => {
+  // 2026-11-09 issue #2774：aitokenpool 账号登录 21 个键 → 465。
+  it("zh/en 各 465 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(444);
-    expect(enKeys.length).toBe(444);
+    expect(zhKeys.length).toBe(465);
+    expect(enKeys.length).toBe(465);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);

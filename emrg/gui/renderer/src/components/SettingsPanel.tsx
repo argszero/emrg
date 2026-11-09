@@ -1,8 +1,9 @@
 import { useEffect, useReducer, useRef, useState } from "react";
 import { useI18n, setLocale, type Locale } from "../lib/i18n";
-import { dialogReducer, initialDialogState } from "../lib/dialog";
+import { dialogReducer, initialDialogState, type ConfirmRequest } from "../lib/dialog";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { GithubDeviceDialog } from "./GithubDeviceDialog";
+import { AtpLoginDialog } from "./AtpLoginDialog";
 
 /**
  * SettingsPanel — Batch 5 slice 6：设置面板接线（vanilla dialogs.js showSettings/
@@ -56,6 +57,17 @@ interface DeviceFlow {
   error: string | null;
 }
 
+/** aitokenpool 登录对话框的状态（issue #2774）：轮询间隔由服务端给，所以它在这里。 */
+interface AtpFlow {
+  open: boolean;
+  code: string | null;
+  url: string | null;
+  waiting: boolean;
+  error: string | null;
+  deviceCode: string;
+  interval: number;
+}
+
 /** one row of the daemon's `recent` list (`evolution_summary`) */
 export interface RecentImprovement {
   timestamp?: string;
@@ -75,6 +87,34 @@ interface EmrgBridge {
   githubConnect(p: { token: string }): Promise<{ ok?: boolean; user?: string; error?: string }>;
   githubConnectWeb(): Promise<{ ok?: boolean; code?: string | null; url?: string | null; user?: string | null; error?: string | null }>;
   githubDisconnect(): Promise<unknown>;
+  /** issue #2774：服务地址有几处由 main 说，界面不另存一份常量。 */
+  atpBases?(): Promise<{ default?: string; alternatives?: string[] }>;
+  atpDeviceStart?(p: { base: string }): Promise<{
+    ok?: boolean;
+    deviceCode?: string;
+    userCode?: string;
+    verificationUri?: string;
+    expiresIn?: number;
+    interval?: number;
+    error?: string;
+    status?: number;
+  }>;
+  atpDevicePoll?(p: { base: string; deviceCode: string; currentInterval: number }): Promise<{
+    status?: string;
+    apiKey?: string;
+    login?: string;
+    interval?: number;
+    httpStatus?: number;
+  }>;
+  atpApply?(p: { base: string; apiKey: string }): Promise<{
+    ok?: boolean;
+    model?: string;
+    contextWindow?: number | null;
+    baseUrl?: string;
+    error?: string;
+    status?: number;
+    unreachable?: boolean;
+  }>;
   openExternal(p: { url: string }): Promise<unknown>;
   taskTemplateList(): Promise<TemplateRec[]>;
   taskTemplateCreate(p: { name: string; prompt: string }): Promise<unknown>;
@@ -129,6 +169,13 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
   const [github, setGithub] = useState<{ authenticated: boolean; user: string | null } | null>(null);
   const [githubToken, setGithubToken] = useState("");
   const [device, setDevice] = useState<DeviceFlow | null>(null);
+  // aitokenpool 账号（issue #2774）：atpBase 从 main 的地址表来，atp 是对话框状态
+  const [atpBase, setAtpBase] = useState("");
+  const [atpBases, setAtpBases] = useState<string[]>([]);
+  const [atp, setAtp] = useState<AtpFlow | null>(null);
+  // 覆盖确认的答案（askReplaceKey 的 resolve）。ConfirmDialog 的取消/ESC 只走 onDismiss，
+  // 所以取消也要能从那里回到这里——否则按钮放下去了、promise 永远不落地。
+  const pendingConfirm = useRef<((ok: boolean) => void) | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   // model 行内表单态（vanilla openModelForm/saveModelForm）
@@ -427,6 +474,187 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
     setDevice(null);
   }
 
+  // ── aitokenpool 账号（issue #2774）──────────────────────
+  /** 服务地址表由 main 给（atp_login.js 是唯一声明点）；读不到也不用挡路——
+   *  没有它照样能填 API Key，登录按钮点了会自己报「连不上」。 */
+  useEffect(() => {
+    const b = bridge();
+    if (!b?.atpBases) return;
+    b.atpBases()
+      .then((r) => {
+        const def = r?.default || "";
+        const alts = Array.isArray(r?.alternatives) ? r.alternatives : [];
+        setAtpBases([...(def ? [def] : []), ...alts]);
+        setAtpBase((cur) => cur || def);
+      })
+      .catch(() => {
+        /* a failed read is not a failure: the flow reports its own errors */
+      });
+  }, []);
+
+  /** 四种失败各自说下一步（要求 11）——只显示「失败」不算回答。 */
+  function atpStartError(error: string | undefined, status: number | undefined): string {
+    if (error === "not_enabled") return t("settings.atpNotEnabled");
+    if (error === "unreachable") return t("settings.atpUnreachable", { base: atpBase });
+    return t("settings.atpFailUnknown", { msg: error || String(status ?? "") });
+  }
+
+  function atpPollError(status: string): string {
+    if (status === "expired") return t("settings.atpExpired");
+    if (status === "denied") return t("settings.atpDenied");
+    if (status === "unreachable") return t("settings.atpUnreachable", { base: atpBase });
+    return t("settings.atpFailUnknown", { msg: status });
+  }
+
+  async function startAtpLogin() {
+    const b = bridge();
+    if (!b?.atpDeviceStart) return;
+    setBusy(true);
+    try {
+      const res = await b.atpDeviceStart({ base: atpBase });
+      if (!res?.ok) {
+        setMsg({ kind: "err", text: atpStartError(res?.error, res?.status) });
+        return;
+      }
+      setAtp({
+        open: true,
+        code: res.userCode || null,
+        url: res.verificationUri || null,
+        waiting: true,
+        error: null,
+        deviceCode: String(res.deviceCode || ""),
+        interval: Number(res.interval) > 0 ? Number(res.interval) : 5,
+      });
+    } catch {
+      setMsg({ kind: "err", text: t("settings.atpUnreachable", { base: atpBase }) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** 一步一问：间隔归服务端（要求 3），429 换间隔后用户看不到任何东西。 */
+  useEffect(() => {
+    if (!atp?.open || !atp.waiting || !atp.deviceCode) return;
+    const b = bridge();
+    const poll = b?.atpDevicePoll;
+    if (!poll) return;
+    let stopped = false;
+    const timer = setInterval(
+      () => {
+        void poll({ base: atpBase, deviceCode: atp.deviceCode, currentInterval: atp.interval })
+          .then((res) => {
+            if (stopped) return;
+            const status = res?.status || "bad_response";
+            if (status === "pending") return;
+            if (status === "slow_down") {
+              const next = Number(res?.interval) > 0 ? Number(res.interval) : atp.interval;
+              setAtp((cur) => (cur ? { ...cur, interval: next } : cur));
+              return;
+            }
+            if (status === "ok") {
+              void finishAtpLogin(res?.apiKey || "", res?.login || "");
+              return;
+            }
+            setAtp((cur) => (cur ? { ...cur, waiting: false, error: atpPollError(status) } : cur));
+          })
+          .catch(() => {
+            /* one failed poll is not a failed flow: the next tick asks again */
+          });
+      },
+      Math.max(1, atp.interval) * 1000,
+    );
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [atp?.open, atp?.waiting, atp?.deviceCode, atp?.interval, atpBase]);
+
+  /** 覆盖确认：resolve(false) 的路径**一次写入调用都不发**（验收 2 数的是调用次数）。 */
+  function askReplaceKey(): Promise<boolean> {
+    return new Promise((resolve) => {
+      pendingConfirm.current = resolve;
+      const request: ConfirmRequest = {
+        title: t("settings.atpConfirmTitle"),
+        message: t("settings.atpConfirmBody"),
+        okText: "settings.atpConfirmOk",
+        danger: false,
+        onOk: () => {
+          pendingConfirm.current = null;
+          resolve(true);
+        },
+      };
+      dispatch({ type: "open-confirm", payload: request });
+    });
+  }
+
+  /** ConfirmDialog 的取消/ESC 都从这里出去，所以它也是那条 promise 的落地点。 */
+  function closeConfirm() {
+    const answer = pendingConfirm.current;
+    pendingConfirm.current = null;
+    dispatch({ type: "close-confirm" });
+    answer?.(false);
+  }
+
+  async function finishAtpLogin(newKey: string, login: string) {
+    // 要求 8：正在用的 key 非空 → 先说清这会替换它；取消则零写入
+    if (newKey.trim() && apiKey.trim()) {
+      const go = await askReplaceKey();
+      if (!go) {
+        setAtp(null);
+        return;
+      }
+    }
+    const b = bridge();
+    if (!b?.atpApply) return;
+    setBusy(true);
+    try {
+      const res = await b.atpApply({ base: atpBase, apiKey: newKey });
+      if (!res?.ok) {
+        const text =
+          res?.error === "probe_failed"
+            ? res.unreachable
+              ? t("settings.atpUnreachable", { base: atpBase })
+              : t("settings.atpProbeFailed", { status: res?.status ?? 0 })
+            : t("settings.atpFailUnknown", { msg: res?.error || "" });
+        setAtp((cur) => (cur ? { ...cur, waiting: false, error: text } : cur));
+        setMsg({ kind: "err", text });
+        return;
+      }
+      const model = res.model || "";
+      // 要求 9：三个字段回填进现有表单。配置文件**已经写好了**，不再经 saveSettings
+      // 写第二遍——第二次写只会多一个出错的机会，不会多一个字节的事实。
+      setApiKey(newKey);
+      setBaseUrl(res.baseUrl || "");
+      if (model) {
+        setDefaultName(model);
+        setExtraModels((prev) =>
+          prev.some((m) => m.name === model)
+            ? prev.map((m) => (m.name === model ? { ...m, model: m.model || model } : m))
+            : [...prev, { name: model, model, vision: false }],
+        );
+      }
+      setAtp(null);
+      setMsg({ kind: "ok", text: t("settings.atpReady", { user: login || "", model }) });
+    } catch (e: unknown) {
+      const text = t("settings.atpFailUnknown", { msg: (e as Error).message });
+      setAtp((cur) => (cur ? { ...cur, waiting: false, error: text } : cur));
+      setMsg({ kind: "err", text });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function openAtpUrl() {
+    const b = bridge();
+    if (!b?.openExternal || !atp?.url) return;
+    void b.openExternal({ url: atp.url });
+  }
+
+  function dismissAtp() {
+    setAtp(null);
+  }
+
   // ── templates tab（自定义任务类型管理，vanilla dialogs.js 语义） ──
   async function loadTemplates() {
     const b = bridge();
@@ -532,6 +760,36 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
         {tab === "model" && (
           <div className="panel-tab-body" data-settings-body="model" data-testid="settings-body-model">
             <div className="settings-group">
+              <div className="settings-group-title" data-testid="atp-account">
+                {t("settings.atpTitle")}
+              </div>
+              <div className="hint" data-testid="atp-hint">
+                {t("settings.atpHint")}
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}>
+                {/* 换地址只是换下一次登录打哪儿，不触发登录（要求 10） */}
+                <select
+                  data-testid="atp-base"
+                  aria-label={t("settings.atpBase")}
+                  value={atpBase}
+                  onChange={(e) => setAtpBase(e.target.value)}
+                >
+                  {atpBases.map((b) => (
+                    <option key={b} value={b}>
+                      {b.replace(/^https:\/\//, "")}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  data-testid="atp-signin"
+                  disabled={busy}
+                  onClick={startAtpLogin}
+                >
+                  {t("settings.atpSignIn")}
+                </button>
+              </div>
               <label>
                 <span>{t("settings.apiKey")}</span>
                 <input
@@ -911,7 +1169,16 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
           </button>
         </div>
       </div>
-      <ConfirmDialog request={dialogState.confirm} onDismiss={() => dispatch({ type: "close-confirm" })} />
+      <ConfirmDialog request={dialogState.confirm} onDismiss={closeConfirm} />
+      <AtpLoginDialog
+        open={Boolean(atp?.open)}
+        code={atp?.code ?? null}
+        url={atp?.url ?? null}
+        waiting={Boolean(atp?.waiting)}
+        error={atp?.error ?? null}
+        onOpenBrowser={openAtpUrl}
+        onDismiss={dismissAtp}
+      />
       <GithubDeviceDialog
         open={Boolean(device?.open)}
         code={device?.code ?? null}

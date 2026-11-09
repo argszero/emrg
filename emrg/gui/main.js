@@ -18,6 +18,9 @@ const { ConnManager } = require("./conn-manager");
 const { guiStatePath, sanitizeOpenSessions, saveGuiState, DEFAULT_CAP } = require("./gui-state");
 const { externalNavPolicy } = require("./nav-policy");
 const { makeConfigPrivate } = require("./config_mode");
+// issue #2774：aitokenpool 的 GitHub 账号登录。协议与 config 合并全在这个纯模块里
+// （main.js 只被 `node --check` 看、不被单测跑），这里只把 fetch 与 fs 接上去。
+const atpLogin = require("./atp_login");
 const APP_VERSION = require("./package.json").version;
 
 // issue #1100 加固：导航策略只放行应用自身 renderer dist 前缀内的 file:// URL
@@ -296,8 +299,13 @@ vision = false
 
   function writeConfig(toml) {
     // G69：mode 0o600（含明文 api_key）
+    writeConfigText(stringifyToml(toml));
+  }
+
+  /** 已是 TOML 文本的写入点（issue #2774：登录后的合并结果只有文本，不再回到对象）。 */
+  function writeConfigText(text) {
     fs.mkdirSync(path.dirname(configPath()), { recursive: true });
-    fs.writeFileSync(configPath(), stringifyToml(toml), { mode: 0o600 });
+    fs.writeFileSync(configPath(), text, { mode: 0o600 });
     // `mode` above applies only when the file is CREATED, so the rule is not stated by it for a
     // file an earlier install left at 0644 — measured, and issue #2148 is the reading. The
     // module carries the rule for both cases (creation is already covered by the option).
@@ -1064,6 +1072,45 @@ vision = false
       // Windows GCM rant Stage 2：断开 GitHub（daemon github_disconnect）
       const frame = await requireConn().sendCommandAndWait("github_disconnect", {}, 40000);
       return { ok: Boolean(frame.ok), error: frame.error || null };
+    });
+
+    // ── aitokenpool 账号（issue #2774）────────────────────────────
+    // 网络与写盘都在 main：renderer 是 sandbox + contextIsolation，没有网络权限
+    // （preload.js 头注释）。协议、轮询语义与 config 合并全在 atp_login.js，
+    // 那里也是「先探测后写入」唯一的实现点。
+    ipcMain.handle("emrg:atpBases", async () => atpLogin.bases());
+
+    ipcMain.handle("emrg:atpDeviceStart", async (_e, { base } = {}) => {
+      return atpLogin.startDevice({ fetchImpl: fetch, base });
+    });
+
+    ipcMain.handle("emrg:atpDevicePoll", async (_e, { base, deviceCode, currentInterval } = {}) => {
+      if (typeof deviceCode !== "string" || !deviceCode) throw new Error("invalid device code");
+      return atpLogin.pollToken({
+        fetchImpl: fetch,
+        base,
+        deviceCode,
+        currentInterval: Number(currentInterval) || 5,
+      });
+    });
+
+    ipcMain.handle("emrg:atpApply", async (_e, { base, apiKey } = {}) => {
+      // 要求 4：先用新 key 打一次受保护的 /api/models，非 200 则一个字节都不写。
+      // 顺序住在 atp_login.completeLogin 里，所以单测数的是那里的写入次数。
+      if (typeof apiKey !== "string" || !apiKey.trim()) throw new Error("invalid api key");
+      const wasRunning = Boolean(connManager?.daemonConn()?.connected);
+      const out = await atpLogin.completeLogin({
+        fetchImpl: fetch,
+        base,
+        apiKey: apiKey.trim(),
+        readConfig: async () =>
+          fs.existsSync(configPath()) ? fs.readFileSync(configPath(), "utf8") : await ensureConfigTemplate(),
+        writeConfig: async (text) => writeConfigText(text || ""),
+      });
+      // 跑着的 daemon 自己 2 秒内应用新配置并向客户端广播（emrg/server/config_reload.py）；
+      // 从没起来过的，照 G123「首启保存 → 主动拉起」的老规矩。
+      if (out.ok && !wasRunning) await ensureConnected();
+      return out;
     });
 
     ipcMain.handle("emrg:githubConnectWeb", async () => {

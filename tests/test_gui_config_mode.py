@@ -266,9 +266,13 @@ def test_the_comment_stripper_reads_both_shapes():
 def test_the_config_writer_applies_the_rule_and_the_neighbour_does_not(tmp_path):
     """The wire, read in both directions on the same extractor.
 
-    A module test cannot see a missing call, and `main.js::writeConfig` is the seam this whole
-    issue is about. `readConfig` is the control: the extractor has to be able to answer "no" for
-    it, or "yes" for `writeConfig` would only be evidence that the pattern matches anything.
+    A module test cannot see a missing call, and the function that writes `config.toml` is the
+    seam this whole issue is about. Since issue #2774 that function is `writeConfigText`:
+    `writeConfig` hands it the serialized TOML, and the aitokenpool login hands it merged text.
+    So the rule is pinned where the write happens, and the delegation is pinned with it — a
+    guard naming only `writeConfig` would pass on a body that no longer writes anything.
+    `readConfig` is the control: the extractor has to be able to answer "no" for it, or "yes"
+    for the writer would only be evidence that the pattern matches anything.
     Comments are stripped first, because a commented-out call is not a call.
     """
     source = _strip_js_comments(MAIN_JS.read_text(encoding="utf-8"))
@@ -276,13 +280,18 @@ def test_the_config_writer_applies_the_rule_and_the_neighbour_does_not(tmp_path)
     assert re.search(r'require\(["\']\./config_mode["\']\)', source), (
         "main.js does not require ./config_mode.js, so the writer below has nothing to call"
     )
-    writer = _function_body(source, "writeConfig")
+    writer = _function_body(source, "writeConfigText")
     assert re.search(r"^[ \t]+makeConfigPrivate\(", writer, re.MULTILINE), (
-        "writeConfig does not call makeConfigPrivate as a statement — the module's rule is never "
-        "applied on the path that rewrites an existing config file (issue #2148)"
+        "writeConfigText does not call makeConfigPrivate as a statement — the module's rule is "
+        "never applied on the path that rewrites an existing config file (issue #2148)"
     )
     assert "fs.writeFileSync(" in writer, (
-        "writeConfig no longer writes the file, so this guard is watching the wrong function"
+        "writeConfigText no longer writes the file, so this guard is watching the wrong function"
+    )
+    delegator = _function_body(source, "writeConfig")
+    assert "writeConfigText(" in delegator, (
+        "writeConfig no longer goes through writeConfigText, so the permission rule is not on "
+        "every path that writes config.toml (issue #2148)"
     )
     reader = _function_body(source, "readConfig")
     assert "makeConfigPrivate(" not in reader, (
