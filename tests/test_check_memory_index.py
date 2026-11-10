@@ -876,3 +876,109 @@ def test_a_list_index_says_the_cell_reading_had_no_subject(mod, tmp_path, capsys
     out = capsys.readouterr().out
     assert "no table row, so the cell reading had no subject here" in out, out
     assert "the cell reading had no subject" in out.split("OK:")[-1], out
+
+
+# ── the sixth reading: a detail file no row names ─────────────────────────────
+
+
+def _entry(tmp_path: Path, name: str, status: str | None = "active") -> None:
+    """Write a detail file beside the index, with a frontmatter status.
+
+    Not `_detail`, because the sixth reading's subject is *which* files carry
+    `status: active`: a fixture written without frontmatter is out of scope, and one that
+    silently stamped `active` everywhere could not arm the retirement case below.
+    """
+    block = f"---\nid: {name[:-3]}\nstatus: {status}\n---\n" if status else ""
+    (tmp_path / name).write_text(f"{block}# {name}\n", encoding="utf-8")
+
+
+def test_a_detail_file_a_row_names_is_not_reported(mod, tmp_path, capsys) -> None:
+    """The ordinary state, positively: the report counts what it read.
+
+    An instrument that only ever fires cannot be told from one that fires on everything,
+    so the clean case asserts the per-index count and the summary's coverage clause.
+    """
+    _entry(tmp_path, "a.md")
+    _entry(tmp_path, "b.md")
+    path = _index(
+        tmp_path, "index.md", ["# Memory Index", "", "- [A](a.md)", "- [B](b.md)"]
+    )
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "detail files 2, named nowhere: 0" in out, out
+    assert "every active detail file is named by a row (2 read)" in out, out
+
+
+def test_a_detail_file_no_row_names_is_reported_with_its_name(mod, tmp_path, capsys) -> None:
+    """The failing half, naming the file the reader has to go and index.
+
+    This is the state the reading exists for: the entry is written, the work is done, and
+    the index - the only map of the store - does not lead to it.
+    """
+    _entry(tmp_path, "a.md")
+    _entry(tmp_path, "b.md")
+    path = _index(tmp_path, "index.md", ["# Memory Index", "", "- [A](a.md)"])
+
+    assert mod.main([str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "detail files 2, named nowhere: 1" in out, out
+    assert "detail file b.md is named by no row" in out, out
+    assert "detail file a.md" not in out, "the named file must not be reported: " + out
+
+
+def test_a_file_named_inside_a_code_span_is_named(mod, tmp_path, capsys) -> None:
+    """Named, not linked: a merged row's backticks are the shape the rule prescribes.
+
+    The compaction rule requires a merged row to keep naming the files it replaced, and
+    this host's index does exactly that inside code spans. A link-only predicate would
+    report an index as holding an unindexed entry for following its own instructions.
+    """
+    _entry(tmp_path, "a.md")
+    _entry(tmp_path, "b.md")
+    path = _index(
+        tmp_path, "index.md", ["# Memory Index", "", "- [A](a.md) (+ `b.md`, `c.md`)"]
+    )
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "detail files 2, named nowhere: 0" in out, out
+
+
+def test_a_retired_detail_file_is_out_of_scope(mod, tmp_path, capsys) -> None:
+    """Retiring an entry is a legitimate way to leave it unnamed.
+
+    The index lists active entries only, so `status: merged` is the rule's own other exit,
+    and a file with no frontmatter is not an entry the store wrote. Without this arm the
+    reading would demand a row for every file kept for provenance.
+    """
+    _entry(tmp_path, "a.md")
+    _entry(tmp_path, "gone.md", status="merged")
+    _entry(tmp_path, "older.md", status="superseded")
+    _entry(tmp_path, "bare.md", status=None)
+    path = _index(tmp_path, "index.md", ["# Memory Index", "", "- [A](a.md)"])
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "detail files 1, named nowhere: 0" in out, out
+
+
+def test_an_index_with_no_active_detail_file_says_so(mod, tmp_path, capsys) -> None:
+    """A zero must not read as a pass, in the report and in the summary line.
+
+    The discipline the cell and link readings already follow: an index standing alone in a
+    directory has no detail file to be a map of, and both lines say that rather than
+    printing a count of nothing as a verdict.
+    """
+    _entry(tmp_path, "retired.md", status="merged")
+    path = _index(
+        tmp_path,
+        "index.md",
+        ["# Memory Index", "", "| id | note |", "| --- | --- |", "| a1 | see none |"],
+    )
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "detail files 0, named nowhere: 0" in out, out
+    assert "the detail reading had no subject here" in out, out
+    assert "the detail reading had no subject" in out.split("OK:")[-1], out

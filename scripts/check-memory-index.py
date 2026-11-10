@@ -63,8 +63,8 @@ apart, the two both read `- ` and a table index fell between them, so the trigge
 drew no note at all while four of that index's rows were past the bound (measured
 2026-10-01 on this host).
 
-Five readings, each from its own source
----------------------------------------
+Six readings, each from its own source
+--------------------------------------
 The line **cap** is `MEMORY_INDEX_ROW_CAP` and the row **bound** is
 `INDEX_TITLE_MAX_CHARS`, both imported here rather than spelled again: they are
 the two constants the prompt's rule is pinned to
@@ -114,6 +114,27 @@ pipe that needed escaping) and too few (a cell that was dropped). An escaped `\\
 content and does not split, which is what lets the finding name the repair instead of
 only the symptom.
 
+The **detail files** are the sixth, and its source is the rule about *writing* an entry
+rather than any rule about an index: `emrg/server/prompts/system.j2` states "**A write is
+two steps**: the file, then its row in the index", and `emrg/server/evolution_prompt.md`
+repeats it. Nothing read that second step. The other five readings ask whether the rows an
+index carries are good; none asks whether an entry exists that no row names, so an entry
+could be written and never indexed while this tool printed `OK`. Measured 2026-11-10 on
+this host: a detail file was written with `status: active`, and two minutes later the guard
+read `lines 88 of 100 - within` · `rows 81, longest 512 chars` · `row links 102,
+unresolved: 0` · `OK`, exit 0, against a store of **107** active files and 82 rows. The
+failure is silent in the direction that costs most: the file exists, the work was done, and
+the fact is unreachable, because the index is the only map of the store.
+
+A file counts as indexed when its **name appears in the index's text** — inside a link or
+inside an inline code span. Not links alone, and that is not a convenience: the compaction
+rule requires a merged row to "still name every id and file that line replaces", and this
+host's index does exactly that inside backticks, one merged row naming the two files it
+replaced. A link-only predicate would report the shape the rule prescribes. The subject is the same
+directory the resolution reading already resolves against, because these rows name their
+siblings; a file whose frontmatter status is `merged`, `superseded`, or absent is out of
+scope, the index listing active entries only.
+
 Scope, named rather than implied
 --------------------------------
 * This tool **measures; it never repairs.** Compaction needs a reader's judgement
@@ -137,6 +158,8 @@ Scope, named rather than implied
   what `100 x 512` bounds, and the renderer that writes them bounds the same thing.
 * An index with no rows (a title and prose only) is measured, not failed: it has
   nothing for the bound to bind and nothing to resolve.
+* The detail-file reading's subject is the directory beside the index, and its verdict
+  is per index: a tree with two indexes asks the question twice, once of each store.
 
 What the resolution reading does not cover
 ------------------------------------------
@@ -163,6 +186,22 @@ What the resolution reading does not cover
   `check-citation-resolves.py`'s own limit section is the precedent for saying so
   rather than half-reading it.
 
+What the detail reading does not cover
+--------------------------------------
+* **Which line** names the file. The rule is "an active entry is reachable from the
+  index", so a name in the right row, the wrong row, or a trailing paragraph all satisfy
+  it; whether the row that names a file *describes* it is a different rule with a
+  reader's judgement behind it.
+* **A name inside a longer name.** Coverage is a substring test on the index's text, so
+  `a.md` reads as named when the index names `a.md.bak`. Identity would need the row
+  grammar and would then miss the code-span spelling the compaction protocol prescribes,
+  so the cheap test that covers both real shapes is the one taken.
+* **The frontmatter's position.** Only the head of a detail file is read, `DETAIL_HEAD`
+  characters, which is where the store writes the block; a file whose frontmatter does
+  not close inside that window is out of scope rather than guessed at.
+* **Repair.** Retiring an entry is a legitimate way to leave it unnamed (`status:
+  superseded`), and writing the row is the agent's judgement, so neither is done here.
+
 Which tree answered
 -------------------
 The first line is `tree: <resolved root>` before any verdict, the convention every
@@ -172,14 +211,16 @@ derived from that root, so the two lines answer about one tree.
 
 Exit codes
 ----------
-``0``  every index read is within every number of the rule, and every row link
-       resolves. The summary line names how many links were **read**, so an index whose
-       rows carry none is a clean verdict about the three numbers and says so, rather
-       than a claim about links nothing looked at.
+``0``  every index read is within every number of the rule, every row link resolves,
+       and every active detail file beside it is named by a row. The summary line names
+       how many links and how many detail files were **read**, so an index whose rows
+       carry no link, or which has no detail file beside it, is a clean verdict about
+       what was read and says so, rather than a claim about a set with no members.
 ``1``  at least one index is over a number the rule names (the line cap, the embed
        budget, or a row past the bound), or carries a row whose cell count does not
-       match its header's, or a row link that resolves to no file; each finding is
-       printed with the line it is on.
+       match its header's, or a row link that resolves to no file, or is a store holding
+       an active detail file that no row names; each finding is printed with the line it
+       is on, and the detail finding names the file it is about.
 ``2``  nothing could be measured: no index under the tree, or a named index could
        not be read. An unreadable subject makes the reading incomplete, which is
        reported as such even when the other indexes were read - a partial reading
@@ -313,6 +354,27 @@ CODE_SPAN = re.compile(r"`[^`]*`")
 #: that grows silently is how a check becomes vacuous.
 NON_FILE_TARGET = re.compile(r"^(?:[a-z][a-z0-9+.-]*:|#)", re.IGNORECASE)
 
+#: A detail file's frontmatter block: the `---` fence, its body, and the closing fence.
+#: Anchored at the start of the file, because that is where the store renders it
+#: (`MemoryIndex`/`MemoryStore` write the fence first) and a `---` further down is a
+#: horizontal rule in prose, not frontmatter.
+FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---", re.DOTALL)
+
+#: The one frontmatter line this reading acts on. Matched inside the block above rather
+#: than over the whole file, so a body line reading `status: active` - a quotation of
+#: this very rule, in the entry that documents it - cannot make a retired file active.
+STATUS_LINE = re.compile(r"^status:\s*(\S+)\s*$", re.MULTILINE)
+
+#: The status whose entries the index is a map of. Everything else - `merged`,
+#: `superseded`, a file with no frontmatter at all - is out of scope by the rule that
+#: says to drop an entry's row once it is retired.
+ACTIVE_STATUS = "active"
+
+#: How much of a detail file is read to find its frontmatter. The block is the top of the
+#: file and is a few lines long; the bound keeps this reading from reading every entry
+#: whole, and a block that does not close inside it is out of scope rather than guessed.
+DETAIL_HEAD = 4096
+
 RUNNER = "uv run --no-sync python3"
 
 
@@ -344,6 +406,11 @@ class Reading(NamedTuple):
         `(file line number, that row's cells, the header's cells)`, in file order.
         Both directions are faults: an unescaped pipe adds a cell, and a dropped one
         removes a cell, and either way the row a reader sees is not the row written.
+    :param detail_files: the detail files beside the index whose frontmatter says
+        `status: active`, in name order - the sixth reading's subject, and the count that
+        says whether it had one.
+    :param unnamed_details: those of them whose name appears nowhere in the file, in the
+        same order - "a write is two steps" and this is the second step's absence.
     """
 
     path: Path
@@ -354,6 +421,8 @@ class Reading(NamedTuple):
     row_targets: tuple[tuple[int, str], ...] = ()
     cell_header: Optional[tuple[int, int]] = None
     cell_faults: tuple[tuple[int, int, int], ...] = ()
+    detail_files: tuple[str, ...] = ()
+    unnamed_details: tuple[str, ...] = ()
 
     @property
     def rows(self) -> int:
@@ -402,6 +471,35 @@ class Reading(NamedTuple):
         return out
 
 
+def _active_detail_files(directory: Path, index_name: str) -> tuple[str, ...]:
+    """The detail files beside an index that the index is a map of.
+
+    :param directory: the index's own directory, which is where these rows' targets live.
+    :param index_name: the index's file name, excluded so an index cannot be its own
+        detail file.
+    :returns: their names, in name order; a subset of what `directory` holds.
+    """
+    out: list[str] = []
+    for entry in sorted(directory.glob("*.md")):
+        if entry.name == index_name or not entry.is_file():
+            continue
+        try:
+            head = entry.read_text(encoding="utf-8")[:DETAIL_HEAD]
+        except (OSError, UnicodeDecodeError):
+            # An entry that cannot be read is not this reading's finding: the tool's
+            # subject is the index, and an unreadable neighbour would make every run
+            # exit 1 for a file the rule says nothing about. Named here so the silence
+            # is a decision rather than an oversight.
+            continue
+        block = FRONTMATTER.match(head)
+        if block is None:
+            continue
+        status = STATUS_LINE.search(block.group(1))
+        if status is not None and status.group(1).strip("\"'") == ACTIVE_STATUS:
+            out.append(entry.name)
+    return tuple(out)
+
+
 def measure(path: Path) -> Reading:
     """Read one index and count what the rule counts.
 
@@ -442,9 +540,14 @@ def measure(path: Path) -> Reading:
         if cell_header is not None
         else ()
     )
+    details = _active_detail_files(path.parent, path.name)
     return Reading(
         path, len(lines), len(text), tuple(row_lines), tuple(row_lengths),
-        tuple(row_targets), cell_header, cell_faults
+        tuple(row_targets), cell_header, cell_faults, details,
+        # Named, not merely linked: a merged row names the files it replaced inside code
+        # spans, and the compaction rule requires exactly that. A substring test over the
+        # whole text covers both spellings; the boundary it buys is in the docstring.
+        tuple(name for name in details if name not in text),
     )
 
 
@@ -534,6 +637,21 @@ def _report(reading: Reading) -> list[str]:
             f"  row at line {number} names {target}, "
             f"which is not beside {reading.path.name}"
         )
+    out.append(
+        f"  detail files {len(reading.detail_files)}, named nowhere: "
+        f"{len(reading.unnamed_details)}"
+    )
+    if not reading.detail_files:
+        out.append(
+            "  no detail file beside the index carries status: active, so the detail "
+            "reading had no subject here - this is not a statement that every entry "
+            "is indexed"
+        )
+    for name in reading.unnamed_details:
+        out.append(
+            f"  detail file {name} is named by no row - write its row, or set its "
+            f"status to merged/superseded if it is retired"
+        )
     return out
 
 
@@ -565,14 +683,17 @@ def main(argv: Optional[list[str]] = None) -> int:
                 else "the rule's numbers are unreadable from this interpreter, so "
                 "every run reports that instead of a count"
             )
-            + ", every table row's cells matching its header, and every row link "
-            "resolving to a file beside it."
+            + ", every table row's cells matching its header, every row link "
+            "resolving to a file beside it, and every active detail file beside it "
+            "named by one of its rows."
         ),
         epilog=(
             f"Exit 0: every index is within every number, every table row's cells match "
-            f"its header, and every row link resolves. Exit 1: at least one is over one "
-            f"of them, carries a row whose cells do not match its header's, or points at "
-            f"a file that is not there. Exit 2: nothing could be measured (no index "
+            f"its header, every row link resolves, and every active detail file is named "
+            f"by a row. Exit 1: at least one is over one "
+            f"of them, carries a row whose cells do not match its header's, points at "
+            f"a file that is not there, or names no row for a detail file that is. "
+            f"Exit 2: nothing could be measured (no index "
             f"under the tree, or a named index could not be read). Example: "
             f"{RUNNER} scripts/check-memory-index.py "
             "~/some/tree/.emrg/memory/MEMORY.md"
@@ -650,6 +771,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         or reading.over(INDEX_TITLE_MAX_CHARS)
         or reading.cell_faults
         or reading.unresolved()
+        or reading.unnamed_details
     ]
     if not findings:
         links_read = sum(len(reading.row_targets) for reading in readings)
@@ -697,13 +819,34 @@ def main(argv: Optional[list[str]] = None) -> int:
                     f"; {len(silent)} of {len(readings)} index(es) carry no ](target) link "
                     "at all, so the resolution reading had no subject there"
                 )
+        # The detail reading carries its own coverage, for the reason above: the summary
+        # is the line a `| tail` takes, and `named nowhere: 0` over a directory holding no
+        # active entry would be a pass this reading never took.
+        details_read = sum(len(reading.detail_files) for reading in readings)
+        if not details_read:
+            summary += (
+                "; the detail reading had no subject - no index read has a detail file "
+                "with status: active beside it, so this is not a statement that every "
+                "entry is indexed"
+            )
+        else:
+            silent = [reading for reading in readings if not reading.detail_files]
+            summary += (
+                f"; every active detail file is named by a row ({details_read} read)"
+            )
+            if silent:
+                summary += (
+                    f"; {len(silent)} of {len(readings)} index(es) hold no active detail "
+                    "file, so the detail reading had no subject there"
+                )
         print(summary)
         return 0
 
     print(
         f"{len(findings)} of {len(readings)} index(es) over a number the rule names, "
-        "carrying a row whose cells do not match its header's, or carrying a row link "
-        "that resolves nowhere; the rule is compacted in "
+        "carrying a row whose cells do not match its header's, carrying a row link "
+        "that resolves nowhere, or naming no row for an active detail file beside it; "
+        "the rule is compacted in "
         "place, by the agent itself, and a stale row is rewritten or dropped when "
         "the detail file is gone"
     )
