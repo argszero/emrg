@@ -34,9 +34,25 @@ This script automates that recipe:
     verifies: GET refs == local rev-parse, and `git diff` of the remote sha
     against the original local tip is empty
 
+The tag direction is the release's stage 2 and has the same problem: a tag push is
+the only trigger of build-release.yml, so an outage with no maintained tag path
+means re-deriving one from notes every release, untested. `--tag` publishes an
+annotated tag through the same two endpoints a release needs:
+
+  * `git cat-file -t refs/tags/<name>` must answer `tag` - a lightweight tag is
+    refused before a single request, because build-release.yml's verify-tag job
+    requires an annotated tag and would refuse it only after the build was spent
+  * the tag object is created with POST /git/tags, carrying the tagger's own
+    instant **and offset** (a tag stamped "now" is a different object)
+  * refs/tags/<name> is created with POST /git/refs - creating that ref is what
+    fires the tag workflow, so this is the whole of stage 2
+  * an existing tag at a different commit is refused rather than moved: a
+    published version number is not a branch to rewrite
+
 Usage:
     python scripts/push-branch-from-api.py [--repo owner/name] [--branch feature/x]
                                            [--ref HEAD] [--force]
+    python scripts/push-branch-from-api.py [--repo owner/name] --tag v0.3.48
 
 Requirements: git on PATH; api.github.com reachable; gh CLI or GH_TOKEN/GITHUB_TOKEN
 auth (private repos need it; public repos work anonymously but rate-limit).
@@ -435,14 +451,96 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
             "content_identical": not diff.strip()}
 
 
+def parse_tag(raw: bytes) -> dict:
+    """Parse a raw annotated tag object into the payload POST /git/tags takes.
+
+    Layout: object/type/tag/tagger header lines, a blank line, then the message.
+    The tagger's epoch+offset is preserved as ISO-8601 carrying that offset, for
+    the same reason `parse_commit` preserves the author's: the API stores the
+    offset it is given, and a tag stamped "now" is not the object that was cut.
+    """
+    header, sep, message = raw.partition(b"\n\n")
+    if not sep:
+        raise ValueError("malformed tag object: no blank line before message")
+    fields = {}
+    for line in header.decode("utf-8").splitlines():
+        key, _, value = line.partition(" ")
+        fields[key] = value
+    for required in ("object", "type", "tag", "tagger"):
+        if required not in fields:
+            raise ValueError(f"malformed tag object: missing {required}")
+    return {"object": fields["object"], "type": fields["type"],
+            "tag": fields["tag"], "tagger": _parse_person(fields["tagger"]),
+            "message": message.decode("utf-8").rstrip("\n")}
+
+
+def _remote_tag_target(repo: str, tag: str) -> str | None:
+    """The commit refs/tags/<tag> names on the remote, or None when it is absent."""
+    try:
+        ref = api("GET", f"/repos/{repo}/git/ref/tags/{tag}")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise
+    sha = ref["object"]["sha"]
+    try:
+        return api("GET", f"/repos/{repo}/git/tags/{sha}")["object"]["sha"]
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return sha     # a lightweight remote tag holds the commit itself
+        raise
+
+
+def push_tag(repo: str, tag: str, cwd: str | None = None) -> dict:
+    """Publish an annotated tag through the Git Data API.
+
+    Creating refs/tags/<name> is what fires the tag workflow, so this is the
+    release's stage 2 when git-over-https is down. Everything that can be refused
+    is refused before the first request: a lightweight tag (the release pipeline
+    requires an annotated one), a missing local tag, and an already-published tag
+    naming a different commit - a version number is not a branch to rewrite.
+    """
+    ref = f"refs/tags/{tag}"
+    try:
+        kind = git("cat-file", "-t", ref, cwd=cwd).decode("utf-8").strip()
+    except RuntimeError as e:
+        raise PushError(f"{ref} is not present locally: {e}") from None
+    if kind != "tag":
+        raise PushError(f"{ref} is a {kind}, not an annotated tag object; the release "
+                        "pipeline requires an annotated tag, so nothing was sent")
+    payload = parse_tag(git("cat-file", "tag", ref, cwd=cwd))
+    commit = payload["object"]
+
+    existing = _remote_tag_target(repo, tag)
+    if existing == commit:
+        return {"result": "no-op", "tag": tag, "commit": commit}
+    if existing is not None:
+        raise PushError(f"{ref} on the remote already names {existing}; refusing to move "
+                        "a published tag - cut a new version instead")
+
+    created = api("POST", f"/repos/{repo}/git/tags", payload)["sha"]
+    api("POST", f"/repos/{repo}/git/refs", {"ref": ref, "sha": created})
+
+    confirmed = api("GET", f"/repos/{repo}/git/ref/tags/{tag}")["object"]["sha"]
+    if confirmed != created:
+        raise PushError(f"verification failed: {ref} reads {confirmed}, not {created}")
+    return {"result": "pushed", "tag": tag, "tag_object": created, "commit": commit}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--repo", default=None, help="owner/name (default: from origin)")
-    ap.add_argument("--branch", required=True, help="remote branch name, e.g. feature/x")
+    ap.add_argument("--branch", default=None, help="remote branch name, e.g. feature/x")
+    ap.add_argument("--tag", default=None,
+                    help="annotated tag to publish, e.g. v0.3.48 (release stage 2)")
     ap.add_argument("--ref", default="HEAD", help="local ref to push (default: HEAD)")
     ap.add_argument("--force", action="store_true",
                     help="force-update the remote ref (default: fail on conflict)")
     args = ap.parse_args()
+
+    if bool(args.branch) == bool(args.tag):
+        print("pass exactly one of --branch <name> or --tag <name>")
+        return 2
 
     repo = args.repo
     if not repo:
@@ -454,7 +552,10 @@ def main() -> int:
         repo = m.group(1)
 
     try:
-        result = push_branch(repo, args.branch, args.ref, args.force)
+        if args.tag:
+            result = push_tag(repo, args.tag)
+        else:
+            result = push_branch(repo, args.branch, args.ref, args.force)
     except PushError as e:
         print(f"push aborted: {e}")
         return 1
@@ -464,6 +565,16 @@ def main() -> int:
     except urllib.error.URLError as e:
         print(f"push aborted (network error after retries): {e}")
         return 1
+
+    if args.tag:
+        print(f"repo {repo} tag {args.tag}")
+        print(f"  release commit: {result['commit']}")
+        if result["result"] == "no-op":
+            print("  nothing to do - refs/tags/ already names that commit")
+        else:
+            print(f"  tag object: {result['tag_object']}")
+            print(f"  created refs/tags/{args.tag} - creating it fires the tag workflow")
+        return 0
 
     print(f"repo {repo} branch {args.branch}")
     print(f"  remote sha: {result['sha']}")
