@@ -3599,3 +3599,63 @@ def test_a_render_context_written_by_a_test_is_read_from_the_builder():
         + ", ".join(faults)
         + " — render through `_test_context`, whose keys are the real builder's"
     )
+
+
+#: The one day a price cut has, and what §5.2 must say about spending it.
+IOS_PRICING_HEADING = "#### 5.2 The store page is where a small app is found"
+IOS_PRICING_ENDS_AT = "#### 5.3 The platform locks a submission, so the order is the rule"
+
+IOS_PRICING_PHRASES = (
+    "A price change is a distribution event, not a setting",
+    "planned as a launch",
+    "spends its one day",
+    "not from a chart",
+)
+
+
+def _ios_pricing_section(text: str) -> str:
+    return _bounded_section(text, IOS_PRICING_HEADING, IOS_PRICING_ENDS_AT)
+
+
+def test_the_ios_app_template_plans_a_price_cut_as_a_distribution_event() -> None:
+    """§5.2 must say that a price change is an event with one day to spend.
+
+    Not decoration: the section already judged a pricing experiment by the installs it
+    produces, and that sentence alone reads as permission to ship a price and wait. What the
+    install data says is the opposite — installs move on the day the price moves, and a run of
+    builds at an unchanged price moves nothing — so a task told only the first half makes the
+    app free from the start and spends the event on a store nobody is looking at. The
+    paragraph is what turns the permission into a plan, and the one after it says which number
+    the plan is judged by, because a reading reconstructed from a graph under-reports the
+    interval it claims to describe and a day the report omits is a zero.
+    """
+    text = _IOS_TEMPLATE.read_text(encoding="utf-8")
+    section = _ios_pricing_section(text)
+    missing = _missing_phrases(section, IOS_PRICING_PHRASES)
+    assert not missing, (
+        f"ios_app_prompt.md §5.2 no longer plans a price cut as an event: {missing}. Without "
+        "these the section permits a pricing experiment and says nothing about when to run it, "
+        "so the app is made free as its initial state and no event is ever spent."
+    )
+
+    # One home: a rule stated twice leaves a reader holding two answers with no way to choose.
+    stated = text.count("A price change is a distribution event")
+    assert stated == 1, (
+        f"the price-as-an-event rule is stated {stated} times in ios_app_prompt.md; this "
+        "template's own rule is that a fact lives in exactly one place"
+    )
+
+
+def test_the_ios_pricing_pin_answers_both_ways() -> None:
+    """The control: a section that has lost the rule reads as missing, not as passing.
+
+    Without it, a §5.2 emptied of the rule and a reader pointed at the wrong region read the
+    same as a section that still carries it — which is the defect `_bounded_section` exists to
+    prevent, one level up.
+    """
+    section = _ios_pricing_section(_IOS_TEMPLATE.read_text(encoding="utf-8"))
+    for phrase in IOS_PRICING_PHRASES:
+        stripped = section.replace(phrase, "")
+        assert phrase in _missing_phrases(stripped, IOS_PRICING_PHRASES), (
+            f"{phrase!r} is not pinned: a §5.2 stripped of it still reads as carrying the rule"
+        )

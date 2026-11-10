@@ -273,6 +273,10 @@ At low install volume, acquisition happens on the store page rather than inside 
 
 **At this stage installs are the only hard number.** Price and metadata are not the bottleneck while nobody sees the app, so a pricing experiment is judged by the installs it produces rather than by the argument for it — including a decision to make the app free.
 
+**A price change is a distribution event, not a setting.** Installs move on the day the price moves, not on the day a build ships: a run of releases at an unchanged price produces nothing, while a cut produces a jump on its own day and a tail that is still producing installs a week later. So a cut is planned as a launch with one day to spend, never as an initial state with none — list at a small non-zero price first, choose the day for the drop, and work that day like a release. What has to be true the day before is the store's own list: the fields the platform freezes already live on a released version, the page complete, the territories open. A drop spends its one day on whatever the page is that morning.
+
+**Read the install figure from the sales report, not from a chart.** The platform's daily sales report is the measurement; a number reconstructed from a web trend graph is an estimate that under-reports the same interval, and a day the report does not answer for is a day of zero rather than a missing reading.
+
 #### 5.3 The platform locks a submission, so the order is the rule
 
 Submitting is a sequence of API calls rather than a form filled in once, and two of its steps refuse work done in the wrong order. Both refusals belong to the platform, not to the client that receives them, and both are cheap to avoid and expensive to discover.
