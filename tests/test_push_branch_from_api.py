@@ -107,6 +107,23 @@ def _raw_commit_from_payload(payload):
     return ("\n".join(lines) + "\n\n" + msg).encode("utf-8")
 
 
+def _raw_tag_from_payload(payload):
+    """Reconstruct the raw annotated tag object GitHub stores for a POST /git/tags
+    payload: the tagger's epoch+offset, and a message with no trailing newline -
+    the same normalization create-commit is observed to apply."""
+    def person(p):
+        import datetime as dt
+        d = dt.datetime.fromisoformat(p["date"])
+        return f"{p['name']} <{p['email']}> {int(d.timestamp())} {d.strftime('%z')}"
+
+    msg = payload["message"]
+    if msg.endswith("\n"):
+        msg = msg[:-1]
+    header = (f"object {payload['object']}\ntype {payload['type']}\n"
+              f"tag {payload['tag']}\ntagger {person(payload['tagger'])}")
+    return (header + "\n\n" + msg).encode("utf-8")
+
+
 def _hash_object(repo: Path, obj_type: str, raw: bytes, write: bool = False) -> str:
     args = ["hash-object", "-t", obj_type]
     if write:
@@ -127,6 +144,8 @@ class FakeGitHub:
         self.refs = {}         # "heads/x" -> sha
         self.log = []          # (method, path) call log
         self.fail_commits = False
+        self.tag_targets = {}  # tag object sha -> the commit it names
+        self.tag_payloads = [] # every POST /git/tags body, for the offset reading
 
     def __call__(self, method, path, body=None):
         self.log.append((method, path))
@@ -196,6 +215,25 @@ class FakeGitHub:
             sha = path.rsplit("/", 1)[1]
             if sha in self.objects:
                 return {"sha": sha}
+            raise _http_error(404)
+        if path.startswith("/repos/x/git/ref/tags/"):
+            ref_key = "refs/tags/" + path[len("/repos/x/git/ref/tags/"):]
+            if method != "GET":
+                raise AssertionError(f"unexpected singular-ref call {method} {path}")
+            if ref_key in self.refs:
+                return {"ref": ref_key, "object": {"sha": self.refs[ref_key]}}
+            raise _http_error(404)
+        if path == "/repos/x/git/tags":
+            self.tag_payloads.append(body)
+            raw = _raw_tag_from_payload(body)
+            sha = _hash_object(self.repo, "tag", raw, write=True)
+            self.objects[sha] = ("tag", raw)
+            self.tag_targets[sha] = body["object"]
+            return {"sha": sha, "object": {"sha": body["object"], "type": "commit"}}
+        if path.startswith("/repos/x/git/tags/"):
+            sha = path.rsplit("/", 1)[1]
+            if sha in self.tag_targets:
+                return {"sha": sha, "object": {"sha": self.tag_targets[sha], "type": "commit"}}
             raise _http_error(404)
         raise AssertionError(f"unexpected call {method} {path}")
 
@@ -568,3 +606,140 @@ def test_a_push_onto_an_existing_remote_base_uploads_only_what_is_missing(tmp_pa
         "the new tree was never created"
     )
     assert result["sha"] in fake.objects, "the new commit was never created"
+
+
+# ---------------------------------------------------------------- the tag path
+#
+# Stage 2 of a release is a tag push, and a tag push is the only trigger of
+# build-release.yml. The branch path exists so an outage does not mean
+# re-deriving a script from notes; the tag path had no home in the repository at
+# all, so every outage re-derived one and nothing tested it (#2795). These pin
+# the four refusals and the one order that make the tag path safe to run during a
+# release: refuse before the network, create the object before the ref, and never
+# move a published tag.
+
+
+def _tag_object(repo: Path, name: str = "v9.9.9") -> str:
+    r = _git("tag", "-a", name, "-m", f"emrg {name}", "HEAD", cwd=repo, env=GIT_ENV)
+    assert r.returncode == 0, r.stderr
+    return _git("rev-parse", f"refs/tags/{name}", cwd=repo).stdout.decode().strip()
+
+
+def _with_fake(mod, fake):
+    orig = mod.api
+    mod.api = fake
+    return orig
+
+
+def test_push_tag_creates_the_tag_object_before_the_ref(tmp_path):
+    """The ref must be created last, pointing at the object just created, and the
+    tagger's own instant and offset must reach the payload - a tag stamped "now"
+    is a different object from the one that was cut."""
+    mod = _load_module()
+    repo = _init_repo(tmp_path)
+    _write_file(repo, "a.txt")
+    commit = _commit_all(repo, "root")
+    _tag_object(repo)
+    fake = FakeGitHub(repo)
+    orig = _with_fake(mod, fake)
+    try:
+        result = mod.push_tag("x", "v9.9.9", cwd=repo)
+    finally:
+        mod.api = orig
+
+    assert result["result"] == "pushed"
+    assert result["commit"] == commit
+    assert fake.refs["refs/tags/v9.9.9"] == result["tag_object"], (
+        "the ref does not point at the tag object that was created"
+    )
+    posts = [(m, p) for m, p in fake.log if m == "POST"]
+    assert posts == [("POST", "/repos/x/git/tags"), ("POST", "/repos/x/git/refs")], (
+        f"unexpected request order/set: {posts} - the ref has to be created after "
+        "the object it names, and nothing else is uploaded for a tag"
+    )
+    assert fake.tag_payloads, "no tag payload was posted"
+    payload = fake.tag_payloads[0]
+    assert payload["object"] == commit and payload["type"] == "commit"
+    assert payload["tag"] == "v9.9.9"
+    # GIT_ENV stamps 1700000000 +0800 in every zone: the offset is what is asserted,
+    # not the instant's spelling (an offset-carrying date is the whole point).
+    assert payload["tagger"]["date"] == "2023-11-15T06:13:20+08:00", (
+        f"the tagger offset was not preserved: {payload['tagger']['date']!r}"
+    )
+
+
+def test_a_lightweight_tag_is_refused_before_any_request(tmp_path):
+    """A lightweight tag would pass here and be refused by build-release.yml's
+    verify-tag job only after a four-platform build was spent, so the refusal
+    belongs in front of the first request."""
+    mod = _load_module()
+    repo = _init_repo(tmp_path)
+    _write_file(repo, "a.txt")
+    _commit_all(repo, "root")
+    r = _git("tag", "light", "HEAD", cwd=repo)   # no -a: a lightweight tag
+    assert r.returncode == 0, r.stderr
+    fake = FakeGitHub(repo)
+    orig = _with_fake(mod, fake)
+    try:
+        with pytest.raises(mod.PushError) as exc:
+            mod.push_tag("x", "light", cwd=repo)
+    finally:
+        mod.api = orig
+
+    assert "annotated" in str(exc.value)
+    assert fake.log == [], f"a lightweight tag still made {fake.log} request(s)"
+
+
+def test_push_tag_refuses_to_move_a_published_tag(tmp_path):
+    """A version number is not a branch: an existing tag naming another commit is
+    refused, and nothing is posted."""
+    mod = _load_module()
+    repo = _init_repo(tmp_path)
+    _write_file(repo, "a.txt")
+    _commit_all(repo, "root")
+    _tag_object(repo)
+    other = _commit_all(repo, "later", new_file="b.txt")
+    fake = FakeGitHub(repo)
+    fake.refs["refs/tags/v9.9.9"] = other      # the published tag names another commit
+    orig = _with_fake(mod, fake)
+    try:
+        with pytest.raises(mod.PushError) as exc:
+            mod.push_tag("x", "v9.9.9", cwd=repo)
+    finally:
+        mod.api = orig
+
+    assert "refusing to move" in str(exc.value)
+    assert [p for m, p in fake.log if m == "POST"] == [], "a refused tag still posted"
+    assert fake.refs["refs/tags/v9.9.9"] == other, "the published tag was moved anyway"
+
+
+def test_push_tag_is_a_no_op_when_the_ref_already_names_that_commit(tmp_path):
+    """Re-running stage 2 after a dropped connection must not be an error."""
+    mod = _load_module()
+    repo = _init_repo(tmp_path)
+    _write_file(repo, "a.txt")
+    commit = _commit_all(repo, "root")
+    _tag_object(repo)
+    fake = FakeGitHub(repo)
+    fake.refs["refs/tags/v9.9.9"] = commit
+    orig = _with_fake(mod, fake)
+    try:
+        result = mod.push_tag("x", "v9.9.9", cwd=repo)
+    finally:
+        mod.api = orig
+
+    assert result["result"] == "no-op"
+    assert result["commit"] == commit
+    assert [p for m, p in fake.log if m == "POST"] == [], "a no-op still posted an object"
+
+
+def test_the_cli_takes_exactly_one_of_branch_or_tag(tmp_path):
+    """Neither or both is a usage error, reported before any git or network call -
+    the check has to sit in front of the origin lookup, which needs a repository."""
+    import sys
+
+    for argv in ([], ["--branch", "feature/x", "--tag", "v9.9.9"]):
+        r = subprocess.run([sys.executable, str(SCRIPT)] + argv, capture_output=True,
+                           text=True, cwd=tmp_path, timeout=120)
+        assert r.returncode == 2, (argv, r.returncode, r.stdout, r.stderr)
+        assert "exactly one of --branch" in r.stdout, (argv, r.stdout)
