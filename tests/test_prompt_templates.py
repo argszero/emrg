@@ -2291,6 +2291,71 @@ def test_the_translated_twin_pin_reads_position_and_absence() -> None:
     )
 
 
+# ── §3.1.5 told a round to read the code it touches and to carry the documents it dates, and
+# said nothing about the code that reads a name the change alters. A caller the change does not
+# open goes on being wrong while the diff reads coherent and the suite stays green — a caller
+# no test path drives is the exact case a suite cannot answer. Pinned by position for the same
+# reason the twin rule above is: §3.1.6 is about running tests, and the same sentence there
+# would be read as a testing rule rather than as an edit rule.
+_OPEN_SOURCE_READERS_PHRASE = "A change that alters what a name means carries its readers with it"
+_OPEN_SOURCE_READERS_SECTION = "##### 3.1.5 Implement"
+_OPEN_SOURCE_READERS_NEXT = "##### 3.1.6 Test"
+
+
+def test_the_open_source_prompt_carries_the_readers_of_a_changed_name() -> None:
+    """An edit rule that stops at the file it opened leaves every other caller behind.
+
+    Not decoration: §3.1.3 covers reading a project before contributing and §3.1.5's documents
+    rule covers prose the change dates, so a round that followed both to the letter could make
+    an argument required and submit a pull request whose own diff is coherent while each caller
+    it did not open is broken. The suite is no substitute — a caller that no test path drives
+    reports nothing.
+    """
+    text = (PROMPTS_DIR / "open_source_prompt.md").read_text(encoding="utf-8")
+
+    assert text.count(_OPEN_SOURCE_READERS_PHRASE) == 1, (
+        f"{_OPEN_SOURCE_READERS_PHRASE!r} appears {text.count(_OPEN_SOURCE_READERS_PHRASE)} "
+        "times — a rule written twice is two answers that will disagree"
+    )
+    for heading in (_OPEN_SOURCE_READERS_SECTION, _OPEN_SOURCE_READERS_NEXT):
+        assert f"\n{heading}" in "\n" + text, (
+            f"the section this pin reads position against is gone: {heading!r} — a positional "
+            "reading of a missing bound compares against nothing"
+        )
+    assert _fifth_level_section_of(text, _OPEN_SOURCE_READERS_PHRASE) == _OPEN_SOURCE_READERS_SECTION, (
+        "the readers-of-a-changed-name rule is no longer under "
+        f"{_OPEN_SOURCE_READERS_SECTION!r} (found: "
+        f"{_fifth_level_section_of(text, _OPEN_SOURCE_READERS_PHRASE)!r}) — a rule in a section "
+        "that does not own its subject is one a round reads as something else"
+    )
+    assert "land on" in text.split(_OPEN_SOURCE_READERS_PHRASE, 1)[1].split(_OPEN_SOURCE_READERS_NEXT, 1)[0], (
+        "the rule no longer says to search the tree the change will land on — a search of the "
+        "checkout alone misses every caller a merge brings in, which is the case it exists for"
+    )
+
+
+def test_the_readers_pin_reads_position_and_absence() -> None:
+    """The controls: deleting the rule and moving it must each redden, and they are not the same
+    arm — deletion is what a rewrite does, relocation is what a busy edit does."""
+    text = (PROMPTS_DIR / "open_source_prompt.md").read_text(encoding="utf-8")
+
+    deleted = text.replace(_OPEN_SOURCE_READERS_PHRASE, "")
+    assert deleted != text, (
+        f"{_OPEN_SOURCE_READERS_PHRASE!r} is pinned but absent, so this arm measured nothing"
+    )
+    assert _fifth_level_section_of(deleted, _OPEN_SOURCE_READERS_PHRASE) is None, (
+        "a deleted rule still reads as present, so the pin would not notice its own rule going"
+    )
+
+    moved = deleted.rstrip() + f"\n\n{_OPEN_SOURCE_READERS_PHRASE}\n"
+    found = _fifth_level_section_of(moved, _OPEN_SOURCE_READERS_PHRASE)
+    assert found is not None, "the relocation arm lost the phrase it moved, not the position"
+    assert found != _OPEN_SOURCE_READERS_SECTION, (
+        f"moving the phrase to the end of the file left it reading as {found!r} — the pin is "
+        "reading presence, not position"
+    )
+
+
 # --------------------------------------------------------------------------- the inbound half
 #
 # A round of the promotion task is written as four outward steps: find a topic, join it,
