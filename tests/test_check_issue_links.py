@@ -2854,3 +2854,45 @@ def test_judge_issues_reads_the_version_off_the_issue_it_is_judging(mod) -> None
     rows = {row.number: row for row in mod.judge_issues(issues, refs, {})}
     assert "check-release-published.py v0.3.46" in rows[2781].detail
     assert "check-release-published" not in rows[2778].detail
+
+
+# --- the title declares the version, the body only mentions one --------------------
+#
+# The artifact remedy belongs where an issue **declares** the release it is about, and is
+# wrong where its body merely cites the release it was **seen in**: that version is already
+# published, so the printed reading exits 0 and invites a close over work it never
+# described. Measured over the repository's last 200 issues, 34 name a version and 8 of
+# them name it only in the body - each of those took the artifact sentence before this
+# gate, for a merge that had done something else.
+
+
+def test_a_version_in_the_body_does_not_make_an_issue_a_release_issue(mod) -> None:
+    issues = [
+        {
+            "number": 2760,
+            "title": "The actionlint step's download has no retry, so one upstream 504 reddens master for hours",
+            "body": "master has failed its Test workflow since a85b1ddd; v0.3.41 stepped on the download.",
+            "created_at": "2026-11-08T10:00:00Z",
+        }
+    ]
+    refs = {2760: mod.Refs(declared_merged={2759})}
+    rows = {row.number: row for row in mod.judge_issues(issues, refs, {})}
+    assert "check-release-published" not in rows[2760].detail
+    assert "either close this issue with the reading that says the work is done" in rows[2760].detail
+
+
+def test_the_title_is_what_declares_the_version_and_the_body_is_not(mod) -> None:
+    body = "master has failed its Test workflow since a85b1ddd; v0.3.41 stepped on the download."
+    issues = [
+        {"number": 2781, "title": "Release v0.3.46", "body": body, "created_at": "2026-11-09T17:35:22Z"},
+        {
+            "number": 2760,
+            "title": "The actionlint step's download has no retry, so one upstream 504 reddens master for hours",
+            "body": body,
+            "created_at": "2026-11-08T10:00:00Z",
+        },
+    ]
+    refs = {2781: mod.Refs(declared_merged={2782}), 2760: mod.Refs(declared_merged={2759})}
+    rows = {row.number: row for row in mod.judge_issues(issues, refs, {})}
+    assert "check-release-published.py v0.3.46" in rows[2781].detail
+    assert "check-release-published" not in rows[2760].detail
