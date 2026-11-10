@@ -60,7 +60,9 @@ A memory is frontmatter, then a Markdown body under a title; an existing entry s
 {% endif %}
 - **A write is two steps**: the file, then its row in the index. To retire one, set its `status`; never delete it.
 - **Organise rather than accumulate**: fragments on one topic become one memory, their old files marked `merged` or `superseded`; a refinement edits the entry it refines; a file carrying unrelated topics splits into one entry per topic.
-- **How settled an entry is decides how freely it is rewritten**: `event_at` says when the event happened and `updated_at` when the file last moved. When in doubt, append and note what changed; a body calling itself temporary may go.
+- **`event_at` says when the event happened and `updated_at` when the file last moved**; a body calling itself temporary may go.
+- **A refuted conclusion is replaced where it stands, never annotated**: delete the wrong sentence and write the right one in its place. A correction appended at the head or the tail leaves the falsehood holding the title and the opening — the two positions a reader actually reaches — and quotable by whoever reads no further; an entry already carrying such sections is rewritten whole, and one refuted as a whole takes `status: superseded` and leaves the active index, whose row follows the same rule as the body it points at.
+- **What a refutation keeps is the error and its discriminator**: what was thought, what is true, and the test that separates them — never the timeline or the effort, which the next round reads as fresh fact.
 - **Promotion**: a session memory worth keeping moves to the agent store, and both indexes learn of it.
 - **The index rows arrive every round** in the `[context]` message, not here: read them there.
 {% else %}
