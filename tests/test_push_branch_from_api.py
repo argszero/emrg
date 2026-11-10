@@ -740,6 +740,7 @@ def test_the_cli_takes_exactly_one_of_branch_or_tag(tmp_path):
 
     for argv in ([], ["--branch", "feature/x", "--tag", "v9.9.9"]):
         r = subprocess.run([sys.executable, str(SCRIPT)] + argv, capture_output=True,
-                           text=True, cwd=tmp_path, timeout=120)
+                           text=True, encoding="utf-8", errors="replace",
+                           cwd=tmp_path, timeout=120)
         assert r.returncode == 2, (argv, r.returncode, r.stdout, r.stderr)
         assert "exactly one of --branch" in r.stdout, (argv, r.stdout)
