@@ -126,14 +126,21 @@ unresolved: 0` · `OK`, exit 0, against a store of **107** active files and 82 r
 failure is silent in the direction that costs most: the file exists, the work was done, and
 the fact is unreachable, because the index is the only map of the store.
 
-A file counts as indexed when its **name appears in the index's text** — inside a link or
-inside an inline code span. Not links alone, and that is not a convenience: the compaction
-rule requires a merged row to "still name every id and file that line replaces", and this
-host's index does exactly that inside backticks, one merged row naming the two files it
-replaced. A link-only predicate would report the shape the rule prescribes. The subject is the same
-directory the resolution reading already resolves against, because these rows name their
-siblings; a file whose frontmatter status is `merged`, `superseded`, or absent is out of
-scope, the index listing active entries only.
+A file counts as indexed when the index's text **names** it — inside a link or inside an
+inline code span, and under **either** of the two spellings a store writes an entry's name
+in: the detail file's own name, or the `id` its frontmatter carries beside the `status` this
+reading already reads. Neither spelling is a convenience. The compaction rule requires a
+merged row to "still name every id and file that line replaces", so this host's index does
+exactly that inside backticks, one merged row naming the two files it replaced; and the same
+index names an entry by its bare id in its first cell, because the file name carries a slug
+the id does not (`1a7c4f30-identity-github-role.md` behind the row `| 1a7c4f30 | …`). A
+name-only predicate would therefore report an index as holding unindexed entries for
+following its own instructions: measured 2026-11-11 on this host, **204 of 207** active
+detail files are named by their id and **4** by their file name, so the name-only reading
+printed `named nowhere: 203` where a census matching both spellings finds **3**. The subject
+is the same directory the resolution reading already resolves against, because these rows
+name their siblings; a file whose frontmatter status is `merged`, `superseded`, or absent is
+out of scope, the index listing active entries only.
 
 Scope, named rather than implied
 --------------------------------
@@ -192,10 +199,12 @@ What the detail reading does not cover
   index", so a name in the right row, the wrong row, or a trailing paragraph all satisfy
   it; whether the row that names a file *describes* it is a different rule with a
   reader's judgement behind it.
-* **A name inside a longer name.** Coverage is a substring test on the index's text, so
-  `a.md` reads as named when the index names `a.md.bak`. Identity would need the row
-  grammar and would then miss the code-span spelling the compaction protocol prescribes,
-  so the cheap test that covers both real shapes is the one taken.
+* **A name inside a longer name.** A file's name is a substring test on the index's text, so
+  `a.md` reads as named when the index names `a.md.bak`; an entry's `id` is matched as a
+  whole token instead, because an id is the store's own key and `cyc20261005-2345571` is not
+  `cyc20261005-234557`. Identity for file names would need the row grammar and would then
+  miss the code-span spelling the compaction protocol prescribes, so the cheap test that
+  covers both real shapes is the one taken.
 * **The frontmatter's position.** Only the head of a detail file is read, `DETAIL_HEAD`
   characters, which is where the store writes the block; a file whose frontmatter does
   not close inside that window is out of scope rather than guessed at.
@@ -365,6 +374,12 @@ FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---", re.DOTALL)
 #: this very rule, in the entry that documents it - cannot make a retired file active.
 STATUS_LINE = re.compile(r"^status:\s*(\S+)\s*$", re.MULTILINE)
 
+#: The other frontmatter line this reading acts on: the name the entry gives itself. It is
+#: a second spelling of "this file", not a second rule - this store's index names entries by
+#: the bare id in its first cell, and the file name carries a slug the id does not. Measured
+#: 2026-11-11 on this host's store: 204 of 207 active files named by id, 4 by file name.
+ID_LINE = re.compile(r"^id:\s*(\S+)\s*$", re.MULTILINE)
+
 #: The status whose entries the index is a map of. Everything else - `merged`,
 #: `superseded`, a file with no frontmatter at all - is out of scope by the rule that
 #: says to drop an entry's row once it is retired.
@@ -409,8 +424,9 @@ class Reading(NamedTuple):
     :param detail_files: the detail files beside the index whose frontmatter says
         `status: active`, in name order - the sixth reading's subject, and the count that
         says whether it had one.
-    :param unnamed_details: those of them whose name appears nowhere in the file, in the
-        same order - "a write is two steps" and this is the second step's absence.
+    :param unnamed_details: those of them that the index names neither by file name nor by
+        their own id, in the same order - "a write is two steps" and this is the second
+        step's absence.
     """
 
     path: Path
@@ -471,15 +487,19 @@ class Reading(NamedTuple):
         return out
 
 
-def _active_detail_files(directory: Path, index_name: str) -> tuple[str, ...]:
+def _active_detail_files(
+    directory: Path, index_name: str
+) -> tuple[tuple[str, Optional[str]], ...]:
     """The detail files beside an index that the index is a map of.
 
     :param directory: the index's own directory, which is where these rows' targets live.
     :param index_name: the index's file name, excluded so an index cannot be its own
         detail file.
-    :returns: their names, in name order; a subset of what `directory` holds.
+    :returns: `(file name, the entry's own id)` per active detail file, in name order; a
+        subset of what `directory` holds. The id is `None` where the frontmatter carries
+        no `id:` line, because not every file in a store was written by one writer.
     """
-    out: list[str] = []
+    out: list[tuple[str, Optional[str]]] = []
     for entry in sorted(directory.glob("*.md")):
         if entry.name == index_name or not entry.is_file():
             continue
@@ -494,10 +514,40 @@ def _active_detail_files(directory: Path, index_name: str) -> tuple[str, ...]:
         block = FRONTMATTER.match(head)
         if block is None:
             continue
-        status = STATUS_LINE.search(block.group(1))
+        body = block.group(1)
+        status = STATUS_LINE.search(body)
         if status is not None and status.group(1).strip("\"'") == ACTIVE_STATUS:
-            out.append(entry.name)
+            found = ID_LINE.search(body)
+            out.append((entry.name, found.group(1).strip("\"'") if found else None))
     return tuple(out)
+
+
+def _names_entry(text: str, name: str, entry_id: Optional[str]) -> bool:
+    """Whether an index's text names one detail file, under either spelling.
+
+    :param text: the index's whole text.
+    :param name: the detail file's name.
+    :param entry_id: the entry's own id, or `None` when its frontmatter carries none.
+    :returns: `True` when the file name appears anywhere in the text, or the id appears as
+        a whole token. The two are matched differently on purpose: the docstring's limits
+        section states why a file name is a substring test and an id is not.
+    """
+    if name in text:
+        return True
+    if not entry_id:
+        return False
+    return _id_token(entry_id).search(text) is not None
+
+
+def _id_token(entry_id: str) -> "re.Pattern[str]":
+    """`entry_id` compiled as a bounded token, so a longer id cannot answer for it.
+
+    :param entry_id: the id a detail file's frontmatter declares.
+    :returns: the pattern whose match means "this id, and no longer one around it".
+    """
+    return re.compile(
+        r"(?<![A-Za-z0-9_-])" + re.escape(entry_id) + r"(?![A-Za-z0-9_-])"
+    )
 
 
 def measure(path: Path) -> Reading:
@@ -540,14 +590,20 @@ def measure(path: Path) -> Reading:
         if cell_header is not None
         else ()
     )
-    details = _active_detail_files(path.parent, path.name)
+    entries = _active_detail_files(path.parent, path.name)
     return Reading(
         path, len(lines), len(text), tuple(row_lines), tuple(row_lengths),
-        tuple(row_targets), cell_header, cell_faults, details,
-        # Named, not merely linked: a merged row names the files it replaced inside code
-        # spans, and the compaction rule requires exactly that. A substring test over the
-        # whole text covers both spellings; the boundary it buys is in the docstring.
-        tuple(name for name in details if name not in text),
+        tuple(row_targets), cell_header, cell_faults,
+        tuple(name for name, _ in entries),
+        # Named, not merely linked, and by either spelling: a merged row names the files it
+        # replaced inside code spans, which the compaction rule requires, while this host's
+        # index names an entry by the bare id its first cell carries. Measured 2026-11-11 on
+        # this host: 204 of 207 active files named by id against 4 by file name, so a
+        # name-only predicate reported 203 unnamed where both spellings find 3.
+        tuple(
+            name for name, entry_id in entries
+            if not _names_entry(text, name, entry_id)
+        ),
     )
 
 
@@ -832,7 +888,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         else:
             silent = [reading for reading in readings if not reading.detail_files]
             summary += (
-                f"; every active detail file is named by a row ({details_read} read)"
+                f"; every active detail file is named by a row ({details_read} read), by "
+                "its file name or by the id its frontmatter carries"
             )
             if silent:
                 summary += (
