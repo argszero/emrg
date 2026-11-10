@@ -126,21 +126,32 @@ unresolved: 0` · `OK`, exit 0, against a store of **107** active files and 82 r
 failure is silent in the direction that costs most: the file exists, the work was done, and
 the fact is unreachable, because the index is the only map of the store.
 
-A file counts as indexed when the index's text **names** it — inside a link or inside an
-inline code span, and under **either** of the two spellings a store writes an entry's name
-in: the detail file's own name, or the `id` its frontmatter carries beside the `status` this
-reading already reads. Neither spelling is a convenience. The compaction rule requires a
-merged row to "still name every id and file that line replaces", so this host's index does
-exactly that inside backticks, one merged row naming the two files it replaced; and the same
-index names an entry by its bare id in its first cell, because the file name carries a slug
-the id does not (`1a7c4f30-identity-github-role.md` behind the row `| 1a7c4f30 | …`). A
-name-only predicate would therefore report an index as holding unindexed entries for
-following its own instructions: measured 2026-11-11 on this host, **204 of 207** active
-detail files are named by their id and **4** by their file name, so the name-only reading
-printed `named nowhere: 203` where a census matching both spellings finds **3**. The subject
-is the same directory the resolution reading already resolves against, because these rows
-name their siblings; a file whose frontmatter status is `merged`, `superseded`, or absent is
-out of scope, the index listing active entries only.
+A file counts as indexed when the index's text **names** it, under **any of the three
+spellings** a store writes an entry's name in: the detail file's own name, the `id` its
+frontmatter carries beside the `status` this reading already reads, or the file's **stem** —
+its name without `.md`. None is a convenience. The compaction rule requires a merged row to
+"still name every id and file that line replaces", so this host's index does exactly that
+inside backticks, one merged row naming the two files it replaced; the same index names an
+entry by its bare id in its first cell, because the file name carries a slug the id does not
+(`1a7c4f30-identity-github-role.md` behind the row `| 1a7c4f30 | …`); and it names an entry
+by the stem wherever the frontmatter id is a short hash (`docstr1ngm1g`) or absent
+altogether, which is the shape the row `| x-publish-chain | reference | …` has beside a file
+carrying no `id:` line. A name-only predicate would report an index as holding unindexed
+entries for following its own instructions: measured 2026-11-11 on this host, **204 of 207**
+active detail files are named by their id and **4** by their file name, so the name-only
+reading printed `named nowhere: 203` where a census matching the two spellings finds **3**.
+
+The three are read **where a name is written**, and that is not the same place for each. A
+file name is a substring of the whole text. An `id` is a whole token anywhere in it. A stem —
+being the shortest of the three, and often a single character in a fixture — is a whole token
+only among the names an index actually writes: the content of its inline code spans and its
+table cells. Matched anywhere, a one-letter stem answers for the English article, which
+silences the reading instead of sharpening it (measured 2026-11-11 on a store holding `a.md`
+beside an index whose prose reads "an index has a note").
+
+The subject is the same directory the resolution reading already resolves against, because
+these rows name their siblings; a file whose frontmatter status is `merged`, `superseded`, or
+absent is out of scope, the index listing active entries only.
 
 Scope, named rather than implied
 --------------------------------
@@ -200,11 +211,19 @@ What the detail reading does not cover
   it; whether the row that names a file *describes* it is a different rule with a
   reader's judgement behind it.
 * **A name inside a longer name.** A file's name is a substring test on the index's text, so
-  `a.md` reads as named when the index names `a.md.bak`; an entry's `id` is matched as a
-  whole token instead, because an id is the store's own key and `cyc20261005-2345571` is not
-  `cyc20261005-234557`. Identity for file names would need the row grammar and would then
-  miss the code-span spelling the compaction protocol prescribes, so the cheap test that
-  covers both real shapes is the one taken.
+  `a.md` reads as named when the index names `a.md.bak`; an entry's `id` and its stem are
+  matched as whole tokens instead, because both are the store's keys rather than prose, and
+  `cyc20261005-2345571` is not `cyc20261005-234557`.
+* **A stem the index only mentions.** A stem is read among the names an index writes - its
+  code spans and its table cells - and not across its whole text, so a paragraph that says
+  "the rotation bookmark" does not index `rotation-bookmark.md`. This is narrower than the
+  other two spellings on purpose: a stem can be one character, and a whole-token match
+  anywhere would read `a.md` as named by the article in a sentence. A store that indexes by
+  stem outside a row or a code span is not covered, and nothing this host's stores write has
+  that shape.
+* **Identity for file names.** A substring test cannot tell `a.md` from `a.md.bak`; closing
+  that would need the row grammar and would then miss the code-span spelling the compaction
+  protocol prescribes, so the cheap test that covers both real shapes is the one taken.
 * **The frontmatter's position.** Only the head of a detail file is read, `DETAIL_HEAD`
   characters, which is where the store writes the block; a file whose frontmatter does
   not close inside that window is out of scope rather than guessed at.
@@ -424,9 +443,9 @@ class Reading(NamedTuple):
     :param detail_files: the detail files beside the index whose frontmatter says
         `status: active`, in name order - the sixth reading's subject, and the count that
         says whether it had one.
-    :param unnamed_details: those of them that the index names neither by file name nor by
-        their own id, in the same order - "a write is two steps" and this is the second
-        step's absence.
+    :param unnamed_details: those of them that the index names by none of the entry's three
+        spellings — its file name, its own id, its stem — in the same order: "a write is two
+        steps" and this is the second step's absence.
     """
 
     path: Path
@@ -522,21 +541,57 @@ def _active_detail_files(
     return tuple(out)
 
 
-def _names_entry(text: str, name: str, entry_id: Optional[str]) -> bool:
-    """Whether an index's text names one detail file, under either spelling.
+def _written_names(text: str, lines: list[str], header_line: Optional[int]) -> str:
+    """The stretches of an index where an entry's name is *written*, in one string.
+
+    Two shapes, both the store's own: the content of every inline code span, and the cells
+    of every table row **but the header's** — the header states the table's width rather
+    than an entry, so a stem spelled `note` must not be answered by a header cell reading
+    `note`. A stem is matched only here, never across the whole file, because a stem is a
+    short slug and a bare token match lets a one-letter stem answer for an English article -
+    measured 2026-11-11, a store holding `a.md` and an index whose prose reads "an index has
+    a note" reports that entry *named* under a bounded match anywhere, which loses the very
+    finding this reading exists to make. A prose paragraph that mentions a stem is a mention
+    and not a name, the distinction the docstring's limits section states.
+
+    :param text: the index's whole text, the source of its code spans.
+    :param lines: that text's lines, the source of its table cells.
+    :param header_line: the 1-based line number of the table's header, or `None` when the
+        index carries no table — the same row the cell reading takes as its header.
+    :returns: one newline-joined string; empty when the index writes no name at all.
+    """
+    out = [span.group(0)[1:-1] for span in CODE_SPAN.finditer(text)]
+    for number, line in enumerate(lines, 1):
+        if number == header_line:
+            continue
+        cells = index_row_cells(line)
+        if cells is not None:
+            out.extend(cell.strip().strip("`") for cell in cells)
+    return "\n".join(out)
+
+
+def _names_entry(
+    text: str, name: str, entry_id: Optional[str], stem: Optional[str], written: str
+) -> bool:
+    """Whether an index's text names one detail file, under any of its spellings.
 
     :param text: the index's whole text.
     :param name: the detail file's name.
     :param entry_id: the entry's own id, or `None` when its frontmatter carries none.
-    :returns: `True` when the file name appears anywhere in the text, or the id appears as
-        a whole token. The two are matched differently on purpose: the docstring's limits
-        section states why a file name is a substring test and an id is not.
+    :param stem: the file's name without `.md`, or `None` when it is only `.md`.
+    :param written: `_written_names`' answer, the stretches where a name is written.
+    :returns: `True` when the file name appears anywhere in the text, when the id appears as
+        a whole token anywhere, or when the stem appears as a whole token among the written
+        names. The three are matched differently on purpose: the docstring's readings and
+        limits sections state which spelling is read where, and why.
     """
     if name in text:
         return True
-    if not entry_id:
+    if entry_id and _id_token(entry_id).search(text) is not None:
+        return True
+    if not stem:
         return False
-    return _id_token(entry_id).search(text) is not None
+    return _id_token(stem).search(written) is not None
 
 
 def _id_token(entry_id: str) -> "re.Pattern[str]":
@@ -591,18 +646,24 @@ def measure(path: Path) -> Reading:
         else ()
     )
     entries = _active_detail_files(path.parent, path.name)
+    written = _written_names(text, lines, cell_header[0] if cell_header else None)
     return Reading(
         path, len(lines), len(text), tuple(row_lines), tuple(row_lengths),
         tuple(row_targets), cell_header, cell_faults,
         tuple(name for name, _ in entries),
-        # Named, not merely linked, and by either spelling: a merged row names the files it
-        # replaced inside code spans, which the compaction rule requires, while this host's
-        # index names an entry by the bare id its first cell carries. Measured 2026-11-11 on
-        # this host: 204 of 207 active files named by id against 4 by file name, so a
-        # name-only predicate reported 203 unnamed where both spellings find 3.
+        # Named, not merely linked, and by any of the entry's three spellings: a merged row
+        # names the files it replaced inside code spans, which the compaction rule requires,
+        # while this host's index names an entry by the bare id its first cell carries, or by
+        # the file's stem where the frontmatter id is a short hash or absent. Measured
+        # 2026-11-11 on this host: 204 of 207 active files named by id against 4 by file
+        # name, so a name-only predicate reported 203 unnamed where two spellings find 3.
         tuple(
             name for name, entry_id in entries
-            if not _names_entry(text, name, entry_id)
+            if not _names_entry(
+                text, name, entry_id,
+                name[:-3] if name.endswith(".md") else None,
+                written,
+            )
         ),
     )
 
