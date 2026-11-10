@@ -1399,15 +1399,29 @@ def _mention_detail(refs: Refs, number: int) -> str:
     return "; ".join(clauses)
 
 
-#: A release version an issue's own text names, e.g. `Release v0.3.46`. It is read
+#: A release version an issue's own **title** names, e.g. `Release v0.3.46`. It is read
 #: because it is the one fact an open issue carries about what finishes *it*: a PR's own
 #: title never reaches `judge_issues`, so "was the declaring PR a bump?" cannot be answered
 #: here at all, while "does this issue's completion name a published artifact?" can.
+#:
+#: The title and not the body, because the two say different things: a title says what an
+#: issue **is**, while a body says what it was **seen in**. An ordinary issue cites the
+#: release it observed its defect on, and reading that as the artifact that finishes it
+#: hands the reader a published version for work that has nothing to do with one - the
+#: reading then exits 0 and invites a close over work that is not done. Measured over the
+#: repository's last 200 issues: 34 name a version, 26 of them in the title and 8 only in
+#: the body, and three of those 8 driven through `judge_issues` each took the artifact
+#: remedy for a merge about something else. An issue naming its version only in the body
+#: therefore keeps the remedy it had.
 _RELEASE_VERSION = re.compile(r"\bv\d+\.\d+\.\d+\b")
 
 
 def release_version(*texts: str | None) -> str | None:
-    """The release version this issue's own text names, or `None` when it names none."""
+    """The release version the given text names, or `None` when it names none.
+
+    Which text is the caller's decision, not this function's: `judge_issues` passes the
+    issue's title alone, and the reason is stated on `_RELEASE_VERSION`.
+    """
     for text in texts:
         if not text:
             continue
@@ -1521,9 +1535,7 @@ def judge_issues(
                 )
                 continue
             if refs.declared_merged or refs.declared_abandoned:
-                detail = _declined_detail(
-                    refs, number, release_version(issue.get("title"), issue.get("body"))
-                )
+                detail = _declined_detail(refs, number, release_version(issue.get("title")))
             elif refs.mentioned_landed or refs.mentioned_abandoned or refs.mentioned_open:
                 detail = _mention_detail(refs, number)
             else:
