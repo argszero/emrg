@@ -59,11 +59,19 @@ Named limits
   on this host, and the assertion's own stub answers when it is reached on a runner.
 * The count is asserted as a numeral, not as a particular word: what the message must say is
   how many attempts it made, in a form a reader can read off the line.
+* **The step is handed a `PATH` inside this test's own tree, and the premise is asserted
+  rather than assumed.** The job that runs this file installs the real `bwrap` into
+  `/usr/bin` seventy lines before pytest, so a `PATH` carrying `/usr/bin` let the step's own
+  `command -v bwrap` guard short-circuit and left the three arms measuring a loop that never
+  ran (measured 2026-11-12, run 43065169139: `installs=0`, `updates=0`, and the fail-closed
+  arm exiting 0). On a host with no `bwrap` - every developer machine here - the old shape
+  was green whether or not that guard worked, so the `test` leg is the one that discriminates.
 """
 
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -98,6 +106,10 @@ POSIX_ONLY = pytest.mark.skipif(
 #: The measured log is reproduced in the failure text, so a red arm here reads like the red
 #: run it stands for.
 _STUB_SUDO = """#!/bin/sh
+# The stub calls the real `chmod`, so it puts the system directories back on its own PATH.
+# The step that calls it is handed neither of them - see `_run_step`, which is where the
+# reason lives.
+PATH=/usr/bin:/bin
 state="$STUB_STATE"
 key="$1 $2"
 case "$key" in
@@ -172,19 +184,51 @@ def _run_step(tmp_path: Path, *, install_fail_first: int, update_fail_first: int
         exe.write_text(body, encoding="utf-8")
         exe.chmod(0o755)
 
+    # The step's PATH is this tree and nothing else. It matters because the job that runs
+    # this file runs the step under test seventy lines earlier, and that step installs the
+    # real `bwrap` into `/usr/bin`: with `/usr/bin` on this PATH the step's own
+    # `command -v bwrap` guard short-circuits, the install loop never runs, and all three
+    # arms below measure nothing (measured 2026-11-12, run 43065169139). The shim carries
+    # the one external command the step itself calls - `cat` in its AppArmor branch - and
+    # the stubs restore the system directories on their own PATH, which they need for
+    # `chmod`.
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    cat = shutil.which("cat")
+    assert cat is not None, "no `cat` on this host, so the step's AppArmor branch cannot run"
+    (shim / "cat").symlink_to(cat)
+
+    # The interpreter is resolved here and passed absolutely: it is what runs the step, not
+    # a command the step looks up, so it has no business on the PATH under test.
+    bash = shutil.which("bash")
+    assert bash is not None, "no `bash` on this host, so the step cannot be executed at all"
+
     script = tmp_path / "step.sh"
     script.write_text(_step()["run"], encoding="utf-8")
 
     env = {
-        "PATH": f"{stubs}:/usr/bin:/bin",
+        "PATH": f"{stubs}:{shim}",
         "STUB_STATE": str(state),
         "STUB_BIN": str(stubs),
         "STUB_INSTALL_FAIL_FIRST": str(install_fail_first),
         "STUB_UPDATE_FAIL_FIRST": str(update_fail_first),
         "HOME": str(tmp_path),
     }
+    # The premise, asserted rather than assumed: a host that can see a `bwrap` from here
+    # turns every arm below into a measurement of that host.
+    assert shutil.which("bwrap", path=env["PATH"]) is None, (
+        "the step can see a `bwrap` on the PATH it was handed, so its install loop is "
+        f"skipped and nothing below measures the retry. PATH was: {env['PATH']}"
+    )
+    assert all(
+        Path(entry).resolve().is_relative_to(tmp_path.resolve())
+        for entry in env["PATH"].split(":")
+    ), (
+        "the step's PATH names a directory outside this test's own tree, which is how the "
+        f"runner's own `bwrap` gets in. PATH was: {env['PATH']}"
+    )
     proc = subprocess.run(
-        ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
+        [bash, "--noprofile", "--norc", "-eo", "pipefail", str(script)],
         cwd=tmp_path,
         env=env,
         capture_output=True,
