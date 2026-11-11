@@ -256,7 +256,7 @@ class PushError(RuntimeError):
 WORKFLOWS_DIR = ".github/workflows/"
 
 
-def ref_write_404_hint(changed_paths, response_body: str = "") -> str:
+def ref_write_404_hint(paths: list[str] | None, response_body: str = "") -> str:
     """Say what a `404` from a ref write leaves out — and no more than the evidence says.
 
     The endpoint's documented refusals all answer `422` (an existing ref, an
@@ -272,8 +272,22 @@ def ref_write_404_hint(changed_paths, response_body: str = "") -> str:
     The hint is therefore conditional on the chain, not on the status: claiming that
     cause for a chain that publishes no workflow file would point the reader at a scope
     that was never the problem, which is worse than the bare status.
+
+    `paths` is `None` when the caller could not measure what the publication changes -
+    and then this function must not answer as if it had, because "I compared nothing"
+    and "no workflow path" are the same empty list to a reader.
     """
-    if any(str(p).startswith(WORKFLOWS_DIR) for p in changed_paths):
+    if paths is None:
+        return (
+            "this endpoint answers 404 for refusals it does not describe, while its "
+            "documented ones answer 422. What this publication would change could not be "
+            "measured from this checkout, so a missing `workflow` scope cannot be ruled "
+            f"out: a commit touching {WORKFLOWS_DIR} needs that scope and is refused as "
+            "404 rather than 403. Settle it with `git diff --name-only <the commit the "
+            "ref names> <tip>` before renewing a scope. "
+            f"Response body: {response_body or '(empty)'}"
+        )
+    if any(str(p).startswith(WORKFLOWS_DIR) for p in paths):
         return (
             f"a commit in this chain changes a path under {WORKFLOWS_DIR}, and an OAuth "
             "app whose token lacks the `workflow` scope is refused exactly at this "
@@ -297,9 +311,10 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
 
     # ---- find the remote base: existing branch head, or first known ancestor
     ref_path = f"/repos/{repo}/git/refs/heads/{branch}"
+    ref_sha = None  # the commit the ref itself names, kept apart from the walk's cursor
     try:
         existing = api("GET", ref_path)
-        base = existing["object"]["sha"]
+        ref_sha = base = existing["object"]["sha"]
     except urllib.error.HTTPError as e:
         if e.code != 404:
             raise
@@ -454,25 +469,43 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
     # ---- update the remote ref (fast-forward semantics; force only if asked)
     final_sha = commit_map[chain[-1][0]] if chain else local_tip
 
-    def changed_paths() -> list[str]:
+    def changed_paths() -> list[str] | None:
         """Paths this publication changes, so a refusal can be explained from evidence.
 
-        `base` is the commit the remote already carries, so the diff names exactly what
-        is being published. When no base is known - the remote has none of this history
-        - every path in the chain is new by definition.
+        The subject of this diff is not the ancestor walk's cursor. `base` is where that
+        walk stopped, and a walk that finds the tip already on the remote stops *at* the
+        tip - so diffing `base..local_tip` compares the tip with itself and answers
+        "nothing". That is a true comparison and a false finding: measured 2026-11-11 on
+        the retry of a refused push whose commit edits `.github/workflows/`, where the
+        empty diff made the refusal diagnose itself as "not a missing branch" and exclude
+        the one cause the hint exists to name.
 
-        Named limit: a remote base that is not an object in this checkout (a branch
-        another pusher advanced) falls back to "everything is new", which can over-claim
-        a workflow change but never hides the ref name the reader needs.
+        What the publication actually changes is, in order of preference: the commit the
+        ref names (what a new ref value changes from), the ancestor the chain was built
+        from, or - when nothing was uploaded - the tip's own parent. `None` means none of
+        them is available here, which is *unmeasured*: the caller must say so rather than
+        read it as "no workflow path".
         """
-        if base:
+        subjects = []
+        if ref_sha:
+            subjects.append(ref_sha)
+        if base and base != local_tip:
+            subjects.append(base)
+        if not chain:
+            # nothing was uploaded, so the tip's own commit is the whole publication
+            parents = parse_commit(git("cat-file", "commit", local_tip, cwd=cwd))["parents"]
+            subjects.extend(parents[:1])
+        for subject in subjects:
             try:
-                out = git("diff", "--name-only", base, local_tip, cwd=cwd)
-                return out.decode("utf-8").splitlines()
+                out = git("diff", "--name-only", subject, local_tip, cwd=cwd)
             except RuntimeError:
-                pass  # base is not an object here - treat every path as new
-        return [p for commit in chain
-                for p in collect_objects(commit[1]["tree"], cwd=cwd)["blobs"].values()]
+                continue  # not an object in this checkout - try the next reading
+            return out.decode("utf-8").splitlines()
+        if chain:
+            # no base to diff against: every path in the uploaded chain is new by definition
+            return [p for commit in chain
+                    for p in collect_objects(commit[1]["tree"], cwd=cwd)["blobs"].values()]
+        return None
 
     body = {"sha": final_sha, "force": force}
     try:

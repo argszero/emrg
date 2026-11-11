@@ -808,12 +808,12 @@ def _refused_ref_write(tmp_path, files: dict[str, bytes]):
     return mod, repo, fake
 
 
-def _push_against(mod, fake, repo):
+def _push_against(mod, fake, repo, branch: str = "feature/refused"):
     orig_api = mod.api
     mod.api = fake
     try:
         with pytest.raises(mod.PushError) as exc:
-            mod.push_branch("x", "feature/refused", "HEAD", False, cwd=repo)
+            mod.push_branch("x", branch, "HEAD", False, cwd=repo)
     finally:
         mod.api = orig_api
     return str(exc.value)
@@ -845,3 +845,43 @@ def test_a_ref_write_404_claims_no_scope_when_no_workflow_file_is_published(tmp_
     assert "workflow" not in message, message
     assert "Response body" in message, message
     assert "refs/heads/feature/refused" not in fake.refs
+
+
+def _stranded_retry(tmp_path, files: dict[str, bytes]):
+    """The state a refused ref write leaves: the tip is uploaded, the ref is behind it.
+
+    `POST /git/commits` runs before the ref write, so a refusal at the ref step strands
+    the publication one request short of finished. The fake reproduces exactly that: its
+    object store already holds the tip's commit while its ref still names the base.
+    """
+    mod = _load_module()
+    repo = _init_repo(tmp_path)
+    _write_file(repo, "docs/base.md", b"base\n")
+    base = _commit_all(repo, "base commit")
+    for rel, content in files.items():
+        _write_file(repo, rel, content)
+    tip = _commit_all(repo, "publish files")
+    fake = FakeGitHub(repo)
+    fake.refs["refs/heads/feature/stranded"] = base
+    fake.objects[tip] = ("commit", b"<already on the remote>")
+    return mod, repo, fake, base, tip
+
+
+def test_a_stranded_retry_names_the_workflow_scope_a_404_hides(tmp_path):
+    """A retry's refusal must name the scope the first attempt lost.
+
+    Measured 2026-11-11 (issue #2819, item 2): on a retry the ancestor walk stops *at*
+    the tip, so a diff of the walk's stopping point with the tip is empty by
+    construction - and the hint read that empty answer as "no workflow path", excluding
+    the one cause it exists to name for a commit that edits `.github/workflows/`.
+    """
+    mod, repo, fake, base, tip = _stranded_retry(
+        tmp_path, {".github/workflows/test.yml": b"jobs: {}\n"})
+    fake.fail_ref_writes = True
+
+    message = _push_against(mod, fake, repo, branch="feature/stranded")
+
+    assert "404" in message, message
+    assert "gh auth refresh -s workflow" in message, message
+    # the refusal left the ref where it was: nothing was published
+    assert fake.refs["refs/heads/feature/stranded"] == base
