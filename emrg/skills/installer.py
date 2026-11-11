@@ -36,12 +36,17 @@ the catalog).
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
+import os
 import shutil
+import tarfile
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
+from urllib.parse import quote
 
 from emrg.config import config_dir
 from emrg.memory import NotARegularFile
@@ -62,11 +67,15 @@ CLI_NAME = "browser-harness"
 CLI_PYPI_PACKAGE = "browser-harness"
 CLI_INSTALL_CMD = ["uv", "tool", "install", "--python", "3.12", CLI_PYPI_PACKAGE]
 GITHUB_API = "https://api.github.com"
+GITHUB_CODELOAD = "https://codeload.github.com"
 _UPDATE_TTL_SECONDS = 24 * 3600
 
 # Catalog "install" values we know how to drive. Anything else is refused
 # with a clear error (capability passport style: catalog is a decision aid).
-_KNOWN_INSTALL_KINDS = ("self-publishing",)
+#
+# ``self-publishing``  the skill's own CLI emits its files (``<cli> skill``)
+# ``vendor-copy``      the catalog names a directory in a repository, copied whole
+_KNOWN_INSTALL_KINDS = ("self-publishing", "vendor-copy")
 
 
 @dataclass
@@ -79,6 +88,7 @@ class CmdResult:
 
 Runner = Callable[..., Awaitable[CmdResult]]
 HttpGet = Callable[[str], Awaitable[Optional[dict]]]
+FetchBytes = Callable[[str], Awaitable[Optional[bytes]]]
 
 
 async def _default_runner(cmd: list[str], **kwargs) -> CmdResult:
@@ -112,6 +122,21 @@ async def _default_http_get(url: str) -> Optional[dict]:
         return resp.json()
 
 
+async def _default_fetch_bytes(url: str) -> Optional[bytes]:
+    """Download a URL's bytes via httpx (used for a repository tarball)."""
+    import httpx
+
+    async with httpx.AsyncClient(
+        timeout=120.0,
+        headers={"User-Agent": "emrg-skill-catalog"},
+        follow_redirects=True,
+    ) as client:
+        resp = await client.get(url)
+        if resp.status_code != 200:
+            return None
+        return resp.content
+
+
 def cli_available() -> bool:
     """True when the CLI executable is on PATH."""
     return shutil.which(CLI_NAME) is not None
@@ -135,6 +160,152 @@ async def _fetch_latest_tag(repo: str, http_get: Optional[HttpGet]) -> Optional[
     if not isinstance(tag, str) or not tag:
         return None
     return tag[1:] if tag.startswith("v") else tag
+
+
+async def _fetch_path_commit(
+    repo: str, source: str, http_get: Optional[HttpGet]
+) -> Optional[str]:
+    """The last commit that touched ``source`` in ``repo`` — a vendor copy's version.
+
+    The commits endpoint, not ``releases/latest``: ``anthropics/skills`` publishes a
+    repository with no releases, so reading a release tag there would answer ``None`` for
+    ever and leave the 24h check permanently silent about it.
+    """
+    if not repo or not source:
+        return None
+    get = http_get or _default_http_get
+    url = f"{GITHUB_API}/repos/{repo}/commits?path={quote(source, safe='/')}&per_page=1"
+    try:
+        data = await get(url)
+    except Exception:
+        logger.debug("commit check failed for %s %s", repo, source, exc_info=True)
+        return None
+    if not isinstance(data, list) or not data:
+        return None
+    head = data[0]
+    sha = head.get("sha") if isinstance(head, dict) else None
+    return sha if isinstance(sha, str) and sha else None
+
+
+def _extract_subtree(payload: bytes, source: str, staging: Path) -> Optional[str]:
+    """Write ``<top>/<source>/`` out of a GitHub tarball into ``staging``.
+
+    Returns an error string, or ``None`` when the subtree was written. A member that
+    escapes the archive or the named directory is **refused**, not skipped: a ``..``
+    component is an attempt to write outside the destination, and a link's target is not
+    something the archive has proved. GitHub's tarballs carry one top-level
+    ``<repo>-<sha>/`` directory, which is stripped before ``source`` is matched.
+    """
+    source = source.strip("/")
+    try:
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as tar:
+            for member in tar:
+                name = member.name
+                if name.startswith("/") or ":" in name.split("/")[0]:
+                    return f"archive member is an absolute path: {name}"
+                parts = [p for p in name.split("/") if p not in ("", ".")]
+                if any(p == ".." for p in parts):
+                    return f"archive member escapes the archive: {name}"
+                inner = "/".join(parts[1:])
+                if not inner:
+                    continue
+                if inner != source and not inner.startswith(source + "/"):
+                    continue
+                rel = inner[len(source):].strip("/")
+                if not rel:
+                    continue
+                if member.isdir():
+                    (staging / rel).mkdir(parents=True, exist_ok=True)
+                    continue
+                if not member.isfile():
+                    return f"archive member is not a regular file: {name}"
+                target = staging / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                handle = tar.extractfile(member)
+                if handle is None:
+                    return f"cannot read archive member: {name}"
+                target.write_bytes(handle.read())
+    except (tarfile.TarError, OSError, EOFError) as e:
+        return f"cannot unpack the archive: {e}"
+    return None
+
+
+async def _vendor_copy(
+    entry: dict,
+    *,
+    name: str,
+    http_get: Optional[HttpGet] = None,
+    fetch_bytes: Optional[FetchBytes] = None,
+    sha: Optional[str] = None,
+) -> dict:
+    """Copy a repository directory into ``dest`` as a bundle (``vendor-copy``).
+
+    No CLI and no subprocess: the catalog names ``repo`` + ``source``, the source
+    directory's last commit is the version, and the tarball at that commit is unpacked.
+    The copy is staged inside ``dest`` and only renamed into place once its ``SKILL.md``
+    carries the name+description frontmatter every loader in this tree requires, so a
+    refused copy leaves no half-written directory behind.
+
+    Returns ``{"ok": True, "path", "version"}`` or ``{"error": ...}``.
+    """
+    repo = entry.get("repo", "")
+    source = (entry.get("source") or "").strip("/")
+    if not repo or not source:
+        return {"error": "vendor-copy entry needs a repo and a source directory"}
+
+    commit = sha or await _fetch_path_commit(repo, source, http_get)
+    if not commit:
+        return {"error": f"cannot resolve the commit of {repo} {source}"}
+
+    url = f"{GITHUB_CODELOAD}/{repo}/tar.gz/{commit}"
+    fetch = fetch_bytes or _default_fetch_bytes
+    try:
+        payload = await fetch(url)
+    except Exception:
+        logger.debug("tarball fetch failed for %s", url, exc_info=True)
+        return {"error": f"cannot download {url}"}
+    if not payload:
+        return {"error": f"cannot download {url}"}
+
+    dest = _resolve_dest(entry.get("dest", "~/.emrg/skills/"))
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(dir=str(dest), prefix=f".vendor-{name}-"))
+    except OSError as e:
+        return {"error": f"cannot prepare {dest}: {e}"}
+
+    try:
+        problem = _extract_subtree(payload, source, staging)
+        if problem:
+            return {"error": problem}
+        if not any(p.is_file() for p in staging.rglob("*")):
+            return {"error": f"{source} is not in the archive of {repo}@{commit[:7]}"}
+
+        from emrg.skills.loader import _parse_frontmatter
+
+        skill_file = staging / "SKILL.md"
+        text = (
+            skill_file.read_text(encoding="utf-8", errors="replace")
+            if skill_file.is_file()
+            else ""
+        )
+        fm = _parse_frontmatter(text) if text.startswith("---") else {}
+        if not fm.get("name") or not fm.get("description"):
+            return {"error": f"{source} carries no usable SKILL.md (name and description)"}
+
+        target = dest / name
+        try:
+            if os.path.islink(target) or (target.exists() and not target.is_dir()):
+                return {"error": f"cannot install into {target}: it is not a directory"}
+            if target.is_dir():
+                shutil.rmtree(target)
+            os.replace(staging, target)
+        except OSError as e:
+            return {"error": f"cannot move the copy into {target}: {e}"}
+        return {"ok": True, "name": name, "path": str(target), "version": commit}
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 async def _publish_skill(entry: dict, runner: Optional[Runner]) -> dict:
@@ -222,17 +393,49 @@ async def install_skill(
     confirmed: bool = False,
     runner: Optional[Runner] = None,
     http_get: Optional[HttpGet] = None,
+    fetch_bytes: Optional[FetchBytes] = None,
 ) -> dict:
-    """Install a catalog skill by name (host-confirmed CLI install).
+    """Install a catalog skill by name.
 
     Returns one of:
       {"error": ...}                     — unknown skill / failed
       {"confirm_required": True, ...}    — CLI missing, host must confirm
       {"ok": True, "name", "version", "installed_at"} — done
+
+    The install kind is dispatched **before** the CLI gate: `vendor-copy` has no CLI, so
+    asking `cli_available()` first would report every such entry as needing a
+    browser-harness install, and refuse it until the host agreed to one it never uses.
     """
     entry = find_catalog_skill(name)
     if entry is None:
         return {"error": f"unknown catalog skill: {name!r}"}
+
+    kind = entry.get("install", "")
+    if kind not in _KNOWN_INSTALL_KINDS:
+        return {"error": f"unsupported install kind: {kind!r}"}
+
+    if kind == "vendor-copy":
+        copied = await _vendor_copy(
+            entry, name=name, http_get=http_get, fetch_bytes=fetch_bytes
+        )
+        if "error" in copied:
+            return {"error": copied["error"]}
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        state = read_state()
+        state[name] = {
+            "version": copied["version"],
+            "installed_at": now,
+            "updated_at": now,
+            "managed": True,
+        }
+        write_state(state)
+        return {
+            "ok": True,
+            "name": name,
+            "version": copied["version"],
+            "installed_at": now,
+            "path": copied["path"],
+        }
 
     if not cli_available():
         if not confirmed:
@@ -286,11 +489,14 @@ async def update_managed_skills(
     *,
     runner: Optional[Runner] = None,
     http_get: Optional[HttpGet] = None,
+    fetch_bytes: Optional[FetchBytes] = None,
 ) -> dict:
-    """Refresh managed skills whose latest GitHub release differs.
+    """Refresh managed skills whose upstream version differs.
 
-    Background-deterministic: never installs a missing CLI silently, never
-    touches non-managed (host-modified) skill files. Returns a summary:
+    Background-deterministic: never installs a missing CLI silently, never touches
+    non-managed (host-modified) skill files. A `self-publishing` entry compares against the
+    latest release tag; a `vendor-copy` entry against the source path's last commit, and is
+    re-copied only when that commit moved. Returns a summary:
       {"checked": int, "updated": [names], "skipped": [names], "errors": [names]}
     """
     state = read_state()
@@ -302,6 +508,27 @@ async def update_managed_skills(
     for name, info in managed.items():
         entry = find_catalog_skill(name)
         if entry is None:
+            continue
+        if entry.get("install") == "vendor-copy":
+            commit = await _fetch_path_commit(
+                entry.get("repo", ""), entry.get("source", ""), http_get
+            )
+            if commit is None:
+                continue  # network/API failure — try again next cycle
+            if commit == info.get("version"):
+                continue  # up to date: nothing is even downloaded
+            copied = await _vendor_copy(
+                entry, name=name, http_get=http_get, fetch_bytes=fetch_bytes, sha=commit
+            )
+            if "error" in copied:
+                errors.append(name)
+                logger.warning("skill update failed for %s: %s", name, copied["error"])
+                continue
+            info["version"] = copied["version"]
+            info["updated_at"] = (
+                datetime.now().astimezone().isoformat(timespec="seconds")
+            )
+            updated.append(name)
             continue
         latest = await _fetch_latest_tag(entry.get("repo", ""), http_get)
         if latest is None:

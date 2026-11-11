@@ -115,9 +115,9 @@ Body text.
 # ── catalog parsing ──────────────────────────────────────────────────
 
 class TestParseFrontmatter:
-    def test_baseline_parses_one_entry_with_all_fields(self):
+    def test_baseline_parses_its_entries_with_all_fields(self):
         entries = parse_skills_frontmatter(BASELINE_CATALOG_MD)
-        assert len(entries) == 1
+        assert [e["name"] for e in entries] == ["browser-harness", "skill-creator"]
         e = entries[0]
         assert e["name"] == "browser-harness"
         assert e["description"].startswith("Direct browser control via CDP")
@@ -171,7 +171,7 @@ class TestCatalogFile:
     def test_load_catalog_from_disk(self, tmp_home):
         ensure_catalog_file()
         entries = load_catalog_skills()
-        assert [e["name"] for e in entries] == ["browser-harness"]
+        assert [e["name"] for e in entries] == ["browser-harness", "skill-creator"]
         assert find_catalog_skill("browser-harness") is not None
         assert find_catalog_skill("nope") is None
 
@@ -440,7 +440,10 @@ class TestTheRegistryAsksTheKindBeforeOpening:
     def test_the_control_catalog_without_the_fifo(self, tmp_home):
         """Same fixture, a regular file: the catalog reads, so the kind is the axis."""
         ensure_catalog_file()
-        assert [e["name"] for e in load_catalog_skills()] == ["browser-harness"]
+        assert [e["name"] for e in load_catalog_skills()] == [
+            "browser-harness",
+            "skill-creator",
+        ]
 
     @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
     def test_a_fifo_state_file_is_skipped_rather_than_opened(self, tmp_home):
@@ -594,3 +597,272 @@ class TestTheCatalogHasOneSourceFile:
             and line.strip().startswith(("cp ", "install ", "rsync ", "ditto "))
         ]
         assert copies == [], f"the runtime build copies a catalog again: {copies}"
+# ── vendor-copy: a catalog skill that ships as a plain directory (issue #2807) ──────
+
+
+VENDOR_CATALOG = """---
+name: skill-catalog
+description: "test catalog"
+skills:
+  - name: vendor-one
+    description: "a skill published as a directory"
+    repo: example/vendor-one
+    source: skills/vendor-one
+    install: vendor-copy
+    dest: ~/.emrg/skills/
+    check: github_commit
+---
+
+# Catalog
+"""
+
+VENDOR_SKILL_MD = "---\nname: vendor-one\ndescription: a vendored skill\n---\n\n# body\n"
+
+
+def _write_catalog(text: str) -> None:
+    """Put a catalog on disk where every reader in this module looks for it."""
+    path = registry.catalog_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _tarball(paths: dict[str, str], root: str = "skills-abc1234") -> bytes:
+    """A repo tarball as GitHub serves it: one top-level `<repo>-<sha>/` directory."""
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, text in paths.items():
+            data = text.encode("utf-8")
+            info = tarfile.TarInfo(f"{root}/{name}")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+class FakeBytes:
+    """Controllable tarball responder, and the URLs it was asked for."""
+
+    def __init__(self, payload: bytes | None):
+        self.payload = payload
+        self.urls: list[str] = []
+
+    async def __call__(self, url: str):
+        self.urls.append(url)
+        return self.payload
+
+
+class FakeCommits:
+    """api.github.com responder for a path's last commit.
+
+    Answers the *releases* endpoint too, and with a tag, because the point of these tests is
+    that a `github_commit` entry must never be read as a release.
+    """
+
+    def __init__(self, sha: str | None = "abc1234def5678"):
+        self.sha = sha
+        self.urls: list[str] = []
+
+    async def __call__(self, url: str):
+        self.urls.append(url)
+        if "/commits" in url:
+            return None if self.sha is None else [{"sha": self.sha}]
+        if url.endswith("/releases/latest"):
+            return {"tag_name": "v9.9.9"}
+        return None
+
+
+class TestVendorCopyInstall:
+    """`install: vendor-copy` — a source directory copied, with no executable installer.
+
+    The catalog could carry only `self-publishing` before this, and `_publish_skill` refuses
+    any other value, so an entry for a skill that upstream publishes as a plain directory
+    could be listed and never installed.
+    """
+
+    def test_a_vendor_copy_entry_copies_its_source_directory(self, tmp_home, no_cli):
+        _write_catalog(VENDOR_CATALOG)
+        payload = _tarball({
+            "skills/vendor-one/SKILL.md": VENDOR_SKILL_MD,
+            "skills/vendor-one/scripts/run.py": "print('vendored')\n",
+            "skills/neighbour/SKILL.md": "---\nname: neighbour\ndescription: d\n---\n",
+        })
+        fetcher = FakeBytes(payload)
+        http = FakeCommits("abc1234def5678")
+
+        result = _run(installer.install_skill(
+            "vendor-one", http_get=http, fetch_bytes=fetcher
+        ))
+
+        assert result["ok"] is True, result
+        target = tmp_home / ".emrg" / "skills" / "vendor-one"
+        assert (target / "SKILL.md").read_text(encoding="utf-8") == VENDOR_SKILL_MD
+        assert (target / "scripts" / "run.py").read_text(encoding="utf-8") == "print('vendored')\n"
+        assert not (target / "neighbour").exists(), "a sibling directory was copied too"
+        assert read_state()["vendor-one"]["managed"] is True
+        assert read_state()["vendor-one"]["version"] == "abc1234def5678"
+
+    def test_a_vendor_copy_needs_no_cli_on_path(self, tmp_home, no_cli):
+        """The half the entry alone would break: `install_skill` used to demand the CLI first."""
+        _write_catalog(VENDOR_CATALOG)
+        fetcher = FakeBytes(_tarball({"skills/vendor-one/SKILL.md": VENDOR_SKILL_MD}))
+        runner = FakeRunner()
+
+        result = _run(installer.install_skill(
+            "vendor-one", confirmed=False, runner=runner, http_get=FakeCommits(),
+            fetch_bytes=fetcher,
+        ))
+
+        assert result.get("confirm_required") is None, result
+        assert result["ok"] is True, result
+        assert runner.calls == [], f"a vendor copy ran a subprocess: {runner.calls}"
+
+    def test_the_version_is_the_source_commit_not_a_release_tag(self, tmp_home, no_cli):
+        _write_catalog(VENDOR_CATALOG)
+        http = FakeCommits("0f1e2d3c4b5a6978")
+
+        result = _run(installer.install_skill(
+            "vendor-one", http_get=http,
+            fetch_bytes=FakeBytes(_tarball({"skills/vendor-one/SKILL.md": VENDOR_SKILL_MD})),
+        ))
+
+        assert result["version"] == "0f1e2d3c4b5a6978", result
+        assert any("path=skills/vendor-one" in u for u in http.urls), http.urls
+        assert not any(u.endswith("/releases/latest") for u in http.urls), http.urls
+
+    def test_an_archive_without_the_source_directory_is_refused(self, tmp_home, no_cli):
+        _write_catalog(VENDOR_CATALOG)
+        payload = _tarball({"skills/somebody-else/SKILL.md": VENDOR_SKILL_MD})
+
+        result = _run(installer.install_skill(
+            "vendor-one", http_get=FakeCommits(), fetch_bytes=FakeBytes(payload),
+        ))
+
+        assert "error" in result, result
+        assert "skills/vendor-one" in result["error"], result["error"]
+        assert not (tmp_home / ".emrg" / "skills" / "vendor-one").exists()
+        assert read_state() == {}, "nothing may be recorded when the copy did not happen"
+
+    def test_a_copy_without_a_usable_skill_file_is_refused_and_leaves_nothing(
+        self, tmp_home, no_cli
+    ):
+        """The validation this shares with the publisher: name+description, or nothing."""
+        _write_catalog(VENDOR_CATALOG)
+        payload = _tarball({
+            "skills/vendor-one/SKILL.md": "# no frontmatter at all\n",
+            "skills/vendor-one/scripts/run.py": "print(1)\n",
+        })
+
+        result = _run(installer.install_skill(
+            "vendor-one", http_get=FakeCommits(), fetch_bytes=FakeBytes(payload),
+        ))
+
+        assert "error" in result, result
+        target = tmp_home / ".emrg" / "skills" / "vendor-one"
+        assert not target.exists(), "a refused copy left the half-written directory behind"
+        assert read_state() == {}
+
+    def test_a_download_that_fails_is_refused(self, tmp_home, no_cli):
+        _write_catalog(VENDOR_CATALOG)
+        result = _run(installer.install_skill(
+            "vendor-one", http_get=FakeCommits(), fetch_bytes=FakeBytes(None),
+        ))
+        assert "error" in result, result
+        assert not (tmp_home / ".emrg" / "skills" / "vendor-one").exists()
+
+    def test_an_unknown_install_kind_is_still_refused(self, tmp_home, no_cli):
+        """The control: accepting a second kind must not mean accepting any kind."""
+        _write_catalog(VENDOR_CATALOG.replace("vendor-copy", "telepathy"))
+        result = _run(installer.install_skill(
+            "vendor-one", http_get=FakeCommits(),
+            fetch_bytes=FakeBytes(_tarball({"skills/vendor-one/SKILL.md": VENDOR_SKILL_MD})),
+        ))
+        assert "error" in result, result
+        assert "unsupported install kind" in result["error"], result["error"]
+
+    def test_the_update_check_moves_a_vendor_copy_by_commit(self, tmp_home, no_cli):
+        _write_catalog(VENDOR_CATALOG)
+        write_state({"vendor-one": {"managed": True, "version": "older000"}})
+        http = FakeCommits("newer111")
+        fetcher = FakeBytes(_tarball({"skills/vendor-one/SKILL.md": VENDOR_SKILL_MD}))
+
+        result = _run(installer.update_managed_skills(
+            http_get=http, fetch_bytes=fetcher
+        ))
+
+        assert result["updated"] == ["vendor-one"], result
+        assert result["errors"] == [], result
+        assert read_state()["vendor-one"]["version"] == "newer111"
+        assert any("path=skills/vendor-one" in u for u in http.urls), http.urls
+        assert not any(u.endswith("/releases/latest") for u in http.urls), http.urls
+
+    def test_the_update_check_leaves_a_vendor_copy_whose_commit_did_not_move(
+        self, tmp_home, no_cli
+    ):
+        """A vendor copy is refreshed by a moved commit, never on every tick."""
+        _write_catalog(VENDOR_CATALOG)
+        write_state({"vendor-one": {"managed": True, "version": "abc1234def5678"}})
+        fetcher = FakeBytes(_tarball({"skills/vendor-one/SKILL.md": VENDOR_SKILL_MD}))
+
+        result = _run(installer.update_managed_skills(
+            http_get=FakeCommits("abc1234def5678"), fetch_bytes=fetcher
+        ))
+
+        assert result["updated"] == [], result
+        assert fetcher.urls == [], "the archive was fetched although nothing moved"
+
+
+class TestTheCatalogOffersWhatItShips:
+    """The on-disk catalog is an overlay; the binary's baseline is what ships.
+
+    `ensure_catalog_file()` writes the baseline only when the file is **absent**, so a host
+    whose file predates an entry never sees it: measured 2026-11-11, `~/.emrg/skills/`
+    carried a 1,198-byte catalog naming no `skill-creator`.  Read as a whole replacement,
+    the shipped list would reach fresh installs and no others.
+    """
+
+    def _disk(self, entries: str) -> None:
+        _write_catalog(
+            "---\nname: skill-catalog\ndescription: \"host edited\"\nskills:\n"
+            f"{entries}---\n\n# Catalog\n"
+        )
+
+    def test_a_shipped_entry_the_disk_file_lacks_is_still_offered(self, tmp_home):
+        self._disk(
+            "  - name: browser-harness\n"
+            '    description: "d"\n    repo: browser-use/browser-harness\n'
+            "    install: self-publishing\n    dest: ~/.emrg/skills/\n"
+            "    check: github_release\n"
+        )
+        names = [e["name"] for e in load_catalog_skills()]
+        assert names == ["browser-harness", "skill-creator"], names
+        assert find_catalog_skill("skill-creator") is not None
+
+    def test_a_disk_entry_wins_over_the_baseline_entry_of_the_same_name(self, tmp_home):
+        self._disk(
+            "  - name: browser-harness\n"
+            '    description: "mine"\n    repo: someone/fork\n'
+            "    install: self-publishing\n    dest: ~/.emrg/skills/\n"
+            "    check: github_release\n"
+        )
+        entries = {e["name"]: e for e in load_catalog_skills()}
+        assert entries["browser-harness"]["repo"] == "someone/fork", entries["browser-harness"]
+        assert [e["name"] for e in load_catalog_skills()].count("browser-harness") == 1
+
+    def test_an_absent_catalog_file_is_still_the_empty_answer(self, tmp_home):
+        """The control: an overlay has to be an overlay *of something present*.
+
+        A deleted catalog is a host opting out, and the daemon writes the baseline at its
+        next start — so this answer stays empty rather than growing a list of its own.
+        """
+        assert load_catalog_skills() == []
+
+    def test_the_baseline_carries_the_vendor_copy_entry(self):
+        entries = {e["name"]: e for e in parse_skills_frontmatter(BASELINE_CATALOG_MD)}
+        assert "skill-creator" in entries, sorted(entries)
+        entry = entries["skill-creator"]
+        assert entry["install"] == "vendor-copy"
+        assert entry["check"] == "github_commit"
+        assert entry["repo"] == "anthropics/skills"
+        assert entry["source"] == "skills/skill-creator"

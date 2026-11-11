@@ -167,6 +167,29 @@ EXEMPT: dict[tuple[str, str, str], str] = {
         "and `is_file()` is false for a FIFO, a socket and a directory; the write half replaces "
         "the file by atomic rename rather than by opening it for writing."
     ),
+    ("emrg/skills/installer.py", "_extract_subtree", "open"): (
+        "the call is `tarfile.open(fileobj=io.BytesIO(payload), mode=\"r:gz\")`: its name is "
+        "`open` but its subject is an **in-memory buffer**, so no path is opened and there is "
+        "no kind to ask. The predicate keys on the call's name and over-reports by design, and "
+        "this is that over-report. Measured 2026-11-11 (`cyc20261111-145058`): adding the "
+        "vendor-copy extractor to master reddened this sweep with exactly this site."
+    ),
+    ("emrg/skills/installer.py", "_extract_subtree", "write_bytes"): (
+        "the target lies inside `staging`, the directory `tempfile.mkdtemp` created **empty** "
+        "in this same call, and every name written under it comes from an archive member that "
+        "passed `member.isfile()` -- a symlink, a link or any other kind is refused before this "
+        "line, and a directory member is made as a directory, never written. So nothing "
+        "pre-exists at that path and no archive can plant a FIFO there; a `non_regular_kind` "
+        "call would be code no reading can reach, the same shape this table carries for "
+        "`ensure_config`."
+    ),
+    ("emrg/skills/installer.py", "_vendor_copy", "read_text"): (
+        "the read sits under `skill_file.is_file() else \"\"`, and `is_file()` is false for a "
+        "FIFO, a socket and a directory -- the shape the `git_utils` row above carries. Its "
+        "subject is the `SKILL.md` that `_extract_subtree` just wrote into this call's own "
+        "staging directory, from a member that passed `member.isfile()`: it is a file this "
+        "process created moments earlier, not a path a caller chose."
+    ),
     ("emrg/session.py", "Session.save_image", "write_bytes"): (
         "the `while filepath.exists()` above it exits only on a name `exists()` says is "
         "**absent**, and `exists()` is true for a FIFO, a socket and a directory alike -- the "
