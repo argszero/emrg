@@ -313,6 +313,20 @@ NOT_TREE_READERS = {
         "path it read is printed first instead (rant 2026-10-14T09:18:05: the icon comes "
         "out of the artifact, which is what had no tool)"
     ),
+    "check-pkg-relocation.py": (
+        "reads the package artifact it is given as an argument - a `.pkg` (expanded with "
+        "pkgutil), an expanded package directory, or a single `PackageInfo` - and asks "
+        "whether a `<relocate>` in it names a bundle id, which is what lets PackageKit "
+        "install that bundle wherever LaunchServices points instead of at the "
+        "install-location the package declares. There is no default subject, so it cannot "
+        "answer about a tree the caller did not name, and the components it read are printed "
+        "with their install-location before the verdict, as check-icon-transparency.py "
+        "prints the subject it read. Its write mode (`--disarm-component-plist`) takes the "
+        "property list `pkgbuild --analyze` wrote, so its subjects are the packaging step's "
+        "inputs and the product that step builds - neither is a working tree, and both are "
+        "pinned against `tmp_path` subjects by tests/test_macos_pkg_cannot_relocate.py "
+        "(issue #2806)"
+    ),
     "check-vote-count.py": "reads reviews and mergeability from the GitHub API",
     "check-pr-base.py": "reads the base each PR declares on the GitHub API",
     "check-issue-links.py": (
