@@ -379,6 +379,12 @@ NOT_TREE_READERS = {
         "would answer anything (the repo it read is printed first instead, as "
         "check-issue-links.py does)"
     ),
+    "check-release-orphan-tags.py": (
+        "reads the repository's whole tag collection against its whole release collection and "
+        "reports the difference - the subject is a remote collection, so no local tree would "
+        "answer anything (the repo it read is printed first, with the paginated counts it "
+        "actually read, because a short collection is the one way this screen can be wrong)"
+    ),
 }
 
 
