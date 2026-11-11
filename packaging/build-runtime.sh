@@ -135,9 +135,13 @@ echo "==> bundling default config (no-op unless EMRG_BUNDLED_* is set)"
 
 # ── 5. assets/LICENSE/version ──
 cp "$ROOT/LICENSE" "$DIST/assets/LICENSE" 2>/dev/null || echo "Apache-2.0" > "$DIST/assets/LICENSE"
-# Installable-skills catalog baseline (rant 2026-08-08T10:14:29): ship it in
-# the runtime so installed machines have it even before daemon first run.
-cp "$ROOT/packaging/assets/skill-catalog.md" "$DIST/assets/skill-catalog.md" 2>/dev/null || true
+# No skill-catalog.md is copied into $DIST/assets/ (issue #2809). It used to be, "so
+# installed machines have it even before daemon first run" — but nothing read the copy:
+# `ensure_catalog_file()` seeds the host's catalog from BASELINE_CATALOG_MD in the
+# daemon's own __init__, which runs before any session. A copy no reader consults can
+# only disagree with the pair the suite holds byte-equal, so there is one producer.
+# If a runtime copy is ever genuinely needed, read the embedded baseline — not a
+# fourth file.
 "$PY_BIN" -c "import emrg,sys; sys.path.insert(0,'$DIST/source'); import emrg as e; print(e.__version__)" > "$DIST/version.txt" 2>/dev/null \
   || echo "0.3.49" > "$DIST/version.txt"
 

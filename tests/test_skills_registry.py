@@ -551,3 +551,46 @@ class TestThePublisherAsksTheKindBeforeOpening:
         assert "error" in result, result
         assert "cannot write skill file" in result["error"], result["error"]
         assert "not a regular file" in result["error"], result["error"]
+
+
+# ── the catalog has one source file (issue #2809) ────────────────────
+
+
+class TestTheCatalogHasOneSourceFile:
+    """One producer for the shipped catalog.
+
+    `packaging/assets/skill-catalog.md` was a **third** copy: `build-runtime.sh` copied it
+    into `dist/assets/` and nothing in the tree read the result — the daemon seeds the
+    host's catalog from `BASELINE_CATALOG_MD` in `EmrgServer.__init__`, which runs before
+    any session, so the copy had no window in which it was the only catalog present.
+
+    Two carriers that must agree are held byte-for-byte by
+    ``test_embedded_baseline_matches_shipped_file``. A third carrier held to nothing can
+    only **disagree**: a host who opened the runtime's copy read a list the binary never
+    consulted, and every change to the two that matter left it further behind.
+
+    Measured 2026-11-11 before the fix: the search below answered
+    ``['emrg/skills/skill-catalog.md', 'packaging/assets/skill-catalog.md']``.
+    """
+
+    def test_the_repository_holds_exactly_one_catalog_source_file(self):
+        found = sorted(
+            p.relative_to(REPO_ROOT).as_posix()
+            for top in ("emrg", "packaging", "scripts")
+            for p in (REPO_ROOT / top).rglob("skill-catalog.md")
+        )
+        assert found == ["emrg/skills/skill-catalog.md"], (
+            f"a second catalog source file exists: {found} — the catalog has one producer, "
+            "and a copy nothing reads can only disagree with it (issue #2809)"
+        )
+
+    def test_the_runtime_build_ships_no_catalog_copy(self):
+        """The other half: the file being absent is no help if the build still copies one."""
+        script = (REPO_ROOT / "packaging" / "build-runtime.sh").read_text(encoding="utf-8")
+        copies = [
+            line.strip()
+            for line in script.splitlines()
+            if "skill-catalog" in line
+            and line.strip().startswith(("cp ", "install ", "rsync ", "ditto "))
+        ]
+        assert copies == [], f"the runtime build copies a catalog again: {copies}"
