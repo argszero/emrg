@@ -93,6 +93,13 @@ judged nothing, so it is reported as `_KIND_NO_VERDICT` with the remedy a missin
 takes (a re-trigger) rather than as a red verdict whose remedy is to read a cause that
 does not exist - measured 2026-10-06, `cyc20261006-065715`.
 
+**A run that produced no job at all is not this state either.** `startup_failure` is
+GitHub's conclusion for a workflow that failed to *start*, so no job existed to judge
+anything and none to stop, and the re-trigger `_KIND_NO_VERDICT` prescribes is the very
+request that was refused - `_KIND_NEVER_STARTED`, whose remedy is to park. Measured
+2026-11-12: a dispatch the API accepted with exit 0 created run `43096918278`, which
+concluded `startup_failure` and answered `total_count: 0` on its job list.
+
 Which state is reported when more than one holds
 ------------------------------------------------
 The kinds are exclusive, so the order they are tested in is a decision, and the
@@ -265,16 +272,22 @@ _UNFINISHED = frozenset({"", "pending", "queued", "in_progress", "requested", "w
 # here reads as "the verdict workflow did not run", not as "the branch has no CI".
 _VERDICT_WORKFLOW = "Test"
 
-# The six ways a verdict can fail to be current. They were prose in `reason`
+# The seven ways a verdict can fail to be current. They were prose in `reason`
 # before, which is enough to *report* the state and not enough to choose a
 # remedy: the state decides which action the tool may recommend, and only one of
-# the six is fixed by a refresh (and that one charges the whole vote count).
+# the seven is fixed by a refresh (and that one charges the whole vote count).
 _KIND_ANCESTRY = "ancestry"  # the #1137 case: green, but about an older master
 _KIND_NO_RUN = "no_run"  # master is an ancestor but nothing ever judged the head
 _KIND_NO_RUN_YET = "no_run_yet"  # the head is younger than a run takes to appear
 _KIND_RUNNING = "running"  # a run exists and has not concluded
 _KIND_FAILING = "failing"  # a job concluded `failure`: the tree was judged and rejected
 _KIND_NO_VERDICT = "no_verdict"  # the run stopped without a job judging the tree
+_KIND_NEVER_STARTED = "never_started"  # the platform refused to start the run: no job existed
+
+#: The conclusion GitHub reports for a workflow it refused to start. Named rather than
+#: spelled at each site, because two readings ask about it: which run speaks for a head
+#: (`_ask_latest_run_for_head`), and which kind a head with no judging run at all gets.
+_NEVER_STARTED = "startup_failure"
 
 #: How long after a head is committed a push-event run can still be *arriving*.
 #: Inside this window an empty run lookup is not evidence of anything: it is the
@@ -359,7 +372,7 @@ class Verdict:
     run_conclusion: str | None
     stale: bool
     reason: str
-    # Which of the six ways (one of the `_KIND_*` names); "" when fresh.
+    # Which of the seven ways (one of the `_KIND_*` names); "" when fresh.
     stale_kind: str = ""
     #: The run's own id, so a remedy can hand over a command that is runnable as
     #: printed. Empty when there is no run. Why it is carried rather than looked up
@@ -463,11 +476,40 @@ def _latest_run_for_head(head: str) -> dict | None:
 
 
 def _ask_latest_run_for_head(head: str) -> dict | None:
-    """One ask of the run lookup: the newest verdict run for the SHA, or `None`.
+    """One ask of the run lookup: the run that speaks for the SHA, or `None`.
 
     Split out so the bounded re-ask in `_latest_run_for_head` cannot accidentally
     re-ask a *broken* call: a call that raises is not an empty answer, and must
     stay a failure rather than being retried into looking like a measurement.
+
+    **The newest run is not always the one that speaks for the head.** A run the platform
+    refused to start judges nothing, so a refused dispatch on top of a head whose own run
+    is still queued would speak for a head that is still being judged - and, once that run
+    concluded, would speak for a head that has already been judged. Measured 2026-11-12 on
+    this repository: head `192428ad` was pushed at 20:25:11Z and got `pull_request` run
+    `43095937647`; a manual dispatch at 20:35:10Z created `43096918278`, which concluded
+    `startup_failure` with no job at all, and so became the newest run of that head.
+
+    A run speaks for the head when it could have judged something, and a run that never
+    started could not - a run still in flight could, and its own state is the answer. The
+    refused runs are consulted only when every run of the head is one of them, which is
+    the state `_KIND_NEVER_STARTED` exists for.
+    """
+    runs = _runs_for_head(head)
+    if not runs:
+        return None
+    speakable = [r for r in runs if str(r.get("conclusion") or "") != _NEVER_STARTED]
+    if speakable:
+        return speakable[-1]
+    return runs[-1]
+
+
+def _runs_for_head(head: str) -> list[dict]:
+    """Every `_VERDICT_WORKFLOW` run for this exact commit, oldest first.
+
+    One owner for the query, because "which runs does this head have" has exactly one
+    answer: the selection above reads all of them to pick the one that speaks for the
+    head, and a second copy of this shape would let the two answers drift apart.
     """
     payload = _gh_json(
         [
@@ -488,9 +530,7 @@ def _ask_latest_run_for_head(head: str) -> dict | None:
         and r.get("headSha") == head
         and r.get("name") == _VERDICT_WORKFLOW
     ]
-    if not matching:
-        return None
-    return max(matching, key=lambda r: str(r.get("createdAt") or ""))
+    return sorted(matching, key=lambda r: str(r.get("createdAt") or ""))
 
 
 def _run_jobs(run_id: str) -> list[dict] | None:
@@ -700,6 +740,31 @@ def check_pr(number: int) -> Verdict:
                 for j in jobs
                 if j.get("conclusion") and j.get("conclusion") != "success"
             ]
+            if conclusion == _NEVER_STARTED and not jobs:
+                # A run GitHub never managed to start. Not `no_verdict`: that kind is a run
+                # that existed and stopped (a cancelled job is its measured shape), and its
+                # remedy - a re-trigger - is the request this state already refused.
+                # Measured 2026-11-12: dispatch accepted (exit 0), run `43096918278`
+                # concluded `startup_failure` with `total_count: 0` jobs four minutes later.
+                #
+                # This run speaks for the head only when no other run of it could: a head
+                # carrying any run that did not fail to start is answered by that run's own
+                # state instead (`_ask_latest_run_for_head`). So there is no other run of
+                # this head to wait for, and the sentence says that rather than offering a
+                # wait that has nothing behind it.
+                return Verdict(
+                    **common,
+                    stale=True,
+                    stale_kind=_KIND_NEVER_STARTED,
+                    reason=(
+                        f"head {head_sha[:8]}'s {_VERDICT_WORKFLOW} run never started: GitHub "
+                        f"concluded {conclusion!r} and the run has **no job at all**, so "
+                        "nothing ran, nothing was cancelled and nothing stopped - a workflow "
+                        "that fails to start is the platform refusing the run, which is not a "
+                        "job that judged nothing and not a run this head can wait on"
+                        f"{_tree_note(stale_tree, status, behind_by, merge_base)}"
+                    ),
+                )
             if not judged:
                 return Verdict(
                     **common,
@@ -882,11 +947,10 @@ def _remedy(pr: int, kind: str, price: Price, run_id: str = "") -> str:
     reader the broken one.
 
     The price is attached only where it is actually paid - an ancestry-stale
-    verdict is the one a refresh cures. The other three kinds get the action that
-    fits them, so the output cannot be read as "rebase and move on" for a head
-    whose CI run is merely missing (a refresh is a remedy there too, but the
-    expensive one: re-triggering fires a run on the same head and keeps the
-    votes).
+    verdict is the one a refresh cures. Every other kind gets the action that fits
+    it, so the output cannot be read as "rebase and move on" for a head whose CI
+    run is merely missing (a refresh is a remedy there too, but the expensive one:
+    re-triggering fires a run on the same head and keeps the votes).
 
     The ancestry-stale branch has **three** states, not two: nothing to void, a
     price in approvals, and - the one that went missing - no approvals but a
@@ -981,6 +1045,15 @@ def _remedy(pr: int, kind: str, price: Price, run_id: str = "") -> str:
             f"#{pr}: park it, the run has not concluded - a vote here is not votable by "
             "anyone and neither a refresh nor a re-trigger answers it, so do not block on "
             "this PR: read it again next cycle (host rant 2026-09-24T14:46:10)"
+        )
+    if kind == _KIND_NEVER_STARTED:
+        return (
+            f"#{pr}: park it - GitHub refused to start this head's run (`startup_failure`, no "
+            "job created at all), so re-triggering reproduces the refusal instead of curing "
+            "it. Before spending another dispatch, ask whether any run on this repository is "
+            "producing jobs: a dispatch the API accepts is not a run that started, and "
+            f"`gh run view <run> --json jobs` answers `[]` for a run in this state. Read this "
+            "PR again next cycle: a later run, or a push, is what can change this state"
         )
     if kind == _KIND_NO_VERDICT:
         return (

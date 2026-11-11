@@ -1365,3 +1365,151 @@ def test_an_unreadable_jobs_list_is_reported_as_unmeasured(mod, monkeypatch, cap
         "an unread list answers neither question, so it may not be reported as the one that "
         "says the run judged nothing"
     )
+
+
+# --- a run the platform never started is not a run that stopped ---------------
+#
+# `startup_failure` is GitHub's conclusion for a workflow that failed to *start*: no job
+# ran, none was cancelled, and nothing stopped. Measured 2026-11-12 on this repository -
+# a `workflow_dispatch` the API accepted (exit 0) created run `43096918278`, which
+# concluded `startup_failure` and answered `total_count: 0` on its jobs list. The
+# `no_verdict` reason sentence ("no job concluded") is literally true there and names the
+# wrong event, and its remedy - a re-trigger - is the request that produced the run.
+#
+# Both directions again, because the conjunction is the reading: a cancellation keeps
+# `no_verdict` and its re-trigger (the test above), and a list nobody could read keeps the
+# coarse reading (the test below) instead of becoming this kind unmeasured.
+
+
+def test_a_run_the_platform_never_started_is_parked_not_retriggered(mod, monkeypatch, capsys):
+    """The measured shape: `startup_failure`, and not one job to its name."""
+    fake = FakeGh(
+        _view(), _compare("ahead", 1, 0), [_run_(conclusion="startup_failure")], jobs=[]
+    )
+    rc = _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "never started" in cap.out
+    assert "no job at all" in cap.out, (
+        "the reading has to say the run produced no job, or it reads as the cancellation "
+        "case the neighbouring kind exists for"
+    )
+    assert "without judging the tree" not in cap.out, (
+        "a run that never started did not stop without judging - it never got as far as a job"
+    )
+    assert "re-trigger-ci.sh" not in cap.err and "gh workflow run" not in cap.err, (
+        "re-triggering is the request this state already refused: handing the reader the "
+        "command is the defect this kind exists to remove. The remedy may (and must) name "
+        "the re-trigger in words - it is what it is refusing to offer"
+    )
+    assert "park it" in cap.err
+
+
+def test_a_startup_failure_whose_jobs_could_not_be_read_is_not_this_kind(
+    mod, monkeypatch, capsys
+):
+    """The conjunction's other half: no job *list* is not the same as no job."""
+    fake = FakeGh(
+        _view(), _compare("ahead", 1, 0), [_run_(conclusion="startup_failure")],
+        jobs_unreadable=True,
+    )
+    _votes(mod, monkeypatch, 3)
+    rc = _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "jobs could not be read" in cap.out
+    assert "never started" not in cap.out, (
+        "an unread list answers nothing about how many jobs the run had, so it may not be "
+        "reported as the kind that asserts there were none"
+    )
+
+
+# --- a head is not one run ----------------------------------------------------
+#
+# The verdict is read off **one** run, and the newest is not always the one that speaks
+# for the head. Measured 2026-11-12: head `192428ad` was pushed at 20:25:11Z and got
+# `pull_request` run `43095937647`; a manual dispatch at 20:35:10Z created `43096918278`,
+# which concluded `startup_failure` with no job at all - and so became the newest run of
+# that head. A run the platform refused to start judged nothing, so reading the verdict
+# off it reports a head that is still being judged as one nobody is judging, and - once
+# the head's own run concluded - reports a judged head as an unjudged one. Both are a
+# measured state reported as an absent one.
+#
+# Two readings, because the head's own run has two states here and the difference is what
+# the reader does next: still in flight (park, a verdict is coming) and concluded (read
+# that verdict, whatever the refused dispatch beside it says). The third, a head whose
+# every run was refused, is the state the kind exists for.
+
+
+def _refused(at: str = "2026-11-11T20:35:10Z") -> dict:
+    """The refusal shape: `startup_failure`, and not one job to its name."""
+    return _run_(conclusion="startup_failure", at=at, run_id="43096918278")
+
+
+def test_a_refused_dispatch_does_not_speak_for_a_head_whose_run_is_in_flight(
+    mod, monkeypatch, capsys
+):
+    """The measured shape: the head's own run was queued when the dispatch was refused."""
+    fake = FakeGh(
+        _view(), _compare("ahead", 1, 0),
+        [_run_(conclusion="", at="2026-11-11T20:25:11Z", run_id="43095937647"), _refused()],
+        jobs=[],
+    )
+    _votes(mod, monkeypatch, 3)
+    rc = _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "still pending" in cap.out, (
+        "the head has a run that has not concluded, and that is the state to report: a "
+        "verdict is still coming, so the reader parks rather than dispatching again"
+    )
+    assert "never started" not in cap.out, (
+        "saying the head's run never started, about a head whose own run is queued, is the "
+        "defect this selection exists to remove"
+    )
+    assert "re-trigger-ci.sh" not in cap.err and "gh workflow run" not in cap.err
+    assert "park it" in cap.err
+
+
+def test_a_refused_dispatch_does_not_hide_a_verdict_the_head_already_has(
+    mod, monkeypatch, capsys
+):
+    """The other direction, and the one a live-run fix leaves standing.
+
+    Same fixture with the head's own run concluded green: the tree has been judged, so the
+    verdict is current and the PR is votable. Reading the newest run alone reports it as
+    never started and parks a PR whose green run is sitting beside the refusal.
+    """
+    fake = FakeGh(
+        _view(), _compare("ahead", 1, 0),
+        [_run_(at="2026-11-11T20:25:11Z", run_id="43095937647"), _refused()],
+    )
+    rc = _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert rc == 0, cap.out + cap.err
+    assert "FRESH" in cap.out
+    assert "never started" not in cap.out
+    assert cap.err == "", "a fresh verdict has no remedy section to print"
+
+
+def test_a_head_whose_every_run_was_refused_is_this_kind(mod, monkeypatch, capsys):
+    """The state the kind exists for, and now its only reachable state.
+
+    Every run of the head was refused, so there is no other run of it to wait for - which
+    is what makes a second dispatch the wrong move rather than a slow one.
+    """
+    fake = FakeGh(
+        _view(), _compare("ahead", 1, 0), [_refused("2026-11-11T20:30:00Z"), _refused()],
+        jobs=[],
+    )
+    rc = _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "never started" in cap.out
+    assert "no job at all" in cap.out
+    assert "not a run this head can wait on" in cap.out, (
+        "with no other run of the head there is nothing to wait for, and the sentence has "
+        "to say so rather than leaving the reader to expect a judgment"
+    )
+    assert "re-trigger-ci.sh" not in cap.err and "gh workflow run" not in cap.err
+    assert "park it" in cap.err

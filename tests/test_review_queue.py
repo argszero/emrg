@@ -2580,6 +2580,39 @@ def test_a_run_that_judged_nothing_is_retriggered_not_read_for_a_cause(mod, monk
     assert "cast-vote.py" not in out, "a head whose run judged nothing is not votable"
 
 
+def test_a_run_the_platform_never_started_is_parked_not_retriggered(mod, monkeypatch, capsys):
+    """The row beside `no_verdict`, and the difference is the whole point.
+
+    Measured 2026-11-12: on a head whose `Test` run concluded `startup_failure` with no job
+    at all, `bash scripts/re-trigger-ci.sh <branch>` was accepted by the API (exit 0) and
+    created another run, which reached the same conclusion with the same zero jobs. The
+    queue had printed `retrigger-ci` for that head, so the row handed over the command whose
+    output it was describing.
+
+    A run GitHub never started is not a run that stopped: re-triggering is the request that
+    was refused, so the verb is `park` and the row says why.
+    """
+    votes = FakeVotes(reviews=[_review(cycle="cyc1")])
+    fresh = FakeFresh(
+        stale=True,
+        kind="never_started",
+        reason="head aaaa's Test run never started: GitHub concluded 'startup_failure' "
+               "and the run has no job at all",
+    )
+    rc = _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "park" in out
+    assert "never_started" in out
+    assert "gh workflow run test.yml" not in out, (
+        "a re-trigger here is the request the platform just refused, not a cure"
+    )
+    assert "re-trigger-ci.sh" not in out
+    assert "read-run-failure.py" not in out, (
+        "there is no run to read: this one was never started"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # The pairing is read from the entry's own `progress` (R5, issue #2352)
 # --------------------------------------------------------------------------- #
