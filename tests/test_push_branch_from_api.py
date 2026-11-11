@@ -744,3 +744,39 @@ def test_the_cli_takes_exactly_one_of_branch_or_tag(tmp_path):
                            cwd=tmp_path, timeout=120)
         assert r.returncode == 2, (argv, r.returncode, r.stdout, r.stderr)
         assert "exactly one of --branch" in r.stdout, (argv, r.stdout)
+
+
+# -------------------------------- a publication stranded one request short
+
+
+def test_a_retry_finishes_when_the_remote_already_holds_the_tip(tmp_path):
+    """One outstanding request must complete, not report an internal fault.
+
+    Measured 2026-11-11 (issue #2819): a push refused at its ref write leaves exactly this
+    state - `POST /git/commits` has already stored the commit, so every retry finds the tip
+    on the remote with nothing left to upload and only the ref write outstanding.
+    """
+    mod = _load_module()
+    repo = _init_repo(tmp_path)
+    _write_file(repo, "docs/base.md", b"base\n")
+    root = _commit_all(repo, "base commit")
+    tip = _commit_all(repo, "second commit", new_file="docs/tip.md")
+    fake = FakeGitHub(repo)
+    fake.refs["refs/heads/feature/stranded"] = root
+    # the remote already carries the tip's commit: it was uploaded before the refusal
+    fake.objects[tip] = ("commit", b"<already on the remote>")
+
+    orig_api = mod.api
+    mod.api = fake
+    try:
+        result = mod.push_branch("x", "feature/stranded", "HEAD", False, cwd=repo)
+    finally:
+        mod.api = orig_api
+
+    assert result["result"] == "pushed"
+    assert result["sha"] == tip
+    assert result["content_identical"] is True
+    assert fake.refs["refs/heads/feature/stranded"] == tip
+    # the content was already there: re-uploading it is a request whose answer is known
+    uploads = [p for method, p in fake.log if method == "POST"]
+    assert uploads == [], f"a stranded publication uploaded again: {uploads}"

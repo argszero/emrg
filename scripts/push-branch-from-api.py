@@ -306,7 +306,16 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
             break
         cur = parents[0] if parents[0] != base else None
     chain.reverse()
-    if not chain:
+    # An empty chain after a walk that found the *tip itself* on the remote is not a
+    # defect: the objects and commits are already published and only a ref is missing.
+    # That is precisely the state a refusal at the ref step leaves behind - a
+    # non-fast-forward, a ruleset, a token missing a scope - because the commit is created
+    # before the ref is written. Refusing it here makes the publication unrecoverable:
+    # measured 2026-11-11, where re-running a push whose ref write had been refused
+    # answered `internal: empty commit chain` while exactly one request remained. Proceed
+    # with nothing to upload and let the ref write finish the publication, or report why
+    # it cannot.
+    if not chain and base != local_tip:
         raise PushError("internal: empty commit chain")
 
     print(f"  base: {base or '(new branch - nothing on remote yet)'}")
@@ -406,7 +415,7 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
         payloads.append(payload)
 
     # ---- update the remote ref (fast-forward semantics; force only if asked)
-    final_sha = commit_map[chain[-1][0]]
+    final_sha = commit_map[chain[-1][0]] if chain else local_tip
     body = {"sha": final_sha, "force": force}
     try:
         if existing:
