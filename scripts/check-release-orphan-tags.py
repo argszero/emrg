@@ -5,7 +5,7 @@
 draft/prerelease/assets, and the per-cause remedy for each. That is the right shape for a
 tag someone is asking about, and it is the wrong shape for the question no one thinks to
 ask -- *is any tag on this repository published-less right now?* -- because it can only be
-put to one tag at a time, and nobody enumerates 150 tags by hand.
+put to one tag at a time, and nobody enumerates a repository's tags by hand.
 
 Measured 2026-11-12 (`cyc20261112-025715`), which is why this file exists. Tag `v0.3.51`
 had been pushed and its release job had been **skipped**, so four platform builds were
@@ -26,11 +26,12 @@ does not need it to answer its own question.
 A tag is not a window
 ---------------------
 Both collections are read **paginated**, and the counts actually read are printed before
-any verdict. This repository holds 152 tags and 149 releases (measured 2026-11-12), which
-is three pages of releases: a list read with the default page size, or with a `--limit`
-window, would report *every tag past the first page* as an orphan. The failure would be
-loud and wrong in the most expensive direction -- it would name real published releases as
-missing and invite someone to re-push their tags.
+any verdict -- that print is where a count belongs, because it moves between runs while
+this paragraph does not. Here both collections outgrow a page at GitHub's default size, so
+a list read with that page size, or with a `--limit` window, would report *every tag past
+the first page* as an orphan. The failure would be loud and wrong in the most expensive
+direction -- it would name real published releases as missing and invite someone to re-push
+their tags.
 
 Draft releases are included in an authenticated list (the account carries `repo`), so a
 draft does **not** read as an orphan here; it reads as its own fault, which is what it is:
