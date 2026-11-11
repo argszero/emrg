@@ -275,7 +275,7 @@ _VERDICT_WORKFLOW = "Test"
 # The seven ways a verdict can fail to be current. They were prose in `reason`
 # before, which is enough to *report* the state and not enough to choose a
 # remedy: the state decides which action the tool may recommend, and only one of
-# the six is fixed by a refresh (and that one charges the whole vote count).
+# the seven is fixed by a refresh (and that one charges the whole vote count).
 _KIND_ANCESTRY = "ancestry"  # the #1137 case: green, but about an older master
 _KIND_NO_RUN = "no_run"  # master is an ancestor but nothing ever judged the head
 _KIND_NO_RUN_YET = "no_run_yet"  # the head is younger than a run takes to appear
@@ -283,6 +283,11 @@ _KIND_RUNNING = "running"  # a run exists and has not concluded
 _KIND_FAILING = "failing"  # a job concluded `failure`: the tree was judged and rejected
 _KIND_NO_VERDICT = "no_verdict"  # the run stopped without a job judging the tree
 _KIND_NEVER_STARTED = "never_started"  # the platform refused to start the run: no job existed
+
+#: The conclusion GitHub reports for a workflow it refused to start. Named rather than
+#: spelled at each site, because two readings ask about it: which run speaks for a head
+#: (`_ask_latest_run_for_head`), and which kind a head with no judging run at all gets.
+_NEVER_STARTED = "startup_failure"
 
 #: How long after a head is committed a push-event run can still be *arriving*.
 #: Inside this window an empty run lookup is not evidence of anything: it is the
@@ -471,31 +476,40 @@ def _latest_run_for_head(head: str) -> dict | None:
 
 
 def _ask_latest_run_for_head(head: str) -> dict | None:
-    """One ask of the run lookup: the newest verdict run for the SHA, or `None`.
+    """One ask of the run lookup: the run that speaks for the SHA, or `None`.
 
     Split out so the bounded re-ask in `_latest_run_for_head` cannot accidentally
     re-ask a *broken* call: a call that raises is not an empty answer, and must
     stay a failure rather than being retried into looking like a measurement.
+
+    **The newest run is not always the one that speaks for the head.** A run the platform
+    refused to start judges nothing, so a refused dispatch on top of a head whose own run
+    is still queued would speak for a head that is still being judged - and, once that run
+    concluded, would speak for a head that has already been judged. Measured 2026-11-12 on
+    this repository: head `192428ad` was pushed at 20:25:11Z and got `pull_request` run
+    `43095937647`; a manual dispatch at 20:35:10Z created `43096918278`, which concluded
+    `startup_failure` with no job at all, and so became the newest run of that head.
+
+    A run speaks for the head when it could have judged something, and a run that never
+    started could not - a run still in flight could, and its own state is the answer. The
+    refused runs are consulted only when every run of the head is one of them, which is
+    the state `_KIND_NEVER_STARTED` exists for.
     """
     runs = _runs_for_head(head)
     if not runs:
         return None
+    speakable = [r for r in runs if str(r.get("conclusion") or "") != _NEVER_STARTED]
+    if speakable:
+        return speakable[-1]
     return runs[-1]
 
 
 def _runs_for_head(head: str) -> list[dict]:
     """Every `_VERDICT_WORKFLOW` run for this exact commit, oldest first.
 
-    One owner for the query, because two questions are asked of the same answer: the
-    verdict reads the **newest** run (`_ask_latest_run_for_head`), and the never-started
-    branch has to know whether any *other* run of that head is still alive
-    (`_unfinished_run_besides`). A second copy of this shape would be a second answer to
-    "which runs does this head have", and the two callers would drift.
-
-    The projection carries `status` for that second question. It costs nothing on the
-    verdict path - the caller reads `conclusion` - and a run's liveness cannot be read
-    from its `conclusion`, which is `None` both for a run that is queued and for one
-    GitHub never reported on.
+    One owner for the query, because "which runs does this head have" has exactly one
+    answer: the selection above reads all of them to pick the one that speaks for the
+    head, and a second copy of this shape would let the two answers drift apart.
     """
     payload = _gh_json(
         [
@@ -503,7 +517,7 @@ def _runs_for_head(head: str) -> list[dict]:
             f"repos/{REPO}/actions/runs?head_sha={head}&per_page=100",
             "--jq",
             "{runs: [.workflow_runs[] | {headSha: .head_sha, name, "
-            "createdAt: .created_at, status, conclusion, databaseId: .id}]}",
+            "createdAt: .created_at, conclusion, databaseId: .id}]}",
         ]
     )
     assert isinstance(payload, dict)
@@ -517,44 +531,6 @@ def _runs_for_head(head: str) -> list[dict]:
         and r.get("name") == _VERDICT_WORKFLOW
     ]
     return sorted(matching, key=lambda r: str(r.get("createdAt") or ""))
-
-
-#: The run statuses that mean "this run is still alive". Named rather than written as
-#: "not concluded", because an unrecognised status is a shape nobody has measured, and
-#: guessing it into "alive" would park a head for ever on a reading taken wrongly.
-_ALIVE_RUN_STATUSES = frozenset(
-    {"queued", "in_progress", "requested", "waiting", "pending"}
-)
-
-
-def _unfinished_run_besides(head: str, run_id: str) -> list[dict] | None:
-    """Runs of this same head that are still alive, apart from `run_id`; `None` if unreadable.
-
-    One head can carry several runs whose fates differ, and the newest is not always the
-    one that speaks for it. Measured 2026-11-12 on this repository: head `192428ad` was
-    pushed at 20:25:11Z and got `pull_request` run `43095937647`; a manual dispatch at
-    20:35:10Z created `43096918278`, which concluded `startup_failure` with no job at all.
-    `_ask_latest_run_for_head` reports the newest, so the refused dispatch spoke for a head
-    whose own push-event run was still queued and could still judge it - and the remedy's
-    wait condition pointed somewhere else instead of at that run.
-
-    So this reads the head, not the run, and the two states it tells apart are different
-    instructions: with a live sibling there is a judgment still coming, and without one the
-    head really is unjudged. `None` is "not measured", never "no sibling" - saying nothing
-    about a head's other runs when the list could not be read is the same defect pointing
-    the other way, and it is reported as unmeasured rather than as housekeeping.
-    """
-    try:
-        runs = _runs_for_head(head)
-    except RuntimeError:
-        return None
-    alive = [
-        r
-        for r in runs
-        if str(r.get("databaseId") or "") != str(run_id)
-        and str(r.get("status") or "") in _ALIVE_RUN_STATUSES
-    ]
-    return sorted(alive, key=lambda r: str(r.get("createdAt") or ""))
 
 
 def _run_jobs(run_id: str) -> list[dict] | None:
@@ -764,36 +740,18 @@ def check_pr(number: int) -> Verdict:
                 for j in jobs
                 if j.get("conclusion") and j.get("conclusion") != "success"
             ]
-            if conclusion == "startup_failure" and not jobs:
+            if conclusion == _NEVER_STARTED and not jobs:
                 # A run GitHub never managed to start. Not `no_verdict`: that kind is a run
                 # that existed and stopped (a cancelled job is its measured shape), and its
                 # remedy - a re-trigger - is the request this state already refused.
                 # Measured 2026-11-12: dispatch accepted (exit 0), run `43096918278`
                 # concluded `startup_failure` with `total_count: 0` jobs four minutes later.
                 #
-                # The sentence is about that **run**, and a head may carry others: the same
-                # head's push-event run was still queued when this one was refused, so what
-                # the reader is told to wait for has to be the head's live run and not "a
-                # run somewhere". `_unfinished_run_besides` is why.
-                others = _unfinished_run_besides(
-                    head_sha, str(run.get("databaseId") or "")
-                )
-                if others is None:
-                    head_note = (
-                        " - and this head's other runs could not be read, so whether some "
-                        "other run of it is still alive is **not measured here**"
-                    )
-                elif others:
-                    named = ", ".join(
-                        f"{r.get('databaseId')} ({r.get('status')})" for r in others
-                    )
-                    head_note = (
-                        f" - but this head is not unjudged yet: run {named} of the **same "
-                        "head** is still alive, so the verdict this head gets will be that "
-                        "run's, and that run - not one elsewhere - is what to wait for"
-                    )
-                else:
-                    head_note = ""
+                # This run speaks for the head only when no other run of it could: a head
+                # carrying any run that did not fail to start is answered by that run's own
+                # state instead (`_ask_latest_run_for_head`). So there is no other run of
+                # this head to wait for, and the sentence says that rather than offering a
+                # wait that has nothing behind it.
                 return Verdict(
                     **common,
                     stale=True,
@@ -803,8 +761,7 @@ def check_pr(number: int) -> Verdict:
                         f"concluded {conclusion!r} and the run has **no job at all**, so "
                         "nothing ran, nothing was cancelled and nothing stopped - a workflow "
                         "that fails to start is the platform refusing the run, which is not a "
-                        "job that judged nothing"
-                        f"{head_note}"
+                        "job that judged nothing and not a run this head can wait on"
                         f"{_tree_note(stale_tree, status, behind_by, merge_base)}"
                     ),
                 )
@@ -990,11 +947,10 @@ def _remedy(pr: int, kind: str, price: Price, run_id: str = "") -> str:
     reader the broken one.
 
     The price is attached only where it is actually paid - an ancestry-stale
-    verdict is the one a refresh cures. The other three kinds get the action that
-    fits them, so the output cannot be read as "rebase and move on" for a head
-    whose CI run is merely missing (a refresh is a remedy there too, but the
-    expensive one: re-triggering fires a run on the same head and keeps the
-    votes).
+    verdict is the one a refresh cures. Every other kind gets the action that fits
+    it, so the output cannot be read as "rebase and move on" for a head whose CI
+    run is merely missing (a refresh is a remedy there too, but the expensive one:
+    re-triggering fires a run on the same head and keeps the votes).
 
     The ancestry-stale branch has **three** states, not two: nothing to void, a
     price in approvals, and - the one that went missing - no approvals but a
@@ -1097,7 +1053,7 @@ def _remedy(pr: int, kind: str, price: Price, run_id: str = "") -> str:
             "it. Before spending another dispatch, ask whether any run on this repository is "
             "producing jobs: a dispatch the API accepts is not a run that started, and "
             f"`gh run view <run> --json jobs` answers `[]` for a run in this state. Read this "
-            "PR again next cycle, or once this head's own run concludes"
+            "PR again next cycle: a later run, or a push, is what can change this state"
         )
     if kind == _KIND_NO_VERDICT:
         return (

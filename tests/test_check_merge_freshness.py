@@ -119,8 +119,6 @@ class FakeGh:
 
     def __init__(self, pr_view: dict, compare: dict, runs: list[dict] | None,
                  jobs: list[dict] | None = None, jobs_unreadable: bool = False,
-                 sibling_runs: list[dict] | None = None,
-                 sibling_unreadable: bool = False,
                  head_committed_at: str | None = HEAD_COMMITTED_AT):
         self.pr_view = pr_view
         self.compare = compare
@@ -138,16 +136,6 @@ class FakeGh:
         #: this file's sibling suites call a fixture that cannot reach the code.
         self.jobs = jobs
         self.jobs_unreadable = jobs_unreadable
-        #: What the **second and later** asks of the head's run list answer. The first ask
-        #: is the verdict's (`_ask_latest_run_for_head`); the second is the never-started
-        #: branch asking whether this head has another live run
-        #: (`_unfinished_run_besides`). `None` leaves both asks answering `runs`, which is
-        #: what every test written before that question existed expects.
-        self.sibling_runs = sibling_runs
-        self.sibling_unreadable = sibling_unreadable
-        #: How many times the run list has been asked, so the answer above is not given to
-        #: the wrong ask. A count that is never read would make the switch invisible.
-        self.runs_reads = 0
         self.calls: list[list[str]] = []
 
     def __call__(self, args: list[str]) -> object:
@@ -165,11 +153,6 @@ class FakeGh:
                     return {"jobs": self.jobs}
                 return {"jobs": _jobs_mirroring(self.runs)}
             if any("actions/runs" in a for a in args):
-                self.runs_reads += 1
-                if self.runs_reads > 1 and self.sibling_runs is not None:
-                    if self.sibling_unreadable:
-                        raise RuntimeError("gh failed (rc=1): the run list is not served")
-                    return {"runs": self.sibling_runs}
                 return {"runs": self.runs if self.runs is not None else []}
             if any("/commits/" in a for a in args):
                 # The head's age, asked only where an empty run lookup makes it
@@ -1443,75 +1426,90 @@ def test_a_startup_failure_whose_jobs_could_not_be_read_is_not_this_kind(
 
 # --- a head is not one run ----------------------------------------------------
 #
-# The sentence `never_started` prints is about **a run**, and a head can carry several
-# whose fates differ. Measured 2026-11-12: head `192428ad` was pushed at 20:25:11Z and got
+# The verdict is read off **one** run, and the newest is not always the one that speaks
+# for the head. Measured 2026-11-12: head `192428ad` was pushed at 20:25:11Z and got
 # `pull_request` run `43095937647`; a manual dispatch at 20:35:10Z created `43096918278`,
-# which concluded `startup_failure` with no job. The verdict reads the *newest* run, so the
-# refused dispatch was speaking for a head whose own push-event run was still queued - and
-# the remedy's wait condition said "once a run elsewhere concludes", which is the wrong run
-# to wait for.
+# which concluded `startup_failure` with no job at all - and so became the newest run of
+# that head. A run the platform refused to start judged nothing, so reading the verdict
+# off it reports a head that is still being judged as one nobody is judging, and - once
+# the head's own run concluded - reports a judged head as an unjudged one. Both are a
+# measured state reported as an absent one.
 #
-# Three readings, because the head's other runs have three states and the difference
-# between them is what the reader does next: a live sibling (wait for it), no sibling (the
-# head really is unjudged), and a list nobody could read (not measured - never "no sibling").
+# Two readings, because the head's own run has two states here and the difference is what
+# the reader does next: still in flight (park, a verdict is coming) and concluded (read
+# that verdict, whatever the refused dispatch beside it says). The third, a head whose
+# every run was refused, is the state the kind exists for.
 
 
-def test_a_live_sibling_run_is_named_and_is_what_to_wait_for(mod, monkeypatch, capsys):
-    """The measured shape: the newest run was refused while the head's own run was queued."""
-    sibling = dict(
-        _run_(conclusion="", at="2026-11-11T20:25:11Z", run_id="43095937647"),
-        status="queued",
-    )
+def _refused(at: str = "2026-11-11T20:35:10Z") -> dict:
+    """The refusal shape: `startup_failure`, and not one job to its name."""
+    return _run_(conclusion="startup_failure", at=at, run_id="43096918278")
+
+
+def test_a_refused_dispatch_does_not_speak_for_a_head_whose_run_is_in_flight(
+    mod, monkeypatch, capsys
+):
+    """The measured shape: the head's own run was queued when the dispatch was refused."""
     fake = FakeGh(
         _view(), _compare("ahead", 1, 0),
-        [_run_(conclusion="startup_failure", at="2026-11-11T20:35:10Z", run_id="43096918278")],
-        jobs=[], sibling_runs=[sibling],
+        [_run_(conclusion="", at="2026-11-11T20:25:11Z", run_id="43095937647"), _refused()],
+        jobs=[],
+    )
+    _votes(mod, monkeypatch, 3)
+    rc = _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "still pending" in cap.out, (
+        "the head has a run that has not concluded, and that is the state to report: a "
+        "verdict is still coming, so the reader parks rather than dispatching again"
+    )
+    assert "never started" not in cap.out, (
+        "saying the head's run never started, about a head whose own run is queued, is the "
+        "defect this selection exists to remove"
+    )
+    assert "re-trigger-ci.sh" not in cap.err and "gh workflow run" not in cap.err
+    assert "park it" in cap.err
+
+
+def test_a_refused_dispatch_does_not_hide_a_verdict_the_head_already_has(
+    mod, monkeypatch, capsys
+):
+    """The other direction, and the one a live-run fix leaves standing.
+
+    Same fixture with the head's own run concluded green: the tree has been judged, so the
+    verdict is current and the PR is votable. Reading the newest run alone reports it as
+    never started and parks a PR whose green run is sitting beside the refusal.
+    """
+    fake = FakeGh(
+        _view(), _compare("ahead", 1, 0),
+        [_run_(at="2026-11-11T20:25:11Z", run_id="43095937647"), _refused()],
+    )
+    rc = _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert rc == 0, cap.out + cap.err
+    assert "FRESH" in cap.out
+    assert "never started" not in cap.out
+    assert cap.err == "", "a fresh verdict has no remedy section to print"
+
+
+def test_a_head_whose_every_run_was_refused_is_this_kind(mod, monkeypatch, capsys):
+    """The state the kind exists for, and now its only reachable state.
+
+    Every run of the head was refused, so there is no other run of it to wait for - which
+    is what makes a second dispatch the wrong move rather than a slow one.
+    """
+    fake = FakeGh(
+        _view(), _compare("ahead", 1, 0), [_refused("2026-11-11T20:30:00Z"), _refused()],
+        jobs=[],
     )
     rc = _run(mod, monkeypatch, fake)
     cap = capsys.readouterr()
     assert rc == 1
     assert "never started" in cap.out
-    assert "43095937647 (queued)" in cap.out, (
-        "the reader has to be given the run that is still alive, by id and status: without "
-        "it the only instruction is to wait for something unnamed"
+    assert "no job at all" in cap.out
+    assert "not a run this head can wait on" in cap.out, (
+        "with no other run of the head there is nothing to wait for, and the sentence has "
+        "to say so rather than leaving the reader to expect a judgment"
     )
-    assert "not unjudged" in cap.out
-    assert "still alive" in cap.out
     assert "re-trigger-ci.sh" not in cap.err and "gh workflow run" not in cap.err
-    assert fake.runs_reads >= 2, (
-        "the sibling reading must actually have been asked - a branch that never queries "
-        "would pass this test on the reason text alone"
-    )
-
-
-def test_a_head_with_no_other_run_keeps_the_plain_reading(mod, monkeypatch, capsys):
-    """The control: one run, refused, and nothing else on that head to wait for."""
-    fake = FakeGh(
-        _view(), _compare("ahead", 1, 0), [_run_(conclusion="startup_failure")], jobs=[]
-    )
-    _run(mod, monkeypatch, fake)
-    cap = capsys.readouterr()
-    assert "never started" in cap.out
-    assert "still alive" not in cap.out, (
-        "with no sibling there is nothing alive to name, and inventing one would send the "
-        "reader to wait for a run that does not exist"
-    )
-    assert "could not be read" not in cap.out
-
-
-def test_an_unreadable_sibling_list_is_reported_as_unmeasured(mod, monkeypatch, capsys):
-    """The third state, and it is not "no sibling": silence would be the same defect."""
-    fake = FakeGh(
-        _view(), _compare("ahead", 1, 0), [_run_(conclusion="startup_failure")],
-        jobs=[], sibling_runs=[{"databaseId": "1", "status": "queued"}],
-        sibling_unreadable=True,
-    )
-    _run(mod, monkeypatch, fake)
-    cap = capsys.readouterr()
-    assert "not measured here" in cap.out, (
-        "a run list that could not be read answers nothing about the head's other runs, "
-        "and the row has to say so rather than read as 'there are none'"
-    )
-    assert "(queued)" not in cap.out, (
-        "no run may be named when the list that would name one could not be read"
-    )
+    assert "park it" in cap.err
