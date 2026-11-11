@@ -43,6 +43,19 @@ printed `gave up fetching <url> after 3 tries` would have said everything the re
 asks for, and a guard keyed on the literal word `attempt` would redden on it while the step
 behaved exactly as required.
 
+The second carrier of the same defect
+------------------------------------
+The step also *installs* `shellcheck` with apt, because the release binary does not bundle
+it, and actionlint runs shellcheck over `run:` blocks only when it finds one. That install
+was the same unretried network fetch one step later, so it now carries the same bounded
+retry and the same fail-closed refusal - and, for the same reason, it is executed rather
+than grepped: an arm that leaves a `shellcheck` on `PATH` never enters the loop, because the
+loop's own `command -v` guard answers first. So the arms below run the step with `PATH`
+rebuilt from the system's tools minus that one name, and a `sudo` stub that scripts the
+mirror's answers. Three separate properties, three arms: the retry survives a window; a
+download that never succeeds refuses and names the count; and an install that answers
+success without leaving a linter still fails the step.
+
 Named limits
 ------------
 * The retry is bounded by what the step says it is; this file does not assert a particular
@@ -65,6 +78,7 @@ from __future__ import annotations
 import io
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -143,6 +157,36 @@ printf 'waited\\n' >> "$STUB_STATE/sleeps"
 exit 0
 """
 
+#: Stub `sudo`: answers the sequence of apt failures the arm asks for, and creates a
+#: `shellcheck` on `PATH` only when the install really succeeds - so the step's own
+#: `command -v` gate below the loop is what decides whether the linter is there. Every call
+#: is counted, so how many attempts the step made is a reading and not an assumption.
+_STUB_SUDO = """#!/bin/sh
+count_file="$STUB_STATE/sudo"
+n=$(cat "$count_file" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s' "$n" > "$count_file"
+if [ "$n" -le "$STUB_SUDO_FAIL_CALLS" ]; then
+  echo "E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/s/shellcheck/shellcheck_0.9.0-1ubuntu0.1_amd64.deb  Temporary failure resolving 'azure.archive.ubuntu.com'" >&2
+  exit 100
+fi
+case "$*" in
+  *shellcheck*)
+    if [ "$STUB_SUDO_CREATES" = "1" ]; then
+      printf '#!/bin/sh\\nexit 0\\n' > "$STUB_TOOLS/shellcheck"
+      chmod +x "$STUB_TOOLS/shellcheck"
+    fi
+    ;;
+esac
+exit 0
+"""
+
+#: What the step itself runs on: it is shell, but not a POSIX shell builtin-only script -
+#: `tar` unpacks the asset, `mktemp` makes the probe directory, `find`/`sort` list the
+#: workflows, and `cat` feeds the heredocs. A `PATH` rebuilt without them would measure
+#: this file's sandbox instead of the step.
+_TOOLS_NEEDED = ("cat", "chmod", "cp", "find", "mkdir", "mktemp", "rm", "sort", "tar")
+
 
 def _step() -> dict:
     """The one step this file is about, found in the workflow by its name."""
@@ -174,8 +218,50 @@ def _stub(directory: Path, name: str, body: str) -> None:
     exe.chmod(0o755)
 
 
-def _run_step(tmp_path: Path, *, fail_first: int) -> tuple[subprocess.CompletedProcess, Path, Path]:
-    """Execute the step's own `run:` block, with `curl` failing `fail_first` times."""
+def _system_path_without_shellcheck(tmp_path: Path) -> Path:
+    """A `PATH` made of the system's own tools, with no `shellcheck` on it.
+
+    The step installs the linter only when `command -v shellcheck` fails, so an arm about
+    that loop has to run where none can be found - and the runner the `test` leg uses ships
+    one in `/usr/bin`. Dropping `/usr/bin` would take `tar`, `mktemp` and `find` with it, so
+    the directory is rebuilt as symlinks to what the system has, minus that one name.
+    Nothing is installed and nothing leaves the host.
+    """
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    seen: set[str] = set()
+    for source in ("/usr/bin", "/bin"):
+        if not os.path.isdir(source):
+            continue
+        for name in sorted(os.listdir(source)):
+            if name in seen or name == "shellcheck":
+                continue
+            seen.add(name)
+            try:
+                (tools / name).symlink_to(os.path.join(source, name))
+            except OSError:
+                # A name this process may not link is not one the step needs; the premise
+                # assertion below names any that actually mattered.
+                continue
+    return tools
+
+
+def _run_step(
+    tmp_path: Path,
+    *,
+    fail_first: int,
+    isolate_shellcheck: bool = False,
+    sudo_fail_calls: int = 0,
+    sudo_creates: bool = True,
+) -> tuple[subprocess.CompletedProcess, Path, Path]:
+    """Execute the step's own `run:` block, with `curl` failing `fail_first` times.
+
+    `isolate_shellcheck` swaps the standing `shellcheck` stub for a `sudo` stub and rebuilds
+    `PATH` so that no linter is findable. That is the only state in which the step's install
+    loop is entered at all: with a `shellcheck` reachable, `command -v` answers, the loop is
+    skipped, and an arm asserting anything about it measures the guard instead. The default
+    is the stub, because the arms about the download never want to install anything.
+    """
     step = _step()
     version = (step.get("env") or {}).get("ACTIONLINT_VERSION", "")
 
@@ -187,9 +273,25 @@ def _run_step(tmp_path: Path, *, fail_first: int) -> tuple[subprocess.CompletedP
     stubs.mkdir()
     _stub(stubs, "curl", _STUB_CURL)
     _stub(stubs, "sleep", _STUB_SLEEP)
-    # The step installs shellcheck with apt only because the release binary does not bundle
-    # it; a stub on PATH keeps this guard off the network and off sudo.
-    _stub(stubs, "shellcheck", "#!/bin/sh\nexit 0\n")
+    tools: Path | None = None
+    if isolate_shellcheck:
+        tools = _system_path_without_shellcheck(tmp_path)
+        _stub(stubs, "sudo", _STUB_SUDO)
+        path = f"{stubs}{os.pathsep}{tools}"
+        missing = [name for name in _TOOLS_NEEDED if shutil.which(name, path=path) is None]
+        if missing:
+            pytest.skip(f"this host provides no {missing}, so the step cannot run here")
+        found = shutil.which("shellcheck", path=path)
+        assert found is None, (
+            "this arm needs a PATH with no shellcheck on it, and one is reachable at "
+            f"{found} - the step would skip its install loop, and every assertion about "
+            "that loop would describe a guard it never entered"
+        )
+    else:
+        # The step installs shellcheck with apt only because the release binary does not
+        # bundle it; a stub on PATH keeps this guard off the network and off sudo.
+        _stub(stubs, "shellcheck", "#!/bin/sh\nexit 0\n")
+        path = f"{stubs}{os.pathsep}/usr/bin{os.pathsep}/bin"
     archive = _archive(tmp_path / "actionlint.tar.gz")
 
     tree = tmp_path / "tree"
@@ -201,13 +303,16 @@ def _run_step(tmp_path: Path, *, fail_first: int) -> tuple[subprocess.CompletedP
     script.write_text(textwrap.dedent(step["run"]), encoding="utf-8")
 
     env = {
-        "PATH": f"{stubs}{os.pathsep}/usr/bin{os.pathsep}/bin",
+        "PATH": path,
         "HOME": str(tmp_path),
         "RUNNER_TEMP": str(runner_temp),
         "ACTIONLINT_VERSION": version,
         "STUB_STATE": str(state),
         "STUB_FAIL_FIRST": str(fail_first),
         "STUB_ARCHIVE": str(archive),
+        "STUB_SUDO_FAIL_CALLS": str(sudo_fail_calls),
+        "STUB_SUDO_CREATES": "1" if sudo_creates else "0",
+        "STUB_TOOLS": str(tools) if tools is not None else "",
     }
     result = subprocess.run(
         ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
@@ -312,4 +417,96 @@ def test_a_download_that_never_succeeds_fails_the_step_and_names_it(tmp_path) ->
     assert any(_names_url_and_count(line, attempts) for line in errors), (
         "the error must name the URL and the number of attempts it made "
         f"({attempts}), in whatever words it chooses; got {errors}"
+    )
+
+
+def _names_attempt_count(line: str, attempts: int) -> bool:
+    """Does this error line say how many attempts it made, as a numeral?
+
+    The count, not the wording: `after 3 attempt(s)` and `on its third try` are the same
+    promise to a reader of a red run, and a guard keyed on the literal word `attempt` would
+    redden on a step that behaved exactly as required while measuring nothing.
+    """
+    return str(attempts) in re.findall(r"\d+", line)
+
+
+@POSIX_ONLY
+def test_the_linter_install_is_retried_and_the_step_goes_on(tmp_path) -> None:
+    """A mirror window fails twice, then answers: the install happens and the step continues.
+
+    The shape is the one measured on 2026-11-11, when every open pull request went red and
+    none of them on a test: `apt-get update` exits 0 with warnings, and the fetch of the
+    `.deb` behind it fails. The install is the same network fetch the download above it
+    already retried, so it gets the same treatment - and this arm is what holds it there.
+    """
+    result, state, runner_temp = _run_step(
+        tmp_path, fail_first=0, isolate_shellcheck=True, sudo_fail_calls=2
+    )
+    assert result.returncode == 0, (
+        "the step failed on a transient mirror error, so one upstream window reds every "
+        f"open pull request again:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert (tmp_path / "tools" / "shellcheck").exists(), (
+        "the step exited 0 with no linter installed - `actionlint` would then lint without "
+        "its shellcheck half and the gate would keep its name while checking less"
+    )
+    calls = int((state / "sudo").read_text(encoding="utf-8").strip())
+    assert calls == 4, (
+        "expected four apt calls (two failed index refreshes, then a refresh and an "
+        f"install that succeed), got {calls} - fewer means the index refresh moved outside "
+        "the loop, which spends every attempt against a list the failure never refreshed"
+    )
+    assert (state / "sleeps").exists(), (
+        "the install was retried back to back with no pause; a mirror window is what the "
+        "pause is for"
+    )
+
+
+@POSIX_ONLY
+def test_an_install_that_never_succeeds_fails_the_step_and_names_the_attempts(tmp_path) -> None:
+    """The other direction: no attempt installs, so the step refuses rather than skipping."""
+    result, state, runner_temp = _run_step(
+        tmp_path, fail_first=0, isolate_shellcheck=True, sudo_fail_calls=99
+    )
+    assert result.returncode != 0, (
+        "the step exited 0 although nothing was ever installed - that is a gate reporting "
+        f"itself as run while checking nothing:\nstdout:\n{result.stdout}"
+    )
+    assert (runner_temp / "actionlint").exists(), (
+        "the linter itself was never unpacked here, so this arm is not about the install - "
+        "the failure above came from the download, not from the loop under test"
+    )
+    assert not (tmp_path / "tools" / "shellcheck").exists(), (
+        "a linter exists although no attempt installed one - the stub is not measuring a "
+        "refusal"
+    )
+    errors = [line for line in result.stdout.splitlines() if "::error::" in line]
+    assert errors, (
+        "no `::error::` line: a bare exit is a refusal a reader of the run view cannot act "
+        f"on.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert any("shellcheck" in line and _names_attempt_count(line, 3) for line in errors), (
+        "the error must name what could not be installed and the number of attempts it "
+        f"made (3), in whatever words it chooses; got {errors}"
+    )
+
+
+@POSIX_ONLY
+def test_an_install_that_answers_success_without_a_linter_fails_the_step(tmp_path) -> None:
+    """The assertion under the loop: apt said 0, and there is still no linter on `PATH`.
+
+    Without that line the step would take the install's exit code as evidence, then run
+    `actionlint` with no shellcheck anywhere - the half-of-the-gate failure the step's own
+    comment says it exists to prevent. It is a separate carrier from the loop, so it gets a
+    separate arm: a loop that retries correctly cannot cover it.
+    """
+    result, state, runner_temp = _run_step(
+        tmp_path, fail_first=0, isolate_shellcheck=True, sudo_fail_calls=0, sudo_creates=False
+    )
+    assert result.returncode != 0, (
+        "the step exited 0 although the install left no shellcheck findable on PATH - the "
+        f"gate would then run with half its checks:\nstdout:\n{result.stdout}"
+    )
+    assert not (tmp_path / "tools" / "shellcheck").exists(), (
+        "the stub did not measure what this arm means to measure"
     )
