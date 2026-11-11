@@ -317,25 +317,35 @@ class FakeFresh:
         )
 
 
-def _install(mod, monkeypatch, votes, fresh):
-    """Point the tool's two sibling seams at the fakes.
+def _install(mod, monkeypatch, votes, fresh, base=None):
+    """Point the tool's three seams at the fakes.
 
     `real` is kept on each fake so it can build the sibling's own dataclasses: the
     point is to exercise this tool against the other tools' *declared* shapes, and a
     self-authored lookalike would agree with a misreading.
+
+    `base_run_health` is a seam of the same kind and is stubbed here rather than left
+    live: it shells out to `gh` for master's latest run, so a test that drove the
+    `ci-red` row without stubbing it would reach the network for a fact the test never
+    asserts. Its default answer is `None` — "could not be read", the one answer that
+    changes no existing row's verdict. A test *about* the base reading passes its answer
+    here as `base=`: patching `mod.base_run_health` before the call and letting this line
+    run afterwards installs that answer and then replaces it, so the test would be
+    measuring the default while asserting about the reading.
     """
     votes.real = mod.vote_counter()
     fresh.real = mod.freshness()
     monkeypatch.setattr(mod, "vote_counter", lambda: votes)
     monkeypatch.setattr(mod, "freshness", lambda: fresh)
+    monkeypatch.setattr(mod, "base_run_health", lambda repo=None: base)
 
 
 def _review(at="2026-09-17T10:05:00Z", kind="approve", cycle=CYCLE, valid=True, why=""):
     return {"at": at, "kind": kind, "cycle": cycle, "valid": valid, "why": why}
 
 
-def _read(mod, monkeypatch, votes, fresh, *, number=1, cycle=None, prs=()):
-    _install(mod, monkeypatch, votes, fresh)
+def _read(mod, monkeypatch, votes, fresh, *, number=1, cycle=None, prs=(), base=None):
+    _install(mod, monkeypatch, votes, fresh, base=base)
     argv = [str(pr) for pr in prs] if prs else [str(number)]
     if cycle:
         argv += ["--cycle", cycle]
@@ -528,11 +538,122 @@ def test_a_red_run_is_not_votable_and_names_the_run(mod, monkeypatch, capsys):
         "the row offers `gh run view --log-failed`, which answers 0 bytes with exit 0 "
         "here - a failure to measure wearing the shape of a pass"
     )
-    # A red row is not always the head's: a base-level failure turns every open PR red,
-    # and the reading that separates the two is the plan suite's base comparison.
-    assert "check-merge-plan-suite.py 1" in out, (
-        "without the base comparison the reader cannot tell this head's failure from one "
-        "the base fails too, and fixing the wrong tree is what that costs"
+
+
+# --- the base's own health, which the ci-red row could not see ----------------
+#
+# The row above answers a red head. It could not answer *whose* red it was. A repo-wide
+# outage reds every open pull request at once, and the only reading it named for that
+# question was `check-merge-plan-suite.py` - which reads the *suite* on a candidate tree
+# and never sees the runners. Measured 2026-11-11: three legs died inside one step on one
+# DNS failure, master's own push run among them, while a leg fifteen minutes earlier
+# passed in 3m0s; two cycles read runs to a cause that was never about the commit.
+#
+# Four outcomes are asserted one at a time, because they collapse into two if the wording
+# is allowed to: red, green, not concluded, and unread. The last carries its own test
+# because a base nobody could read is not a base that is fine - the distinction this whole
+# file exists to keep.
+
+
+def _red_head():
+    return FakeFresh(stale=True, kind="failing", run_id="37194550758",
+                     reason="CI concluded 'failure' on head aaaa")
+
+
+def test_a_red_base_is_named_with_the_run_to_read(mod, monkeypatch, capsys):
+    _read(mod, monkeypatch, FakeVotes(reviews=[]), _red_head(), cycle=CYCLE, base={
+        "conclusion": "failure", "status": "completed",
+        "headSha": "bf1c9f60deadbeefcafe", "url": "https://example.test/run/red-base"})
+    out = capsys.readouterr().out
+    assert "ci-red" in out
+    assert "master's own latest run (bf1c9f60)" in out, (
+        "a red head was read without asking whether the base is red too — the reading "
+        "that separates an outage from a defect in the patch"
+    )
+    assert "https://example.test/run/red-base" in out, (
+        "the base's red run is named but not addressable, so the reader still has to go "
+        "find it before they can read it"
+    )
+    assert "may be the base's rather than this head's" in out
+
+
+def test_a_green_base_leaves_the_red_head_its_own(mod, monkeypatch, capsys):
+    _read(mod, monkeypatch, FakeVotes(reviews=[]), _red_head(), cycle=CYCLE, base={
+        "conclusion": "success", "status": "completed",
+        "headSha": "bf1c9f60", "url": "https://example.test/run/green-base"})
+    out = capsys.readouterr().out
+    assert "master's own latest run concluded green" in out
+    assert "may be the base's" not in out, (
+        "a green base was still offered as the suspected cause of this head's red, "
+        "which sends the reader to the wrong run"
+    )
+
+
+def test_an_unreadable_base_reads_unmeasured_not_green(mod, monkeypatch, capsys):
+    _read(mod, monkeypatch, FakeVotes(reviews=[]), _red_head(), cycle=CYCLE)
+    out = capsys.readouterr().out
+    assert "could not be read" in out
+    assert "unmeasured" in out
+    assert "concluded green" not in out, (
+        "a base nobody could read was reported as green — the failure this file "
+        "distinguishes 'clean' from 'could not measure' to avoid"
+    )
+
+
+def test_a_base_whose_run_has_not_concluded_says_so(mod, monkeypatch, capsys):
+    _read(mod, monkeypatch, FakeVotes(reviews=[]), _red_head(), cycle=CYCLE, base={
+        "conclusion": "", "status": "in_progress", "headSha": "x", "url": "y"})
+    out = capsys.readouterr().out
+    assert "has not concluded" in out
+    assert "concluded green" not in out
+
+
+def test_the_base_reading_answers_unmeasured_rather_than_raising(mod, monkeypatch):
+    """The reading's own failure mode: one missing fact does not cost the queue."""
+
+    def _boom(args):
+        raise RuntimeError("gh failed (rc=1): gh run list")
+
+    monkeypatch.setattr(mod, "_gh_json", _boom)
+    mod._BASE_RUNS.clear()
+    assert mod.base_run_health("argszero/emrg") is None
+
+    # An empty answer is not a passing base either: `run list` answering `[]` means no
+    # run was found, which is a fact about the lookup and not a verdict about master.
+    monkeypatch.setattr(mod, "_gh_json", lambda args: [])
+    mod._BASE_RUNS.clear()
+    assert mod.base_run_health("argszero/emrg") is None
+
+
+def test_a_red_head_does_not_call_a_re_run_pointless(mod, monkeypatch, capsys):
+    """A re-run is not only for a flake, and the row must not say it is.
+
+    Measured 2026-11-11: an upstream DNS window reddened master and every open pull
+    request for more than a hundred minutes, and the action that ends it *is* a
+    re-dispatch - which publishes no commit, so it voids no vote. The row used to name
+    one precondition ("only helps if the failure was a flake"), which is false for the
+    class of failure that lasts longest, and it contradicted the two siblings that
+    already prescribe the re-run and say why it is free: `check-vote-count.py` and
+    `check-merge-freshness.py`. A reader who trusts the exclusive claim parks a head
+    that a single dispatch would have cleared.
+
+    Both directions are pinned: the false exclusion is gone, and the fact that makes a
+    re-dispatch cheap is present - because removing the sentence alone would leave the
+    row asking for an action it never says is free.
+    """
+    _read(mod, monkeypatch, FakeVotes(reviews=[]), _red_head(), cycle=CYCLE, base={
+        "conclusion": "failure", "status": "completed",
+        "headSha": "bf1c9f60", "url": "https://example.test/run/red-base"})
+    out = capsys.readouterr().out
+    assert "only helps if the failure was a flake" not in out, (
+        "the ci-red row still claims a re-run helps only for a flake, which is false "
+        "for an upstream window - and the base note printed immediately before it "
+        "prescribes exactly the re-run the sentence just dismissed"
+    )
+    assert "publishes no commit" in out and "voids no vote" in out, (
+        "the row asks for a re-run without saying it is free: a reader who does not "
+        "know a re-dispatch publishes no commit has to weigh it against every vote "
+        "standing on the head, which is the cost the refresh remedy actually carries"
     )
 
 

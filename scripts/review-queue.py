@@ -444,6 +444,82 @@ def _gh_json(args: list[str]) -> object:
     return json.loads(proc.stdout)
 
 
+#: Master's latest run per repo, read at most once per process. A dict rather than one
+#: value because a caller may name another repo, and `None` is a value here: an
+#: unreadable base is a reading of its own, not a miss to retry.
+_BASE_RUNS: dict[str, dict | None] = {}
+
+
+def base_run_health(repo: str = REPO) -> dict | None:
+    """Master's latest workflow run, or `None` when it could not be read.
+
+    Asked apart from `freshness()` because the two answer different questions:
+    freshness asks whether *this head* contains master and says nothing about why the
+    head's CI is red. A repo-wide outage reds every open pull request at once, and this
+    branch used to answer that by pointing at `check-merge-plan-suite.py` - which reads
+    the *suite* on a candidate tree and cannot see the runners at all.
+
+    Measured 2026-11-11: three legs died inside the same step on the same DNS failure,
+    **master's own push run among them**, while a leg fifteen minutes earlier passed in
+    3m0s. Nothing this file printed distinguished that from a defect in the patch under
+    review, so two cycles read runs to a cause that was never about the commit.
+
+    `None` is returned rather than raised when `gh` cannot answer: the `ci-red` row is
+    still the right row, and a caveat reading "unmeasured" is honest where an exception
+    would trade the whole queue for one missing fact.
+    """
+    if repo in _BASE_RUNS:
+        return _BASE_RUNS[repo]
+    try:
+        raw = _gh_json(
+            [
+                "run", "list", "-R", repo, "--branch", "master", "--limit", "1",
+                "--json", "conclusion,status,headSha,url",
+            ]
+        )
+    except Exception:  # noqa: BLE001
+        _BASE_RUNS[repo] = None
+        return None
+    first = raw[0] if isinstance(raw, list) and raw else None
+    _BASE_RUNS[repo] = first if isinstance(first, dict) else None
+    return _BASE_RUNS[repo]
+
+
+def base_red_note(base: dict | None) -> str:
+    """What the base's own latest run says about a red head, as one clause.
+
+    Four outcomes, and they are not two. The base is **red** (an outage is on the
+    table), **green** (the head's red is its own), **not concluded** (the base's run is
+    still going, so nothing about it is known yet), or **unread** — and the last of
+    those is not the base being fine, which is why it gets its own words rather than an
+    empty string.
+    """
+    if base is None:
+        return (
+            " - and master's own latest run could not be read, so whether the base is red"
+            " is unmeasured here rather than answered"
+        )
+    conclusion = str(base.get("conclusion") or "")
+    if conclusion == "failure":
+        sha = str(base.get("headSha") or "")[:8]
+        url = str(base.get("url") or "")
+        return (
+            f" - and master's own latest run ({sha}) concluded red as well: {url}"
+            " - so this failure may be the base's rather than this head's, and the base's"
+            " run is the one to read first: it separates an outage from a defect in the"
+            " patch"
+        )
+    if conclusion == "success":
+        return (
+            " - master's own latest run concluded green, so a repo-wide outage is not"
+            " what this row is looking at"
+        )
+    return (
+        " - and master's own latest run has not concluded, so whether it holds the same"
+        " failure is not readable yet"
+    )
+
+
 def open_prs(repo: str = REPO) -> list[int]:
     """Every open PR number, in the order GitHub lists them (newest first).
 
@@ -1020,8 +1096,11 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
         return Action(
             kind="ci-red",
             why=reading.stale_reason
+            + base_red_note(base_run_health(repo))
             + " - not votable: a vote at this head would be a vote about a tree whose "
-              "CI ran red, and a re-run only helps if the failure was a flake. "
+              "CI ran red. A re-run is worth it when the failure was not this head's - "
+              "a flake, or a window that has since closed - and it publishes no commit, "
+              "so it voids no vote standing here. "
               "`gh pr checks` names the failing check, not its cause, so read the cause "
               "with the reading that answers - and before fixing anything, ask whether "
               "the row is the head's own, because a base-level failure turns every open "
