@@ -77,6 +77,7 @@ EXPECTED_H2 = [
     "## Agent context",
     "## Skills",
     "## How you work",
+    "## Before work that costs the host time",
     "## Memory",
     "## Session and history",
     "## Writing",
