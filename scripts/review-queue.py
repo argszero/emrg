@@ -1153,8 +1153,8 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
             why=reading.stale_reason
             + " - parked for this cycle: the run was never started, so a re-trigger is the "
               "request that was just refused and another dispatch spends the window on the "
-              "same refusal. Read this PR again next cycle, or once a run elsewhere on the "
-              "repository produces a job",
+              "same refusal. Read this PR again next cycle, or once this head's own run "
+              "produces a job",
             command=f"gh pr checks {pr} -R {repo}",
         )
     if reading.stale_read and reading.stale_kind == "no_verdict":

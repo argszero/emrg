@@ -477,13 +477,33 @@ def _ask_latest_run_for_head(head: str) -> dict | None:
     re-ask a *broken* call: a call that raises is not an empty answer, and must
     stay a failure rather than being retried into looking like a measurement.
     """
+    runs = _runs_for_head(head)
+    if not runs:
+        return None
+    return runs[-1]
+
+
+def _runs_for_head(head: str) -> list[dict]:
+    """Every `_VERDICT_WORKFLOW` run for this exact commit, oldest first.
+
+    One owner for the query, because two questions are asked of the same answer: the
+    verdict reads the **newest** run (`_ask_latest_run_for_head`), and the never-started
+    branch has to know whether any *other* run of that head is still alive
+    (`_unfinished_run_besides`). A second copy of this shape would be a second answer to
+    "which runs does this head have", and the two callers would drift.
+
+    The projection carries `status` for that second question. It costs nothing on the
+    verdict path - the caller reads `conclusion` - and a run's liveness cannot be read
+    from its `conclusion`, which is `None` both for a run that is queued and for one
+    GitHub never reported on.
+    """
     payload = _gh_json(
         [
             "api",
             f"repos/{REPO}/actions/runs?head_sha={head}&per_page=100",
             "--jq",
             "{runs: [.workflow_runs[] | {headSha: .head_sha, name, "
-            "createdAt: .created_at, conclusion, databaseId: .id}]}",
+            "createdAt: .created_at, status, conclusion, databaseId: .id}]}",
         ]
     )
     assert isinstance(payload, dict)
@@ -496,9 +516,45 @@ def _ask_latest_run_for_head(head: str) -> dict | None:
         and r.get("headSha") == head
         and r.get("name") == _VERDICT_WORKFLOW
     ]
-    if not matching:
+    return sorted(matching, key=lambda r: str(r.get("createdAt") or ""))
+
+
+#: The run statuses that mean "this run is still alive". Named rather than written as
+#: "not concluded", because an unrecognised status is a shape nobody has measured, and
+#: guessing it into "alive" would park a head for ever on a reading taken wrongly.
+_ALIVE_RUN_STATUSES = frozenset(
+    {"queued", "in_progress", "requested", "waiting", "pending"}
+)
+
+
+def _unfinished_run_besides(head: str, run_id: str) -> list[dict] | None:
+    """Runs of this same head that are still alive, apart from `run_id`; `None` if unreadable.
+
+    One head can carry several runs whose fates differ, and the newest is not always the
+    one that speaks for it. Measured 2026-11-12 on this repository: head `192428ad` was
+    pushed at 20:25:11Z and got `pull_request` run `43095937647`; a manual dispatch at
+    20:35:10Z created `43096918278`, which concluded `startup_failure` with no job at all.
+    `_ask_latest_run_for_head` reports the newest, so the refused dispatch spoke for a head
+    whose own push-event run was still queued and could still judge it - and the remedy's
+    wait condition pointed somewhere else instead of at that run.
+
+    So this reads the head, not the run, and the two states it tells apart are different
+    instructions: with a live sibling there is a judgment still coming, and without one the
+    head really is unjudged. `None` is "not measured", never "no sibling" - saying nothing
+    about a head's other runs when the list could not be read is the same defect pointing
+    the other way, and it is reported as unmeasured rather than as housekeeping.
+    """
+    try:
+        runs = _runs_for_head(head)
+    except RuntimeError:
         return None
-    return max(matching, key=lambda r: str(r.get("createdAt") or ""))
+    alive = [
+        r
+        for r in runs
+        if str(r.get("databaseId") or "") != str(run_id)
+        and str(r.get("status") or "") in _ALIVE_RUN_STATUSES
+    ]
+    return sorted(alive, key=lambda r: str(r.get("createdAt") or ""))
 
 
 def _run_jobs(run_id: str) -> list[dict] | None:
@@ -714,6 +770,30 @@ def check_pr(number: int) -> Verdict:
                 # remedy - a re-trigger - is the request this state already refused.
                 # Measured 2026-11-12: dispatch accepted (exit 0), run `43096918278`
                 # concluded `startup_failure` with `total_count: 0` jobs four minutes later.
+                #
+                # The sentence is about that **run**, and a head may carry others: the same
+                # head's push-event run was still queued when this one was refused, so what
+                # the reader is told to wait for has to be the head's live run and not "a
+                # run somewhere". `_unfinished_run_besides` is why.
+                others = _unfinished_run_besides(
+                    head_sha, str(run.get("databaseId") or "")
+                )
+                if others is None:
+                    head_note = (
+                        " - and this head's other runs could not be read, so whether some "
+                        "other run of it is still alive is **not measured here**"
+                    )
+                elif others:
+                    named = ", ".join(
+                        f"{r.get('databaseId')} ({r.get('status')})" for r in others
+                    )
+                    head_note = (
+                        f" - but this head is not unjudged yet: run {named} of the **same "
+                        "head** is still alive, so the verdict this head gets will be that "
+                        "run's, and that run - not one elsewhere - is what to wait for"
+                    )
+                else:
+                    head_note = ""
                 return Verdict(
                     **common,
                     stale=True,
@@ -724,6 +804,7 @@ def check_pr(number: int) -> Verdict:
                         "nothing ran, nothing was cancelled and nothing stopped - a workflow "
                         "that fails to start is the platform refusing the run, which is not a "
                         "job that judged nothing"
+                        f"{head_note}"
                         f"{_tree_note(stale_tree, status, behind_by, merge_base)}"
                     ),
                 )
@@ -1016,7 +1097,7 @@ def _remedy(pr: int, kind: str, price: Price, run_id: str = "") -> str:
             "it. Before spending another dispatch, ask whether any run on this repository is "
             "producing jobs: a dispatch the API accepts is not a run that started, and "
             f"`gh run view <run> --json jobs` answers `[]` for a run in this state. Read this "
-            "PR again next cycle, or once a run elsewhere concludes"
+            "PR again next cycle, or once this head's own run concludes"
         )
     if kind == _KIND_NO_VERDICT:
         return (
