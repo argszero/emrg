@@ -86,7 +86,27 @@ jobs:
           # that only the linter can supply (never write a comment line here that begins with
           # the word `# shellcheck`: this file's prose is shell to the linter, and a line
           # shaped like its directive is a parse error, measured 2026-10-10).
-          command -v shellcheck >/dev/null || (sudo apt-get update && sudo apt-get install -y shellcheck)
+          # The second carrier of the same defect (issue #2830): the download above is
+          # retried, and this install - the same network fetch, one step later - was not.
+          # It is masked on today's image only because the runner ships shellcheck, so a
+          # window that reached this line would red the leg exactly as the bubblewrap
+          # install did. Same bounded form, same fail-closed reason.
+          if ! command -v shellcheck >/dev/null; then
+            attempts=3
+            attempt=1
+            while [ "$attempt" -le "$attempts" ]; do
+              if sudo apt-get update && sudo apt-get install -y shellcheck; then
+                break
+              fi
+              if [ "$attempt" -ge "$attempts" ]; then
+                echo "::error::cannot install shellcheck after ${attempts} attempt(s) - the Ubuntu mirror did not answer; failing rather than skipping, so an upstream fault is visible"
+                exit 1
+              fi
+              echo "attempt ${attempt}/${attempts} failed; retrying in 5s" >&2
+              sleep 5
+              attempt=$((attempt + 1))
+            done
+          fi
           command -v shellcheck >/dev/null
           "$bin" -version
           probe="$(mktemp -d)"
@@ -125,7 +145,35 @@ jobs:
       # absent - so without this step the leg would report a skip and measure nothing.
       - name: Ensure bubblewrap (the Linux sandbox dialect's runner)
         run: |
-          command -v bwrap >/dev/null || (sudo apt-get update && sudo apt-get install -y bubblewrap)
+          # One unreachable-mirror window must not read as a defect in this repository.
+          # Measured 2026-11-11 (issue #2830): master's run 43051480347 died at this install
+          # with `Temporary failure resolving 'azure.archive.ubuntu.com'` after a 3m20s fetch
+          # at 7323 B/s, exit 100 - and the same step took down every open pull request's run
+          # in that window (43043686605, 43043484572, 43051487300). A red leg is not votable,
+          # so one upstream window freezes every open pull request at once with master reading
+          # red for no commit's fault.
+          #
+          # The retry is bounded, and it still fails closed: the assertion at the end of this
+          # step is what keeps the gate honest, so a failed install is never a skip.
+          if ! command -v bwrap >/dev/null; then
+            attempts=3
+            attempt=1
+            while [ "$attempt" -le "$attempts" ]; do
+              # The update is retried together with the install: an install cannot succeed on
+              # an index the update failed to refresh, so retrying only the install would
+              # spend its attempts against a stale list.
+              if sudo apt-get update && sudo apt-get install -y bubblewrap; then
+                break
+              fi
+              if [ "$attempt" -ge "$attempts" ]; then
+                echo "::error::cannot install bubblewrap after ${attempts} attempt(s) - the Ubuntu mirror did not answer; failing rather than skipping, so an upstream fault is visible"
+                exit 1
+              fi
+              echo "attempt ${attempt}/${attempts} failed; retrying in 5s" >&2
+              sleep 5
+              attempt=$((attempt + 1))
+            done
+          fi
           # Installing it is not enough. Ubuntu 23.10+ restricts **unprivileged user
           # namespaces** through AppArmor, and bwrap needs one before it can start any
           # command; with the restriction on, every invocation dies with
