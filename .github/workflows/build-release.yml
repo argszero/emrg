@@ -506,6 +506,36 @@ jobs:
           fi
           exit "$rc"
 
+      # ── bundle 落点：读本次构建的 pkg（issue #2806）──────────────────
+      # 这一步的主语是**这个 pkg 会不会把 bundle 装到别处**。组件包的 `<relocate>`
+      # 让 PackageKit 按 LaunchServices 决定落点、压过 install-location —— 跑过
+      # electron-builder 的机器上 GUI 被装进源码树的 emrg/gui/dist/mac-*/，install 树
+      # 收不到件、postinstall 静默跳过、安装器仍退出 0（`/var/log/install.log` 的
+      # `relocated to` 行留证）。pkg 只在打了 tag 时才存在，所以这条读数只能在这里。
+      # 判据是 **<relocate> 里的 bundle id**，不是元素在不在：全部标成不可重定位后
+      # pkgbuild 吐的是空的 `<relocate/>`（实测 2026-11-11，那一版守卫若要求元素缺席
+      # 就永远不可能通过）。
+      - name: Assert the pkg cannot relocate its bundles (macOS only)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKG="$(find dist/artifacts -maxdepth 1 -name 'EMRG-*-macos-*.pkg' | head -1)"
+          if [ -z "$PKG" ]; then
+            echo "::error::no EMRG-*-macos-*.pkg found in dist/artifacts — this step's subject is the pkg, and a release missing its macOS product must not be reported as success"
+            exit 1
+          fi
+          rc=0
+          uv run --no-sync python3 scripts/check-pkg-relocation.py "$PKG" || rc=$?
+          if [ "$rc" -eq 1 ]; then
+            echo "::error::$PKG lets PackageKit relocate one of its bundles (the identifiers are printed above), so the GUI lands wherever LaunchServices points instead of ~/.emrg/install — packaging/make-installer.sh must mark every bundle BundleIsRelocatable=false in the component plist before pkgbuild."
+          elif [ "$rc" -eq 2 ]; then
+            echo "::error::no component could be read out of $PKG — 'could not measure' is not a pass: the package must carry a component PackageInfo whose <relocate> this tool can parse."
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error::scripts/check-pkg-relocation.py exited $rc, which is neither this tool's fault code (1) nor its unmeasurable one (2) — the tool itself failed, so nothing was read about the artifact."
+          fi
+          exit "$rc"
+
       # ── pkg 签名（macOS only，P2；Secret 未配则跳过降级）──
       # ⚠️ productsign 需要 Developer ID Installer 身份（非 Application 身份）——
       # 实测 #462：MACOS_SIGNING_IDENTITY 配 Application 身份报
