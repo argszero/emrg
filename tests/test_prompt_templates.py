@@ -3390,6 +3390,47 @@ def test_the_claim_provenance_rule_lives_in_the_section_that_writes_into_a_proje
     )
 
 
+def test_the_shared_layer_rule_lives_in_the_section_that_implements_a_change() -> None:
+    """An edit keeps to the convention the project's existing code carries (issue #2821).
+
+    Four facts, each able to go missing on its own: the rule is present; it sits in §3.1.5 —
+    the section that owns what an edit must satisfy — rather than appended at the file's end;
+    and it states the two things a reader can act on, which files are other people's
+    foundation and how to tell a quirk from a defect. A rule reading only "follow the existing
+    pattern" leaves the reader where it found them, because the sibling that answers the
+    question is a file the reader did not open.
+    """
+    text = (PROMPTS_DIR / "open_source_prompt.md").read_text(encoding="utf-8")
+    section = _bounded_section(text, "##### 3.1.5 ", "##### 3.1.6 ")
+    lead = "The shared layer belongs to every other feature in the project"
+
+    assert lead in section, (
+        "§3.1.5 no longer carries the shared-layer rule, so a contributor makes a local fix "
+        "inside a file every other feature serves through, and the change is rejected as an "
+        "intrusion into a common layer rather than reviewed as a fix"
+    )
+    assert "copy its registration or wiring exactly" in section, (
+        "the rule no longer says how to enter — by the path a sibling of the same kind already "
+        'takes; without it "keep to the existing mechanism" is advice rather than a method'
+    )
+    assert "is the convention, so the outcome is a note in the delivery" in section, (
+        "the rule no longer gives the test that separates a quirk from a defect — the same "
+        "shape on an existing sibling — so a behaviour the project settled is 'fixed' and the "
+        "convention is lost with it"
+    )
+    assert "git diff --stat" in section, (
+        "the rule no longer names the self-check before the commit, which is the only one of "
+        "the four a reader can perform without having read the whole project"
+    )
+
+    # One home: §3.1.3 owns the *written* conventions, so this rule must not become a second
+    # statement of it — the phrase that opens it appears once in the whole template.
+    assert text.count(lead) == 1, (
+        f"the shared-layer rule is stated {text.count(lead)} times in open_source_prompt.md; "
+        "this template's own rule is that a fact lives in exactly one place"
+    )
+
+
 # ── the ios-app template's platform-feasibility rules ───────────────────────────────────────
 #
 # A feasibility conclusion decides a direction and a design, so it is the claim this template
