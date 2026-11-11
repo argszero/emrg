@@ -751,6 +751,42 @@ def test_the_cli_takes_exactly_one_of_branch_or_tag(tmp_path):
         assert "exactly one of --branch" in r.stdout, (argv, r.stdout)
 
 
+# -------------------------------- a publication stranded one request short
+
+
+def test_a_retry_finishes_when_the_remote_already_holds_the_tip(tmp_path):
+    """One outstanding request must complete, not report an internal fault.
+
+    Measured 2026-11-11 (issue #2819): a push refused at its ref write leaves exactly this
+    state - `POST /git/commits` has already stored the commit, so every retry finds the tip
+    on the remote with nothing left to upload and only the ref write outstanding.
+    """
+    mod = _load_module()
+    repo = _init_repo(tmp_path)
+    _write_file(repo, "docs/base.md", b"base\n")
+    root = _commit_all(repo, "base commit")
+    tip = _commit_all(repo, "second commit", new_file="docs/tip.md")
+    fake = FakeGitHub(repo)
+    fake.refs["refs/heads/feature/stranded"] = root
+    # the remote already carries the tip's commit: it was uploaded before the refusal
+    fake.objects[tip] = ("commit", b"<already on the remote>")
+
+    orig_api = mod.api
+    mod.api = fake
+    try:
+        result = mod.push_branch("x", "feature/stranded", "HEAD", False, cwd=repo)
+    finally:
+        mod.api = orig_api
+
+    assert result["result"] == "pushed"
+    assert result["sha"] == tip
+    assert result["content_identical"] is True
+    assert fake.refs["refs/heads/feature/stranded"] == tip
+    # the content was already there: re-uploading it is a request whose answer is known
+    uploads = [p for method, p in fake.log if method == "POST"]
+    assert uploads == [], f"a stranded publication uploaded again: {uploads}"
+
+
 # ------------------------------------------------- refusals the status cannot name
 
 
@@ -772,12 +808,12 @@ def _refused_ref_write(tmp_path, files: dict[str, bytes]):
     return mod, repo, fake
 
 
-def _push_against(mod, fake, repo):
+def _push_against(mod, fake, repo, branch: str = "feature/refused"):
     orig_api = mod.api
     mod.api = fake
     try:
         with pytest.raises(mod.PushError) as exc:
-            mod.push_branch("x", "feature/refused", "HEAD", False, cwd=repo)
+            mod.push_branch("x", branch, "HEAD", False, cwd=repo)
     finally:
         mod.api = orig_api
     return str(exc.value)
@@ -809,3 +845,106 @@ def test_a_ref_write_404_claims_no_scope_when_no_workflow_file_is_published(tmp_
     assert "workflow" not in message, message
     assert "Response body" in message, message
     assert "refs/heads/feature/refused" not in fake.refs
+
+
+def _stranded_retry(tmp_path, files: dict[str, bytes]):
+    """The state a refused ref write leaves: the tip is uploaded, the ref is behind it.
+
+    `POST /git/commits` runs before the ref write, so a refusal at the ref step strands
+    the publication one request short of finished. The fake reproduces exactly that: its
+    object store already holds the tip's commit while its ref still names the base.
+    """
+    mod = _load_module()
+    repo = _init_repo(tmp_path)
+    _write_file(repo, "docs/base.md", b"base\n")
+    base = _commit_all(repo, "base commit")
+    for rel, content in files.items():
+        _write_file(repo, rel, content)
+    tip = _commit_all(repo, "publish files")
+    fake = FakeGitHub(repo)
+    fake.refs["refs/heads/feature/stranded"] = base
+    fake.objects[tip] = ("commit", b"<already on the remote>")
+    return mod, repo, fake, base, tip
+
+
+def test_a_stranded_retry_names_the_workflow_scope_a_404_hides(tmp_path):
+    """A retry's refusal must name the scope the first attempt lost.
+
+    Measured 2026-11-11 (issue #2819, item 2): on a retry the ancestor walk stops *at*
+    the tip, so a diff of the walk's stopping point with the tip is empty by
+    construction - and the hint read that empty answer as "no workflow path", excluding
+    the one cause it exists to name for a commit that edits `.github/workflows/`.
+    """
+    mod, repo, fake, base, tip = _stranded_retry(
+        tmp_path, {".github/workflows/test.yml": b"jobs: {}\n"})
+    fake.fail_ref_writes = True
+
+    message = _push_against(mod, fake, repo, branch="feature/stranded")
+
+    assert "404" in message, message
+    assert "gh auth refresh -s workflow" in message, message
+    # the refusal left the ref where it was: nothing was published
+    assert fake.refs["refs/heads/feature/stranded"] == base
+
+
+def test_a_retry_creates_the_ref_when_the_refusal_left_none(tmp_path):
+    """Item 1 where no ref survived: one request outstanding, not "nothing to do".
+
+    A refused `POST /git/refs` creates no ref at all, so the retry's own walk finds the
+    tip on the remote with `base == local_tip`. Answering `no-op` there reports a
+    publication that never happened - the branch does not exist on the remote.
+    """
+    mod = _load_module()
+    repo = _init_repo(tmp_path)
+    _write_file(repo, "docs/base.md", b"base\n")
+    _commit_all(repo, "base commit")
+    tip = _commit_all(repo, "second commit", new_file="docs/tip.md")
+    fake = FakeGitHub(repo)
+    fake.objects[tip] = ("commit", b"<already on the remote>")
+
+    orig_api = mod.api
+    mod.api = fake
+    try:
+        result = mod.push_branch("x", "feature/stranded-new", "HEAD", False, cwd=repo)
+    finally:
+        mod.api = orig_api
+
+    assert result["result"] == "pushed", result
+    assert fake.refs["refs/heads/feature/stranded-new"] == tip
+    # the ref creation is a POST; re-uploading objects that are already there is not
+    uploads = [p for method, p in fake.log
+               if method == "POST" and p.rsplit("/", 1)[-1] != "refs"]
+    assert uploads == [], f"a stranded publication uploaded again: {uploads}"
+
+
+def test_a_stranded_publication_bounded_below_states_it_cannot_be_measured(tmp_path):
+    """A lower bound is not a measurement of the publication.
+
+    A refused attempt uploaded *every* commit of its publication, so a retried push of
+    three commits whose workflow edit is the middle one is bounded by the last commit
+    alone - and answering "no workflow path" from that bound is the vetoed defect one
+    variant later: measured 2026-11-11, where this state printed "read this as a
+    permission or ruleset refusal rather than a missing branch" for a publication that
+    adds `.github/workflows/test.yml` two commits below the tip.
+    """
+    mod = _load_module()
+    repo = _init_repo(tmp_path)
+    _write_file(repo, "docs/base.md", b"base\n")
+    _commit_all(repo, "base commit")
+    _write_file(repo, ".github/workflows/test.yml", b"jobs: {}\n")
+    middle = _commit_all(repo, "add workflow")
+    tip = _commit_all(repo, "docs after the workflow", new_file="docs/more.md")
+    fake = FakeGitHub(repo)
+    # the refused attempt uploaded every commit and lost only the ref write
+    for sha in (middle, tip):
+        fake.objects[sha] = ("commit", b"<already on the remote>")
+    fake.fail_ref_writes = True
+
+    message = _push_against(mod, fake, repo, branch="feature/stranded-multi")
+
+    assert "404" in message, message
+    # it must not assert a cause it did not measure ...
+    assert "read this as a permission or ruleset refusal" not in message, message
+    # ... and must leave open the one cause it cannot rule out
+    assert "cannot be ruled out" in message, message
+    assert "workflow" in message, message
