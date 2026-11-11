@@ -305,6 +305,22 @@ This is a rule about **capability**, and it is not a licence about **permission*
 spend money, change an account setting or sign anything as the host stays a stop-and-ask, whatever the
 browser shows.
 
+**A verification never reaches the project's live infrastructure.** The paragraphs above govern what a
+check establishes; this one governs what it may touch while establishing it. Where the project ships its
+own doubles — a fake CLI, a local stub server, a fixture, a recorded protocol trace — drive those, because
+they exist precisely so a contributor can exercise the real path with nothing real behind it.
+
+Never as part of a check: a production database or an account somebody is signed in to, a message, mail or
+payment that actually leaves, a listener attached to a service another person is using, or a repository and
+any other resource created or deleted for real. A script that would do any of that is read, not run, and
+where the project's own instructions say it arms only behind an explicit flag, that flag stays off.
+
+Nothing a run produces leaves with the work either — not a secret or a token, not a permissioned link, not a
+full configuration, a database, or a command's output, into the branch, the pull request or anything
+published from it. A check that genuinely needs the live system is not run, and the pull request says which
+direction could not be measured — the same obligation this section already places on a check that could not
+be taken at all.
+
 ##### 3.1.7 Commit and open the pull request
 
 Commit and branch names follow the project's conventions (§3.1.3); with none specified, use `fix/<description>` and `<scope>: <description>`.
