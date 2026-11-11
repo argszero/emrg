@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -4013,6 +4014,132 @@ def test_clean_tree_keeps_configured_sandbox(tmp_path):
                           identity=InstanceIdentity())
     assert asyncio.run(handler._effective_sandbox()) == "workspace-write"
     assert _git_out(repo, "stash", "list") == "", "a clean tree is never asked about loss"
+
+
+# ── A suspend must not stretch the interval (issue #2804) ──────────────
+# The instant a task is due is a wall-clock reading, while the wait that reaches it
+# is measured on the monotonic clock — on macOS that is `mach_absolute_time()`, which
+# stands still while the machine is suspended. Both clocks are injected here, so the
+# disagreement a closed lid causes is a reading rather than a suspended laptop.
+
+class _SuspendClock:
+    """A wall clock that jumps past a suspend while the monotonic clock stands still.
+
+    `jump` seconds are added to the wall clock once, `jump_after` seconds into the
+    reading. `monotonic` never moves: that is what `mach_absolute_time()` does while
+    the machine sleeps, and it is the whole reason a wait sized from the wall clock
+    can outlast the instant it was sized for.
+    """
+
+    def __init__(self, start: float, *, jump: float, jump_after: float = 0.0):
+        self._wall = start
+        self._jump = jump
+        self._jump_after = jump_after
+        self._since: float | None = None
+
+    def time(self) -> float:
+        if self._since is None:
+            self._since = time.monotonic()
+        if self._jump and time.monotonic() - self._since >= self._jump_after:
+            self._wall += self._jump
+            self._jump = 0.0
+        return self._wall
+
+    def monotonic(self) -> float:
+        return 0.0
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+def test_a_suspend_does_not_stretch_the_interval(monkeypatch):
+    """Two hours out, with three hours of wall clock passing and no monotonic time.
+
+    The wait has to end: the wall clock says the instant passed. A single
+    whole-interval `asyncio.wait_for` never ends here, because it is measured on the
+    clock that did not move — that is the defect, and this is the reading of it.
+    """
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "SLEEP_SLICE_SECONDS", 0.02)
+    clock = _SuspendClock(1_000_000.0, jump=3 * 3600, jump_after=0.05)
+    monkeypatch.setattr(mod, "time", clock)
+    handler = make_handler(name="emrg-task", interval=7200)
+    due_at = clock.time() + 7200  # two hours out, on the wall clock
+
+    async def _drive():
+        return await asyncio.wait_for(handler._wait_until(due_at), timeout=5.0)
+
+    manual = asyncio.run(_drive())
+
+    assert manual is False, "the instant arrived — no trigger was set"
+    assert clock.time() >= due_at, (
+        "the wait has to end because the wall clock passed the instant; if it ended "
+        "for any other reason this test is not measuring the suspend"
+    )
+
+
+def test_the_slice_is_what_bounds_the_wait(monkeypatch):
+    """The control for the test above: same clocks, same instant, no slice.
+
+    Only `SLEEP_SLICE_SECONDS` differs, and it is large enough to cover the whole
+    interval. This one must not return — otherwise the test above would be measuring
+    something other than the slice.
+    """
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "SLEEP_SLICE_SECONDS", 3600.0)
+    clock = _SuspendClock(1_000_000.0, jump=3 * 3600, jump_after=0.05)
+    monkeypatch.setattr(mod, "time", clock)
+    handler = make_handler(name="emrg-task", interval=7200)
+    due_at = clock.time() + 7200
+
+    async def _drive():
+        await asyncio.wait_for(handler._wait_until(due_at), timeout=1.0)
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(_drive())
+
+
+def test_a_manual_trigger_still_ends_the_wait(monkeypatch):
+    """Slicing must not cost the trigger what the wait was interruptible for."""
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "SLEEP_SLICE_SECONDS", 0.02)
+    handler = make_handler(name="emrg-task", interval=7200)
+
+    async def _drive():
+        waiting = asyncio.create_task(handler._wait_until(time.time() + 7200))
+        await asyncio.sleep(0.05)
+        handler._trigger_event.set()
+        return await asyncio.wait_for(waiting, timeout=2.0)
+
+    assert asyncio.run(_drive()) is True, "a triggered wait reports the trigger"
+
+
+def test_status_reports_the_instant_behind_the_countdown():
+    """A duration alone cannot say whether the frame is live (issue #2804)."""
+    handler = make_handler(name="emrg-task", interval=7200)
+    instant = time.time() + 7200
+    handler._next_run_at = instant
+
+    status = handler.status()
+
+    assert status["next_run_at"] == instant
+    assert status["next_run_in_seconds"] == pytest.approx(7200, abs=2)
+
+
+def test_a_row_with_no_handler_carries_the_same_keys():
+    """`_idle_status` exists so a client never has to know whether a handler started."""
+    live = make_handler(name="emrg-task", interval=7200).status()
+    idle = TaskScheduler(InstanceIdentity())._idle_status(
+        {"name": "emrg-task", "type": "evolution", "config": {}, "interval": 7200}
+    )
+
+    assert set(idle) == set(live), (
+        "the two shapes must stay the same: a key present on one and absent on the "
+        "other is a client that has to know which it is looking at"
+    )
 
 
 # ── No-progress watchdog (rant 2026-09-29T15:52:43, requirement 5) ──────

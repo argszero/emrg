@@ -468,6 +468,18 @@ TABLE_POLL_SECONDS = 2.0
 #: product reason: this is "how long may a hand edit take to matter", not a new knob.
 TABLE_RETRY_SECONDS = 30
 
+#: The longest single wait a handler takes before it reads the wall clock again.
+#:
+#: The instant a task is due is a wall-clock reading while the wait that reaches it is
+#: measured on the monotonic clock — `time.monotonic()` is `mach_absolute_time()` on
+#: macOS — and that clock stands still while the machine is suspended. One wait for a
+#: whole interval therefore makes the machine owe its sleep back as awake time: an
+#: interval of two hours that spans a two-hour suspend waits almost two hours more
+#: after the lid opens. Taken in slices, the machine wakes owing at most one slice,
+#: because the first reading of the wall clock after the wake already sees the instant
+#: passed. A slice only ever shortens the wait; what ends it is still the instant.
+SLEEP_SLICE_SECONDS = 30.0
+
 # ── The stall watchdog (rant 2026-09-29T15:52:43, requirement 5) ──
 #
 # A cycle that stops producing frames must not hold its slot forever. Measured
@@ -2700,21 +2712,11 @@ class TaskHandler:
             # Wait for interval or manual trigger (interruptible)
             # A poll is internal: the next run reported stays the task's own cadence, so
             # `next_run_at` never claims the task runs more often than it does.
-            self._next_run_at = natural_due if _polled else time.time() + wait_timeout
+            due_at = time.time() + wait_timeout
+            self._next_run_at = natural_due if _polled else due_at
             self._save_next_run_state()  # survives daemon restarts (rant 2026-08-25T09:25:32 ④)
-            manual_trigger = False
-            try:
-                await asyncio.wait_for(
-                    self._trigger_event.wait(),
-                    timeout=wait_timeout,
-                )
-                # Manual trigger fired — clear and proceed
-                self._trigger_event.clear()
-                manual_trigger = True
-                self._logger.debug(
-                    "TaskHandler[%s] manually triggered", self.name
-                )
-            except asyncio.TimeoutError:
+            manual_trigger = await self._wait_until(due_at)
+            if not manual_trigger:
                 # Normal scheduled run — unless this wait was a `when` poll, in which case
                 # the run has to be earned: a holding condition wakes the task, and one
                 # that does not re-arms the remainder of its own cadence (issue #2592).
@@ -2769,6 +2771,38 @@ class TaskHandler:
         self._clear_runtime_state()
         await self._write_final_summary()
         self._logger.info("TaskHandler[%s] stopped", self.name)
+
+    async def _wait_until(self, due_at: float) -> bool:
+        """Wait until the wall-clock instant `due_at`, or until a manual trigger.
+
+        Returns True when the trigger woke the wait, False when the instant arrived.
+
+        The wait is taken in slices of `SLEEP_SLICE_SECONDS`, each followed by a fresh
+        reading of the wall clock (issue #2804). The instant is a wall-clock reading
+        while the wait itself is measured on the monotonic clock, and those two
+        disagree across a suspend: `time.monotonic()` is `mach_absolute_time()` on
+        macOS, which does not advance while the machine sleeps. One wait for a whole
+        interval therefore owes the machine's sleep back as awake time. A slice bounds
+        that to one slice, and a task already past its instant returns at once.
+
+        A slice only ever shortens the wait. What ends it is still `due_at`, so the
+        cadence a task was armed for is unchanged in either direction (issue #2592).
+        """
+        while True:
+            slice_seconds = min(SLEEP_SLICE_SECONDS, due_at - time.time())
+            if slice_seconds <= 0:
+                return False
+            try:
+                await asyncio.wait_for(
+                    self._trigger_event.wait(),
+                    timeout=slice_seconds,
+                )
+            except asyncio.TimeoutError:
+                continue
+            # Manual trigger fired — clear and proceed
+            self._trigger_event.clear()
+            self._logger.debug("TaskHandler[%s] manually triggered", self.name)
+            return True
 
     async def _run_cycle_bounded(self) -> str:
         """Run one cycle under its progress marker; return how it ended.
@@ -2909,6 +2943,11 @@ class TaskHandler:
             "running": self._cycle_running,
             "started_at": started_at,
             "next_run_in_seconds": remaining,
+            # Issue #2804: the instant `remaining` was derived from. A duration alone
+            # cannot say whether the frame is live — a client that keeps a number on a
+            # screen needs the instant to tell a frame that is merely old from one whose
+            # task is genuinely due.
+            "next_run_at": self._next_run_at,
             "interval": self.interval,
             "effective_interval": self._effective_interval(),
             "schedule": self._task.get("schedule"),
@@ -3810,6 +3849,7 @@ class TaskScheduler:
             "running": False,
             "started_at": None,
             "next_run_in_seconds": None,
+            "next_run_at": None,
             "interval": record.get("interval", DEFAULT_INTERVAL),
             "effective_interval": effective_interval(record),
             "schedule": record.get("schedule"),
