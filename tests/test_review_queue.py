@@ -625,6 +625,38 @@ def test_the_base_reading_answers_unmeasured_rather_than_raising(mod, monkeypatc
     assert mod.base_run_health("argszero/emrg") is None
 
 
+def test_a_red_head_does_not_call_a_re_run_pointless(mod, monkeypatch, capsys):
+    """A re-run is not only for a flake, and the row must not say it is.
+
+    Measured 2026-11-11: an upstream DNS window reddened master and every open pull
+    request for more than a hundred minutes, and the action that ends it *is* a
+    re-dispatch - which publishes no commit, so it voids no vote. The row used to name
+    one precondition ("only helps if the failure was a flake"), which is false for the
+    class of failure that lasts longest, and it contradicted the two siblings that
+    already prescribe the re-run and say why it is free: `check-vote-count.py` and
+    `check-merge-freshness.py`. A reader who trusts the exclusive claim parks a head
+    that a single dispatch would have cleared.
+
+    Both directions are pinned: the false exclusion is gone, and the fact that makes a
+    re-dispatch cheap is present - because removing the sentence alone would leave the
+    row asking for an action it never says is free.
+    """
+    _read(mod, monkeypatch, FakeVotes(reviews=[]), _red_head(), cycle=CYCLE, base={
+        "conclusion": "failure", "status": "completed",
+        "headSha": "bf1c9f60", "url": "https://example.test/run/red-base"})
+    out = capsys.readouterr().out
+    assert "only helps if the failure was a flake" not in out, (
+        "the ci-red row still claims a re-run helps only for a flake, which is false "
+        "for an upstream window - and the base note printed immediately before it "
+        "prescribes exactly the re-run the sentence just dismissed"
+    )
+    assert "publishes no commit" in out and "voids no vote" in out, (
+        "the row asks for a re-run without saying it is free: a reader who does not "
+        "know a re-dispatch publishes no commit has to weigh it against every vote "
+        "standing on the head, which is the cost the refresh remedy actually carries"
+    )
+
+
 def test_a_head_with_no_run_is_retriggered_not_refreshed(mod, monkeypatch, capsys):
     """A re-trigger fires a run on the same head and keeps the votes; a refresh
     would spend them for a question the re-trigger answers."""

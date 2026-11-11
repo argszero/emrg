@@ -1098,7 +1098,9 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
             why=reading.stale_reason
             + base_red_note(base_run_health(repo))
             + " - not votable: a vote at this head would be a vote about a tree whose "
-              "CI ran red, and a re-run only helps if the failure was a flake. "
+              "CI ran red. A re-run is worth it when the failure was not this head's - "
+              "a flake, or a window that has since closed - and it publishes no commit, "
+              "so it voids no vote standing here. "
               "`gh pr checks` names the failing check, not its cause, so read the cause "
               "with the reading that answers - and before fixing anything, ask whether "
               "the row is the head's own, because a base-level failure turns every open "
