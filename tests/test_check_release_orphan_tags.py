@@ -1,0 +1,291 @@
+"""`scripts/check-release-orphan-tags.py` -- the fleet reading over the release collection.
+
+`scripts/check-release-published.py` answers one tag. The question this file exists for is
+the one no cycle thought to ask: *is any tag on this repository published-less right now?*
+It was answered by hand exactly once, and the hand answer was wrong by two: the cycle that
+found `v0.3.51`'s skipped release job asked the repository the next cycle and got **three**
+orphans -- `v0.3.51`, `v0.3.34`, `v0.3.8` (measured 2026-11-12 against `argszero/emrg`).
+
+What is pinned here, and why each one is a separate arm:
+
+* the **difference** is read from two paginated collections, and both keep `--paginate` and
+  a full page size -- this repository holds more than one page of releases, so dropping
+  either would report every tag past the first page as an orphan;
+* every candidate is **confirmed** by the per-tag endpoint before it is reported, so a
+  short collection cannot name a published release as missing; and a candidate the
+  endpoint contradicts is `not measurable`, never a fault and never clean;
+* the three unusable states (draft, prerelease, no asset) are separate faults, because a
+  draft is not an orphan -- it is invisible to `releases/latest`, which is a different
+  sentence with a different remedy;
+* an empty tag collection is `not measurable`: a scan whose subject is empty has measured
+  nothing, which is not the verdict that nothing is wrong.
+
+The fakes never touch the network: `_gh` is replaced by a routing table keyed on the
+argument list, and every payload below is shaped like the one the live endpoint returns
+(measured 2026-11-12).
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = REPO_ROOT / "scripts" / "check-release-orphan-tags.py"
+
+REPO = "argszero/emrg"
+
+
+def _load_module():
+    spec = importlib.util.spec_from_file_location("check_release_orphan_tags", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.fixture
+def mod():
+    return _load_module()
+
+
+class FakeGh:
+    """`_gh` replaced by a routing table: prefix of argv -> verbatim text or exception."""
+
+    def __init__(self, routes: dict[tuple[str, ...], object]) -> None:
+        self.routes = routes
+        self.calls: list[list[str]] = []
+
+    def __call__(self, args: list[str]) -> str:
+        self.calls.append(list(args))
+        for prefix, payload in self.routes.items():
+            if tuple(args[: len(prefix)]) == prefix:
+                if isinstance(payload, BaseException):
+                    raise payload
+                return payload  # already text: both readers parse lines themselves
+        raise AssertionError(f"unrouted gh call: gh {' '.join(args)}")
+
+    def called(self, *prefix: str) -> bool:
+        return any(tuple(c[: len(prefix)]) == prefix for c in self.calls)
+
+
+#: The two collection reads, by the exact argv prefix each one is asked with. Keying on the
+#: full prefix is what lets the pagination arms below assert on it too.
+TAGS = ("api", f"repos/{REPO}/tags?per_page=100")
+RELEASES = ("api", f"repos/{REPO}/releases?per_page=100")
+
+
+def _tags(*names: str) -> str:
+    return "".join(f"{n}\n" for n in names)
+
+
+def _releases(*rows: tuple[str, str, str, str]) -> str:
+    """rows are (tag, draft, prerelease, assets) -- the @tsv shape the reader parses."""
+    return "".join("\t".join(row) + "\n" for row in rows)
+
+
+def _published(*names: str) -> tuple:
+    return tuple((n, "false", "false", "9") for n in names)
+
+
+def _routes(tags: str, releases: str, extra=None) -> dict:
+    routes = {TAGS: tags, RELEASES: releases}
+    if extra:
+        routes.update(extra)
+    return routes
+
+
+def _check(mod, monkeypatch, capsys, routes, only=None):
+    fake = FakeGh(routes)
+    monkeypatch.setattr(mod, "_gh", fake)
+    code = mod.check(REPO, only)
+    return code, capsys.readouterr().out, fake
+
+
+def _confirmed_absent(mod, tag) -> BaseException:
+    """The 404 `_gh` builds from a real call: process code 1, the status in the message."""
+    return mod.GhError(1, ["api", f"repos/{REPO}/releases/tags/{tag}"],
+                       "gh: Not Found (HTTP 404)", http_status=404)
+
+
+# --------------------------------------------------------------------------- 0
+
+
+def test_every_tag_published_is_the_only_pass(mod, monkeypatch, capsys):
+    routes = _routes(_tags("v0.3.2", "v0.3.1"), _releases(*_published("v0.3.2", "v0.3.1")))
+    code, out, _ = _check(mod, monkeypatch, capsys, routes)
+    assert code == 0
+    assert out.splitlines()[0] == f"repo: {REPO}"
+    assert "tags read: 2" in out
+    assert "OK: all 2 tag(s) read carry a published release" in out
+
+
+# --------------------------------------------------------------------------- 1
+
+
+def test_a_tag_with_no_release_is_named_with_the_per_tag_reading(mod, monkeypatch, capsys):
+    """The whole point: the orphan is named, and the remedy explains it rather than guesses."""
+    routes = _routes(
+        _tags("v0.3.51", "v0.3.50"),
+        _releases(*_published("v0.3.50")),
+        {("api", f"repos/{REPO}/releases/tags/v0.3.51"): _confirmed_absent(mod, "v0.3.51")},
+    )
+    code, out, fake = _check(mod, monkeypatch, capsys, routes)
+    assert code == 1
+    assert "tag: v0.3.51 -- NO RELEASE" in out
+    assert "v0.3.50 -- NO RELEASE" not in out, "a published tag must not be named"
+    assert "scripts/check-release-published.py <tag>" in out
+    assert "uv run --no-sync python3" in out, "a printed command carries its runner"
+    assert fake.called("api", f"repos/{REPO}/releases/tags/v0.3.51")
+
+
+def test_every_candidate_is_confirmed_so_the_collection_alone_never_convicts(
+    mod, monkeypatch, capsys
+):
+    """Absence read from a collection is a screen; the per-tag call is the verdict."""
+    routes = _routes(
+        _tags("v0.3.34", "v0.3.8"),
+        _releases(),
+        {
+            ("api", f"repos/{REPO}/releases/tags/v0.3.34"): _confirmed_absent(mod, "v0.3.34"),
+            ("api", f"repos/{REPO}/releases/tags/v0.3.8"): _confirmed_absent(mod, "v0.3.8"),
+        },
+    )
+    code, out, fake = _check(mod, monkeypatch, capsys, routes)
+    assert code == 1
+    assert "tag: v0.3.34 -- NO RELEASE" in out and "tag: v0.3.8 -- NO RELEASE" in out
+    assert fake.called("api", f"repos/{REPO}/releases/tags/v0.3.34")
+    assert fake.called("api", f"repos/{REPO}/releases/tags/v0.3.8")
+
+
+def test_a_draft_is_its_own_fault_not_an_orphan(mod, monkeypatch, capsys):
+    routes = _routes(
+        _tags("v0.3.1"), _releases(("v0.3.1", "true", "false", "8"))
+    )
+    code, out, fake = _check(mod, monkeypatch, capsys, routes)
+    assert code == 1
+    assert "release unusable: it is a DRAFT" in out
+    assert "NO RELEASE" not in out
+    assert not fake.called("api", f"repos/{REPO}/releases/tags/v0.3.1"), (
+        "a draft is present in the collection, so there is nothing to confirm"
+    )
+
+
+def test_a_prerelease_is_its_own_fault(mod, monkeypatch, capsys):
+    routes = _routes(_tags("v0.3.1"), _releases(("v0.3.1", "false", "true", "9")))
+    code, out, _ = _check(mod, monkeypatch, capsys, routes)
+    assert code == 1
+    assert "PRERELEASE" in out
+
+
+def test_a_release_with_no_asset_is_a_fault(mod, monkeypatch, capsys):
+    """The v0.3.1 incident: eight of nine uploads, and `other side closed`."""
+    routes = _routes(_tags("v0.3.1"), _releases(("v0.3.1", "false", "false", "0")))
+    code, out, _ = _check(mod, monkeypatch, capsys, routes)
+    assert code == 1
+    assert "carries no asset" in out
+
+
+# --------------------------------------------------------------------------- 2
+
+
+def test_an_empty_tag_collection_is_not_measurable_never_clean(mod, monkeypatch, capsys):
+    routes = _routes(_tags(), _releases())
+    code, out, _ = _check(mod, monkeypatch, capsys, routes)
+    assert code == 2
+    assert "no tags at all" in out
+    assert "not a pass" in out
+    assert "OK" not in out
+
+
+def test_a_candidate_the_endpoint_contradicts_is_not_measurable(mod, monkeypatch, capsys):
+    """The collection was short of its own subject: its premise is gone, so it decides nothing."""
+    routes = _routes(
+        _tags("v0.3.50"), _releases(), {("api", f"repos/{REPO}/releases/tags/v0.3.50"): "{}"}
+    )
+    code, out, _ = _check(mod, monkeypatch, capsys, routes)
+    assert code == 2
+    assert "did not appear in the" in out and "answers that a release exists" in out
+    assert "not a pass" in out
+    assert "NO RELEASE" not in out, "a contradicted candidate must never be printed as a fault"
+
+
+def test_a_confirmation_that_fails_to_answer_is_not_measurable(mod, monkeypatch, capsys):
+    routes = _routes(
+        _tags("v0.3.51"),
+        _releases(),
+        {
+            ("api", f"repos/{REPO}/releases/tags/v0.3.51"): mod.GhError(
+                1, ["api"], "gh: Server Error (HTTP 502)", http_status=502
+            )
+        },
+    )
+    code, out, _ = _check(mod, monkeypatch, capsys, routes)
+    assert code == 2
+    assert "not measurable" in out
+    assert "FAULT" not in out
+
+
+def test_gh_missing_is_not_measurable(mod, monkeypatch, capsys):
+    def boom(args):
+        raise mod.GhError(None, args, "gh is not available on this machine (No such file)")
+
+    monkeypatch.setattr(mod, "_gh", boom)
+    code = mod.check(REPO, None)
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "not measurable" in out and "not a pass" in out
+
+
+def test_an_absent_tag_asked_for_by_name_is_not_measurable(mod, monkeypatch, capsys):
+    routes = _routes(_tags("v0.3.50"), _releases(*_published("v0.3.50")))
+    code, out, _ = _check(mod, monkeypatch, capsys, routes, only="v9.9.9")
+    assert code == 2
+    assert "not in the 1 tags read" in out
+    assert "nothing was compared" in out
+
+
+# ---------------------------------------------------------------- the window, which is not
+# ---------------------------------------------------------------------------- the subject
+
+
+def test_both_collections_are_read_paginated_at_a_full_page(mod, monkeypatch, capsys):
+    """This repo holds more than one page of releases.
+
+    Dropping `--paginate`, or lowering the page size, makes every tag past the first page
+    read as an orphan -- a loud fault about published releases, and the expensive direction
+    to be wrong in. Asserted on the argv because that is the only place it is visible.
+    """
+    routes = _routes(_tags("v0.3.2"), _releases(*_published("v0.3.2")))
+    _code, _out, fake = _check(mod, monkeypatch, capsys, routes)
+    for prefix in (TAGS, RELEASES):
+        call = next(c for c in fake.calls if tuple(c[:2]) == prefix)
+        assert "--paginate" in call, f"{prefix} must be read paginated"
+        assert "per_page=100" in prefix[1]
+        assert call[2] == "--paginate"
+
+
+def test_the_counts_actually_read_are_printed_before_any_verdict(mod, monkeypatch, capsys):
+    """A reading has to name its subject size; a short collection then reads as a short one."""
+    routes = _routes(_tags("v0.3.2", "v0.3.1"), _releases(*_published("v0.3.2", "v0.3.1")))
+    _code, out, _ = _check(mod, monkeypatch, capsys, routes)
+    lines = out.splitlines()
+    assert any(l.startswith("tags read: 2") for l in lines)
+    assert any(l.startswith("releases read: 2") for l in lines)
+    assert "drafts included" in out
+
+
+def test_a_narrowed_subject_still_reads_the_whole_collection(mod, monkeypatch, capsys):
+    """`--tag` narrows what is reported, never what is known: a tag outside a short list
+    would otherwise read as an orphan."""
+    routes = _routes(_tags("v0.3.51", "v0.3.50"), _releases(*_published("v0.3.50")),
+                     {("api", f"repos/{REPO}/releases/tags/v0.3.51"):
+                      _confirmed_absent(mod, "v0.3.51")})
+    code, out, _ = _check(mod, monkeypatch, capsys, routes, only="v0.3.51")
+    assert code == 1
+    assert "tags read: 2" in out
+    assert "v0.3.50 -- NO RELEASE" not in out
