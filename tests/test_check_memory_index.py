@@ -876,3 +876,289 @@ def test_a_list_index_says_the_cell_reading_had_no_subject(mod, tmp_path, capsys
     out = capsys.readouterr().out
     assert "no table row, so the cell reading had no subject here" in out, out
     assert "the cell reading had no subject" in out.split("OK:")[-1], out
+
+
+# ── the sixth reading: a detail file no row names ─────────────────────────────
+
+
+def _entry(
+    tmp_path: Path, name: str, status: str | None = "active", entry_id: str | None = None
+) -> None:
+    """Write a detail file beside the index, with a frontmatter status.
+
+    Not `_detail`, because the sixth reading's subject is *which* files carry
+    `status: active`: a fixture written without frontmatter is out of scope, and one that
+    silently stamped `active` everywhere could not arm the retirement case below.
+
+    `entry_id` defaults to the file's stem, the slug shape the store writes when the two
+    agree. A caller passes it to write the other spelling - an id in front of a longer file
+    name (`id: 1a7c4f30` beside `1a7c4f30-identity-github-role.md`) - which is the one this
+    host's index actually names, or passes `""` for an entry whose frontmatter carries no
+    `id:` line at all, the shape a stem-named row indexes.
+    """
+    if not status:
+        block = ""
+    elif entry_id == "":
+        block = f"---\nstatus: {status}\n---\n"
+    else:
+        ident = name[:-3] if entry_id is None else entry_id
+        block = f"---\nid: {ident}\nstatus: {status}\n---\n"
+    (tmp_path / name).write_text(f"{block}# {name}\n", encoding="utf-8")
+
+
+def test_a_detail_file_a_row_names_is_not_reported(mod, tmp_path, capsys) -> None:
+    """The ordinary state, positively: the report counts what it read.
+
+    An instrument that only ever fires cannot be told from one that fires on everything,
+    so the clean case asserts the per-index count and the summary's coverage clause.
+    """
+    _entry(tmp_path, "a.md")
+    _entry(tmp_path, "b.md")
+    path = _index(
+        tmp_path, "index.md", ["# Memory Index", "", "- [A](a.md)", "- [B](b.md)"]
+    )
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "detail files 2, named nowhere: 0" in out, out
+    assert "every active detail file is named by a row (2 read), by its file name or by " \
+        "the id its frontmatter carries" in out, out
+
+
+def test_a_detail_file_no_row_names_is_reported_with_its_name(mod, tmp_path, capsys) -> None:
+    """The failing half, naming the file the reader has to go and index.
+
+    This is the state the reading exists for: the entry is written, the work is done, and
+    the index - the only map of the store - does not lead to it.
+    """
+    _entry(tmp_path, "a.md")
+    _entry(tmp_path, "b.md")
+    path = _index(tmp_path, "index.md", ["# Memory Index", "", "- [A](a.md)"])
+
+    assert mod.main([str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "detail files 2, named nowhere: 1" in out, out
+    assert "detail file b.md is named by no row" in out, out
+    assert "detail file a.md" not in out, "the named file must not be reported: " + out
+
+
+def test_a_file_named_inside_a_code_span_is_named(mod, tmp_path, capsys) -> None:
+    """Named, not linked: a merged row's backticks are the shape the rule prescribes.
+
+    The compaction rule requires a merged row to keep naming the files it replaced, and
+    this host's index does exactly that inside code spans. A link-only predicate would
+    report an index as holding an unindexed entry for following its own instructions.
+    """
+    _entry(tmp_path, "a.md")
+    _entry(tmp_path, "b.md")
+    path = _index(
+        tmp_path, "index.md", ["# Memory Index", "", "- [A](a.md) (+ `b.md`, `c.md`)"]
+    )
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "detail files 2, named nowhere: 0" in out, out
+
+
+def test_a_retired_detail_file_is_out_of_scope(mod, tmp_path, capsys) -> None:
+    """Retiring an entry is a legitimate way to leave it unnamed.
+
+    The index lists active entries only, so `status: merged` is the rule's own other exit,
+    and a file with no frontmatter is not an entry the store wrote. Without this arm the
+    reading would demand a row for every file kept for provenance.
+    """
+    _entry(tmp_path, "a.md")
+    _entry(tmp_path, "gone.md", status="merged")
+    _entry(tmp_path, "older.md", status="superseded")
+    _entry(tmp_path, "bare.md", status=None)
+    path = _index(tmp_path, "index.md", ["# Memory Index", "", "- [A](a.md)"])
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "detail files 1, named nowhere: 0" in out, out
+
+
+def test_an_index_with_no_active_detail_file_says_so(mod, tmp_path, capsys) -> None:
+    """A zero must not read as a pass, in the report and in the summary line.
+
+    The discipline the cell and link readings already follow: an index standing alone in a
+    directory has no detail file to be a map of, and both lines say that rather than
+    printing a count of nothing as a verdict.
+    """
+    _entry(tmp_path, "retired.md", status="merged")
+    path = _index(
+        tmp_path,
+        "index.md",
+        ["# Memory Index", "", "| id | note |", "| --- | --- |", "| a1 | see none |"],
+    )
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "detail files 0, named nowhere: 0" in out, out
+    assert "the detail reading had no subject here" in out, out
+    assert "the detail reading had no subject" in out.split("OK:")[-1], out
+
+
+def test_a_file_named_by_its_id_is_named(mod, tmp_path, capsys) -> None:
+    """The store's own spelling: the row carries the entry's id, the file carries a slug.
+
+    Measured 2026-11-11 on this host: `MEMORY.md` names 204 of 207 active detail files by the
+    bare `id` their frontmatter declares and 4 by file name, so a name-only predicate printed
+    `named nowhere: 203` where a census matching both spellings finds 3. The quoted id form is
+    the one most of those files carry, so this arm writes it quoted and the next writes it bare.
+    """
+    _entry(tmp_path, "1a7c4f30-identity-github-role.md", entry_id='"1a7c4f30"')
+    path = _index(
+        tmp_path,
+        "index.md",
+        ["# Memory Index", "", "| id | note |", "| --- | --- |", "| `1a7c4f30` | role |"],
+    )
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "detail files 1, named nowhere: 0" in out, out
+
+
+def test_a_file_named_by_its_name_alone_is_named(mod, tmp_path, capsys) -> None:
+    """The other spelling, pinned on its own: the row names the file and its id matches nothing.
+
+    Without this arm the two spellings are only ever satisfied together - the fixtures around
+    it give an id that matches the same row - so deleting the file-name branch would leave every
+    test green. The store does write that spelling: a row that names a file directly, and the
+    compaction protocol's requirement that a merged row keep naming every file it replaced.
+    """
+    _entry(tmp_path, "a-long-file-name.md", entry_id="zzz99999")
+    path = _index(tmp_path, "index.md", ["# Memory Index", "", "- [A](a-long-file-name.md)"])
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "detail files 1, named nowhere: 0" in out, out
+
+
+def test_an_id_that_is_only_a_prefix_does_not_name_the_entry(mod, tmp_path, capsys) -> None:
+    """A longer id is a different entry, so it may not answer for the shorter one.
+
+    A file name keeps the substring test the docstring's limits section describes; an id is
+    matched at its boundaries, and this is the arm that buys it. Without the boundary a
+    substring test over ids would read `cyc…-2345571` as naming `cyc…-234557` - the misreading
+    a sibling guard already paid for on 2026-10-05.
+    """
+    _entry(tmp_path, "abc12345-x.md", entry_id="abc12345")
+    path = _index(
+        tmp_path,
+        "index.md",
+        [
+            "# Memory Index", "", "| id | note |", "| --- | --- |",
+            "| abc123451 | a different entry |",
+        ],
+    )
+
+    assert mod.main([str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "detail files 1, named nowhere: 1" in out, out
+    assert "detail file abc12345-x.md is named by no row" in out, out
+
+
+def test_a_file_named_by_its_stem_in_a_table_cell_is_named(mod, tmp_path, capsys) -> None:
+    """The third spelling, and the row shape it exists for: the cell is the stem.
+
+    An entry whose frontmatter carries no `id:` line is named by its stem in the index's
+    first cell - `x-publish-chain.md` beside the row `| x-publish-chain | reference | …` on
+    this host's project store, where the two-spelling reading reported it unnamed and printed
+    a remedy that either duplicates the row it already has or retires a live entry.
+    """
+    _entry(tmp_path, "x-publish-chain.md", entry_id="")
+    path = _index(
+        tmp_path,
+        "index.md",
+        [
+            "# Memory Index", "", "| id | note |", "| --- | --- |",
+            "| x-publish-chain | how a release is published |",
+        ],
+    )
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "detail files 1, named nowhere: 0" in out, out
+
+
+def test_a_file_named_by_its_stem_in_a_code_span_is_named(mod, tmp_path, capsys) -> None:
+    """The same spelling inside backticks, the shape a merged row writes.
+
+    The compaction rule requires a merged row to keep naming what it replaced, and this
+    store writes those names as code spans rather than links.
+    """
+    _entry(tmp_path, "rotation-bookmark.md", entry_id="b3f1c9a2")
+    path = _index(
+        tmp_path, "index.md", ["# Memory Index", "", "- the `rotation-bookmark` entry"]
+    )
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "detail files 1, named nowhere: 0" in out, out
+
+
+def test_a_stem_that_is_only_a_prefix_does_not_name_the_entry(mod, tmp_path, capsys) -> None:
+    """A stem is a bounded token, so a longer name that starts with it is another entry.
+
+    The counterpart of the id's boundary arm: without it, a cell reading `abc12345-xyz`
+    would answer for `abc12345-x.md`, and the two entries would share one row.
+    """
+    _entry(tmp_path, "abc12345-x.md", entry_id="")
+    path = _index(
+        tmp_path,
+        "index.md",
+        [
+            "# Memory Index", "", "| id | note |", "| --- | --- |",
+            "| abc12345-xyz | a different entry |",
+        ],
+    )
+
+    assert mod.main([str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "detail files 1, named nowhere: 1" in out, out
+    assert "detail file abc12345-x.md is named by no row" in out, out
+
+
+def test_a_stem_mentioned_in_prose_does_not_name_the_entry(mod, tmp_path, capsys) -> None:
+    """A mention is not a name: a stem is read only where an index writes a name.
+
+    A stem can be one character, and matched as a token anywhere it answers for the English
+    article - a store holding `a.md` beside an index whose prose says "an index has a note"
+    would report that entry indexed and lose the finding this reading exists to make. So the
+    stem is read among the index's code spans and table cells, which is where a name is
+    written, and this arm is what keeps that restriction from being decoration.
+    """
+    _entry(tmp_path, "a.md", entry_id="")
+    path = _index(
+        tmp_path,
+        "index.md",
+        ["# Memory Index", "", "an index has a note about the store but no row."],
+    )
+
+    assert mod.main([str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "detail files 1, named nowhere: 1" in out, out
+    assert "detail file a.md is named by no row" in out, out
+
+
+def test_a_header_cell_does_not_name_a_file_of_that_name(mod, tmp_path, capsys) -> None:
+    """The header states the table's width, so its cells are not names of entries.
+
+    A store may hold an entry called `note.md`; a header reading `| id | note |` would
+    otherwise answer for it, and the reading would pass a store that never indexed it.
+    """
+    _entry(tmp_path, "note.md", entry_id="")
+    path = _index(
+        tmp_path,
+        "index.md",
+        [
+            "# Memory Index", "", "| id | note |", "| --- | --- |",
+            "| a1 | see elsewhere |",
+        ],
+    )
+
+    assert mod.main([str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "detail files 1, named nowhere: 1" in out, out
+    assert "detail file note.md is named by no row" in out, out
