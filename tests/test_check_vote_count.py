@@ -2520,9 +2520,17 @@ def test_a_vote_by_another_instance_is_not_voided_by_this_hosts_window(
         "a vote by another instance is not this host's self-review, so the clause its "
         "window carries is not asked of it"
     )
-    assert f"cast by {OTHER_LOGIN}, not this instance" in out, (
+    # The two halves are printed in two places now: the note says *why* an in-window vote
+    # was not voided, and the voter column says *who* cast it. Asserting both keeps a
+    # later reword from dropping either - silence on the first would read as the clause
+    # never having been asked, and a line without the account cannot be told from a peer
+    # instance's vote (issue #2828).
+    assert "counts - not this instance, so the own-head clause is not asked of it" in out, (
         "the count has to say why a vote inside the window was not voided - silence "
         "would read as the clause never having been asked"
+    )
+    assert f"(cast by {OTHER_LOGIN})" in out, (
+        "and the vote line has to name the account that cast it, beside the cycle id"
     )
     # The login is asked for the first public question that needed it, and then not
     # again: one ask per process rather than per vote, so the run with nothing inside
@@ -2759,3 +2767,92 @@ def test_an_id_extended_by_a_digit_is_not_read_as_its_prefix(mod):
     assert mod.distinct_cycle_ids(
         f"\u2705 LGTM\n\n— cycle {own}\n\nas measured by cyc20261005-234558\n"
     ) == [own, "cyc20261005-234558"]
+
+
+# --- the voter column: who cast the vote, on both renderings (issue #2828) ---
+
+
+def test_every_vote_line_names_the_account_that_cast_it(mod, monkeypatch, capsys):
+    """A count that moves has to say *which* account moved it.
+
+    This repository takes votes from more than one account, so a report naming only the
+    cycle leaves two very different facts reading the same: one of this instance's own
+    scheduled cycles voted, or another instance's did. Measured 2026-11-11 while counting
+    votes on PR #2824 - the second vote arrived as `cyc20261111-212728 - counts` between
+    two readings of this instance's own board, and deciding what it was took a separate
+    `gh api .../reviews` call, because the reading drops the author it has just read.
+
+    The two reviews below differ in the author and in nothing else, which is the pair
+    that makes the assertion a measurement rather than a shape: a line printer that
+    forgot the field fails it for both accounts at once.
+    """
+    fake = FakeGh(
+        [
+            _approve("cyc20260911-080000", "2026-09-11T01:00:00Z", author=SELF_LOGIN),
+            _approve("cyc20260911-090000", "2026-09-11T02:00:00Z", author=OTHER_LOGIN),
+        ],
+        push_time=T0,
+    )
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert f"(cast by {SELF_LOGIN})" in out, out
+    assert f"(cast by {OTHER_LOGIN})" in out, out
+    # Beside the cycle id, on the vote's **own** line: the two facts answer different
+    # questions and a reader decides about both at once. Asserted per line rather than
+    # per paragraph, because which verdict a vote earns is a separate reading - the first
+    # of these two lands inside its own cycle's window and is voided - and the voter
+    # column has to sit beside its cycle id either way.
+    lines = [line for line in out.splitlines() if "cast by" in line]
+    for cycle, login in (
+        ("cyc20260911-080000", SELF_LOGIN),
+        ("cyc20260911-090000", OTHER_LOGIN),
+    ):
+        assert any(cycle in line and f"(cast by {login})" in line for line in lines), (
+            f"{cycle} must name {login} on its own line: {lines}"
+        )
+
+
+def test_a_landed_heads_history_names_its_voters_too(mod, monkeypatch, capsys):
+    """The second carrier, because the fact must not vanish at the merge.
+
+    The live count and the landed history are built by two different readers
+    (`_history_votes` and the live loop), and only one of them was taught to carry the
+    author at first. That read as *"an account the payload did not carry"* on a payload
+    that had carried one - a wrong answer rather than a missing one - which is why this
+    arm exists rather than trusting the live one to cover both.
+    """
+    fake = FakeGh(
+        [_approve("cyc20260911-080000", "2026-09-11T01:00:00Z", author=OTHER_LOGIN)],
+        state="MERGED",
+        merged_at="2026-09-11T03:00:00Z",
+        mergeable="UNKNOWN",
+        merge_state="UNKNOWN",
+    )
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert f"(cast by {OTHER_LOGIN})" in out, out
+    assert "the payload did not carry" not in out, (
+        "the history reader reads the author from the same projection as the live one, so "
+        "a landed head must not report the field as absent"
+    )
+
+
+def test_a_vote_with_no_author_reads_as_unmeasured_not_as_a_blank(mod, monkeypatch, capsys):
+    """The absent case, in words: `""` is not a login and must not print like one.
+
+    A payload that lost the field keeps the own-head clause applied (`own_login`), which
+    is the safe direction, so the report has to show the reader that the voter is
+    unknown. An empty account would read as a value and leave the reader believing the
+    line named somebody.
+    """
+    fake = FakeGh(
+        [_review("2026-09-11T01:00:00Z", "\u2705 LGTM - cycle `cyc20260911-080000`", "")],
+        push_time=T0,
+    )
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "cast by an account the payload did not carry" in out, out
+    assert "(cast by )" not in out, "an absent author must not render as an empty account"
