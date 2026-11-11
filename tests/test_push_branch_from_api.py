@@ -144,6 +144,7 @@ class FakeGitHub:
         self.refs = {}         # "heads/x" -> sha
         self.log = []          # (method, path) call log
         self.fail_commits = False
+        self.fail_ref_writes = False
         self.tag_targets = {}  # tag object sha -> the commit it names
         self.tag_payloads = [] # every POST /git/tags body, for the offset reading
 
@@ -158,6 +159,8 @@ class FakeGitHub:
                     return {"object": {"sha": self.refs[ref_key]}}
                 raise _http_error(404)
             if method == "PATCH":
+                if self.fail_ref_writes:
+                    raise _http_error(404, b'{"message":"Not Found","status":"404"}')
                 if ref_key not in self.refs:
                     raise _http_error(404)
                 self.refs[ref_key] = body["sha"]
@@ -165,6 +168,8 @@ class FakeGitHub:
             raise AssertionError(f"unexpected ref call {method} {path}")
         if path == "/repos/x/git/refs":
             ref = body["ref"]
+            if self.fail_ref_writes:
+                raise _http_error(404, b'{"message":"Not Found","status":"404"}')
             if ref in self.refs:
                 raise _http_error(422, b'{"message":"Reference already exists"}')
             self.refs[ref] = body["sha"]
@@ -744,3 +749,63 @@ def test_the_cli_takes_exactly_one_of_branch_or_tag(tmp_path):
                            cwd=tmp_path, timeout=120)
         assert r.returncode == 2, (argv, r.returncode, r.stdout, r.stderr)
         assert "exactly one of --branch" in r.stdout, (argv, r.stdout)
+
+
+# ------------------------------------------------- refusals the status cannot name
+
+
+def _refused_ref_write(tmp_path, files: dict[str, bytes]):
+    """A repo holding `files`, pushed against a fake that refuses the ref write.
+
+    Measured 2026-11-11 (issue #2817): the real endpoint answered this 404 for a commit
+    that edits `.github/workflows/`, while `git push` of the same commit named the
+    missing `workflow` scope. The fake reproduces the status alone, which is what the
+    script has to reason from.
+    """
+    mod = _load_module()
+    repo = _init_repo(tmp_path)
+    for rel, content in files.items():
+        _write_file(repo, rel, content)
+    _commit_all(repo, "publish files")
+    fake = FakeGitHub(repo)
+    fake.fail_ref_writes = True
+    return mod, repo, fake
+
+
+def _push_against(mod, fake, repo):
+    orig_api = mod.api
+    mod.api = fake
+    try:
+        with pytest.raises(mod.PushError) as exc:
+            mod.push_branch("x", "feature/refused", "HEAD", False, cwd=repo)
+    finally:
+        mod.api = orig_api
+    return str(exc.value)
+
+
+def test_a_ref_write_404_names_the_workflow_scope_when_the_chain_publishes_one(tmp_path):
+    """The measured shape: a workflow edit refused as 404, with no reason in the body."""
+    mod, repo, fake = _refused_ref_write(
+        tmp_path, {".github/workflows/test.yml": b"jobs: {}\n"})
+    message = _push_against(mod, fake, repo)
+    assert "404" in message, message
+    assert "workflow" in message, message
+    assert "gh auth refresh -s workflow" in message, message
+    assert "Nothing was published" in message, message
+    # a refusal is not a partial push: the ref never moved
+    assert "refs/heads/feature/refused" not in fake.refs
+
+
+def test_a_ref_write_404_claims_no_scope_when_no_workflow_file_is_published(tmp_path):
+    """The other side: the same status on an ordinary chain must not acquire a cause.
+
+    A hint that fired on the status alone would send this reader to renew a scope that
+    was never the problem - the defect the hint exists to cure, one level up.
+    """
+    mod, repo, fake = _refused_ref_write(tmp_path, {"docs/readme.md": b"text\n"})
+    message = _push_against(mod, fake, repo)
+    assert "404" in message, message
+    assert "gh auth refresh" not in message, message
+    assert "workflow" not in message, message
+    assert "Response body" in message, message
+    assert "refs/heads/feature/refused" not in fake.refs

@@ -252,6 +252,43 @@ class PushError(RuntimeError):
     pass
 
 
+#: A commit touching this directory needs the token's `workflow` scope to be published.
+WORKFLOWS_DIR = ".github/workflows/"
+
+
+def ref_write_404_hint(changed_paths, response_body: str = "") -> str:
+    """Say what a `404` from a ref write leaves out — and no more than the evidence says.
+
+    The endpoint's documented refusals all answer `422` (an existing ref, an
+    unresolvable sha, an invalid ref name), so a `404` on this request is a refusal
+    GitHub does not describe. One of them is measurable from here: a commit that
+    touches `.github/workflows/` cannot be published by an OAuth app whose token lacks
+    the `workflow` scope, and that refusal is reported as `404` rather than `403` —
+    measured 2026-11-11, where `git push` of the same commit answered `refusing to
+    allow an OAuth App to create or update workflow .github/workflows/test.yml without
+    'workflow' scope` while this tool printed `Not Found` and sent the reader after a
+    branch name that was spelled correctly.
+
+    The hint is therefore conditional on the chain, not on the status: claiming that
+    cause for a chain that publishes no workflow file would point the reader at a scope
+    that was never the problem, which is worse than the bare status.
+    """
+    if any(str(p).startswith(WORKFLOWS_DIR) for p in changed_paths):
+        return (
+            f"a commit in this chain changes a path under {WORKFLOWS_DIR}, and an OAuth "
+            "app whose token lacks the `workflow` scope is refused exactly at this "
+            "request — `git push` names that scope outright, while this endpoint answers "
+            "404. The remedy is `gh auth refresh -s workflow`, which needs a browser and "
+            "so cannot be run from an automated session. Nothing was published"
+        )
+    return (
+        "this endpoint answers 404 for refusals it does not describe, while its "
+        "documented ones answer 422 — the ref name and the objects were accepted, so "
+        "read this as a permission or ruleset refusal rather than a missing branch. "
+        f"Response body: {response_body or '(empty)'}"
+    )
+
+
 def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None = None) -> dict:
     """Upload objects and advance the remote branch; returns result summary."""
     local_tip = git("rev-parse", ref, cwd=cwd).decode("utf-8").strip()
@@ -407,6 +444,27 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
 
     # ---- update the remote ref (fast-forward semantics; force only if asked)
     final_sha = commit_map[chain[-1][0]]
+
+    def changed_paths() -> list[str]:
+        """Paths this publication changes, so a refusal can be explained from evidence.
+
+        `base` is the commit the remote already carries, so the diff names exactly what
+        is being published. When no base is known - the remote has none of this history
+        - every path in the chain is new by definition.
+
+        Named limit: a remote base that is not an object in this checkout (a branch
+        another pusher advanced) falls back to "everything is new", which can over-claim
+        a workflow change but never hides the ref name the reader needs.
+        """
+        if base:
+            try:
+                out = git("diff", "--name-only", base, local_tip, cwd=cwd)
+                return out.decode("utf-8").splitlines()
+            except RuntimeError:
+                pass  # base is not an object here - treat every path as new
+        return [p for commit in chain
+                for p in collect_objects(commit[1]["tree"], cwd=cwd)["blobs"].values()]
+
     body = {"sha": final_sha, "force": force}
     try:
         if existing:
@@ -421,6 +479,12 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
                 else:
                     raise
     except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise PushError(
+                "remote ref write answered 404 (no refs touched) — "
+                + ref_write_404_hint(changed_paths(),
+                                     e.read().decode("utf-8", "replace")[:300])
+            ) from e
         if e.code == 422 and not force:
             raise PushError("remote ref update rejected (non-fast-forward?) — "
                             "use --force only if you know the remote is stale (no refs touched)") from e
