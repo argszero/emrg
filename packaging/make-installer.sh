@@ -26,7 +26,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/dist"
 RUNTIME="$DIST/runtime"
-VERSION="$(cat "$RUNTIME/version.txt" 2>/dev/null || echo 0.3.49)"
+VERSION="$(cat "$RUNTIME/version.txt" 2>/dev/null || echo 0.3.50)"
 PLATFORM="${1:-$(uname -s | tr '[:upper:]' '[:lower:]')}"
 
 mkdir -p "$DIST/artifacts"
@@ -140,10 +140,18 @@ INSTALL_DEST="${2:-$HOME_DIR/.emrg/install}"
 # R105: root 复制 → chown 回用户（否则用户无法更新 install/）
 chown -R "$USER":staff "$HOME_DIR/.emrg" 2>/dev/null || true
 # ② GUI EMRG.app → ~/Applications/（R104）
+# 落点不由 postinstall 决定：pkg 的 install-location 说了算；而组件里的 <relocate>
+# 能让 PackageKit 按 LaunchServices 把 bundle 装到别处（跑过 electron-builder 的机器上
+# 就是源码树的 emrg/gui/dist/mac-*/EMRG.app），此时 $INSTALL_DEST 里没有 EMRG.app。
+# 旧版这里只是跳过 —— 安装器照样退出 0 并写回执，宿主事后只看见"应用不见了"
+# （issue #2806）。make-installer.sh 已把 BundleIsRelocatable 关掉；这里再兜一道。
+GUI_MISSING=""
 if [ -d "$INSTALL_DEST/emrg-gui/EMRG.app" ]; then
   mkdir -p "$HOME_DIR/Applications"
   cp -R "$INSTALL_DEST/emrg-gui/EMRG.app" "$HOME_DIR/Applications/"
   chown -R "$USER":staff "$HOME_DIR/Applications/EMRG.app" 2>/dev/null || true
+else
+  GUI_MISSING="$INSTALL_DEST/emrg-gui/EMRG.app"
 fi
 # ③ 卸载 EMRG.app（R30：pkg 无原生卸载器，放置卸载 app）
 if [ -d "$INSTALL_DEST/emrg-gui/卸载 EMRG.app" ]; then
@@ -167,15 +175,35 @@ if ! grep -qsF "$ANCHOR_START" "$HOME_DIR/.zshrc" "$HOME_DIR/.bash_profile" "$HO
     chown "$USER":staff "$HOME_DIR/.zshrc" 2>/dev/null || true
   fi
 fi
+# 缺件即失败：安装器报"成功"是宿主唯一的读数，静默跳过就是让它说错话。
+if [ -n "$GUI_MISSING" ]; then
+  echo "EMRG: the GUI bundle never arrived: $GUI_MISSING does not exist after the payload was installed." >&2
+  echo "EMRG: a component marked relocatable lets PackageKit install its bundle wherever LaunchServices" >&2
+  echo "EMRG: points - look for 'relocated to' lines in /var/log/install.log. This install is incomplete." >&2
+  exit 1
+fi
 exit 0
 EOF
     chmod +x "$PKG_ROOT/scripts/postinstall"
     # 组件包：--install-location '/.emrg/install'（currentUserHome 域下相对 home 锚点，
     # 解析为 ~/.emrg/install/，不再落到系统宗卷 /）
+    # ⛔ 每个 bundle 必须在 component plist 里标成不可重定位。pkgbuild 从 payload 推断
+    # 组件时为每个 .app 写 BundleIsRelocatable=true，组件 PackageInfo 里就出现
+    # `<relocate><bundle id="…"/></relocate>` —— 那正是 PackageKit 覆盖 install-location
+    # 的依据：跑过 electron-builder 的机器上 GUI 被装进源码树的
+    # emrg/gui/dist/mac-*/EMRG.app，install 树两个月没收到件（issue #2806）。
+    # pkgbuild 没有关掉它的开关（连 --help 都不认），所以关在它自己的 component plist 上。
+    pkgbuild --analyze --root "$PKG_ROOT/payload" "$PKG_ROOT/components.plist"
+    python3 "$ROOT/scripts/check-pkg-relocation.py" \
+      --disarm-component-plist "$PKG_ROOT/components.plist"
     pkgbuild --root "$PKG_ROOT/payload" --scripts "$PKG_ROOT/scripts" \
+      --component-plist "$PKG_ROOT/components.plist" \
       --identifier "com.argszero.emrg" --version "$VERSION" \
       --install-location '/.emrg/install' \
       "$PKG_ROOT/EMRG-component.pkg"
+    # 验收读的是组件包自己说的话，不是"我传了参数"：脚本以 2 退出（没读到）同样中止，
+    # set -e 把两者都变成构建失败。
+    python3 "$ROOT/scripts/check-pkg-relocation.py" "$PKG_ROOT/EMRG-component.pkg"
     # distribution：仅当前用户 home 域（enable_currentUserHome=true, localSystem=false）
     # → 安装器显示"仅当前用户"，装到 ~/.emrg/install/，不要求系统卷权限
     cat > "$PKG_ROOT/distribution.xml" <<EOF
