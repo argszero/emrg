@@ -1222,6 +1222,13 @@ class Vote:
     #: a reader could not tell an identity's exemption from the clock's ordinary
     #: answer). Empty is the ordinary case, and the label column prints "counts" for it.
     note: str = ""
+    #: The account that submitted the review, or `""` when the payload did not carry
+    #: one. Read for the own-head clause (`own_login`) and **printed**, because a count
+    #: that moves between two readings of one board does not say whether this instance's
+    #: own scheduled cycle voted or another instance's did, and those are different
+    #: facts about what to do next (issue #2828). `""` is not a login: the clause treats
+    #: it as undecidable, and the label says so rather than printing a blank account.
+    author: str = ""
 
 
 def _cycle_label(vote: Vote) -> str:
@@ -1237,6 +1244,26 @@ def _cycle_label(vote: Vote) -> str:
     if len(vote.ids) > 1:
         return f"({len(vote.ids)} cycle ids)"
     return "(no cycle id)"
+
+
+def _voter_label(vote: Vote) -> str:
+    """The account that cast this vote, or the reason the report cannot name one.
+
+    Printed beside the cycle id because the two answer different questions and the
+    report is the only place a reader gets both: *which cycle* wrote the body, and
+    *which account* submitted it. This repository takes votes from more than one
+    account, so a count that rose between two readings of the same board is either this
+    instance's own cycle voting or another instance's — and without the voter the
+    reading cannot tell them apart, which is what made a peer's vote read as a second
+    dispatch of this instance's task (issue #2828).
+
+    `""` becomes a sentence, never an empty account: the payload lost the field, the
+    same case the own-head clause keeps applied, so the line shows that the voter is
+    unmeasured rather than leaving a gap that reads as a value.
+    """
+    if vote.author:
+        return f"cast by {vote.author}"
+    return "cast by an account the payload did not carry"
 
 
 @dataclass(frozen=True)
@@ -1915,17 +1942,24 @@ def _history_votes(number: int, reviews: list[dict]) -> list[Vote]:
         kind = classify(str(r.get("body") or ""))
         if kind == "comment":
             continue
+        # Carried onto each record for the same reason the live path carries it: the
+        # line names who cast the vote (issue #2828), and the projection already read
+        # the field - dropping it here made the landed rendering say the payload did
+        # not carry an account it had just carried, which is a wrong answer rather
+        # than a missing one.
+        author = str(r.get("author") or "")
         ids = distinct_cycle_ids(str(r.get("body") or ""))
         cycle = ids[0] if len(ids) == 1 else None
         if len(ids) > 1:
             votes.append(Vote(at, kind, None, False,
                 f"the vote body names {len(ids)} cycle ids ({', '.join(ids)}) - which "
                 "cycle wrote it cannot be measured, so it credits none of them",
-                tuple(ids)))
+                tuple(ids), author=author))
         elif cycle is None:
-            votes.append(Vote(at, kind, None, False, "no cycle id in the vote body"))
+            votes.append(Vote(at, kind, None, False, "no cycle id in the vote body",
+                              author=author))
         else:
-            votes.append(Vote(at, kind, cycle, True, "", tuple(ids)))
+            votes.append(Vote(at, kind, cycle, True, "", tuple(ids), author=author))
     return votes
 
 
@@ -2061,15 +2095,16 @@ def check_pr(
         if at <= push_time:
             votes.append(
                 Vote(at, kind, cycle, False, f"submitted before the head push ({push_time})",
-                     tuple(ids))
+                     tuple(ids), author=author)
             )
         elif len(ids) > 1:
             votes.append(Vote(at, kind, None, False,
                 f"the vote body names {len(ids)} cycle ids ({', '.join(ids)}) - which "
                 "cycle wrote it cannot be measured, so it counts for none of them; a "
-                "vote body must name exactly one", tuple(ids)))
+                "vote body must name exactly one", tuple(ids), author=author))
         elif cycle is None:
-            votes.append(Vote(at, kind, cycle, False, "no cycle id in the vote body"))
+            votes.append(Vote(at, kind, cycle, False, "no cycle id in the vote body",
+                              author=author))
         else:
             # The clause `cast-vote.py` refuses on, asked of a vote that is already
             # posted. It sits *after* the three reasons above so that each vote is
@@ -2094,11 +2129,12 @@ def check_pr(
             if inside and not own_login(author):
                 votes.append(Vote(
                     at, kind, cycle, True, "", tuple(ids),
-                    f"counts - cast by {author}, not this instance, so the own-head "
-                    "clause is not asked of it",
+                    "counts - not this instance, so the own-head clause is not asked "
+                    "of it",
+                    author=author,
                 ))
             elif inside:
-                votes.append(Vote(at, kind, cycle, False, why, tuple(ids)))
+                votes.append(Vote(at, kind, cycle, False, why, tuple(ids), author=author))
             else:
                 # `why` is usually empty here — the head is simply outside the window —
                 # but the one exemption that was decided by an *identity* reading instead
@@ -2106,7 +2142,8 @@ def check_pr(
                 # reader can see which datum decided (the review on #1900 asked for it).
                 # It goes in `note`, which is the column a *valid* vote renders, not in
                 # `why`, which only a voided one does.
-                votes.append(Vote(at, kind, cycle, True, "", tuple(ids), why))
+                votes.append(Vote(at, kind, cycle, True, "", tuple(ids), why,
+                                  author=author))
 
     # Walk the votes in order, resetting the run on a veto, and counting each
     # cycle at most once inside the trailing run.
@@ -2288,7 +2325,10 @@ def main(argv: list[str] | None = None) -> int:
                         mark, note = "OK  ", "the review approved"
                     else:
                         mark, note = "VOID", vote.why
-                    print(f"    {vote.at} {mark} {_cycle_label(vote)} - {note}")
+                    print(
+                        f"    {vote.at} {mark} {_cycle_label(vote)} - {note} "
+                        f"({_voter_label(vote)})"
+                    )
                 continue
             # A missing run is both a caveat about the count *and* the CI conjunct
             # unverified, so the line says which: `mark` is already BLOCKED here,
@@ -2348,7 +2388,10 @@ def main(argv: list[str] | None = None) -> int:
                     # itself (measured 2026-09-11 on #1133: four lines read
                     # "OK - VOID").
                     mark, note = "VOID", vote.why
-                print(f"    {vote.at} {mark} {_cycle_label(vote)} - {note}")
+                print(
+                    f"    {vote.at} {mark} {_cycle_label(vote)} - {note} "
+                    f"({_voter_label(vote)})"
+                )
 
     # Two ways to fail, with different cures, so they are reported separately rather
     # than as one "not ready": a SHORT PR needs more review; a BLOCKED one needs the
