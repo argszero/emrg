@@ -67,8 +67,9 @@ LIMIT_HEADINGS = (
 )
 
 #: Every `## ` heading the prompt carries, in order. The order is the design: who you are → where you
-#: are → what you were given → how you work → what you keep → where the conversation lives → how you
-#: write → two special actions → the limits → the shape a round must have. Pinned as a list rather than
+#: are → what you were given → how you work → the one class of work that costs minutes → what you keep →
+#: where the conversation lives → how you write → two special actions → the limits → the shape a round
+#: must have. Pinned as a list rather than
 #: as a count, because a duplicated heading and a missing one are different defects and a count sees
 #: neither. The last entry is deliberate: the round's shape closes the file, after every rule a round
 #: must not break.
@@ -77,6 +78,7 @@ EXPECTED_H2 = [
     "## Agent context",
     "## Skills",
     "## How you work",
+    "## Before work that costs the host time",
     "## Memory",
     "## Session and history",
     "## Writing",
