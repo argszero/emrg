@@ -93,6 +93,13 @@ judged nothing, so it is reported as `_KIND_NO_VERDICT` with the remedy a missin
 takes (a re-trigger) rather than as a red verdict whose remedy is to read a cause that
 does not exist - measured 2026-10-06, `cyc20261006-065715`.
 
+**A run that produced no job at all is not this state either.** `startup_failure` is
+GitHub's conclusion for a workflow that failed to *start*, so no job existed to judge
+anything and none to stop, and the re-trigger `_KIND_NO_VERDICT` prescribes is the very
+request that was refused - `_KIND_NEVER_STARTED`, whose remedy is to park. Measured
+2026-11-12: a dispatch the API accepted with exit 0 created run `43096918278`, which
+concluded `startup_failure` and answered `total_count: 0` on its job list.
+
 Which state is reported when more than one holds
 ------------------------------------------------
 The kinds are exclusive, so the order they are tested in is a decision, and the
@@ -265,7 +272,7 @@ _UNFINISHED = frozenset({"", "pending", "queued", "in_progress", "requested", "w
 # here reads as "the verdict workflow did not run", not as "the branch has no CI".
 _VERDICT_WORKFLOW = "Test"
 
-# The six ways a verdict can fail to be current. They were prose in `reason`
+# The seven ways a verdict can fail to be current. They were prose in `reason`
 # before, which is enough to *report* the state and not enough to choose a
 # remedy: the state decides which action the tool may recommend, and only one of
 # the six is fixed by a refresh (and that one charges the whole vote count).
@@ -275,6 +282,7 @@ _KIND_NO_RUN_YET = "no_run_yet"  # the head is younger than a run takes to appea
 _KIND_RUNNING = "running"  # a run exists and has not concluded
 _KIND_FAILING = "failing"  # a job concluded `failure`: the tree was judged and rejected
 _KIND_NO_VERDICT = "no_verdict"  # the run stopped without a job judging the tree
+_KIND_NEVER_STARTED = "never_started"  # the platform refused to start the run: no job existed
 
 #: How long after a head is committed a push-event run can still be *arriving*.
 #: Inside this window an empty run lookup is not evidence of anything: it is the
@@ -359,7 +367,7 @@ class Verdict:
     run_conclusion: str | None
     stale: bool
     reason: str
-    # Which of the six ways (one of the `_KIND_*` names); "" when fresh.
+    # Which of the seven ways (one of the `_KIND_*` names); "" when fresh.
     stale_kind: str = ""
     #: The run's own id, so a remedy can hand over a command that is runnable as
     #: printed. Empty when there is no run. Why it is carried rather than looked up
@@ -700,6 +708,25 @@ def check_pr(number: int) -> Verdict:
                 for j in jobs
                 if j.get("conclusion") and j.get("conclusion") != "success"
             ]
+            if conclusion == "startup_failure" and not jobs:
+                # A run GitHub never managed to start. Not `no_verdict`: that kind is a run
+                # that existed and stopped (a cancelled job is its measured shape), and its
+                # remedy - a re-trigger - is the request this state already refused.
+                # Measured 2026-11-12: dispatch accepted (exit 0), run `43096918278`
+                # concluded `startup_failure` with `total_count: 0` jobs four minutes later.
+                return Verdict(
+                    **common,
+                    stale=True,
+                    stale_kind=_KIND_NEVER_STARTED,
+                    reason=(
+                        f"head {head_sha[:8]}'s {_VERDICT_WORKFLOW} run never started: GitHub "
+                        f"concluded {conclusion!r} and the run has **no job at all**, so "
+                        "nothing ran, nothing was cancelled and nothing stopped - a workflow "
+                        "that fails to start is the platform refusing the run, which is not a "
+                        "job that judged nothing"
+                        f"{_tree_note(stale_tree, status, behind_by, merge_base)}"
+                    ),
+                )
             if not judged:
                 return Verdict(
                     **common,
@@ -981,6 +1008,15 @@ def _remedy(pr: int, kind: str, price: Price, run_id: str = "") -> str:
             f"#{pr}: park it, the run has not concluded - a vote here is not votable by "
             "anyone and neither a refresh nor a re-trigger answers it, so do not block on "
             "this PR: read it again next cycle (host rant 2026-09-24T14:46:10)"
+        )
+    if kind == _KIND_NEVER_STARTED:
+        return (
+            f"#{pr}: park it - GitHub refused to start this head's run (`startup_failure`, no "
+            "job created at all), so re-triggering reproduces the refusal instead of curing "
+            "it. Before spending another dispatch, ask whether any run on this repository is "
+            "producing jobs: a dispatch the API accepts is not a run that started, and "
+            f"`gh run view <run> --json jobs` answers `[]` for a run in this state. Read this "
+            "PR again next cycle, or once a run elsewhere concludes"
         )
     if kind == _KIND_NO_VERDICT:
         return (

@@ -32,7 +32,7 @@ re-implemented here:
 * `check-vote-count.py` owns "how many votes are still about this head?" — the
   count, the per-cycle rule, and the mergeability clause;
 * `check-merge-freshness.py` owns "is the green CI about the tree that would land?"
-  — the ancestry, and the six ways a verdict can fail to be current.
+  — the ancestry, and the seven ways a verdict can fail to be current.
 
 So the number printed here is the counter's number and the staleness here is the
 freshness tool's *kind*, not a local re-derivation of either. That matters more than
@@ -1141,6 +1141,21 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
               "refresh would spend",
             command=f"gh workflow run test.yml --ref <branch-of-{pr}>",
             extra=[f"bash scripts/re-trigger-ci.sh <branch-of-{pr}>"],
+        )
+    if reading.stale_read and reading.stale_kind == "never_started":
+        # The row beside `no_verdict`, and the difference is the whole point: that one is a
+        # run that existed and stopped, cured by re-running; this one is a run the platform
+        # refused to start, so re-running is the request that was refused. Measured
+        # 2026-11-12: `re-trigger-ci.sh` exited 0, run `43096918278` concluded
+        # `startup_failure` with no job, and the row for that head still said `retrigger-ci`.
+        return Action(
+            kind="park",
+            why=reading.stale_reason
+            + " - parked for this cycle: the run was never started, so a re-trigger is the "
+              "request that was just refused and another dispatch spends the window on the "
+              "same refusal. Read this PR again next cycle, or once a run elsewhere on the "
+              "repository produces a job",
+            command=f"gh pr checks {pr} -R {repo}",
         )
     if reading.stale_read and reading.stale_kind == "no_verdict":
         # A run that stopped without judging the tree is the `ci-red` row's *other* half:
