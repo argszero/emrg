@@ -334,7 +334,13 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
             if not parents:
                 break
             cur = parents[0]
-    if base == local_tip:
+    # A ref that already names the tip is a genuine no-op. The *absence* of a ref is not
+    # one: when the walk found the tip on the remote with no ref naming it, exactly one
+    # request is outstanding - the ref write - and answering "no-op" would report a
+    # publication as already done while the branch does not exist. That is the shape a
+    # refused `POST /git/refs` leaves behind, since the commit is created before the ref
+    # is written; measured 2026-11-11 on the retry of such a push.
+    if ref_sha is not None and ref_sha == local_tip:
         return {"result": "no-op", "branch": branch, "sha": local_tip}
 
     # ---- collect the missing chain, oldest first. Probe each ancestor against

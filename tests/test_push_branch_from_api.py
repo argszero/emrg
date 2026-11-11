@@ -885,3 +885,33 @@ def test_a_stranded_retry_names_the_workflow_scope_a_404_hides(tmp_path):
     assert "gh auth refresh -s workflow" in message, message
     # the refusal left the ref where it was: nothing was published
     assert fake.refs["refs/heads/feature/stranded"] == base
+
+
+def test_a_retry_creates_the_ref_when_the_refusal_left_none(tmp_path):
+    """Item 1 where no ref survived: one request outstanding, not "nothing to do".
+
+    A refused `POST /git/refs` creates no ref at all, so the retry's own walk finds the
+    tip on the remote with `base == local_tip`. Answering `no-op` there reports a
+    publication that never happened - the branch does not exist on the remote.
+    """
+    mod = _load_module()
+    repo = _init_repo(tmp_path)
+    _write_file(repo, "docs/base.md", b"base\n")
+    _commit_all(repo, "base commit")
+    tip = _commit_all(repo, "second commit", new_file="docs/tip.md")
+    fake = FakeGitHub(repo)
+    fake.objects[tip] = ("commit", b"<already on the remote>")
+
+    orig_api = mod.api
+    mod.api = fake
+    try:
+        result = mod.push_branch("x", "feature/stranded-new", "HEAD", False, cwd=repo)
+    finally:
+        mod.api = orig_api
+
+    assert result["result"] == "pushed", result
+    assert fake.refs["refs/heads/feature/stranded-new"] == tip
+    # the ref creation is a POST; re-uploading objects that are already there is not
+    uploads = [p for method, p in fake.log
+               if method == "POST" and p.rsplit("/", 1)[-1] != "refs"]
+    assert uploads == [], f"a stranded publication uploaded again: {uploads}"
