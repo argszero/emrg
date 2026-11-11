@@ -15,6 +15,13 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Without a ceiling a hung job reports `in_progress` until the platform's 360-minute
+    # default fires, and nothing outside the run distinguishes a hang from a slow runner -
+    # so the first evidence of a hang is a pull request that cannot be acted on for hours.
+    # Each value is kept generous against the durations the legs actually take, because a
+    # ceiling that fires on a normal run replaces an unbounded wait with a false red.
+    # `tests/test_ci_job_timeouts.py` holds every job here to both bounds.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       # #441 教训：workflow 文件的 if: secrets 等解析错误人工审查易漏
@@ -196,6 +203,7 @@ jobs:
   # 测试回归要到发版构建才暴露。每个 PR 都应在 Windows 上跑 pytest 门禁。
   test-windows:
     runs-on: windows-2025
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v5
