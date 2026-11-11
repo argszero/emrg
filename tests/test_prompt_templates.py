@@ -2356,6 +2356,89 @@ def test_the_readers_pin_reads_position_and_absence() -> None:
     )
 
 
+# ── §3.1.6 reads what a test result says, and it answered only the suite that never started ──
+#
+# The section states what the tree must do ("Tests must pass"), what a test you add owes (its
+# own failing arm), what a failing check may not be answered with (a weakened test), and what a
+# suite that could not run means (a skip, never a failure). What it never said is that a run
+# which *did* start may be failing for reasons older than the change: a suite already red on
+# the tree the contributor arrived at turns "tests must pass" into a repair of someone else's
+# breakage, a report of an environment's fault as a project defect, or a revert of a change
+# that was fine. Measured cost elsewhere: a suite that hangs in this host's sandbox made a
+# contributor read 17 environment failures as its own, and the same file list on the pristine
+# upstream tree is what settled it.
+#
+# The method pinned here is the cheap one: the same file list on the project's own unmodified
+# tree, compared by the failing *names* rather than by a count — a count moves for every test
+# added and says nothing about which failure is whose.
+_OPEN_SOURCE_BASELINE_PHRASE = "A red run has not yet said whose failure it is"
+_OPEN_SOURCE_BASELINE_SECTION = "##### 3.1.6 Test"
+_OPEN_SOURCE_BASELINE_NEXT = "##### 3.1.7 Commit and open the pull request"
+
+#: The parts that make the paragraph discriminating. Each is one decision a rewrite could take
+#: away while the lead sentence — the phrase the position is read by — stayed exactly where it is.
+_OPEN_SOURCE_BASELINE_PARTS = (
+    "a worktree of `upstream/$DEFAULT` beside the clone",
+    "compare the **names** that failed, not the number that passed",
+    "read the base branch's own latest run before your head's",
+)
+
+
+def test_the_open_source_prompt_measures_the_baseline_before_blaming_a_failure() -> None:
+    """A red run does not say whose failure it is, and §3.1.6 answered only the unrunnable half.
+
+    Not decoration: the neighbouring paragraph settles the suite that never started — a skip,
+    never a failure — so a round reading §3.1.6 to the letter knows what to do with an absent
+    runner and nothing about a runner that ran and failed on files it never opened.
+    """
+    text = (PROMPTS_DIR / "open_source_prompt.md").read_text(encoding="utf-8")
+
+    assert text.count(_OPEN_SOURCE_BASELINE_PHRASE) == 1, (
+        f"{_OPEN_SOURCE_BASELINE_PHRASE!r} appears {text.count(_OPEN_SOURCE_BASELINE_PHRASE)} "
+        "times — a rule written twice is two answers that will disagree"
+    )
+    for heading in (_OPEN_SOURCE_BASELINE_SECTION, _OPEN_SOURCE_BASELINE_NEXT):
+        assert f"\n{heading}" in "\n" + text, (
+            f"the section this pin reads position against is gone: {heading!r} — a positional "
+            "reading of a missing bound compares against nothing"
+        )
+    assert _fifth_level_section_of(text, _OPEN_SOURCE_BASELINE_PHRASE) == _OPEN_SOURCE_BASELINE_SECTION, (
+        "the baseline rule is no longer under "
+        f"{_OPEN_SOURCE_BASELINE_SECTION!r} (found: "
+        f"{_fifth_level_section_of(text, _OPEN_SOURCE_BASELINE_PHRASE)!r}) — a rule in a "
+        "section that does not own its subject is one a round reads as something else"
+    )
+    paragraph = text.split(_OPEN_SOURCE_BASELINE_PHRASE, 1)[1].split(_OPEN_SOURCE_BASELINE_NEXT, 1)[0]
+    missing = _missing_phrases(paragraph, _OPEN_SOURCE_BASELINE_PARTS)
+    assert not missing, (
+        "the baseline rule no longer names how it is measured: " + ", ".join(missing) + " — the "
+        "lead sentence survives a rewrite that drops the method, and a rule with no method is "
+        "the carefulness the rule exists to replace"
+    )
+
+
+def test_the_baseline_pin_reads_position_and_absence() -> None:
+    """The controls: deleting the rule and moving it must each redden, and they are not the same
+    arm — deletion is what a rewrite does, relocation is what a busy edit does."""
+    text = (PROMPTS_DIR / "open_source_prompt.md").read_text(encoding="utf-8")
+
+    deleted = text.replace(_OPEN_SOURCE_BASELINE_PHRASE, "")
+    assert deleted != text, (
+        f"{_OPEN_SOURCE_BASELINE_PHRASE!r} is pinned but absent, so this arm measured nothing"
+    )
+    assert _fifth_level_section_of(deleted, _OPEN_SOURCE_BASELINE_PHRASE) is None, (
+        "a deleted rule still reads as present, so the pin would not notice its own rule going"
+    )
+
+    moved = deleted.rstrip() + f"\n\n{_OPEN_SOURCE_BASELINE_PHRASE}\n"
+    found = _fifth_level_section_of(moved, _OPEN_SOURCE_BASELINE_PHRASE)
+    assert found is not None, "the relocation arm lost the phrase it moved, not the position"
+    assert found != _OPEN_SOURCE_BASELINE_SECTION, (
+        f"moving the phrase to the end of the file left it reading as {found!r} — the pin is "
+        "reading presence, not position"
+    )
+
+
 # --------------------------------------------------------------------------- the inbound half
 #
 # A round of the promotion task is written as four outward steps: find a topic, join it,
