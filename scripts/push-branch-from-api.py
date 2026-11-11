@@ -487,20 +487,19 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
         the one cause the hint exists to name.
 
         What the publication actually changes is, in order of preference: the commit the
-        ref names (what a new ref value changes from), the ancestor the chain was built
-        from, or - when nothing was uploaded - the tip's own parent. `None` means none of
-        them is available here, which is *unmeasured*: the caller must say so rather than
-        read it as "no workflow path".
+        ref names (what a new ref value changes from), or the ancestor the chain was built
+        from. Both are exact. When nothing was uploaded there is no such anchor, and the
+        tip's own parent is only a **lower bound**: a refused attempt uploaded every commit
+        of its publication, so a retried push of three commits whose workflow edit is the
+        middle one is bounded by the last commit alone. A lower bound that names a workflow
+        path is still a cause; one that names nothing proves nothing, so it answers `None`
+        — *unmeasured* — rather than the negative a reader would act on.
         """
         subjects = []
         if ref_sha:
             subjects.append(ref_sha)
         if base and base != local_tip:
             subjects.append(base)
-        if not chain:
-            # nothing was uploaded, so the tip's own commit is the whole publication
-            parents = parse_commit(git("cat-file", "commit", local_tip, cwd=cwd))["parents"]
-            subjects.extend(parents[:1])
         for subject in subjects:
             try:
                 out = git("diff", "--name-only", subject, local_tip, cwd=cwd)
@@ -511,6 +510,15 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
             # no base to diff against: every path in the uploaded chain is new by definition
             return [p for commit in chain
                     for p in collect_objects(commit[1]["tree"], cwd=cwd)["blobs"].values()]
+        if not subjects:
+            # nothing was uploaded and no anchor was measured: the tip's parent bounds the
+            # publication from below, and only a workflow path inside that bound is a cause
+            parents = parse_commit(git("cat-file", "commit", local_tip, cwd=cwd))["parents"]
+            if parents:
+                out = git("diff", "--name-only", parents[0], local_tip, cwd=cwd)
+                bound = out.decode("utf-8").splitlines()
+                if any(str(p).startswith(WORKFLOWS_DIR) for p in bound):
+                    return bound
         return None
 
     body = {"sha": final_sha, "force": force}

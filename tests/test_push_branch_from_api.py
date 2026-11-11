@@ -915,3 +915,36 @@ def test_a_retry_creates_the_ref_when_the_refusal_left_none(tmp_path):
     uploads = [p for method, p in fake.log
                if method == "POST" and p.rsplit("/", 1)[-1] != "refs"]
     assert uploads == [], f"a stranded publication uploaded again: {uploads}"
+
+
+def test_a_stranded_publication_bounded_below_states_it_cannot_be_measured(tmp_path):
+    """A lower bound is not a measurement of the publication.
+
+    A refused attempt uploaded *every* commit of its publication, so a retried push of
+    three commits whose workflow edit is the middle one is bounded by the last commit
+    alone - and answering "no workflow path" from that bound is the vetoed defect one
+    variant later: measured 2026-11-11, where this state printed "read this as a
+    permission or ruleset refusal rather than a missing branch" for a publication that
+    adds `.github/workflows/test.yml` two commits below the tip.
+    """
+    mod = _load_module()
+    repo = _init_repo(tmp_path)
+    _write_file(repo, "docs/base.md", b"base\n")
+    _commit_all(repo, "base commit")
+    _write_file(repo, ".github/workflows/test.yml", b"jobs: {}\n")
+    middle = _commit_all(repo, "add workflow")
+    tip = _commit_all(repo, "docs after the workflow", new_file="docs/more.md")
+    fake = FakeGitHub(repo)
+    # the refused attempt uploaded every commit and lost only the ref write
+    for sha in (middle, tip):
+        fake.objects[sha] = ("commit", b"<already on the remote>")
+    fake.fail_ref_writes = True
+
+    message = _push_against(mod, fake, repo, branch="feature/stranded-multi")
+
+    assert "404" in message, message
+    # it must not assert a cause it did not measure ...
+    assert "read this as a permission or ruleset refusal" not in message, message
+    # ... and must leave open the one cause it cannot rule out
+    assert "cannot be ruled out" in message, message
+    assert "workflow" in message, message
