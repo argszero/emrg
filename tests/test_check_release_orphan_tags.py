@@ -53,6 +53,19 @@ def mod():
     return _load_module()
 
 
+@pytest.fixture
+def no_baseline(mod, monkeypatch):
+    """An empty record, for every arm that is not about the record.
+
+    A recorded row whose tag a fixture leaves out is audited like any other row, so an arm
+    that does not mean to exercise the record has to say so -- otherwise its fixture picks
+    the subject by accident, and a change to the record reddens an arm about something else
+    while looking like a regression in it.
+    """
+    monkeypatch.setattr(mod, "ABANDONED_TAGS", {})
+    return mod
+
+
 class FakeGh:
     """`_gh` replaced by a routing table: prefix of argv -> verbatim text or exception."""
 
@@ -112,10 +125,16 @@ def _confirmed_absent(mod, tag) -> BaseException:
                        "gh: Not Found (HTTP 404)", http_status=404)
 
 
+def _tag_not_found(mod, tag) -> BaseException:
+    """The same 404 for a tag ref that does not exist: a collection's absence, confirmed."""
+    return mod.GhError(1, ["api", f"repos/{REPO}/git/ref/tags/{tag}"],
+                       "gh: Not Found (HTTP 404)", http_status=404)
+
+
 # --------------------------------------------------------------------------- 0
 
 
-def test_every_tag_published_is_the_only_pass(mod, monkeypatch, capsys):
+def test_every_tag_published_is_the_only_pass(mod, monkeypatch, capsys, no_baseline):
     routes = _routes(_tags("v0.3.2", "v0.3.1"), _releases(*_published("v0.3.2", "v0.3.1")))
     code, out, _ = _check(mod, monkeypatch, capsys, routes)
     assert code == 0
@@ -127,7 +146,9 @@ def test_every_tag_published_is_the_only_pass(mod, monkeypatch, capsys):
 # --------------------------------------------------------------------------- 1
 
 
-def test_a_tag_with_no_release_is_named_with_the_per_tag_reading(mod, monkeypatch, capsys):
+def test_a_tag_with_no_release_is_named_with_the_per_tag_reading(
+    mod, monkeypatch, capsys, no_baseline
+):
     """The whole point: the orphan is named, and the remedy explains it rather than guesses."""
     routes = _routes(
         _tags("v0.3.51", "v0.3.50"),
@@ -144,25 +165,27 @@ def test_a_tag_with_no_release_is_named_with_the_per_tag_reading(mod, monkeypatc
 
 
 def test_every_candidate_is_confirmed_so_the_collection_alone_never_convicts(
-    mod, monkeypatch, capsys
+    mod, monkeypatch, capsys, no_baseline
 ):
     """Absence read from a collection is a screen; the per-tag call is the verdict."""
     routes = _routes(
-        _tags("v0.3.34", "v0.3.8"),
+        # Two tags outside the recorded baseline: on a recorded tag the verdict is
+        # reclassified, and this arm is about the confirmation, not about the record.
+        _tags("v0.3.52", "v0.3.51"),
         _releases(),
         {
-            ("api", f"repos/{REPO}/releases/tags/v0.3.34"): _confirmed_absent(mod, "v0.3.34"),
-            ("api", f"repos/{REPO}/releases/tags/v0.3.8"): _confirmed_absent(mod, "v0.3.8"),
+            ("api", f"repos/{REPO}/releases/tags/v0.3.52"): _confirmed_absent(mod, "v0.3.52"),
+            ("api", f"repos/{REPO}/releases/tags/v0.3.51"): _confirmed_absent(mod, "v0.3.51"),
         },
     )
     code, out, fake = _check(mod, monkeypatch, capsys, routes)
     assert code == 1
-    assert "tag: v0.3.34 -- NO RELEASE" in out and "tag: v0.3.8 -- NO RELEASE" in out
-    assert fake.called("api", f"repos/{REPO}/releases/tags/v0.3.34")
-    assert fake.called("api", f"repos/{REPO}/releases/tags/v0.3.8")
+    assert "tag: v0.3.52 -- NO RELEASE" in out and "tag: v0.3.51 -- NO RELEASE" in out
+    assert fake.called("api", f"repos/{REPO}/releases/tags/v0.3.52")
+    assert fake.called("api", f"repos/{REPO}/releases/tags/v0.3.51")
 
 
-def test_a_draft_is_its_own_fault_not_an_orphan(mod, monkeypatch, capsys):
+def test_a_draft_is_its_own_fault_not_an_orphan(mod, monkeypatch, capsys, no_baseline):
     routes = _routes(
         _tags("v0.3.1"), _releases(("v0.3.1", "true", "false", "8"))
     )
@@ -175,14 +198,14 @@ def test_a_draft_is_its_own_fault_not_an_orphan(mod, monkeypatch, capsys):
     )
 
 
-def test_a_prerelease_is_its_own_fault(mod, monkeypatch, capsys):
+def test_a_prerelease_is_its_own_fault(mod, monkeypatch, capsys, no_baseline):
     routes = _routes(_tags("v0.3.1"), _releases(("v0.3.1", "false", "true", "9")))
     code, out, _ = _check(mod, monkeypatch, capsys, routes)
     assert code == 1
     assert "PRERELEASE" in out
 
 
-def test_a_release_with_no_asset_is_a_fault(mod, monkeypatch, capsys):
+def test_a_release_with_no_asset_is_a_fault(mod, monkeypatch, capsys, no_baseline):
     """The v0.3.1 incident: eight of nine uploads, and `other side closed`."""
     routes = _routes(_tags("v0.3.1"), _releases(("v0.3.1", "false", "false", "0")))
     code, out, _ = _check(mod, monkeypatch, capsys, routes)
@@ -253,7 +276,9 @@ def test_an_absent_tag_asked_for_by_name_is_not_measurable(mod, monkeypatch, cap
 # ---------------------------------------------------------------------------- the subject
 
 
-def test_both_collections_are_read_paginated_at_a_full_page(mod, monkeypatch, capsys):
+def test_both_collections_are_read_paginated_at_a_full_page(
+    mod, monkeypatch, capsys, no_baseline
+):
     """This repo holds more than one page of releases.
 
     Dropping `--paginate`, or lowering the page size, makes every tag past the first page
@@ -269,7 +294,9 @@ def test_both_collections_are_read_paginated_at_a_full_page(mod, monkeypatch, ca
         assert call[2] == "--paginate"
 
 
-def test_the_counts_actually_read_are_printed_before_any_verdict(mod, monkeypatch, capsys):
+def test_the_counts_actually_read_are_printed_before_any_verdict(
+    mod, monkeypatch, capsys, no_baseline
+):
     """A reading has to name its subject size; a short collection then reads as a short one."""
     routes = _routes(_tags("v0.3.2", "v0.3.1"), _releases(*_published("v0.3.2", "v0.3.1")))
     _code, out, _ = _check(mod, monkeypatch, capsys, routes)
@@ -289,3 +316,192 @@ def test_a_narrowed_subject_still_reads_the_whole_collection(mod, monkeypatch, c
     assert code == 1
     assert "tags read: 2" in out
     assert "v0.3.50 -- NO RELEASE" not in out
+
+
+# ------------------------------------------------- the recorded baseline, in both directions
+#
+# Two tags on this repository will never carry a release: `v0.3.8` and `v0.3.34` each lost
+# their build and were superseded by a published successor. A screen that faults on them for
+# ever is an exit code its reader learns to ignore, so the two are recorded -- and every arm
+# below pins a way the record must NOT grow: a third tag faults, a row taken away faults, a
+# different fault on a recorded tag faults, and a row that stops describing the repository
+# faults -- both ways it can, by being contradicted and by naming a tag that is gone.
+# Suppression is one tag's verdict, never a class of them.
+
+
+def test_a_recorded_abandoned_tag_is_named_and_does_not_fault(mod, monkeypatch, capsys):
+    """Recorded is not skipped: the per-tag reading still runs, the baseline reclassifies it."""
+    routes = _routes(
+        _tags("v0.3.8", "v0.3.34", "v0.3.50"),
+        _releases(*_published("v0.3.50")),
+        {
+            ("api", f"repos/{REPO}/releases/tags/v0.3.8"): _confirmed_absent(mod, "v0.3.8"),
+            ("api", f"repos/{REPO}/releases/tags/v0.3.34"): _confirmed_absent(mod, "v0.3.34"),
+        },
+    )
+    code, out, fake = _check(mod, monkeypatch, capsys, routes)
+    assert code == 0
+    assert "v0.3.8 -- ABANDONED" in out, "the record is printed, not silently dropped"
+    assert "NO RELEASE" not in out
+    assert "FAULT" not in out
+    assert "abandoned above carry none by recorded decision" in out
+    assert fake.called("api", f"repos/{REPO}/releases/tags/v0.3.8"), (
+        "an abandoned tag is still confirmed by the per-tag endpoint: the baseline "
+        "reclassifies a verdict it did not take a shortcut around"
+    )
+
+
+def test_a_third_orphan_outside_the_baseline_still_faults(mod, monkeypatch, capsys):
+    """The baseline names two tags, not a class: anything else keeps the full verdict."""
+    routes = _routes(
+        _tags("v9.9.9", "v0.3.8", "v0.3.34"),
+        _releases(),
+        {
+            ("api", f"repos/{REPO}/releases/tags/{t}"): _confirmed_absent(mod, t)
+            for t in ("v9.9.9", "v0.3.8", "v0.3.34")
+        },
+    )
+    code, out, _ = _check(mod, monkeypatch, capsys, routes)
+    assert code == 1
+    assert "v9.9.9 -- NO RELEASE" in out
+    assert "FAULT: 1 tag(s) with no release" in out, "only the unrecorded orphan is counted"
+    assert "2 more carry no release by recorded decision" in out
+
+
+def test_dropping_a_baseline_row_makes_that_tag_fault_again(mod, monkeypatch, capsys):
+    """The other direction: the record is the only thing suppressing it."""
+    monkeypatch.setattr(mod, "ABANDONED_TAGS", {})
+    routes = _routes(
+        _tags("v0.3.8"),
+        _releases(),
+        {("api", f"repos/{REPO}/releases/tags/v0.3.8"): _confirmed_absent(mod, "v0.3.8")},
+    )
+    code, out, _ = _check(mod, monkeypatch, capsys, routes)
+    assert code == 1
+    assert "v0.3.8 -- NO RELEASE" in out
+    assert "ABANDONED" not in out
+
+
+def test_the_baseline_never_suppresses_a_different_fault_on_a_recorded_tag(
+    mod, monkeypatch, capsys
+):
+    """A draft on a recorded tag is a draft, with a draft's remedy and nothing to confirm."""
+    routes = _routes(
+        _tags("v0.3.8", "v0.3.34"),
+        _releases(("v0.3.8", "true", "false", "8")),
+        {
+            ("api", f"repos/{REPO}/releases/tags/v0.3.34"): _confirmed_absent(mod, "v0.3.34"),
+        },
+    )
+    code, out, fake = _check(mod, monkeypatch, capsys, routes)
+    assert code == 1
+    assert "release unusable: it is a DRAFT" in out
+    assert "v0.3.8 -- ABANDONED" not in out, "the record reclassified nothing here"
+    assert not fake.called("api", f"repos/{REPO}/releases/tags/v0.3.8")
+
+
+def test_a_baseline_row_that_no_longer_describes_the_repository_is_a_fault(
+    mod, monkeypatch, capsys
+):
+    """A suppression that outlives its reason is how a baseline becomes permanent rot."""
+    routes = _routes(
+        _tags("v0.3.8", "v0.3.34", "v0.3.50"),
+        _releases(*_published("v0.3.8", "v0.3.50")),
+        {
+            ("api", f"repos/{REPO}/releases/tags/v0.3.34"): _confirmed_absent(mod, "v0.3.34"),
+        },
+    )
+    code, out, _ = _check(mod, monkeypatch, capsys, routes)
+    assert code == 1
+    assert "baseline row: v0.3.8 -- STALE" in out
+    assert "remove it from ABANDONED_TAGS" in out
+    assert "v0.3.8 -- ABANDONED" not in out, "a tag with a release is not abandoned"
+
+
+def test_a_baseline_row_for_a_tag_the_collection_no_longer_has_is_a_fault(
+    mod, monkeypatch, capsys
+):
+    """The second way a row stops describing the repository, and it faults for the same reason.
+
+    A gone tag does not make its row true: the row names a tag the repository no longer has,
+    so it suppresses nothing and can never be retired by anyone who is not told to retire it.
+    The remedy is the same one line the contradicted row's remedy is, so this fault is neither
+    permanent nor unactionable -- which is what an asymmetry between the two cases would have
+    to rest on. The absence is confirmed on the tag's own ref first, because it was read from
+    a collection.
+    """
+    routes = _routes(
+        _tags("v0.3.50"),
+        _releases(*_published("v0.3.50")),
+        {
+            ("api", f"repos/{REPO}/git/ref/tags/{tag}"): _tag_not_found(mod, tag)
+            for tag in ("v0.3.8", "v0.3.34")
+        },
+    )
+    code, out, fake = _check(mod, monkeypatch, capsys, routes)
+    assert code == 1
+    assert "baseline row: v0.3.8 -- STALE" in out, "the row is named with its verdict"
+    assert "not among the 1 tags read" in out, "the reason states what was actually read"
+    assert "remove it from ABANDONED_TAGS" in out, "the one-line remedy rides the line"
+    assert "v0.3.8 -- ABANDONED" not in out, "a tag with no ref is not abandoned by decision"
+    assert fake.called("api", f"repos/{REPO}/git/ref/tags/v0.3.8"), (
+        "the absence came from a collection, so the tag's own ref confirms it"
+    )
+
+
+def test_a_recorded_tag_the_collection_omits_but_its_ref_reports_is_not_measurable(
+    mod, monkeypatch, capsys
+):
+    """The other direction of the same reading: a short collection must not convict a row.
+
+    A tag collection can be short for a reason that has nothing to do with the tag, and this
+    file's rule is that only the per-tag answer convicts. So a row whose tag the ref endpoint
+    still reports is `not measurable` -- never a fault telling someone to delete a suppression
+    that is still doing its job.
+    """
+    routes = _routes(
+        _tags("v0.3.50"),
+        _releases(*_published("v0.3.50")),
+        {("api", f"repos/{REPO}/git/ref/tags/v0.3.8"): "{}"},
+    )
+    code, out, _ = _check(mod, monkeypatch, capsys, routes)
+    assert code == 2
+    assert "not measurable" in out
+    assert "answers that it exists" in out
+    assert "not a pass" in out
+    assert "STALE" not in out, "an unconfirmed absence must never be printed as a fault"
+
+
+def test_the_baseline_is_exactly_the_two_measured_tags_and_each_carries_its_evidence(mod):
+    """The record is a reading, so a reading of it is pinned: two rows, each with its run.
+
+    Growing this dict is the decision this arm exists to make deliberate -- a third tag is a
+    new permanent suppression, and it arrives as an edit to this test as well.
+    """
+    assert set(mod.ABANDONED_TAGS) == {"v0.3.8", "v0.3.34"}
+    assert "36956685533" in mod.ABANDONED_TAGS["v0.3.8"], "the row cites its failed build"
+    assert "41625081155" in mod.ABANDONED_TAGS["v0.3.34"], "the row cites its failed build"
+    assert "superseded" in mod.ABANDONED_TAGS["v0.3.8"].lower()
+    assert "superseded" in mod.ABANDONED_TAGS["v0.3.34"].lower()
+
+
+def test_each_row_carries_the_date_its_successor_was_published(mod):
+    """A reason a reader can check, not a word a reader has to trust.
+
+    "superseded" was the whole assertion once, and a row that said its successor was
+    "published the same day" passed it while the two dates were six days apart. A date is
+    the smallest thing that makes the claim checkable against the release collection, so
+    each row names one and this arm holds it to the successor it actually had.
+    """
+    assert "2026-10-08" in mod.ABANDONED_TAGS["v0.3.8"], (
+        "v0.3.8 was tagged 2026-10-02 and v0.3.9 was published 2026-10-08 -- six days "
+        "later, not the same day as the row once said"
+    )
+    assert "2026-11-03" in mod.ABANDONED_TAGS["v0.3.34"], (
+        "v0.3.34 was tagged and v0.3.35 published on 2026-11-03"
+    )
+    for tag, reason in mod.ABANDONED_TAGS.items():
+        assert "same day" not in reason.lower(), (
+            f"{tag}'s row states a temporal claim a reader cannot check from the release "
+            f"collection; name the successor's publication date instead"
+        )

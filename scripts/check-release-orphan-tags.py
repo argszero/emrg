@@ -53,12 +53,42 @@ out of gh's own message, which is the same distinction `check-release-published.
 and for the same reason -- "there is no release" and "the question could not be asked" must
 never arrive as one value.
 
+A tag that will never have a release
+------------------------------------
+Two tags on this repository carry no release and never will: `v0.3.8` and `v0.3.34` each lost
+their build, and a published successor replaced each one. They are recorded in
+`ABANDONED_TAGS` with the failed run and the successor that replaced it, because the
+alternative is a screen that answers `1` on every run for the rest of the repository's life --
+and an exit code that is correct, unactionable and permanent is an exit code its reader learns
+to ignore. That costs exactly the reading this screen was built to make cheap: an orphan
+nobody thought to ask about.
+
+The record is the narrowest thing that suppresses anything.
+
+* It reclassifies **one verdict on one tag**: "no release at all". A recorded tag that later
+  carries a draft, a prerelease or an asset-less release still faults, because that is a
+  different sentence with a different remedy.
+* A recorded tag is still **confirmed** by the per-tag endpoint. The record reclassifies a
+  verdict; it does not take a shortcut around the reading that produced it.
+* A third tag faults whether or not it is in the record. This is a list of tags, never a
+  class of them.
+* A recorded row that a release **contradicts** is a fault: the record claimed no release
+  would ever exist for that tag, and one does. Removing the row is the whole remedy, which is
+  what keeps the record from becoming a permanent blanket.
+* A recorded row whose tag has **left the collection** no longer describes the repository
+  either, and it faults for the same reason the contradicted row does: the remedy is the same
+  single line, so the fault is neither permanent nor unactionable, while a row nobody is told
+  to remove is exactly the blanket this record must not become. The tag's own ref is asked
+  first, because that absence was read from a collection.
+
 Exit codes, the family's contract:
 
     0  every tag carries a release that is published: not a draft, not a prerelease, with
-       at least one asset
+       at least one asset -- or carries none at all and is recorded in `ABANDONED_TAGS`,
+       which is printed on its own line and never silently
     1  a fault, named per tag with its remedy: a tag with no release at all, or a release
-       that is a draft, is a prerelease, or carries no asset
+       that is a draft, is a prerelease, or carries no asset; and a recorded row that no
+       longer describes the repository
     2  not measurable -- never 0. `gh` is missing, unauthenticated or refused a call; the
        repository returned **no tags at all**, which is a scan that read nothing rather
        than a clean result; or a candidate could not be confirmed either way
@@ -87,6 +117,25 @@ _HTTP_STATUS = re.compile(r"\(HTTP (\d{3})\)")
 
 #: A page of 100 is GitHub's own maximum, so this is the fewest calls the read can take.
 _PER_PAGE = 100
+
+#: Tags whose release will never exist, each with the reason it is permanent. A row here
+#: reclassifies **one** verdict on **one** tag -- "no release at all" -- and nothing else: it
+#: never suppresses a draft, a prerelease or an asset-less release on the same tag, it never
+#: covers a tag it does not name, and a row the repository no longer bears out -- a release
+#: contradicts it, or the tag itself is gone -- is a fault of its own.
+#: The docstring's "A tag that will never have a release" states why.
+ABANDONED_TAGS: dict[str, str] = {
+    "v0.3.8": (
+        "build-release run 36956685533 concluded failure on its macOS arm64 job; v0.3.9, "
+        "published 2026-10-08, superseded it, so retrying the build now would publish a "
+        "version older than the one hosts already run"
+    ),
+    "v0.3.34": (
+        "build-release run 41625081155 concluded failure on both Linux AppImage jobs; "
+        "v0.3.35, published 2026-11-03, superseded it, so retrying the build now would "
+        "publish a version older than the one hosts already run"
+    ),
+}
 
 
 class GhError(RuntimeError):
@@ -203,6 +252,23 @@ def release_exists(tag: str, repo: str) -> bool:
     return True
 
 
+def tag_exists(tag: str, repo: str) -> bool:
+    """Put one recorded row's tag to its own ref: is the tag really gone?
+
+    False is the definite absence (HTTP 404). A row is audited against the tags collection,
+    and a collection can be short for reasons that have nothing to do with the tag, so the
+    rule the orphan direction applies holds here too: only a 404 convicts a row, and a ref
+    that answers keeps a live suppression from being called stale.
+    """
+    try:
+        _gh(["api", f"repos/{repo}/git/ref/tags/{tag}"])
+    except GhError as exc:
+        if exc.http_status == 404:
+            return False
+        raise
+    return True
+
+
 def _unusable(release: dict) -> list[str]:
     """The ways a release that exists can still be one no host can use."""
     faults: list[str] = []
@@ -268,32 +334,92 @@ def _read(repo: str, only: str | None) -> int:
             )
             return 2
 
+    # The record splits the orphans; it does not shorten the list before it is read.
+    abandoned = [tag for tag in orphans if tag in ABANDONED_TAGS]
+    faults = [tag for tag in orphans if tag not in ABANDONED_TAGS]
+
+    # Both ways a row can stop describing the repository are faults of the record itself: the
+    # record claimed no release would ever exist for that tag, and either one does, or the tag
+    # is gone. Removing the row is the remedy in both cases -- one edit -- which is what keeps
+    # the record from becoming a blanket. An asymmetry between the two would have to rest on
+    # the second fault being unactionable or permanent, and it is neither: the same one line
+    # removes it, and the fault stops the moment it is removed.
+    #
+    # A row whose tag the collection omits is confirmed on the tag's own ref before it is
+    # called stale, because that absence was read from a collection too. A narrowed run
+    # audits only the rows whose tag it read.
+    stale: list[tuple[str, str]] = []
+    for tag in ABANDONED_TAGS:
+        if only and tag != only:
+            continue
+        if tag in orphans:
+            continue
+        if tag in releases:
+            stale.append((tag, "it now carries a release, so it is not an orphan"))
+        elif tag not in tags:
+            if tag_exists(tag, repo):
+                print(
+                    f"not measurable: the {len(tags)} tags read do not include {tag}, yet "
+                    f"`git/ref/tags/{tag}` answers that it exists. The tag collection was "
+                    f"short of its own subject, so the record was not audited -- not a pass."
+                )
+                return 2
+            stale.append(
+                (
+                    tag,
+                    f"it is not among the {len(tags)} tags read, so the row suppresses "
+                    f"nothing",
+                )
+            )
+
     unusable: list[tuple[str, list[str]]] = [
         (tag, _unusable(releases[tag]))
         for tag in subject
         if tag in releases and _unusable(releases[tag])
     ]
 
-    for tag in orphans:
+    for tag in faults:
         print(f"  tag: {tag} -- NO RELEASE")
-    for tag, faults in unusable:
-        print(f"  tag: {tag} -- release unusable: {'; '.join(faults)}")
-
-    if not orphans and not unusable:
+    for tag in abandoned:
         print(
-            f"OK: all {len(subject)} tag(s) read carry a published release -- not a "
-            f"draft, not a prerelease, with at least one asset"
+            f"  tag: {tag} -- ABANDONED, no release by recorded decision: "
+            f"{ABANDONED_TAGS[tag]}"
         )
+    for tag, why in stale:
+        print(f"  baseline row: {tag} -- STALE: {why}; remove it from ABANDONED_TAGS")
+    for tag, tag_faults in unusable:
+        print(f"  tag: {tag} -- release unusable: {'; '.join(tag_faults)}")
+
+    if not faults and not unusable and not stale:
+        if abandoned:
+            print(
+                f"OK: {len(subject) - len(abandoned)} of {len(subject)} tag(s) read carry a "
+                f"published release -- not a draft, not a prerelease, with at least one "
+                f"asset; the {len(abandoned)} abandoned above carry none by recorded decision"
+            )
+        else:
+            print(
+                f"OK: all {len(subject)} tag(s) read carry a published release -- not a "
+                f"draft, not a prerelease, with at least one asset"
+            )
         return 0
 
     print(
-        f"FAULT: {len(orphans)} tag(s) with no release and {len(unusable)} tag(s) with an "
-        f"unusable release, out of {len(subject)} read. A tag with no release behind it is "
-        f"a version someone was told was cut; the four platform builds may even be green, "
-        f"because a build and a release are two different jobs. Read each one with "
-        f"`uv run --no-sync python3 scripts/check-release-published.py <tag>`, which names "
-        f"that tag's run and the remedy for its own cause -- this screen reads the "
-        f"collection and cannot tell a skipped release job from a failed one."
+        f"FAULT: {len(faults)} tag(s) with no release and {len(unusable)} tag(s) with an "
+        f"unusable release"
+        + (f", plus {len(stale)} stale baseline row(s)" if stale else "")
+        + f", out of {len(subject)} read"
+        + (
+            f" ({len(abandoned)} more carry no release by recorded decision and are not "
+            f"counted)"
+            if abandoned
+            else ""
+        )
+        + ". A tag with no release behind it is a version someone was told was cut; the four "
+        f"platform builds may even be green, because a build and a release are two different "
+        f"jobs. Read each one with `uv run --no-sync python3 scripts/check-release-published.py "
+        f"<tag>`, which names that tag's run and the remedy for its own cause -- this screen "
+        f"reads the collection and cannot tell a skipped release job from a failed one."
     )
     return 1
 
