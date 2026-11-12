@@ -75,9 +75,11 @@ The record is the narrowest thing that suppresses anything.
 * A recorded row that a release **contradicts** is a fault: the record claimed no release
   would ever exist for that tag, and one does. Removing the row is the whole remedy, which is
   what keeps the record from becoming a permanent blanket.
-* A recorded row whose tag has **left the collection** suppresses nothing, so it is printed
-  as dormant and does not fault. Faulting there would be the same disease this record exists
-  to cure -- permanent, correct, and unactionable.
+* A recorded row whose tag has **left the collection** no longer describes the repository
+  either, and it faults for the same reason the contradicted row does: the remedy is the same
+  single line, so the fault is neither permanent nor unactionable, while a row nobody is told
+  to remove is exactly the blanket this record must not become. The tag's own ref is asked
+  first, because that absence was read from a collection.
 
 Exit codes, the family's contract:
 
@@ -119,7 +121,8 @@ _PER_PAGE = 100
 #: Tags whose release will never exist, each with the reason it is permanent. A row here
 #: reclassifies **one** verdict on **one** tag -- "no release at all" -- and nothing else: it
 #: never suppresses a draft, a prerelease or an asset-less release on the same tag, it never
-#: covers a tag it does not name, and a row a release contradicts is a fault of its own.
+#: covers a tag it does not name, and a row the repository no longer bears out -- a release
+#: contradicts it, or the tag itself is gone -- is a fault of its own.
 #: The docstring's "A tag that will never have a release" states why.
 ABANDONED_TAGS: dict[str, str] = {
     "v0.3.8": (
@@ -249,6 +252,23 @@ def release_exists(tag: str, repo: str) -> bool:
     return True
 
 
+def tag_exists(tag: str, repo: str) -> bool:
+    """Put one recorded row's tag to its own ref: is the tag really gone?
+
+    False is the definite absence (HTTP 404). A row is audited against the tags collection,
+    and a collection can be short for reasons that have nothing to do with the tag, so the
+    rule the orphan direction applies holds here too: only a 404 convicts a row, and a ref
+    that answers keeps a live suppression from being called stale.
+    """
+    try:
+        _gh(["api", f"repos/{repo}/git/ref/tags/{tag}"])
+    except GhError as exc:
+        if exc.http_status == 404:
+            return False
+        raise
+    return True
+
+
 def _unusable(release: dict) -> list[str]:
     """The ways a release that exists can still be one no host can use."""
     faults: list[str] = []
@@ -318,16 +338,17 @@ def _read(repo: str, only: str | None) -> int:
     abandoned = [tag for tag in orphans if tag in ABANDONED_TAGS]
     faults = [tag for tag in orphans if tag not in ABANDONED_TAGS]
 
-    # A row a release contradicts is a fault of the record itself: the record claimed no
-    # release would ever exist for that tag, and one does, so the row is no longer true and
-    # removing it is the remedy. The fault is one edit away from gone, which is what keeps
-    # the record from becoming a blanket.
+    # Both ways a row can stop describing the repository are faults of the record itself: the
+    # record claimed no release would ever exist for that tag, and either one does, or the tag
+    # is gone. Removing the row is the remedy in both cases -- one edit -- which is what keeps
+    # the record from becoming a blanket. An asymmetry between the two would have to rest on
+    # the second fault being unactionable or permanent, and it is neither: the same one line
+    # removes it, and the fault stops the moment it is removed.
     #
-    # A row whose tag has left the collection suppresses nothing at all, so it is printed as
-    # dormant rather than faulting: a permanent fault here would be the same disease this
-    # record exists to cure. A narrowed run audits only the rows whose tag it read.
+    # A row whose tag the collection omits is confirmed on the tag's own ref before it is
+    # called stale, because that absence was read from a collection too. A narrowed run
+    # audits only the rows whose tag it read.
     stale: list[tuple[str, str]] = []
-    dormant: list[str] = []
     for tag in ABANDONED_TAGS:
         if only and tag != only:
             continue
@@ -336,7 +357,20 @@ def _read(repo: str, only: str | None) -> int:
         if tag in releases:
             stale.append((tag, "it now carries a release, so it is not an orphan"))
         elif tag not in tags:
-            dormant.append(tag)
+            if tag_exists(tag, repo):
+                print(
+                    f"not measurable: the {len(tags)} tags read do not include {tag}, yet "
+                    f"`git/ref/tags/{tag}` answers that it exists. The tag collection was "
+                    f"short of its own subject, so the record was not audited -- not a pass."
+                )
+                return 2
+            stale.append(
+                (
+                    tag,
+                    f"it is not among the {len(tags)} tags read, so the row suppresses "
+                    f"nothing",
+                )
+            )
 
     unusable: list[tuple[str, list[str]]] = [
         (tag, _unusable(releases[tag]))
@@ -353,11 +387,6 @@ def _read(repo: str, only: str | None) -> int:
         )
     for tag, why in stale:
         print(f"  baseline row: {tag} -- STALE: {why}; remove it from ABANDONED_TAGS")
-    for tag in dormant:
-        print(
-            f"  record: {tag} -- DORMANT: it is not among the {len(tags)} tags read, so its "
-            f"row suppresses nothing today"
-        )
     for tag, tag_faults in unusable:
         print(f"  tag: {tag} -- release unusable: {'; '.join(tag_faults)}")
 
