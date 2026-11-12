@@ -28,6 +28,7 @@ argument list, and every payload below is shaped like the one the live endpoint 
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -485,21 +486,50 @@ def test_the_baseline_is_exactly_the_two_measured_tags_and_each_carries_its_evid
     assert "superseded" in mod.ABANDONED_TAGS["v0.3.34"].lower()
 
 
-def test_each_row_carries_the_date_its_successor_was_published(mod):
+SUCCESSORS = {
+    "v0.3.8": ("v0.3.9", "2026-10-08"),
+    "v0.3.34": ("v0.3.35", "2026-11-03"),
+}
+
+
+def _names_token(text: str, token: str) -> bool:
+    """Is `token` a whole token in `text`, or only the prefix of a longer one?
+
+    `"v0.3.9" in reason` is satisfied by `v0.3.99`, so a row naming a version that never
+    existed passed the first draft of this arm. A version and a date are both digit-bearing
+    tokens: what follows or precedes one continues it. Measured on the row, not assumed.
+    """
+    return re.search(rf"(?<![\w.]){re.escape(token)}(?![\w.])", text) is not None
+
+
+def test_each_row_names_the_successor_that_replaced_it(mod):
     """A reason a reader can check, not a word a reader has to trust.
 
     "superseded" was the whole assertion once, and a row that said its successor was
-    "published the same day" passed it while the two dates were six days apart. A date is
-    the smallest thing that makes the claim checkable against the release collection, so
-    each row names one and this arm holds it to the successor it actually had.
+    "published the same day" passed it while the two dates were six days apart. The date was
+    then held and the version was not: a row rewritten to say "v0.3.99, published
+    2026-10-08" still passed everything in this file, because the date is the half a reader
+    checks against the release collection and the version is the half they search it for.
+    Both are named here, and the expectation is keyed by tag so a newly abandoned tag cannot
+    pass on a property nothing states.
     """
-    assert "2026-10-08" in mod.ABANDONED_TAGS["v0.3.8"], (
-        "v0.3.8 was tagged 2026-10-02 and v0.3.9 was published 2026-10-08 -- six days "
-        "later, not the same day as the row once said"
+    assert set(SUCCESSORS) == set(mod.ABANDONED_TAGS), (
+        "this arm names the version that replaced each abandoned tag; the two disagree "
+        "about which rows exist, so some row's successor nothing holds: "
+        f"{sorted(set(mod.ABANDONED_TAGS) ^ set(SUCCESSORS))}"
     )
-    assert "2026-11-03" in mod.ABANDONED_TAGS["v0.3.34"], (
-        "v0.3.34 was tagged and v0.3.35 published on 2026-11-03"
-    )
+    for tag, (successor, published) in SUCCESSORS.items():
+        reason = mod.ABANDONED_TAGS[tag]
+        assert _names_token(reason, successor), (
+            f"{tag}'s row does not name {successor} as a whole version, the version that "
+            f"replaced it -- a row naming no successor, or naming another version, sends the "
+            f"reader to the release collection with nothing to look for"
+        )
+        assert _names_token(reason, published), (
+            f"{tag}'s row does not name {successor}'s publication date, {published}, as a "
+            f"whole date -- the date is what makes the claim checkable against the release "
+            f"collection"
+        )
     for tag, reason in mod.ABANDONED_TAGS.items():
         assert "same day" not in reason.lower(), (
             f"{tag}'s row states a temporal claim a reader cannot check from the release "
