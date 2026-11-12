@@ -424,8 +424,19 @@ def _fetch_head(number: int) -> str:
     The parked ref is dropped before this returns (`merge_tree.drop_ref`): the
     caller wants the SHA, and a ref left behind pins that head's objects for the
     life of the clone (measured 2026-09-17: this gate had 25 of them resident).
+
+    A head this clone already holds is the same measurement with no network in it,
+    so it is answered before any fetch (`merge_tree.head_commit_already_here`). That
+    path parks no ref, which is why the drop below is on the fetch path alone: there
+    is nothing to release when nothing was fetched.
     """
     ref = f"refs/emrg-landing-diff/pr{number}"
+    # The sha comes from the API, never from a local ref, so the forced refspec's
+    # stale-ref protection is not weakened. When it answers `None` the fetch below is
+    # exactly what this function did before.
+    here = merge_tree.head_commit_already_here(number, run=_run)
+    if here is not None:
+        return here
     proc = _run(["git", "fetch", "--quiet", "origin", f"+pull/{number}/head:{ref}"])
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
