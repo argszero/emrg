@@ -1425,8 +1425,21 @@ def _mention_detail(refs: Refs, number: int) -> str:
 #: release word this repository's titles actually use, immediately before the version; a
 #: version behind anything else is a citation, the issue keeps the remedy it had, and the
 #: reading never substitutes a different version than the one it names.
+#:
+#: The release word does not always introduce a `v`, and requiring one was a second false
+#: negative in the same sentence. This repository's titles spell the version both ways -
+#: `Release v0.3.46` beside `Publish 0.3.52` - so a pattern that demanded the `v` answered
+#: nothing for the second form, and the reader of a genuine release issue was left with the
+#: generic remedy that names no artifact at all. Measured over a 200-issue window: five
+#: titles present a bare version and every one of them names a real release. So the `v` is
+#: optional on the way in and restored on the way out, because the sentence below prints
+#: this value as an argument: every tag here is `v`-prefixed (154 of 154) and
+#: `check-release-published.py` takes a tag, so echoing `0.3.52` as written would print an
+#: argument that command refuses. Restoring the prefix is not the substitution this rule
+#: forbids - it puts the `v` the tag carries onto a version the title already presents,
+#: while a version the title does not present stays refused.
 _RELEASE_VERSION = re.compile(
-    r"(?:\brelease|\bcut|\bpublish)\s+(v\d+\.\d+\.\d+)\b", re.IGNORECASE
+    r"(?:\brelease|\bcut|\bpublish)\s+v?(\d+\.\d+\.\d+)\b", re.IGNORECASE
 )
 
 
@@ -1435,13 +1448,16 @@ def release_version(*texts: str | None) -> str | None:
 
     Which text is the caller's decision, not this function's: `judge_issues` passes the
     issue's title alone, and the reason is stated on `_RELEASE_VERSION`.
+
+    The value comes back in the tag's spelling rather than the title's, for the reason
+    stated there: the caller prints it as the argument of a command that takes a tag.
     """
     for text in texts:
         if not text:
             continue
         found = _RELEASE_VERSION.search(text)
         if found:
-            return found.group(1)
+            return f"v{found.group(1)}"
     return None
 
 
