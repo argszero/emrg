@@ -188,6 +188,73 @@ class TestParseSkillFile:
         result = _parse_skill_file(md, "user")
         assert result is None
 
+    def test_a_crlf_file_reads_as_its_lf_twin(self, tmp_path):
+        """A skill written with CRLF reads exactly as the same skill written with LF.
+
+        The tolerance comes from `read_text`'s universal-newline translation, not from anything
+        this module asserts, which is why it is pinned here: a reader that decoded the bytes
+        itself - the natural move for a byte-oriented guard at the same seam - would keep the
+        carriage return in every block scalar and in the whole body, so the description that
+        reaches the prompt would carry them. A literal block scalar keeps its line breaks, so
+        the equality below is not trivially true of any two strings.
+        """
+        lf_text = (
+            "---\n"
+            "name: crlf-demo\n"
+            "description: |\n"
+            "  first line\n"
+            "  second line\n"
+            "---\n"
+            "# Body heading\n"
+            "\n"
+            "Paragraph one.\n"
+        )
+        lf_file = tmp_path / "lf.md"
+        crlf_file = tmp_path / "crlf.md"
+        lf_file.write_bytes(lf_text.encode("utf-8"))
+        crlf_file.write_bytes(lf_text.replace("\n", "\r\n").encode("utf-8"))
+        assert crlf_file.read_bytes().count(b"\r\n") == lf_text.count("\n"), (
+            "the fixture is not the shape it claims to be"
+        )
+
+        lf_skill = _parse_skill_file(lf_file, "user")
+        crlf_skill = _parse_skill_file(crlf_file, "user")
+
+        assert lf_skill is not None and crlf_skill is not None
+        assert (crlf_skill.name, crlf_skill.description, crlf_skill.body) == (
+            lf_skill.name,
+            lf_skill.description,
+            lf_skill.body,
+        ), "a CRLF skill file read differently from the same file written with LF"
+        assert "\r" not in crlf_skill.description, "a carriage return reached the description"
+        assert "\r" not in crlf_skill.body, "a carriage return reached the body"
+        assert crlf_skill.description == "first line\nsecond line"
+
+    def test_a_file_that_ends_at_its_closing_fence_still_parses(self, tmp_path):
+        """A skill whose last bytes are its closing fence is read, not refused.
+
+        Skill files are hand-written, and one on this host ends exactly there. A reader that
+        required a newline after the closing fence would answer `None`, and `None` is how the
+        loader says "not a skill": the declaration would drop out of the prompt with nothing
+        reported. The tolerance belongs to `split("---", 2)` matching without a trailing
+        newline rather than to any statement in the module, so it is pinned here.
+        """
+        md = tmp_path / "no-final-newline.md"
+        md.write_bytes(
+            b"---\n"
+            b"name: bare-fence\n"
+            b"description: a declared description\n"
+            b"---"
+        )
+        assert not md.read_bytes().endswith(b"\n"), "the fixture gained the newline it must lack"
+
+        result = _parse_skill_file(md, "user")
+
+        assert result is not None, "a file ending at its closing fence was refused"
+        assert result.name == "bare-fence"
+        assert result.description == "a declared description"
+        assert result.body == ""
+
 
 class TestBuildSkillsContext:
     """Tests for build_skills_context — system prompt skills summary."""
