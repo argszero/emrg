@@ -332,6 +332,14 @@ def _fetch_head(repo: str, number: int) -> str:
     same two fetches both succeed and the ref ends at the true head.
     """
     ref = f"refs/emrg-forecast/pr{number}"
+    # A head this clone already holds is the same measurement with no network in it
+    # (`merge_tree.head_commit_already_here`), and the sha comes from the API rather
+    # than from a local ref, so the forced refspec's stale-ref protection is not
+    # weakened. That path parks no ref, which is why the drop below is on the fetch
+    # path alone. When it answers `None` the fetch is exactly what this did before.
+    here = merge_tree.head_commit_already_here(number, run=_run)
+    if here is not None:
+        return here
     proc = _run(
         ["git", "fetch", "--quiet", "origin", f"+pull/{number}/head:{ref}"]
     )
