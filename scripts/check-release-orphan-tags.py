@@ -123,14 +123,14 @@ _PER_PAGE = 100
 #: The docstring's "A tag that will never have a release" states why.
 ABANDONED_TAGS: dict[str, str] = {
     "v0.3.8": (
-        "build-release run 36956685533 concluded failure on its macOS arm64 job; v0.3.9 was "
-        "published the same day and superseded it, so retrying the build now would publish a "
+        "build-release run 36956685533 concluded failure on its macOS arm64 job; v0.3.9, "
+        "published 2026-10-08, superseded it, so retrying the build now would publish a "
         "version older than the one hosts already run"
     ),
     "v0.3.34": (
         "build-release run 41625081155 concluded failure on both Linux AppImage jobs; "
-        "v0.3.35 was published and superseded it, so retrying the build now would publish a "
-        "version older than the one hosts already run"
+        "v0.3.35, published 2026-11-03, superseded it, so retrying the build now would "
+        "publish a version older than the one hosts already run"
     ),
 }
 

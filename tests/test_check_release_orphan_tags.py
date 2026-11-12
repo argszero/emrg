@@ -405,3 +405,25 @@ def test_the_baseline_is_exactly_the_two_measured_tags_and_each_carries_its_evid
     assert "41625081155" in mod.ABANDONED_TAGS["v0.3.34"], "the row cites its failed build"
     assert "superseded" in mod.ABANDONED_TAGS["v0.3.8"].lower()
     assert "superseded" in mod.ABANDONED_TAGS["v0.3.34"].lower()
+
+
+def test_each_row_carries_the_date_its_successor_was_published(mod):
+    """A reason a reader can check, not a word a reader has to trust.
+
+    "superseded" was the whole assertion once, and a row that said its successor was
+    "published the same day" passed it while the two dates were six days apart. A date is
+    the smallest thing that makes the claim checkable against the release collection, so
+    each row names one and this arm holds it to the successor it actually had.
+    """
+    assert "2026-10-08" in mod.ABANDONED_TAGS["v0.3.8"], (
+        "v0.3.8 was tagged 2026-10-02 and v0.3.9 was published 2026-10-08 -- six days "
+        "later, not the same day as the row once said"
+    )
+    assert "2026-11-03" in mod.ABANDONED_TAGS["v0.3.34"], (
+        "v0.3.34 was tagged and v0.3.35 published on 2026-11-03"
+    )
+    for tag, reason in mod.ABANDONED_TAGS.items():
+        assert "same day" not in reason.lower(), (
+            f"{tag}'s row states a temporal claim a reader cannot check from the release "
+            f"collection; name the successor's publication date instead"
+        )
