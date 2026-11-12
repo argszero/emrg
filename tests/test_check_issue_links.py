@@ -2876,12 +2876,44 @@ def test_the_release_version_is_read_only_where_it_is_one(mod) -> None:
             "A version is owed: the skill reader changed what an installation does since v0.3.52",
             None,
         ),
+        # The other spelling of a presentation: this repository's release titles also write
+        # the version without the `v`, and those name a real release just as plainly. The
+        # expected value is the tag's form, not the title's - see the test below for why.
+        ("Publish 0.3.52", "v0.3.52"),
+        (
+            "Publish 0.3.50: four merges past the tag change what an installation does, "
+            "and master still declares 0.3.49",
+            "v0.3.50",
+        ),
+        (
+            "The release lags master: cut 0.3.40 so an upgrade carries the self-media "
+            "publish round",
+            "v0.3.40",
+        ),
     ],
 )
 def test_the_version_is_read_where_the_title_presents_one_and_not_where_it_cites_one(
     mod, title, expected
 ) -> None:
     assert mod.release_version(title) == expected
+
+
+def test_a_bare_version_comes_back_in_the_form_the_tag_carries(mod) -> None:
+    """The reader's value is an argument, so it has to be spelled the way the command takes it.
+
+    A title writing its version without the `v` presents a real release exactly as the
+    `v`-prefixed form does, and refusing it left the reader with the generic remedy that
+    names no artifact. Reading it is only useful if it comes back normalised: every tag in
+    this repository is `v`-prefixed and `check-release-published.py` takes a tag, so echoing
+    the bare spelling would print an argument that command refuses. The sentence is driven
+    here rather than the reader alone, because a value the sentence never prints is a value
+    nothing downstream was fixed by.
+    """
+    version = mod.release_version("Publish 0.3.52")
+    assert version == "v0.3.52"
+    detail = mod._declined_detail(mod.Refs(declared_merged={2843}), 2842, version)
+    assert "scripts/check-release-published.py v0.3.52" in detail
+    assert "scripts/check-release-published.py 0.3.52" not in detail
 
 
 def test_a_cited_version_leaves_the_artifact_sentence_out_and_the_generic_one_in(mod) -> None:
