@@ -1611,3 +1611,64 @@ def test_the_hazard_explanation_is_printed_after_the_change_it_warns_about(
     assert err.strip() == "", (
         f"stderr carried a verdict, so its position is again decided by buffering: {err!r}"
     )
+
+
+# --- a head this clone holds is measured without a network ----------------------
+#
+# Every gate in this family read a PR head by fetching it, so on a host whose git
+# transport is down each of them answered "could not measure" while the very commit
+# the PR heads at sat in the clone. `merge_tree.head_commit_already_here` takes the
+# sha from the API and asks the object store; this gate reaches it the way its
+# siblings do, and the fetch stays exactly what it was whenever that answers nothing.
+
+
+def test_a_head_this_clone_holds_is_measured_without_a_fetch(mod, monkeypatch) -> None:
+    """The cheap path answers the sha, and never runs `git fetch`."""
+    sha = "a" * 40
+    seen: list[list[str]] = []
+
+    class _Proc:
+        def __init__(self, returncode: int, stdout: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = ""
+
+    def fake_run(argv, cwd=None, env=None):
+        seen.append(list(argv))
+        if argv[:3] == ["gh", "pr", "view"]:
+            return _Proc(0, sha + "\n")
+        if argv[:2] == ["git", "cat-file"]:
+            return _Proc(0)
+        return _Proc(1)
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+
+    assert mod._fetch_head(7) == sha
+    assert not [a for a in seen if a[:2] == ["git", "fetch"]], (
+        f"the cheap path still fetched, so this test proves nothing: {seen!r}"
+    )
+
+
+def test_the_fetch_is_still_the_fallback_when_no_head_is_local(mod, monkeypatch) -> None:
+    """When no answer comes back, this function does what it did before the change."""
+    seen: list[list[str]] = []
+
+    class _Proc:
+        def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_run(argv, cwd=None, env=None):
+        seen.append(list(argv))
+        if argv[:3] == ["gh", "pr", "view"]:
+            return _Proc(1)
+        return _Proc(1, stderr="fatal: could not read from remote repository")
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+
+    with pytest.raises(mod.MeasurementError):
+        mod._fetch_head(7)
+    assert [a for a in seen if a[:2] == ["git", "fetch"]], (
+        f"the fallback never fetched, so a head missing locally lost its old path: {seen!r}"
+    )
