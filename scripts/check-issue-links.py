@@ -1438,8 +1438,16 @@ def _mention_detail(refs: Refs, number: int) -> str:
 #: argument that command refuses. Restoring the prefix is not the substitution this rule
 #: forbids - it puts the `v` the tag carries onto a version the title already presents,
 #: while a version the title does not present stays refused.
+#: The release word also has to be a word rather than the tail of one. A word boundary sits
+#: between a hyphen and the letter after it, so `pre-release v0.3.44` and `non-release
+#: v0.3.44` matched the same release-word-then-version pair a presentation does, and that
+#: issue was handed the artifact remedy for a version its title never shipped - the false
+#: positive this rule exists to prevent, arriving through the boundary instead of through
+#: the word. So what stands in front of the word may be neither a letter nor a hyphen, and
+#: every accepted spelling keeps working: the word opening a title, or following a space, a
+#: colon, a bracket or an em dash.
 _RELEASE_VERSION = re.compile(
-    r"(?:\brelease|\bcut|\bpublish)\s+v?(\d+\.\d+\.\d+)\b", re.IGNORECASE
+    r"(?<![\w-])(?:release|cut|publish)\s+v?(\d+\.\d+\.\d+)\b", re.IGNORECASE
 )
 
 
