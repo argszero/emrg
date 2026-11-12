@@ -359,6 +359,21 @@ NOT_TREE_READERS = {
         "refusal (rc 2, with the roots named) is pinned by tests/test_check_batching_share.py "
         "- added by issue #2406, whose two acceptance numbers had no command behind them"
     ),
+    "check-extra-prompt-rotation.py": (
+        "reads two subjects it names before any verdict - the task table "
+        "(`~/.emrg/tasks.yml`) and the rotation table (a Markdown table of the "
+        "extra_prompt length each block was classified at) - and compares the length "
+        "of every block that renders against the number its row records. A working tree "
+        "is not its subject and no tree's name would answer anything: the questions are "
+        "which blocks moved and whether every rendering block has a row, and both are "
+        "answered about host state a checkout does not carry (the tasks table is the "
+        "host's, the rotation table is gitignored memory). Its unmeasurable answer (rc 2: "
+        "no task table, no rotation table, YAML that does not parse, records that are not "
+        "a list, a table with no parsable row) and its classification states (rc 1: "
+        "changed, unclassified, gone) are pinned by "
+        "tests/test_check_extra_prompt_rotation.py - added by issue #2850, where section "
+        "1.7's rotation spent a round re-reading an unchanged block for the third time"
+    ),
     "check-merge-freshness.py": "requires PR numbers; answers per head and its base",
     "check-merge-order.py": "requires PR numbers; names the base it plans against",
     "check-merge-pairs.py": "requires PR numbers; names the base it folds onto",
