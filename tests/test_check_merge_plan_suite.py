@@ -981,6 +981,55 @@ def test_the_ref_is_released_by_the_fetch_that_made_it_not_by_the_run(
     assert _plan_refs(repo) == [], "the fetch left its own ref resident"
 
 
+def test_a_head_the_clone_already_holds_is_read_without_a_fetch(
+    queue: tuple[Path, Path], mod, monkeypatch
+) -> None:
+    """A gate must be measurable on a host whose git transport is down.
+
+    Measured 2026-11-12 (`cyc20261112-115744`): `check-merge-plan-suite.py 2853`
+    answered rc 2, "could not measure", because `_fetch_head` fetches
+    `refs/pull/<N>/head` over a transport this host cannot reach — while the very
+    commit that PR heads at was resident in the clone, as the local branch the cycle
+    had pushed. Every merge gate in this family fetches, so on that host none of them
+    could judge anything.
+
+    The cheap path is the same measurement: the sha comes from the API (so it is the
+    PR's head by definition and the forced refspec's stale-ref protection is not
+    weakened), and the object store is asked whether this clone already has it. This
+    test stubs the API's answer and asserts no `git fetch` is attempted — which is the
+    discriminator, because the fetch here would *succeed* against the local origin and
+    return the same commit.
+    """
+    repo, origin = queue
+    _branch_with(repo, "one", {"a.md": "a\n"})
+    head = _publish(repo, origin, 1, "one")
+    monkeypatch.chdir(repo)
+
+    real_run = mod._run
+    calls: list[list[str]] = []
+
+    class _Done:
+        def __init__(self, argv: list[str], **kw) -> None:
+            self.returncode = 0
+            self.stdout = head + "\n"
+            self.stderr = ""
+
+    def fake_run(argv, **kw):
+        calls.append(list(argv))
+        if argv and argv[0] == "gh":
+            return _Done(argv, **kw)
+        return real_run(argv, **kw)
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+
+    assert mod._fetch_head(1) == head
+    assert not [c for c in calls if c[:2] == ["git", "fetch"]], (
+        "a head the clone already holds was fetched over the network anyway"
+    )
+    assert [c for c in calls if c and c[0] == "gh"], "the API was never asked for the head"
+    assert _plan_refs(repo) == [], "the network-free path parked a ref it never released"
+
+
 def test_the_run_does_not_hand_the_suite_the_callers_dirty_tree_override(
     queue: tuple[Path, Path],
 ) -> None:

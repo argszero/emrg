@@ -449,6 +449,50 @@ def commit_tree(
     return proc.stdout.strip()
 
 
+_HEAD_SHA = re.compile(r"^[0-9a-f]{40}$")
+
+
+def head_commit_already_here(
+    number: int,
+    run: Callable[..., subprocess.CompletedProcess],
+) -> str | None:
+    """The PR's head commit, if this clone already holds it — else ``None``.
+
+    Every gate in this family reads a PR head by fetching it. A fetch is a network
+    operation, so on a host whose git transport is down every one of them answers
+    "could not measure" — measured 2026-11-12: `check-merge-plan-suite.py 2853`
+    reported rc 2 through that path while the very commit the PR heads at was
+    sitting in the clone as a local branch. The suite evidence for that tree was
+    available; the tool could not reach it.
+
+    The sha comes from the **API**, never from a local ref, and that is what keeps
+    this from reintroducing the stale-ref trap the forced refspec exists to close: a
+    branch called `test/skill-reader-pins` may be behind, ahead, or a name that no
+    longer means what it meant, but a commit sha read from `gh pr view <N>` is this
+    PR's head by definition. The object store is then asked whether *that* commit is
+    present (`^{commit}` peels, so an annotated tag is not accepted as a head).
+
+    No ref is created, so nothing here owes a release: the callers that park a head
+    under `refs/<tool>/pr<N>` still do so on the fetch path, and this path hands back
+    a commit, which is what every caller measures with anyway.
+
+    Returning ``None`` covers all three ways the cheap path is unavailable — no
+    network, no `gh`, or an object this clone does not have — and each of them ends
+    at the fetch the caller already had.
+    """
+    proc = run(
+        ["gh", "pr", "view", str(number), "--json", "headRefOid", "--jq", ".headRefOid"]
+    )
+    if proc.returncode != 0:
+        return None
+    sha = proc.stdout.strip()
+    if not _HEAD_SHA.match(sha):
+        return None
+    if run(["git", "cat-file", "-e", f"{sha}^{{commit}}"]).returncode != 0:
+        return None
+    return sha
+
+
 def drop_ref(
     ref: str,
     run: Callable[..., subprocess.CompletedProcess],

@@ -640,6 +640,12 @@ def _fetch_head(number: int) -> str:
     for good - measured 2026-09-17, this gate had 83 such refs resident.
     """
     ref = f"refs/emrg-merge-seq/pr{number}"
+    # Same cheap path as the plan-suite gate: a head already in this clone is measured
+    # by sha from the API, with no fetch and no ref parked. See
+    # `merge_tree.head_commit_already_here`.
+    here = merge_tree.head_commit_already_here(number, run=_run)
+    if here is not None:
+        return here
     proc = _run(["git", "fetch", "--quiet", "origin", f"+pull/{number}/head:{ref}"])
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip() or "unknown error"

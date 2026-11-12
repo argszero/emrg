@@ -631,6 +631,13 @@ def _fetch_head(number: int) -> str:
     something" is not a property, while "the call that made the ref deletes it" is.
     """
     ref = f"{PLAN_REF_PREFIX}{number}"
+    # A head this clone already holds is the same measurement with no network in it,
+    # and the sha comes from the API rather than from a local ref, so the forced
+    # refspec's stale-ref protection is not weakened. When it answers `None` the fetch
+    # below is exactly what this function did before.
+    here = merge_tree.head_commit_already_here(number, run=_run)
+    if here is not None:
+        return here
     proc = _run(["git", "fetch", "--quiet", "origin", f"+pull/{number}/head:{ref}"])
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
