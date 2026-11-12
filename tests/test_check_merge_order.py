@@ -1808,3 +1808,58 @@ class TestTheHeaderNamesTheSelectionNotTheRepository:
         )
         assert mod.main(["--json"]) == 0
         assert json.loads(capsys.readouterr().out)["selection"] == "open"
+
+
+# --- a head this clone holds is measured without a network ----------------------
+
+
+def test_a_head_this_clone_holds_is_measured_without_a_fetch(mod, monkeypatch) -> None:
+    """The cheap path answers the sha, and never runs `git fetch`."""
+    sha = "a" * 40
+    seen: list[list[str]] = []
+
+    class _Proc:
+        def __init__(self, returncode: int, stdout: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = ""
+
+    def fake_run(argv):
+        seen.append(list(argv))
+        if argv[:3] == ["gh", "pr", "view"]:
+            return _Proc(0, sha + "\n")
+        if argv[:2] == ["git", "cat-file"]:
+            return _Proc(0)
+        return _Proc(1)
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+
+    assert mod._fetch_head("argszero/emrg", 7) == sha
+    assert not [a for a in seen if a[:2] == ["git", "fetch"]], (
+        f"the cheap path still fetched, so this test proves nothing: {seen!r}"
+    )
+
+
+def test_the_fetch_is_still_the_fallback_when_no_head_is_local(mod, monkeypatch) -> None:
+    """When no answer comes back, this function does what it did before the change."""
+    seen: list[list[str]] = []
+
+    class _Proc:
+        def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_run(argv):
+        seen.append(list(argv))
+        if argv[:3] == ["gh", "pr", "view"]:
+            return _Proc(1)
+        return _Proc(1, stderr="fatal: could not read from remote repository")
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+
+    with pytest.raises(RuntimeError):
+        mod._fetch_head("argszero/emrg", 7)
+    assert [a for a in seen if a[:2] == ["git", "fetch"]], (
+        f"the fallback never fetched, so a head missing locally lost its old path: {seen!r}"
+    )
