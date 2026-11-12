@@ -261,6 +261,100 @@ def test_a_block_scalar_description_reads_as_its_text(roots, name, indicator, ex
     )
 
 
+PLAIN_CONTINUATION_CASES = [
+    ("one-line", "  world", "hello world"),
+    ("deeper", "    world", "hello world"),
+    ("two-lines", "  world\n  again", "hello world again"),
+    ("blank-between", "\n  world", "hello\nworld"),
+]
+
+
+@pytest.mark.parametrize("name, continuation, expected", PLAIN_CONTINUATION_CASES)
+def test_a_plain_description_folds_across_the_lines_indented_past_it(
+    roots, name, continuation, expected
+):
+    """A plain scalar continues on the indented lines below it, the way YAML reads it.
+
+    The reader skipped every indented line outside a block scalar. That is right for a key
+    with no value — a nested mapping must not overwrite the top-level entry — and wrong for
+    one that already carries text: the continuation vanished, and the skill was described in
+    the prompt by its first line alone. Each expected value below is what ``yaml.safe_load``
+    answers for the same frontmatter, including the newline a blank line folds to.
+    """
+    root = roots["dirs"]["user"]
+    root.mkdir(parents=True, exist_ok=True)
+    (root / f"{name}.md").write_text(
+        "---\n"
+        f"name: {name}\n"
+        "description: hello\n"
+        f"{continuation}\n"
+        "---\n\nbody\n",
+        encoding="utf-8",
+    )
+
+    skills, _ = _load(roots)
+
+    assert [s.name for s in skills] == [name], skills
+    description = skills[0].description
+    assert description == expected, f"{name} read as {description!r}"
+
+
+def test_a_valueless_key_still_opens_a_nested_mapping_beside_a_folded_one(roots):
+    """The half that must not move: the fold is decided by the value, not the indentation.
+
+    Both shapes are present in one frontmatter, so neither can pass by the other being
+    absent: ``metadata:`` carries no value and its indented ``description`` must still be
+    read as nested YAML, while ``description: hello`` carries one and its indented line must
+    fold into it. A reader that keyed on indentation alone would satisfy one and break the
+    other.
+    """
+    root = roots["dirs"]["user"]
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "both.md").write_text(
+        "---\n"
+        "name: both\n"
+        "description: hello\n"
+        "  world\n"
+        "metadata:\n"
+        "  description: the nested one\n"
+        "---\n\nbody\n",
+        encoding="utf-8",
+    )
+
+    skills, _ = _load(roots)
+
+    assert [s.name for s in skills] == ["both"], skills
+    assert skills[0].description == "hello world", skills[0].description
+
+
+def test_a_block_scalar_and_a_folded_plain_value_resolve_in_one_load(roots):
+    """The two branches are disjoint, so one load carries both shapes intact.
+
+    An indicator opens a block and a plain value folds; a plain value must never be read as
+    a block, and the block path must not be reached by text that merely happens to continue.
+    Asserting them together is what makes a shadowed branch visible — either answer alone
+    would still be right with the other path broken.
+    """
+    root = roots["dirs"]["user"]
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "blocky.md").write_text(
+        "---\nname: blocky\ndescription: >\n  first line\n  second line\n---\n\nbody\n",
+        encoding="utf-8",
+    )
+    (root / "folded.md").write_text(
+        "---\nname: folded\ndescription: hello\n  world\n---\n\nbody\n",
+        encoding="utf-8",
+    )
+
+    skills, _ = _load(roots)
+    descriptions = {s.name: s.description for s in skills}
+
+    assert descriptions == {
+        "blocky": "first line second line",
+        "folded": "hello world",
+    }, descriptions
+
+
 def test_a_colon_in_a_plain_description_is_kept(roots):
     """The control for the block-scalar branch: an ordinary value is not read as one."""
     root = roots["dirs"]["user"]
