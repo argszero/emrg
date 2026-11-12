@@ -6,6 +6,7 @@ Usage
     uv run --no-sync python3 scripts/check-extra-prompt-rotation.py
     uv run --no-sync python3 scripts/check-extra-prompt-rotation.py --all
     uv run --no-sync python3 scripts/check-extra-prompt-rotation.py --tasks <PATH> --table <PATH>
+    uv run --no-sync python3 scripts/check-extra-prompt-rotation.py --init > <table>
 
 Why this exists
 ---------------
@@ -73,6 +74,16 @@ Exit codes
 `0` is reserved for a reading that covered every block, and a question the file cannot answer
 is **2**, never `0` - the prompt's own rule for every reading, and the reason a missing table
 cannot look like a clean rotation.
+
+Bootstrapping a host that has no table
+-------------------------------------
+The rotation table is an installation's own memory, and nothing creates it: a checkout that has
+never run a cycle has no row for anything, so the first reading on it answers **2**. Naming the
+missing path without a next step is the dead end this file exists to remove, so **`--init` prints
+a skeleton** - the table header and one row per block that renders, carrying that block's length
+as it stands - for the caller to write to the table's path and then classify. It is printed and
+never written: recording what a block turned out to be is a reader's judgement, and a tool that
+filled in its own rows would be recording classifications nobody made.
 
 What it does not do
 -------------------
@@ -218,6 +229,47 @@ def _load_table(path):
         return None
 
 
+def init_table(blocks):
+    """The rotation table's skeleton, one row per block that renders.
+
+    The lengths are this host's, which is the point: the skeleton is only useful for the task
+    table it was printed from, and a reader classifies each row against the block it names.
+    """
+    rows = sorted(
+        (task, length) for task, (renders, length, _both) in blocks.items() if renders
+    )
+    lines = [
+        "# The section 1.7 rotation table.",
+        "#",
+        "# One row per task `extra_prompt` block that renders. The number is that block's length",
+        "# when the row was written; a block whose length is unchanged has not moved, so there is",
+        "# nothing to classify.",
+        "#",
+        "# Replace `**unclassified**` with what the block turned out to be: `**already in",
+        "# template**`, `**instance configuration**`, or `**missing from template**`.",
+        "",
+        "| task | chars | class | evidence |",
+        "|---|---|---|---|",
+    ]
+    for task, length in rows:
+        lines.append(f"| `{task}` | {length} | **unclassified** | printed by --init |")
+    return "\n".join(lines) + "\n"
+
+
+def _print_init(records, tasks_path, table_path):
+    """`--init`: print the skeleton for this task table. Exit 2 when nothing renders."""
+    blocks = rendered_blocks(records)
+    if not any(renders for renders, _length, _both in blocks.values()):
+        print(
+            f"cannot measure: {tasks_path} carries no record with a rendering extra_prompt",
+            file=sys.stderr,
+        )
+        return 2
+    sys.stdout.write(init_table(blocks))
+    print(f"# write this to {table_path}", file=sys.stderr)
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description=(
@@ -243,6 +295,14 @@ def main(argv=None):
         action="store_true",
         help="list every block, including the unchanged ones",
     )
+    parser.add_argument(
+        "--init",
+        action="store_true",
+        help=(
+            "print a skeleton rotation table for this task table, one row per block that "
+            "renders, to be written to the table's path and classified"
+        ),
+    )
     args = parser.parse_args(argv)
 
     tasks_path = Path(os.path.expanduser(str(args.tasks)))
@@ -251,8 +311,18 @@ def main(argv=None):
     records = _load_tasks(tasks_path)
     if records is None:
         return 2
+
+    if args.init:
+        return _print_init(records, tasks_path, table_path)
+
     text = _load_table(table_path)
     if text is None:
+        print(
+            "the rotation table is this host's memory and nothing creates it: run `--init` to "
+            f"print a skeleton for every block that renders, write it to {table_path}, then "
+            "classify its rows",
+            file=sys.stderr,
+        )
         return 2
 
     rows = table_rows(text)

@@ -19,7 +19,10 @@ answer that question, and can a wrong answer read as clean":
   YAML that does not parse, records that are not a list, and a table with no parsable row all
   answer **2**, and `0` is reserved for a reading that covered every block;
 * **it measures and never repairs** - a run leaves both files byte-identical, because a tool
-  that advanced the table itself would record a classification nobody made.
+  that advanced the table itself would record a classification nobody made;
+* **a host with no table has a next step** - `--init` prints a skeleton carrying each rendering
+  block's length, it writes nothing itself, and what it prints is a valid table: written to the
+  table's path it reads back clean, which is what closes the loop a first reading dead-ends on.
 
 Loading
 -------
@@ -229,3 +232,58 @@ def test_all_lists_the_unchanged_blocks_too(mod, tmp_path, capsys):
     all_out = capsys.readouterr().out
     assert "zeta" in all_out and "eta" in all_out
     assert "40 chars" in all_out and "7 chars" in all_out
+
+
+def test_init_prints_a_row_per_rendering_block(mod, tmp_path, capsys):
+    """The bootstrap: a host that never wrote the table gets the shape, with its own numbers."""
+    tasks = _tasks(
+        tmp_path,
+        [_record("zeta", text="x" * 40), _record("eta"), _record("omega", top="y" * 9)],
+    )
+
+    assert mod.main(["--tasks", str(tasks), "--init"]) == 0
+    out = capsys.readouterr().out
+    assert "| task | chars | class | evidence |" in out
+    assert "| `zeta` | 40 |" in out
+    assert "| `omega` | 9 |" in out, "a top-level block is a block here too"
+    assert "`eta`" not in out, "nothing renders for eta, so there is nothing to classify"
+
+
+def test_init_writes_nothing(mod, tmp_path, capsys):
+    """It prints the shape; writing a classification nobody made is not its job."""
+    tasks = _tasks(tmp_path, [_record("zeta", text="x" * 12)])
+    table = tmp_path / "absent.md"
+
+    assert mod.main(["--tasks", str(tasks), "--table", str(table), "--init"]) == 0
+    capsys.readouterr()
+    assert not table.exists(), "the tool may not create the table it is asked to read"
+
+
+def test_what_init_prints_reads_back_clean(mod, tmp_path, capsys):
+    """The loop closes: the skeleton, written where the table belongs, is a table."""
+    tasks = _tasks(tmp_path, [_record("zeta", text="x" * 40), _record("omega", top="y" * 9)])
+
+    assert mod.main(["--tasks", str(tasks), "--init"]) == 0
+    printed = capsys.readouterr().out
+
+    table = tmp_path / "rotation.md"
+    table.write_text(printed, encoding="utf-8")
+    assert mod.main(["--tasks", str(tasks), "--table", str(table)]) == 0
+    assert "2 render, 2 unchanged" in capsys.readouterr().out
+
+
+def test_the_missing_table_remedy_names_init(mod, tmp_path, capsys):
+    """A dead end that names its own next step, which is what the first reading used to be."""
+    tasks = _tasks(tmp_path, [_record("zeta", text="x")])
+
+    assert mod.main(["--tasks", str(tasks), "--table", str(tmp_path / "absent.md")]) == 2
+    err = capsys.readouterr().err
+    assert "cannot measure" in err and "--init" in err, err
+
+
+def test_init_with_no_rendering_block_is_not_a_pass(mod, tmp_path, capsys):
+    """A skeleton with no rows would be an empty table, and an empty table is not a reading."""
+    tasks = _tasks(tmp_path, [_record("zeta"), _record("eta")])
+
+    assert mod.main(["--tasks", str(tasks), "--init"]) == 2
+    assert "no record with a rendering extra_prompt" in capsys.readouterr().err
