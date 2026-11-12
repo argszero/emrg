@@ -38,6 +38,15 @@ The second reading is the append's own premise: **the state file's block must no
 be in the archive**. When it is, the append reached the archive and the replacement did
 not, so the state file still holds a block that is filed twice.
 
+That reading compares **subject cells, not block text**, and the difference is the whole
+reason it works. A displaced block's header is rewritten on the way in -- `- re-derive,
+never quote` becomes `- displaced by cyc<id>` -- so the state file's block is *never* a
+verbatim substring of the archive once the append has happened. A first draft compared the
+text and answered clean on exactly the half-done state it exists to report; measured on
+2026-11-12 with both shapes side by side. The subject cell is the one part displacement
+preserves, so it is what identity is read from here, exactly as it is in the header
+reading above.
+
 Report
 ------
 The first line names the checkout that answered, `tree: <path>`, before any verdict -- the
@@ -153,16 +162,26 @@ def header_faults(text: str) -> list[tuple[int, str, str]]:
     return faults
 
 
-def snapshot_block(text: str) -> Optional[str]:
-    """The state file's snapshot block: its header through to the end of the file.
+def snapshot_subject(text: str) -> Optional[str]:
+    """The subject cell of the snapshot header this file opens.
 
-    :returns: the block, or `None` when the file opens no snapshot header at all.
+    :returns: the subject, or `None` when the file opens no snapshot header at all.
     """
-    lines = text.splitlines()
-    for number, line in enumerate(lines):
-        if HEADER.match(line) is not None:
-            return "\n".join(lines[number:]).rstrip("\n")
+    for line in text.splitlines():
+        match = HEADER.match(line)
+        if match is not None:
+            return match.group("subject").strip()
     return None
+
+
+def archived_subjects(text: str) -> list[tuple[int, str]]:
+    """Every block header's subject cell in `text`, with the line it sits on."""
+    found: list[tuple[int, str]] = []
+    for number, line in enumerate(text.splitlines(), 1):
+        match = HEADER.match(line)
+        if match is not None:
+            found.append((number, match.group("subject").strip()))
+    return found
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -209,9 +228,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     state_faults = header_faults(texts["state"])
     for number, reason, line in state_faults:
         findings.append(f"{state}:{number}: {reason}\n    {line}")
-    block = snapshot_block(texts["state"])
+    subject = snapshot_subject(texts["state"])
     state_headers = sum(1 for line in texts["state"].splitlines() if HEADER.match(line))
-    if block is None:
+    if subject is None:
         findings.append(f"{state}: opens no `## Current state (snapshot ...` header at all")
     elif state_headers != 1:
         findings.append(
@@ -223,11 +242,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     for number, reason, line in archive_faults:
         findings.append(f"{archive}:{number}: {reason}\n    {line}")
 
-    if block is not None and block in texts["archive"].rstrip("\n"):
-        findings.append(
-            f"{archive}: already holds the block the state file carries -- the append "
-            "reached the archive and the replacement did not"
-        )
+    if subject is not None:
+        for number, archived in archived_subjects(texts["archive"]):
+            if archived == subject:
+                findings.append(
+                    f"{archive}:{number}: holds a block whose subject cell is {subject!r}, "
+                    "the same block the state file still opens -- the append reached the "
+                    "archive and the replacement did not, so the record is filed twice"
+                )
+                break
 
     headers = sum(1 for line in texts["archive"].splitlines() if HEADER.match(line))
 
@@ -244,8 +267,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(
         f"OK: the state file opens {state_headers} snapshot header and the archive's "
         f"{headers} block header(s) each name exactly one subject -- a cycle id in the "
-        "form `cyc<8 digits>-<6 digits>` or a host-turn stamp -- and the state file's block "
-        "is not yet in the archive"
+        f"form `cyc<8 digits>-<6 digits>` or a host-turn stamp -- and no archive block "
+        f"carries the subject cell {subject!r} the state file opens, so its block is filed "
+        "once"
     )
     return 0
 

@@ -18,8 +18,10 @@ The assertions are the halves of "does it answer that question":
   the refusals;
 * **a header naming two ids is not admitted** -- an id that leaks into the date cell still
   names two cycles;
-* **the append's own premise is read** -- a state block already in the archive is a record
-  filed twice, which is what a half-done cycle leaves;
+* **the append's own premise is read by identity** -- a state block already in the archive
+  is a record filed twice, which is what a half-done cycle leaves; the archive's copy
+  carries a rewritten header, so the comparison is the subject cell and the arm builds both
+  the verbatim shape and the displaced one the workflow really produces;
 * **unmeasurable is never a pass** -- an absent file and a file that is not UTF-8 text both
   answer exit 2, and the message says the question could not be asked.
 
@@ -58,10 +60,11 @@ def load_module(path: Path, name: str):
 mod = load_module(SCRIPT, "check_cycle_record")
 
 
-def header(subject: str, date: str = "2026-11-12") -> str:
-    return (
-        f"## Current state (snapshot {subject}, {date}) - re-derive, never quote\n"
-    )
+def header(
+    subject: str, date: str = "2026-11-12", tail: str = "- re-derive, never quote"
+) -> str:
+    """A block header as this record writes it; `tail` is the part displacement rewrites."""
+    return f"## Current state (snapshot {subject}, {date}) {tail}\n"
 
 
 def build(root: Path, state_body: str, archive_body: str = "") -> tuple[Path, Path]:
@@ -150,10 +153,53 @@ def test_a_subject_cell_naming_two_cycles_is_a_fault(tmp_path: Path) -> None:
 
 
 def test_a_state_block_already_archived_is_a_fault(tmp_path: Path) -> None:
-    """The half-done cycle: the append landed, the replacement did not."""
+    """The half-done cycle: the append landed, the replacement did not.
+
+    **Both shapes are read, and the second one is the real one.** A displaced block's header
+    is rewritten on the way into the archive -- `- re-derive, never quote` becomes
+    `- displaced by cyc<id>` -- so the archive's copy is never the state file's text. A
+    reading that compared the block's text answered clean on the realistic shape (measured
+    2026-11-12: verbatim rc 1, rewritten rc 0), which is why the halves below are separate
+    trees rather than one: the first is what a hand-written append leaves, the second is what
+    this project does every cycle.
+    """
+    verbatim = tmp_path / "verbatim"
+    verbatim.mkdir()
     block = header(CYCLE) + "\n- a fact\n"
-    state, archive = build(tmp_path, block, header("cyc20261112-214138") + "\n- older\n" + block)
+    state, archive = build(
+        verbatim, block, header("cyc20261112-214138") + "\n- older\n" + block
+    )
     assert run(state, archive) == 1
+
+    displaced = tmp_path / "displaced"
+    displaced.mkdir()
+    filed = header(CYCLE, tail="- displaced by cyc20261112-214138") + "- a fact\n"
+    state, archive = build(
+        displaced,
+        header(CYCLE) + "- a fact\n",
+        header("cyc20261112-221305", tail="- displaced by cyc20261112-222511") + "- older\n" + filed,
+    )
+    assert run(state, archive) == 1, (
+        "the archive holds this block under its displaced header, which is the shape the "
+        "workflow produces; comparing block text instead of the subject cell reads this clean"
+    )
+    faults = mod.archived_subjects(filed)
+    assert faults == [(1, CYCLE)], (faults, "the subject cell is what identity is read from")
+
+
+def test_an_archive_block_of_another_cycle_is_clean(tmp_path: Path) -> None:
+    """The control: a different subject in the archive is the normal, correct state.
+
+    Without it, an arm that faults on every archive block would pass the halves above while
+    reporting a fault on a healthy record. The archive's own block here carries the same
+    tail convention and a *different* cycle id, and the reading must not fire.
+    """
+    state, archive = build(
+        tmp_path,
+        header(CYCLE) + "- a fact\n",
+        header("cyc20261112-221305", tail="- displaced by " + CYCLE) + "- older\n",
+    )
+    assert run(state, archive) == 0
 
 
 def test_a_state_file_with_no_header_is_a_fault(tmp_path: Path) -> None:
