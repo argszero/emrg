@@ -538,13 +538,70 @@ def test_each_row_names_the_successor_that_replaced_it(mod):
         )
 
 
-def _statement_blocks(tree):
-    """Every list of statements in the module, so an exit can be read beside its siblings."""
+def _prints_before_each_exit(source):
+    """Every `return 2` in one module, with the prints that run before it in its function.
+
+    A cause is stated where the exit is, but not always in the same list the exit sits in: a
+    print inside an `if`, with the `return 2` inside a loop within that `if`, is one exit
+    explained to. So the search walks up the lists the exit's own path came through -- one
+    list per level -- and stops at the function the exit belongs to. A sibling list of the
+    same statement is a different path and is not credited: an `if`'s `else` does not run
+    when its body does, so a print there explains a `return 2` in neither of the two, and
+    the same holds for a `for`'s `else`. Nor does a print in some other function run before
+    this return, nor one printed after it.
+    """
+    tree = ast.parse(source)
+    # child -> the statement and the field whose list holds it, so each level is read alone.
+    holders = {}
     for node in ast.walk(tree):
-        for field in ("body", "orelse", "finalbody"):
-            block = getattr(node, field, None)
-            if isinstance(block, list) and block and isinstance(block[0], ast.stmt):
-                yield block
+        for field, value in ast.iter_fields(node):
+            for child in value if isinstance(value, list) else [value]:
+                if isinstance(child, ast.AST):
+                    holders[child] = (node, field)
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Return)
+            and isinstance(node.value, ast.Constant)
+            and node.value.value == 2
+        ):
+            continue
+        prints = []
+        path = node
+        while path in holders:
+            scope, field = holders[path]
+            block = getattr(scope, field, None)
+            for stmt in block if isinstance(block, list) else []:
+                if (
+                    isinstance(stmt, ast.Expr)
+                    and isinstance(stmt.value, ast.Call)
+                    and isinstance(stmt.value.func, ast.Name)
+                    and stmt.value.func.id == "print"
+                    and stmt.lineno < node.lineno
+                ):
+                    prints.append(
+                        (
+                            stmt.lineno,
+                            " ".join(ast.unparse(arg) for arg in stmt.value.args),
+                        )
+                    )
+            if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)):
+                break
+            path = scope
+        yield node.lineno, prints
+
+
+def _unnamed_exits(source):
+    """The `return 2` exits of one module that do not state their own cause."""
+    unnamed = []
+    for lineno, prints in _prints_before_each_exit(source):
+        missing = [
+            phrase
+            for phrase in ("not measurable", "not a pass")
+            if not any(phrase in text for _, text in prints)
+        ]
+        if missing:
+            unnamed.append((lineno, missing))
+    return unnamed
 
 
 def test_every_exit_that_cannot_measure_names_its_cause():
@@ -559,37 +616,94 @@ def test_every_exit_that_cannot_measure_names_its_cause():
     phrase for one exit and the fifth exit was covered by none of them. This is what the
     docstring's `2` entry sends a reader to.
     """
-    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
-    exits = 0
-    unnamed: list[int] = []
-    for block in _statement_blocks(tree):
-        prints = [
-            (stmt.lineno, " ".join(ast.unparse(arg) for arg in stmt.value.args))
-            for stmt in block
-            if isinstance(stmt, ast.Expr)
-            and isinstance(stmt.value, ast.Call)
-            and isinstance(stmt.value.func, ast.Name)
-            and stmt.value.func.id == "print"
-        ]
-        for stmt in block:
-            if not (
-                isinstance(stmt, ast.Return)
-                and isinstance(stmt.value, ast.Constant)
-                and stmt.value.value == 2
-            ):
-                continue
-            exits += 1
-            before = [(line, text) for line, text in prints if line < stmt.lineno]
-            missing = [
-                phrase
-                for phrase in ("not measurable", "not a pass")
-                if not any(phrase in text for _, text in before)
-            ]
-            if missing:
-                unnamed.append((stmt.lineno, missing))
+    exits = list(_prints_before_each_exit(SCRIPT.read_text(encoding="utf-8")))
     assert exits, "the module has no `return 2` - this arm would pass on nothing"
-    assert not unnamed, (
-        "these `return 2` exits do not print, in their own block, the sentence a reader needs "
+    assert not _unnamed_exits(SCRIPT.read_text(encoding="utf-8")), (
+        "these `return 2` exits do not print, before the return, the sentence a reader needs "
         "in order to tell which measurement was missing and that the run is not a pass: "
-        f"line(s) {unnamed}"
+        f"line(s) {_unnamed_exits(SCRIPT.read_text(encoding='utf-8'))}"
     )
+
+
+ONE_BLOCK_OUT = "\n".join(
+    [
+        "def scan(tags):",
+        "    for tag in tags:",
+        "        if not tag:",
+        "            print('not measurable: no tag -- not a pass')",
+        "            for _ in tags:",
+        "                return 2",
+        "    return 0",
+    ]
+)
+
+
+def test_a_cause_printed_one_block_out_still_explains_the_exit():
+    """The exit is explained by a print in a list that contains it, not only its own list.
+
+    Reading the innermost list alone refused this shape while crediting nothing extra, so a
+    module that does explain its exit was reported unnamed. The five live exits happen to
+    keep their print in the return's own list today, which is why the narrower reading went
+    unnoticed.
+    """
+    assert _unnamed_exits(ONE_BLOCK_OUT) == []
+
+
+def test_a_cause_printed_after_the_exit_does_not_count():
+    """A sentence printed past the return never runs, so it explains nothing."""
+    source = "\n".join(
+        [
+            "def scan(tags):",
+            "    return 2",
+            "    print('not measurable: no tag -- not a pass')",
+        ]
+    )
+    assert _unnamed_exits(source) == [(2, ["not measurable", "not a pass"])]
+
+
+def test_a_cause_printed_in_another_function_does_not_count():
+    """Only the exit's own function runs before it -- a sibling's print is not its cause."""
+    source = "\n".join(
+        [
+            "def report():",
+            "    print('not measurable: the collection was short -- not a pass')",
+            "",
+            "def scan(tags):",
+            "    if not tags:",
+            "        return 2",
+        ]
+    )
+    assert _unnamed_exits(source) == [(6, ["not measurable", "not a pass"])]
+
+
+def test_a_cause_printed_in_a_sibling_branch_does_not_count():
+    """A print in the branch beside the exit is not on the path that reaches it."""
+    source = "\n".join(
+        [
+            "def scan(tags, short):",
+            "    if short:",
+            "        print('not measurable: the collection was short -- not a pass')",
+            "    if not tags:",
+            "        return 2",
+        ]
+    )
+    assert _unnamed_exits(source) == [(5, ["not measurable", "not a pass"])]
+
+
+def test_a_cause_printed_in_the_branch_of_a_different_list_does_not_count():
+    """The two halves of one `if` are two paths: the one that does not run explains nothing.
+
+    Crediting them together is the vacuous reading in the other direction -- a silent exit
+    admitted because a sentence exists somewhere in the same statement. The arms above pin
+    what the walker must not miss; this one pins what it must not take.
+    """
+    source = "\n".join(
+        [
+            "def scan(tags, short):",
+            "    if short:",
+            "        print('not measurable: the collection was short -- not a pass')",
+            "    else:",
+            "        return 2",
+        ]
+    )
+    assert _unnamed_exits(source) == [(5, ["not measurable", "not a pass"])]
