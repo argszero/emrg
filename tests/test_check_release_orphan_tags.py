@@ -524,8 +524,10 @@ def test_every_exit_that_cannot_measure_names_its_cause():
     held that list in step with the code, and it drifted in both directions at once: it
     named a state no exit produces, and omitted two exits that exist. The property that
     survives a change sits at the exits, because that is where a cause is added -- every one
-    of them prints a sentence beginning `not measurable:` before it returns 2. This arm
-    holds that, and it is what the docstring's `2` entry sends a reader to.
+    of them prints a sentence beginning `not measurable:` and saying `not a pass` before it
+    returns 2. Both halves are held here, because four hand-written arms each asserted the
+    phrase for one exit and the fifth exit was covered by none of them. This is what the
+    docstring's `2` entry sends a reader to.
     """
     tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
     exits = 0
@@ -547,12 +549,17 @@ def test_every_exit_that_cannot_measure_names_its_cause():
             ):
                 continue
             exits += 1
-            if not any(
-                line < stmt.lineno and "not measurable" in text for line, text in prints
-            ):
-                unnamed.append(stmt.lineno)
+            before = [(line, text) for line, text in prints if line < stmt.lineno]
+            missing = [
+                phrase
+                for phrase in ("not measurable", "not a pass")
+                if not any(phrase in text for _, text in before)
+            ]
+            if missing:
+                unnamed.append((stmt.lineno, missing))
     assert exits, "the module has no `return 2` - this arm would pass on nothing"
     assert not unnamed, (
-        "these `return 2` exits print no `not measurable:` sentence of their own, so a "
-        f"reader of the run cannot tell which measurement was missing: line(s) {unnamed}"
+        "these `return 2` exits do not print, in their own block, the sentence a reader needs "
+        "in order to tell which measurement was missing and that the run is not a pass: "
+        f"line(s) {unnamed}"
     )

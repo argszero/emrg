@@ -90,7 +90,7 @@ Exit codes, the family's contract:
        that is a draft, is a prerelease, or carries no asset; and a recorded row that no
        longer describes the repository
     2  not measurable -- never 0. Each way this file can fail to measure prints its own
-       sentence beginning `not measurable:` and ending "not a pass", so a run that exits 2
+       sentence beginning `not measurable:` and saying "not a pass", so a run that exits 2
        always names the measurement it was missing: a cause that cannot be read off the run
        is not part of this contract. The causes are named at the exits that produce them
        and are deliberately not enumerated here -- an enumeration is a second carrier of a
@@ -317,7 +317,7 @@ def _read(repo: str, only: str | None) -> int:
         print(
             f"not measurable: `--tag {only}` was asked for, and that tag is not in the "
             f"{len(tags)} tags read. Either it does not exist or the collection was short; "
-            f"nothing was compared."
+            f"nothing was compared -- not a pass."
         )
         return 2
 
