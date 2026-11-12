@@ -27,6 +27,7 @@ argument list, and every payload below is shaped like the one the live endpoint 
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import sys
 from pathlib import Path
@@ -505,3 +506,53 @@ def test_each_row_carries_the_date_its_successor_was_published(mod):
             f"{tag}'s row states a temporal claim a reader cannot check from the release "
             f"collection; name the successor's publication date instead"
         )
+
+
+def _statement_blocks(tree):
+    """Every list of statements in the module, so an exit can be read beside its siblings."""
+    for node in ast.walk(tree):
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(node, field, None)
+            if isinstance(block, list) and block and isinstance(block[0], ast.stmt):
+                yield block
+
+
+def test_every_exit_that_cannot_measure_names_its_cause():
+    """A `return 2` states its own cause, so the contract cannot fall behind the code.
+
+    The module docstring used to enumerate the ways a run can be `not measurable`. Nothing
+    held that list in step with the code, and it drifted in both directions at once: it
+    named a state no exit produces, and omitted two exits that exist. The property that
+    survives a change sits at the exits, because that is where a cause is added -- every one
+    of them prints a sentence beginning `not measurable:` before it returns 2. This arm
+    holds that, and it is what the docstring's `2` entry sends a reader to.
+    """
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    exits = 0
+    unnamed: list[int] = []
+    for block in _statement_blocks(tree):
+        prints = [
+            (stmt.lineno, " ".join(ast.unparse(arg) for arg in stmt.value.args))
+            for stmt in block
+            if isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Call)
+            and isinstance(stmt.value.func, ast.Name)
+            and stmt.value.func.id == "print"
+        ]
+        for stmt in block:
+            if not (
+                isinstance(stmt, ast.Return)
+                and isinstance(stmt.value, ast.Constant)
+                and stmt.value.value == 2
+            ):
+                continue
+            exits += 1
+            if not any(
+                line < stmt.lineno and "not measurable" in text for line, text in prints
+            ):
+                unnamed.append(stmt.lineno)
+    assert exits, "the module has no `return 2` - this arm would pass on nothing"
+    assert not unnamed, (
+        "these `return 2` exits print no `not measurable:` sentence of their own, so a "
+        f"reader of the run cannot tell which measurement was missing: line(s) {unnamed}"
+    )

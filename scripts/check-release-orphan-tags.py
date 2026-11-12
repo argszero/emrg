@@ -89,9 +89,14 @@ Exit codes, the family's contract:
     1  a fault, named per tag with its remedy: a tag with no release at all, or a release
        that is a draft, is a prerelease, or carries no asset; and a recorded row that no
        longer describes the repository
-    2  not measurable -- never 0. `gh` is missing, unauthenticated or refused a call; the
-       repository returned **no tags at all**, which is a scan that read nothing rather
-       than a clean result; or a candidate could not be confirmed either way
+    2  not measurable -- never 0. Each way this file can fail to measure prints its own
+       sentence beginning `not measurable:` and ending "not a pass", so a run that exits 2
+       always names the measurement it was missing: a cause that cannot be read off the run
+       is not part of this contract. The causes are named at the exits that produce them
+       and are deliberately not enumerated here -- an enumeration is a second carrier of a
+       fact each exit already states, and it is the carrier no test holds.
+       `test_every_exit_that_cannot_measure_names_its_cause` holds the property at the
+       exits instead, which is where a cause is added.
 
 Usage:
 
