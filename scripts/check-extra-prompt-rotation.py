@@ -9,7 +9,7 @@ Usage
 
 Why this exists
 ---------------
-The evolution prompt's §1.7 rotates one task's `extra_prompt` per cycle and classifies the
+The evolution prompt's section 1.7 rotates one task's `extra_prompt` per cycle and classifies the
 blocks it finds, and the classification costs a cycle's round: `ios-app-task` alone is 6,327
 characters that have to be read against a 381-line template before anything can be said about
 them. The rotation's own clock is therefore the **length list** - a block whose length is
@@ -23,7 +23,7 @@ characters of `feishu-inbox` to reach the identical "0 general-method gaps, thre
 that the table's row already stated. Prose asking a reader to compare eight numbers by eye is
 not a rule; comparing them is what this file does.
 
-It is the same shape `check-memory-rotation.py` answers for §1.5: a step every cycle takes,
+It is the same shape `check-memory-rotation.py` answers for section 1.5: a step every cycle takes,
 whose hand-written version answered wrongly while reading as clean.
 
 What it reads, and what it prints first
@@ -65,7 +65,7 @@ re-classify. Its remedy is on the installation's side, not the rotation's.
 
 Exit codes
 ----------
-    0  every non-empty block has a row and its length is unchanged - the §1.7 reading
+    0  every non-empty block has a row and its length is unchanged - the section 1.7 reading
     1  a block moved, a block has no row, or a row's block is gone
     2  nothing was measured: the task table, the rotation table, or the YAML inside it could
        not be read, or the table carries no row this file can parse
@@ -221,7 +221,7 @@ def _load_table(path):
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description=(
-            "Report which task extra_prompt blocks moved since the §1.7 rotation table "
+            "Report which task extra_prompt blocks moved since the section 1.7 rotation table "
             "classified them. Exit 0 = nothing moved, 1 = something needs classifying, "
             "2 = the reading could not be taken."
         )
@@ -236,7 +236,7 @@ def main(argv=None):
         "--table",
         type=Path,
         default=DEFAULT_TABLE,
-        help="the §1.7 rotation table (default: %(default)s)",
+        help="the section 1.7 rotation table (default: %(default)s)",
     )
     parser.add_argument(
         "--all",
@@ -293,7 +293,7 @@ def main(argv=None):
             "unchanged one - a block whose length is unchanged has not moved"
         )
         return 1
-    print("every block renders unchanged text: the §1.7 reading is the length list itself")
+    print("every block renders unchanged text: the section 1.7 reading is the length list itself")
     return 0
 
 

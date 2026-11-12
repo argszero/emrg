@@ -1,8 +1,8 @@
-"""The §1.7 rotation reading: `scripts/check-extra-prompt-rotation.py`.
+"""The section 1.7 rotation reading: `scripts/check-extra-prompt-rotation.py`.
 
 What this file holds
 --------------------
-The tool answers §1.7's question - which task `extra_prompt` blocks moved since the rotation
+The tool answers section 1.7's question - which task `extra_prompt` blocks moved since the rotation
 table classified them - and it exists because prose asking a reader to compare eight numbers
 by eye decayed three times (issue #2850). So the assertions are the three halves of "does it
 answer that question, and can a wrong answer read as clean":
