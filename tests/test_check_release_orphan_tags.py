@@ -513,15 +513,21 @@ def _prints_before_each_exit(source):
 
     A cause is stated where the exit is, but not always in the same list the exit sits in: a
     print inside an `if`, with the `return 2` inside a loop within that `if`, is one exit
-    explained to. So the search walks the statement lists that textually contain the exit and
-    stops at the function the exit belongs to -- a print in some other function never runs
-    before this return and is not credited, and neither is one printed after it.
+    explained to. So the search walks up the lists the exit's own path came through -- one
+    list per level -- and stops at the function the exit belongs to. A sibling list of the
+    same statement is a different path and is not credited: an `if`'s `else` does not run
+    when its body does, so a print there explains a `return 2` in neither of the two, and
+    the same holds for a `for`'s `else`. Nor does a print in some other function run before
+    this return, nor one printed after it.
     """
     tree = ast.parse(source)
-    parents = {}
+    # child -> the statement and the field whose list holds it, so each level is read alone.
+    holders = {}
     for node in ast.walk(tree):
-        for child in ast.iter_child_nodes(node):
-            parents[child] = node
+        for field, value in ast.iter_fields(node):
+            for child in value if isinstance(value, list) else [value]:
+                if isinstance(child, ast.AST):
+                    holders[child] = (node, field)
     for node in ast.walk(tree):
         if not (
             isinstance(node, ast.Return)
@@ -530,29 +536,27 @@ def _prints_before_each_exit(source):
         ):
             continue
         prints = []
-        scope = parents.get(node)
-        while scope is not None:
-            for field in ("body", "orelse", "finalbody"):
-                block = getattr(scope, field, None)
-                if not isinstance(block, list):
-                    continue
-                for stmt in block:
-                    if (
-                        isinstance(stmt, ast.Expr)
-                        and isinstance(stmt.value, ast.Call)
-                        and isinstance(stmt.value.func, ast.Name)
-                        and stmt.value.func.id == "print"
-                        and stmt.lineno < node.lineno
-                    ):
-                        prints.append(
-                            (
-                                stmt.lineno,
-                                " ".join(ast.unparse(arg) for arg in stmt.value.args),
-                            )
+        path = node
+        while path in holders:
+            scope, field = holders[path]
+            block = getattr(scope, field, None)
+            for stmt in block if isinstance(block, list) else []:
+                if (
+                    isinstance(stmt, ast.Expr)
+                    and isinstance(stmt.value, ast.Call)
+                    and isinstance(stmt.value.func, ast.Name)
+                    and stmt.value.func.id == "print"
+                    and stmt.lineno < node.lineno
+                ):
+                    prints.append(
+                        (
+                            stmt.lineno,
+                            " ".join(ast.unparse(arg) for arg in stmt.value.args),
                         )
+                    )
             if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)):
                 break
-            scope = parents.get(scope)
+            path = scope
         yield node.lineno, prints
 
 
@@ -650,6 +654,25 @@ def test_a_cause_printed_in_a_sibling_branch_does_not_count():
             "    if short:",
             "        print('not measurable: the collection was short -- not a pass')",
             "    if not tags:",
+            "        return 2",
+        ]
+    )
+    assert _unnamed_exits(source) == [(5, ["not measurable", "not a pass"])]
+
+
+def test_a_cause_printed_in_the_branch_of_a_different_list_does_not_count():
+    """The two halves of one `if` are two paths: the one that does not run explains nothing.
+
+    Crediting them together is the vacuous reading in the other direction -- a silent exit
+    admitted because a sentence exists somewhere in the same statement. The arms above pin
+    what the walker must not miss; this one pins what it must not take.
+    """
+    source = "\n".join(
+        [
+            "def scan(tags, short):",
+            "    if short:",
+            "        print('not measurable: the collection was short -- not a pass')",
+            "    else:",
             "        return 2",
         ]
     )
