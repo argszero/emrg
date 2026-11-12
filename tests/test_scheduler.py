@@ -4101,6 +4101,37 @@ def test_the_slice_is_what_bounds_the_wait(monkeypatch):
         asyncio.run(_drive())
 
 
+def test_the_shipped_slice_is_smaller_than_the_shortest_interval():
+    """The value, not only the mechanism — the one reading the tests above cannot give.
+
+    Every test above replaces `SLEEP_SLICE_SECONDS` before measuring it, so the number
+    the daemon actually runs with is measured by nothing at all: setting it to
+    `100000.0` leaves this whole file green (measured 2026-11-12, issue #2848). A slice
+    that covers the whole wait bounds nothing, and the promise
+    `_wait_until`'s docstring makes — the machine wakes owing at most one slice — is
+    exactly what stops being true once the slice reaches the shortest wait the
+    scheduler accepts.
+
+    The bound is derived from `MIN_INTERVAL` rather than written as a literal, so
+    raising that constant cannot leave a stale second copy of the rule behind.
+
+    What this pins is the boundary below which slicing is a bound at all. It is not a
+    claim about the optimum: a value just under `MIN_INTERVAL` passes here and is still
+    a poor bound, which is the limit of this reading and is why it is stated.
+    """
+    from emrg.server import scheduler as mod
+
+    assert mod.SLEEP_SLICE_SECONDS > 0, (
+        "a slice of zero or less would spin the wait loop without ever yielding"
+    )
+    assert mod.SLEEP_SLICE_SECONDS < mod.MIN_INTERVAL, (
+        f"SLEEP_SLICE_SECONDS is {mod.SLEEP_SLICE_SECONDS} while MIN_INTERVAL is "
+        f"{mod.MIN_INTERVAL}: a task at the minimum interval takes its whole wait as "
+        "one slice, so a suspend across it is owed back in full — the defect the "
+        "slices exist to bound"
+    )
+
+
 def test_a_manual_trigger_still_ends_the_wait(monkeypatch):
     """Slicing must not cost the trigger what the wait was interruptible for."""
     from emrg.server import scheduler as mod
