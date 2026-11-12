@@ -96,36 +96,68 @@ class SkillShadow:
     dropped: Skill      # the declaration that lost the name
 
 
-# Every indicator a YAML block scalar can carry. The set is closed on purpose: a value that
-# is one of these opens a block, and anything else is the value itself, so a description
-# reading `>` is the one shape that cannot be told from its own text without this list.
-_BLOCK_SCALARS = ("|", "|-", "|+", ">", ">-", ">+")
+# A YAML block scalar's indicator: a style character, an optional chomping sign and an
+# optional indentation digit 1-9, the last two in either order — `|`, `>-`, `|+`, `|2`,
+# `>+2`, `>2-` all open a block. The set is closed on purpose: a value matching this shape
+# opens a block, and anything else is the value itself, so a description reading `>` is the
+# one shape that cannot be told from its own text without this rule.
+def _block_scalar_indicator(value: str) -> Optional[tuple[str, int]]:
+    """``(chomping, indent)`` when ``value`` is a block-scalar indicator, else ``None``.
+
+    ``indent`` is the digit the indicator states, and 0 when it states none — YAML has no
+    zero indentation indicator, so ``|0`` is not one of these and falls through to being
+    the value itself.
+    """
+    if not value or value[0] not in ("|", ">"):
+        return None
+    rest = value[1:]
+    chomping = ""
+    indent = 0
+    for _ in range(2):
+        head = rest[:1]
+        if head in ("+", "-") and not chomping:
+            chomping = head
+            rest = rest[1:]
+        elif head.isdigit() and not indent:
+            if head == "0":
+                return None
+            indent = int(head)
+            rest = rest[1:]
+    if rest:
+        return None
+    return chomping, indent
 
 
-def _join_block_scalar(indicator: str, lines: list[str]) -> str:
+def _join_block_scalar(
+    style: str, chomping: str, lines: list[str], indent: int = 0
+) -> str:
     """The real text under a block-scalar key, from the indented lines that follow it.
 
-    Two shapes, and the difference is what the indicator is for: ``|`` is literal and keeps
-    its line breaks, ``>`` is folded and joins each run of lines into one paragraph with a
-    blank line between paragraphs. A trailing ``-`` strips the final newline and ``+``
-    keeps the trailing blank lines; the bare forms behave like ``-`` here, because this text
-    is a description rather than a file and a trailing newline in it would be noise in a
+    Two shapes, and the difference is what the style is for: ``|`` is literal and keeps its
+    line breaks, ``>`` is folded and joins each run of lines into one paragraph with a blank
+    line between paragraphs. ``chomping`` of ``+`` keeps the trailing blank lines, and ``-``
+    or nothing strips them, which is what this reader wants here, because this text is a
+    description rather than a file and a trailing newline in it would be noise in a
     one-line prompt entry.
 
-    The indentation removed is the block's own, taken from its least-indented non-blank
-    line, so a block indented by two spaces and one indented by four read alike.
+    ``indent`` is the block's indentation when the indicator stated it (``|2``) and 0 when
+    it did not. Stated, it is used as written: a block whose content is indented further
+    than the indicator says keeps those extra spaces, which is the only reason to write the
+    digit at all. Unstated, the indentation removed is the block's own, taken from its
+    least-indented non-blank line, so a block indented by two spaces and one indented by
+    four read alike.
     """
     body = list(lines)
     while body and not body[0].strip():
         body.pop(0)
-    if not indicator.endswith("+"):
+    if chomping != "+":
         while body and not body[-1].strip():
             body.pop()
     indents = [len(line) - len(line.lstrip()) for line in body if line.strip()]
-    cut = min(indents) if indents else 0
+    cut = indent if indent else (min(indents) if indents else 0)
     stripped = [line[cut:] if line.strip() else "" for line in body]
 
-    if indicator.startswith(">"):
+    if style == ">":
         paragraphs: list[str] = []
         current: list[str] = []
         for line in stripped:
@@ -170,7 +202,8 @@ def _parse_frontmatter(text: str) -> dict[str, str]:
         key, _, value = line.partition(":")
         key = key.strip()
         value = value.strip()
-        if value in _BLOCK_SCALARS:
+        parts = _block_scalar_indicator(value)
+        if parts is not None:
             block: list[str] = []
             while index < len(lines):
                 following = lines[index]
@@ -178,7 +211,7 @@ def _parse_frontmatter(text: str) -> dict[str, str]:
                     break  # the next top-level key ends the block
                 block.append(following)
                 index += 1
-            value = _join_block_scalar(value, block)
+            value = _join_block_scalar(value[0], parts[0], block, parts[1])
         elif len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
             value = value[1:-1]
         if key:
