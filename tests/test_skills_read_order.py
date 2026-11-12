@@ -225,6 +225,12 @@ BLOCK_SCALAR_CASES = [
     ("folded", ">", "first line second line"),
     ("literal-strip", "|-", "first line\nsecond line"),
     ("literal", "|", "first line\nsecond line"),
+    # A chomping sign says what a *file* keeps at its end; this reader answers a
+    # description, so every form is stripped and `+`, `-` and nothing all read alike. All
+    # three are listed because the sign still has to open the block: a reader that skipped
+    # it would answer the value `+` instead of the text beneath it.
+    ("literal-keep", "|+", "first line\nsecond line"),
+    ("folded-keep", ">+", "first line second line"),
     # The indentation indicator: the digit states how far the block is indented, and is
     # no part of the text either way it is ordered.
     ("literal-indent", "|2", "first line\nsecond line"),
@@ -400,6 +406,31 @@ def test_a_colon_in_a_plain_description_is_kept(roots):
 
     assert [s.name for s in skills] == ["plain"], skills
     assert skills[0].description == "One thing: and another"
+
+
+def test_a_lone_plus_sign_is_a_description_rather_than_an_indicator(roots):
+    """The other side of the chomping sign, because only a style character opens a block.
+
+    ``|+`` is an indicator and the text under it is the description. A bare ``+`` is not —
+    YAML reads it as the plain scalar ``+`` — so the reader must answer the value itself.
+    Recognising the sign without this arm would be free to grow into swallowing a
+    description that starts with it.
+    """
+    root = roots["dirs"]["user"]
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "bare-plus.md").write_text(
+        "---\nname: bare-plus\ndescription: +\n---\n\nbody\n", encoding="utf-8"
+    )
+    (root / "block-keep.md").write_text(
+        "---\nname: block-keep\ndescription: |+\n  the text under it\n---\n\nbody\n",
+        encoding="utf-8",
+    )
+
+    skills, _ = _load(roots)
+    descriptions = {s.name: s.description for s in skills}
+
+    assert descriptions["bare-plus"] == "+", descriptions["bare-plus"]
+    assert descriptions["block-keep"] == "the text under it", descriptions["block-keep"]
 
 
 def test_a_nested_description_key_still_loses_to_the_top_level_one(roots):
