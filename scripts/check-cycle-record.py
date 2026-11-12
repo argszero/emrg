@@ -47,6 +47,20 @@ text and answered clean on exactly the half-done state it exists to report; meas
 preserves, so it is what identity is read from here, exactly as it is in the header
 reading above.
 
+What a line *is* is the third reading, and the one this guard first got wrong. Both files are
+Markdown, so a header is a header only where it is content: a fenced code block quotes a
+shape, and a record that documents its own header -- as this one does -- would otherwise be
+read as carrying a block it merely illustrates. A quoted copy of the state file's own subject
+is the sharpest form of that: it read as the record filed twice.
+
+And a header is found only if the reader says it found one. Matching the exact literal
+prefix, a drifted `## Current State (snapshot ...` counted **nothing**, and "each of the zero
+headers names exactly one subject" is true, so a drifted archive passed -- measured 2026-11-13
+as rc 0 with `0 block header(s)`. The archive is append-only and nothing else reads it, so
+that silence is permanent. Three readings close it: fences are cut before a line is read, a
+level-2 heading presenting `(snapshot` that is not the admitted form is a finding rather than
+silence, and an archive holding text but no recognised header is a finding too.
+
 Report
 ------
 The first line names the checkout that answered, `tree: <path>`, before any verdict -- the
@@ -89,6 +103,19 @@ FULL_CYCLE = re.compile(r"cyc\d{8}-\d{6}\Z")
 #: snapshot written in a host conversation carries the instant it was taken.
 HOST_TURN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?[+-]\d{2}:\d{2}\Z")
 
+#: A code fence marker: an opening or closing run of backticks or tildes, indented up to
+#: three spaces (the Markdown limit). The ``info`` group is what stands after the run.
+FENCE = re.compile(r"^ {0,3}(?P<marker>`{3,}|~{3,})(?P<info>.*)$")
+
+#: A level-2 heading that presents the header's parenthetical ``(snapshot``, and is therefore
+#: a block header in this record's own voice whatever its literal prefix. The discriminator
+#: is measured rather than guessed: on 2026-11-13 this checkout's archive held **311** level-2
+#: headings, 254 of them admitted headers and **57** not -- and none of the 57 carries
+#: ``(snapshot``; they read ``## Displaced snapshot cyc... (archived by cyc...)`` and
+#: ``## Moved from the state file at cyc... (verbatim)``. A rule keyed on the *word* snapshot
+#: would red on those 57; keyed on the parenthetical it reds on none of them.
+PRESENTS_SNAPSHOT = re.compile(r"^## .*\(\s*snapshot")
+
 
 def checkout_root() -> Path:
     """The checkout this script ships inside, derived from its own file.
@@ -117,6 +144,63 @@ def read_lines(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def content_lines(text: str) -> list[tuple[int, str]]:
+    """Every line that is content, with its 1-based line number.
+
+    A fenced code block is *quoted* text, not a reading of the record: a header inside one is
+    an example, so counting it reports a block that does not exist, and a quoted copy of the
+    state file's own subject reports a record filed twice. Fences nest by **length** -- a
+    block opened with N markers is closed only by the same character at least N long, so a
+    shorter marker inside a longer block is content, as a reader sees it.
+
+    An **unbalanced** opener is ordinary text and the lines after it are returned as content.
+    That is the direction the repository's other fence reader takes, and it is the only safe
+    one here: masking the tail would let a stray marker hide every header after it, which is
+    exactly the silence this guard exists to report.
+    """
+    out: list[tuple[int, str]] = []
+    opened: Optional[tuple[str, int]] = None
+    quoted: list[tuple[int, str]] = []
+    for number, line in enumerate(text.splitlines(), 1):
+        match = FENCE.match(line)
+        if opened is None:
+            if match is None:
+                out.append((number, line))
+            else:
+                opened = (match.group("marker")[0], len(match.group("marker")))
+                quoted = []
+            continue
+        character, length = opened
+        if (
+            match is not None
+            and match.group("marker")[0] == character
+            and len(match.group("marker")) >= length
+            and not match.group("info").strip()
+        ):
+            opened = None
+            quoted = []
+            continue
+        quoted.append((number, line))
+    if opened is not None:
+        out.extend(quoted)
+    return out
+
+
+def unrecognised_headers(text: str) -> list[tuple[int, str]]:
+    """Level-2 headings that present a snapshot but are not the admitted block header.
+
+    A drifted literal -- ``## Current State (snapshot ...`` with a capital `S` -- matched no
+    header at all, so the archive half of this reading counted nothing and reported
+    ``0 block header(s) ... each name exactly one subject``, which is true of the empty set
+    and therefore a pass the run never earned.
+    """
+    return [
+        (number, line)
+        for number, line in content_lines(text)
+        if HEADER.match(line) is None and PRESENTS_SNAPSHOT.match(line) is not None
+    ]
+
+
 def header_faults(text: str) -> list[tuple[int, str, str]]:
     """Every block header in `text` whose **subject cell** does not name one admitted form.
 
@@ -128,7 +212,7 @@ def header_faults(text: str) -> list[tuple[int, str, str]]:
     :returns: one `(line number, reason, header)` per finding, in file order.
     """
     faults: list[tuple[int, str, str]] = []
-    for number, line in enumerate(text.splitlines(), 1):
+    for number, line in content_lines(text):
         match = HEADER.match(line)
         if match is None:
             continue
@@ -167,7 +251,7 @@ def snapshot_subject(text: str) -> Optional[str]:
 
     :returns: the subject, or `None` when the file opens no snapshot header at all.
     """
-    for line in text.splitlines():
+    for _, line in content_lines(text):
         match = HEADER.match(line)
         if match is not None:
             return match.group("subject").strip()
@@ -177,7 +261,7 @@ def snapshot_subject(text: str) -> Optional[str]:
 def archived_subjects(text: str) -> list[tuple[int, str]]:
     """Every block header's subject cell in `text`, with the line it sits on."""
     found: list[tuple[int, str]] = []
-    for number, line in enumerate(text.splitlines(), 1):
+    for number, line in content_lines(text):
         match = HEADER.match(line)
         if match is not None:
             found.append((number, match.group("subject").strip()))
@@ -228,8 +312,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     state_faults = header_faults(texts["state"])
     for number, reason, line in state_faults:
         findings.append(f"{state}:{number}: {reason}\n    {line}")
+    for label, path in (("state", state), ("archive", archive)):
+        for number, line in unrecognised_headers(texts[label]):
+            findings.append(
+                f"{path}:{number}: is a level-2 heading presenting a snapshot but not the "
+                "admitted block header `## Current state (snapshot <subject>,` -- a block "
+                "whose identity this reading cannot find is a block no other reading can "
+                f"find either\n    {line}"
+            )
     subject = snapshot_subject(texts["state"])
-    state_headers = sum(1 for line in texts["state"].splitlines() if HEADER.match(line))
+    state_headers = sum(1 for _, line in content_lines(texts["state"]) if HEADER.match(line))
     if subject is None:
         findings.append(f"{state}: opens no `## Current state (snapshot ...` header at all")
     elif state_headers != 1:
@@ -252,7 +344,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                 )
                 break
 
-    headers = sum(1 for line in texts["archive"].splitlines() if HEADER.match(line))
+    headers = sum(1 for _, line in content_lines(texts["archive"]) if HEADER.match(line))
+    if headers == 0 and any(line.strip() for _, line in content_lines(texts["archive"])):
+        findings.append(
+            f"{archive}: holds text but not one block header this reading recognises -- zero "
+            "headers out of a file with content is either a shape renamed away from the "
+            "admitted one or a reader that has stopped reading, and neither is a pass"
+        )
 
     if findings:
         for finding in findings:
@@ -263,6 +361,15 @@ def main(argv: Optional[list[str]] = None) -> int:
             "already in the archive is a record filed twice"
         )
         return 1
+
+    if headers == 0:
+        print(
+            f"OK (nothing archived yet): the state file opens {state_headers} snapshot header "
+            f"naming the subject {subject!r}, in an admitted form; the archive holds no block "
+            "at all, so this run decided nothing about any archived block -- the empty "
+            "comparison above is reported rather than dressed as a verdict"
+        )
+        return 0
 
     print(
         f"OK: the state file opens {state_headers} snapshot header and the archive's "

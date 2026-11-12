@@ -22,6 +22,18 @@ The assertions are the halves of "does it answer that question":
   is a record filed twice, which is what a half-done cycle leaves; the archive's copy
   carries a rewritten header, so the comparison is the subject cell and the arm builds both
   the verbatim shape and the displaced one the workflow really produces;
+* **a quoted header is not a block** -- both files are Markdown, so a fenced code block's
+  contents are an illustration of the shape and not the shape. Measured 2026-11-13 against
+  the guard as it first stood: a quoted *other* subject inflated the archive's count and
+  passed (a block that does not exist), and a quoted copy of the state file's own subject
+  read as "the record is filed twice" -- a fault naming a half-done cycle that was not
+  there; a fenced example inside the state file read as `opens 2 snapshot headers`;
+* **a header is found only where the reader says so** -- matched on the exact literal, a
+  drifted `## Current State (snapshot ...` counted nothing, and "each of the zero headers
+  names exactly one subject" is true, so a drifted archive printed `0 block header(s)` and
+  exited 0. The near-miss reading refuses it, and the arm that keeps it honest is the
+  opposite direction: `## Displaced snapshot cyc... (archived by cyc...)` is a heading the
+  archive really carries and must not be refused;
 * **unmeasurable is never a pass** -- an absent file and a file that is not UTF-8 text both
   answer exit 2, and the message says the question could not be asked.
 
@@ -276,6 +288,161 @@ def test_the_default_root_is_derived_from_this_script_not_written_as_a_home_path
     """A copy of the tree measures its own memory instead of naming one installation."""
     root = mod.default_memory_root()
     assert root == SCRIPT.parent.parent / ".emrg" / "memory"
+
+
+def test_a_header_quoted_in_a_fenced_block_is_not_a_block(tmp_path: Path) -> None:
+    """A record that illustrates its own header shape is not carrying a second block.
+
+    Both shapes are read, because they failed differently before the reader knew about
+    fences: a quoted *other* subject was counted as a real block (a block that does not
+    exist, reported as `2 block header(s)`), and a quoted copy of the state file's own
+    subject was reported as `the record is filed twice` -- a fault naming a half-done cycle
+    that was not there. Measured 2026-11-13 against the guard as it first stood.
+    """
+    quoted_other = (
+        header("cyc20261112-214138", tail="- displaced by " + CYCLE)
+        + "- an older block\n"
+        + "```markdown\n"
+        + header("cyc20260101-000000")
+        + "- an example, not a block\n"
+        + "```\n"
+    )
+    state, archive = build(tmp_path, header(CYCLE) + "- a fact\n", quoted_other)
+    assert run(state, archive) == 0
+    assert [subject for _, subject in mod.archived_subjects(quoted_other)] == [
+        "cyc20261112-214138"
+    ], "the quoted subject is content only where the fence does not reach"
+
+    same = tmp_path / "same"
+    same.mkdir()
+    quoted_same = (
+        header("cyc20261112-214138", tail="- displaced by " + CYCLE)
+        + "- an older block\n"
+        + "```\n"
+        + header(CYCLE)
+        + "```\n"
+    )
+    state, archive = build(same, header(CYCLE) + "- a fact\n", quoted_same)
+    assert run(state, archive) == 0, (
+        "the quoted copy names the state file's own subject; read as a block it reports a "
+        "record filed twice that is not there"
+    )
+
+
+def test_a_fence_nests_by_length_so_a_quoted_marker_is_content() -> None:
+    """A block opened with four markers is closed only by four; the inner three are text."""
+    nested = "````\n```\n" + header("cyc20260101-000000") + "```\n````\n"
+    assert mod.archived_subjects(nested) == [], (
+        "a shorter marker inside a longer block is content, as a reader sees it"
+    )
+
+
+def test_a_fenced_example_in_the_state_file_is_not_a_second_snapshot(tmp_path: Path) -> None:
+    """The state file documents its own header shape, and one snapshot is still one."""
+    body = (
+        header(CYCLE)
+        + "- a fact\n"
+        + "\nExample of the shape:\n\n"
+        + "```markdown\n"
+        + header("cyc20260101-000000")
+        + "```\n"
+    )
+    state, archive = build(tmp_path, body, header("cyc20261112-214138") + "- older\n")
+    assert run(state, archive) == 0
+    assert mod.snapshot_subject(body) == CYCLE
+
+
+def test_a_drifted_literal_prefix_is_a_fault_in_both_files(tmp_path: Path) -> None:
+    """A header nothing recognises is a finding, not a count of zero.
+
+    `## Current State (snapshot ...` with a capital `S` matched no header, so the archive
+    half counted nothing and printed `0 block header(s) ... each name exactly one subject`
+    -- true of the empty set, and therefore a pass the run never earned.
+    """
+    drifted = header("cyc20261112-214138").replace("## Current state", "## Current State")
+    archive_tree = tmp_path / "archive"
+    archive_tree.mkdir()
+    state, archive = build(archive_tree, header(CYCLE) + "- a fact\n", drifted + "- older\n")
+    assert run(state, archive) == 1
+    faults = mod.unrecognised_headers(drifted)
+    assert len(faults) == 1 and faults[0][1] == drifted.rstrip("\n")
+
+    state_tree = tmp_path / "state"
+    state_tree.mkdir()
+    drifted_state = header(CYCLE).replace("## Current state", "## Current State")
+    state, archive = build(state_tree, drifted_state + "- a fact\n")
+    assert run(state, archive) == 1
+
+
+def test_a_heading_the_record_really_carries_is_not_a_drifted_header(tmp_path: Path) -> None:
+    """The archive holds `## Displaced snapshot cyc... (archived by cyc...)` blocks.
+
+    A rule that refused every level-2 heading mentioning a snapshot would redden on them.
+    Measured 2026-11-13 on this checkout's archive: of its 311 level-2 headings 57 are not
+    admitted headers, and every one of them is this shape. The discriminator is the
+    parenthetical, not the word.
+    """
+    legitimate = (
+        "## Displaced snapshot cyc20261023-205806 (archived by cyc20261023-210604)\n"
+        "- an older block\n"
+        "## Moved from the state file at cyc20261025-060350 (verbatim)\n"
+        "- another one\n"
+    )
+    state, archive = build(
+        tmp_path,
+        header(CYCLE) + "- a fact\n",
+        header("cyc20261112-214138", tail="- displaced by " + CYCLE) + legitimate,
+    )
+    assert run(state, archive) == 0
+    assert mod.unrecognised_headers(legitimate) == [], (
+        "these are headings the record really carries, so refusing them is a rule nothing "
+        "obeys"
+    )
+
+
+def test_an_archive_holding_text_but_no_block_header_is_a_fault(tmp_path: Path) -> None:
+    """Zero headers out of a file with content is a shape renamed away, not a clean archive."""
+    state, archive = build(
+        tmp_path,
+        header(CYCLE) + "- a fact\n",
+        "## Snapshot (cyc20261112-214138)\n- a block in a shape this reader does not know\n",
+    )
+    assert run(state, archive) == 1
+
+
+def test_an_empty_archive_is_clean_and_says_what_it_did_not_read(tmp_path: Path, capsys) -> None:
+    """A record that has archived nothing is legal, and the verdict must not overclaim.
+
+    `each of the zero headers names exactly one subject` is true and says nothing, so an
+    empty archive answers rc 0 in words that name the block it did not decide.
+    """
+    state, archive = build(tmp_path, header(CYCLE) + "- a fact\n")
+    assert run(state, archive) == 0
+    out = capsys.readouterr().out
+    assert "nothing archived yet" in out
+    assert "decided nothing about any archived block" in out
+    assert "each name exactly one subject" not in out, (
+        "a universal claim about an empty set is the pass this arm exists to refuse"
+    )
+
+
+def test_an_unbalanced_fence_does_not_hide_the_headers_after_it(tmp_path: Path) -> None:
+    """A stray marker is read as prose: masking the tail would hide every later header.
+
+    The direction is the family's own -- the fence reader in `check-vote-count.py` takes it
+    for the same reason -- and what a hidden line would cost here is a block header, which
+    is exactly the silence this guard exists to report.
+    """
+    archive_body = (
+        "```\n- a stray opener nothing closes\n"
+        + header("cyc20261112-214138", tail="- displaced by " + CYCLE)
+        + "- the block after it\n"
+    )
+    state, archive = build(tmp_path, header(CYCLE) + "- a fact\n", archive_body)
+    assert run(state, archive) == 0
+    assert [subject for _, subject in mod.archived_subjects(archive_body)] == [
+        "cyc20261112-214138"
+    ], "an unmatched opener must not hide the rest of the record"
 
 
 @pytest.mark.skipif(
