@@ -33,8 +33,9 @@ Each skill file has YAML frontmatter:
 
 The loader uses a minimal hand-written frontmatter parser to avoid
 adding a YAML dependency for the simple key-value format. It reads quoted and plain
-values and the block scalars `>`/`>-`/`|`/`|-` (and their `+` forms), because the skills
-published into the provider directories write `description:` that way.
+values, folds a plain value across the lines indented past it, and reads the block scalars
+`>`/`>-`/`|`/`|-` (and their `+` forms), because the skills published into the provider
+directories write `description:` that way.
 
 Progressive disclosure: only the skill name + description are injected
 into the system prompt. The LLM uses the read tool to load the full
@@ -172,14 +173,46 @@ def _join_block_scalar(
     return "\n".join(stripped).rstrip("\n")
 
 
+def _join_plain_continuation(first: str, lines: list[str]) -> str:
+    """A plain scalar's text, folded across the lines indented past its key.
+
+    YAML continues a plain scalar on the following lines that are indented past the key, so
+    ``description: hello`` with an indented ``world`` beneath it is the text "hello world".
+    Content lines join with a single space, and a blank line between them becomes a newline --
+    the same fold ``>`` performs for a block scalar, reached without an indicator. Returns
+    ``first`` unchanged when nothing continues it.
+
+    A key with **no** value is not this function's subject: it opens a nested mapping, and
+    those indented lines stay skipped, which is what keeps a nested ``description`` from
+    overwriting the top-level one.
+    """
+    body = list(lines)
+    while body and not body[-1].strip():
+        body.pop()
+    paragraphs: list[str] = []
+    current: list[str] = [first]
+    for line in body:
+        text = line.strip()
+        if text:
+            current.append(text)
+        elif current:
+            paragraphs.append(" ".join(current))
+            current = []
+    paragraphs.append(" ".join(current))
+    return "\n".join(paragraphs)
+
+
 def _parse_frontmatter(text: str) -> dict[str, str]:
     """Parse simple key: value YAML frontmatter.
 
     Handles quoted strings, plain values and block scalars (``>``, ``>-``, ``|``, ``|-``
-    and their ``+`` forms). No nested structures: an indented line outside a block scalar is
-    nested YAML and is ignored, so a skill whose frontmatter also carries a nested metadata
-    list (skill-catalog.md, rant 2026-08-08T10:14:29) keeps its own top-level
-    name/description — nested ``description:`` keys must not overwrite the top-level one.
+    and their ``+`` forms). A plain value continues on the lines indented past it, folded
+    the way YAML folds a multi-line plain scalar. No nested structures: an indented line
+    under a key carrying **no** value opens a nested mapping and is ignored, so a skill
+    whose frontmatter also carries a nested metadata list (skill-catalog.md, rant
+    2026-08-08T10:14:29) keeps its own top-level name/description — nested ``description:``
+    keys must not overwrite the top-level one. The value, and not the amount of indentation,
+    is what tells the two cases apart.
 
     Block scalars are read because that is how the skills published into the provider
     directories write their description (rant 2026-10-30T10:42:59): the earlier reader
@@ -214,6 +247,18 @@ def _parse_frontmatter(text: str) -> dict[str, str]:
             value = _join_block_scalar(value[0], parts[0], block, parts[1])
         elif len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
             value = value[1:-1]
+        elif value:
+            # A plain scalar folds across the lines indented past its key, and the
+            # discriminator is the value rather than the amount of indentation: a key with
+            # no value opens a nested mapping, whose lines stay skipped.
+            continuation: list[str] = []
+            while index < len(lines):
+                following = lines[index]
+                if following.strip() and not following[:1].isspace():
+                    break  # the next top-level key ends the fold
+                continuation.append(following)
+                index += 1
+            value = _join_plain_continuation(value, continuation)
         if key:
             result[key] = value
     return result
