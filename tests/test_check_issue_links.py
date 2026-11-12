@@ -2842,6 +2842,77 @@ def test_the_release_version_is_read_only_where_it_is_one(mod) -> None:
     assert mod.release_version("xv0.3.46y") is None
 
 
+#: Real titles, both directions. A title that **presents** a version as its release keeps
+#: it; a title that merely **cites** one - the release a defect exists since, the one a fix
+#: must move past, the tag a declaration lags, or one that never shipped - yields nothing,
+#: because `check-release-published.py` answers green for an artifact that already existed
+#: and green is what the artifact sentence says licenses a close. Both halves are needed:
+#: a rule that refused everything would pass the refusals alone.
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("Release v0.3.46", "v0.3.46"),
+        ("Release v0.3.48 — bump every version declaration to 0.3.48", "v0.3.48"),
+        (
+            "Cut v0.3.44: two merges sit past v0.3.43, and both change a template a cycle reads",
+            "v0.3.44",
+        ),
+        ("emrg: release v0.3.33", "v0.3.33"),
+        (
+            "emrg: publish v0.3.31 so the round-shape prompt reaches installed clients",
+            "v0.3.31",
+        ),
+        (
+            "emrg: v0.3.34 never published, so the next release is 0.3.35 cut from a tree "
+            "that has the AppImage fix",
+            None,
+        ),
+        (
+            "emrg: v0.3.35 names a tree without the batch-call fix, so the next release is 0.3.36",
+            None,
+        ),
+        ("The version declarations are one merge behind the v0.3.44 tag", None),
+        (
+            "A version is owed: the skill reader changed what an installation does since v0.3.52",
+            None,
+        ),
+    ],
+)
+def test_the_version_is_read_where_the_title_presents_one_and_not_where_it_cites_one(
+    mod, title, expected
+) -> None:
+    assert mod.release_version(title) == expected
+
+
+def test_a_cited_version_leaves_the_artifact_sentence_out_and_the_generic_one_in(mod) -> None:
+    """The refusal has to reach the row, not stop at the reader.
+
+    A title naming its version only as a citation must keep the remedy it had; withholding
+    the version there is only useful if the sentence that follows changes with it.
+    """
+    refs = mod.Refs(declared_merged={2782})
+    cited = mod._declined_detail(refs, 2781, mod.release_version("…since v0.3.52"))
+    assert cited == mod._declined_detail(refs, 2781, None)
+    assert "check-release-published" not in cited
+    assert "either close this issue with the reading that says the work is done" in cited
+
+
+def test_a_release_issue_reopened_after_its_merge_says_what_the_reopen_says(mod) -> None:
+    """The two facts share one branch, and only one sentence can be printed.
+
+    An issue can be both a release issue and reopened after the merge that declared it. The
+    reopen sentence wins because that merge is what closed the issue and the landing did not
+    finish the work, so "close it on the artifact reading" is not the step that comes next -
+    saying what the issue still leaves is. Pinned because the combination was reachable and
+    exercised nowhere, so moving either sentence past the other would go unnoticed.
+    """
+    refs = mod.Refs(declared_merged={2782}, reopened_after_merge=True)
+    detail = mod._declined_detail(refs, 2781, "v0.3.46")
+    assert "reopened after that merge" in detail
+    assert "state here what it still leaves" in detail
+    assert "check-release-published" not in detail
+
+
 def test_judge_issues_reads_the_version_off_the_issue_it_is_judging(mod) -> None:
     issues = [
         {"number": 2781, "title": "Release v0.3.46", "created_at": "2026-11-09T17:35:22Z"},
