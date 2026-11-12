@@ -225,7 +225,39 @@ BLOCK_SCALAR_CASES = [
     ("folded", ">", "first line second line"),
     ("literal-strip", "|-", "first line\nsecond line"),
     ("literal", "|", "first line\nsecond line"),
+    # The indentation indicator: the digit states how far the block is indented, and is
+    # no part of the text either way it is ordered.
+    ("literal-indent", "|2", "first line\nsecond line"),
+    ("folded-indent", ">2", "first line second line"),
+    ("literal-keep-indent", "|+2", "first line\nsecond line"),
+    ("folded-strip-indent", ">2-", "first line second line"),
 ]
+
+
+def test_an_indentation_indicator_sets_the_block_indent_rather_than_inferring_it(roots):
+    """`|2` says the block is two columns in, so the three extra spaces are the value's own.
+
+    Without the digit the indentation is taken from the first non-empty line, which strips
+    all five spaces here. Both halves are asserted on one pair of files: the extra spaces
+    survive when the indicator states the indent, and none of them do when it does not.
+    """
+    root = roots["dirs"]["user"]
+    root.mkdir(parents=True, exist_ok=True)
+    for name, indicator in (("stated", "|2"), ("inferred", "|")):
+        (root / f"{name}.md").write_text(
+            "---\n"
+            f"name: {name}\n"
+            f"description: {indicator}\n"
+            "     three spaces of my own\n"
+            "---\n\nbody\n",
+            encoding="utf-8",
+        )
+
+    skills, _ = _load(roots)
+    descriptions = {s.name: s.description for s in skills}
+
+    assert descriptions["stated"] == "   three spaces of my own", descriptions["stated"]
+    assert descriptions["inferred"] == "three spaces of my own", descriptions["inferred"]
 
 
 @pytest.mark.parametrize("name, indicator, expected", BLOCK_SCALAR_CASES)
