@@ -101,22 +101,27 @@ class SkillShadow:
 # `>+2`, `>2-` all open a block. The set is closed on purpose: a value matching this shape
 # opens a block, and anything else is the value itself, so a description reading `>` is the
 # one shape that cannot be told from its own text without this rule.
-def _block_scalar_indicator(value: str) -> Optional[tuple[str, int]]:
-    """``(chomping, indent)`` when ``value`` is a block-scalar indicator, else ``None``.
+def _block_scalar_indicator(value: str) -> Optional[int]:
+    """The indentation digit when ``value`` is a block-scalar indicator, else ``None``.
 
-    ``indent`` is the digit the indicator states, and 0 when it states none — YAML has no
-    zero indentation indicator, so ``|0`` is not one of these and falls through to being
-    the value itself.
+    ``0`` means the indicator is one but states no digit; 1-9 is the digit it states. YAML
+    has no zero indentation indicator, so ``|0`` is not one of these and falls through to
+    being the value itself.
+
+    The chomping sign is read as part of the grammar and then dropped, because it cannot
+    reach the text: `_join_block_scalar` strips trailing blank lines for every form. It is
+    read rather than ignored because ``|+`` has to open a block — a reader that skipped the
+    sign would answer the value ``+`` and lose the description.
     """
     if not value or value[0] not in ("|", ">"):
         return None
     rest = value[1:]
-    chomping = ""
     indent = 0
+    seen_sign = False
     for _ in range(2):
         head = rest[:1]
-        if head in ("+", "-") and not chomping:
-            chomping = head
+        if head in ("+", "-") and not seen_sign:
+            seen_sign = True
             rest = rest[1:]
         elif head.isdigit() and not indent:
             if head == "0":
@@ -125,20 +130,22 @@ def _block_scalar_indicator(value: str) -> Optional[tuple[str, int]]:
             rest = rest[1:]
     if rest:
         return None
-    return chomping, indent
+    return indent
 
 
-def _join_block_scalar(
-    style: str, chomping: str, lines: list[str], indent: int = 0
-) -> str:
+def _join_block_scalar(style: str, lines: list[str], indent: int = 0) -> str:
     """The real text under a block-scalar key, from the indented lines that follow it.
 
     Two shapes, and the difference is what the style is for: ``|`` is literal and keeps its
     line breaks, ``>`` is folded and joins each run of lines into one paragraph with a blank
-    line between paragraphs. ``chomping`` of ``+`` keeps the trailing blank lines, and ``-``
-    or nothing strips them, which is what this reader wants here, because this text is a
-    description rather than a file and a trailing newline in it would be noise in a
-    one-line prompt entry.
+    line between paragraphs.
+
+    Trailing blank lines go for **every** chomping form, ``+`` included. A chomping sign
+    says what a *file* keeps at its end; this text is a description, where a trailing
+    newline is noise in a one-line prompt entry, so the sign is read as part of the
+    indicator (``_block_scalar_indicator``) and never reaches the value. Measured: ``|``,
+    ``|-`` and ``|+`` over one body all answer ``'one\\ntwo'``, where ``yaml.safe_load``
+    answers ``'one\\ntwo\\n\\n\\n'`` for the ``+`` form.
 
     ``indent`` is the block's indentation when the indicator stated it (``|2``) and 0 when
     it did not. Stated, it is used as written: a block whose content is indented further
@@ -150,9 +157,8 @@ def _join_block_scalar(
     body = list(lines)
     while body and not body[0].strip():
         body.pop(0)
-    if chomping != "+":
-        while body and not body[-1].strip():
-            body.pop()
+    while body and not body[-1].strip():
+        body.pop()
     indents = [len(line) - len(line.lstrip()) for line in body if line.strip()]
     cut = indent if indent else (min(indents) if indents else 0)
     stripped = [line[cut:] if line.strip() else "" for line in body]
@@ -211,7 +217,7 @@ def _parse_frontmatter(text: str) -> dict[str, str]:
                     break  # the next top-level key ends the block
                 block.append(following)
                 index += 1
-            value = _join_block_scalar(value[0], parts[0], block, parts[1])
+            value = _join_block_scalar(value[0], block, parts)
         elif len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
             value = value[1:-1]
         if key:
