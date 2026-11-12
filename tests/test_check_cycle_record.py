@@ -178,11 +178,43 @@ def test_a_state_file_carrying_two_snapshots_is_a_fault(tmp_path: Path) -> None:
     assert run(state, archive) == 1
 
 
-def test_an_absent_file_is_unmeasurable_not_clean(tmp_path: Path) -> None:
+def test_an_absent_file_is_unmeasurable_not_clean(tmp_path: Path, capsys) -> None:
     """A file that is not there is a question this run could not ask."""
     archive = tmp_path / mod.ARCHIVE_NAME
     archive.write_text(header("cyc20261112-214138") + "- older\n", encoding="utf-8")
     assert run(tmp_path / "no-such-state.md", archive) == 2
+    # The spelling is part of the answer: the guards in this family are read by matchers
+    # that look for `could not measure` at the start of a line, and a truthful refusal in
+    # another word is a refusal those readers report as a guard printing no reason at all.
+    refused = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("could not measure:")]
+    assert refused, "the refusal must carry the family's spelling, not only its meaning"
+    assert "state" in refused[0]
+    assert "this is not a pass" in refused[0]
+
+
+def test_the_report_names_its_checkout_before_any_verdict(tmp_path: Path, capsys) -> None:
+    """A guard that reads a tree names it first — and names *this* checkout, not the cwd.
+
+    The line is derived from the script's own file, so the same report is never true of two
+    trees: launched from anywhere, it still answers about the checkout it ships in. Without
+    this arm the family's registration of this guard (a member of `RUN_HERE`) would be a
+    claim nothing here checks.
+
+    Both shapes are read, because "before any verdict" is only measured by a run that
+    reaches one: an absent subject (rc 2, no verdict at all) and a file that is readable and
+    is not a record (rc 1, a finding). One arm alone would leave the other untested.
+    """
+    expected = f"tree: {SCRIPT.parent.parent}"
+
+    assert run(tmp_path / "no-such-state.md", tmp_path / "no-such-archive.md") == 2
+    assert capsys.readouterr().out.splitlines()[0] == expected
+
+    found, archive = build(tmp_path, "- a fact with no snapshot header\n")
+    assert run(found, archive) == 1
+    assert capsys.readouterr().out.splitlines()[0] == expected, (
+        "a verdict must be preceded by the tree that gave it, or one report is true of two "
+        "different trees"
+    )
 
 
 def test_a_file_that_is_not_text_is_unmeasurable_too(tmp_path: Path) -> None:

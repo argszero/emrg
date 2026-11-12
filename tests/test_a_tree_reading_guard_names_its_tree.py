@@ -106,6 +106,7 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 #: agent interpreter (which this suite is), and it reads the `.emrg/` trees under
 #: the checkout it stands in.
 RUN_HERE = (
+    "check-cycle-record.py",
     "check-doc-count.py",
     "check-memory-index.py",
     "check-rant-citations.py",
@@ -115,15 +116,26 @@ RUN_HERE = (
     "check-undefined-names.py",
 )
 
-#: The one `RUN_HERE` member whose *subject* the tree under test can genuinely lack, and
-#: the places it looks for that subject when it is given no path — the guard's own message
-#: names both, and
+#: The `RUN_HERE` members whose *subject* the tree under test can genuinely lack, and
+#: the places each looks for that subject when it is given no path — the guards' own
+#: messages name theirs, and
 #: `tests/test_check_memory_index.py::test_the_default_subject_is_both_levels_the_tree_carries`
-#: pins them. They live under `.emrg/`, which is gitignored, so a bare checkout carries
-#: none of them and the guard answers `could not measure` (rc 2) rather than a verdict.
-#: Listed here so the leg below can *measure* the absence it reads that answer against,
-#: instead of assuming it: with a subject present, the same rc 2 is a failure.
+#: pins the first member's two. They live under `.emrg/`, which is gitignored, so a bare
+#: checkout carries none of them and the guard answers `could not measure` (rc 2) rather
+#: than a verdict. Listed here so the leg below can *measure* the absence it reads that
+#: answer against, instead of assuming it: with a subject present, the same rc 2 is a
+#: failure.
+#:
+#: `check-cycle-record.py` joined 2026-11-12 (`cyc20261112-222511`) and its entry is why
+#: the table is keyed by name rather than being one member's home: it reads the state file
+#: and the archive beside the index, all three gitignored, so it has exactly the first
+#: member's shape. Its subject is named exactly rather than as `.emrg/memory/*.md`,
+#: because a glob matching the index as well would read `present` on a tree that carries
+#: an index and no cycle record — the absence this entry exists to measure.
 SUBJECT_MAY_BE_ABSENT = {
+    "check-cycle-record.py": (
+        ".emrg/memory/evolution-nte-steady-state-since-v0.2.73.md",
+    ),
     "check-memory-index.py": (
         ".emrg/memory/MEMORY.md",
         ".emrg/sessions/*/memory/MEMORY.md",

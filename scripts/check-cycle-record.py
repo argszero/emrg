@@ -38,13 +38,21 @@ The second reading is the append's own premise: **the state file's block must no
 be in the archive**. When it is, the append reached the archive and the replacement did
 not, so the state file still holds a block that is filed twice.
 
+Report
+------
+The first line names the checkout that answered, `tree: <path>`, before any verdict -- the
+convention every guard in this family follows, and the reason is that a line following the
+caller's cwd would make one report true of two different trees. The two lines after it name
+the files actually read; `--memory-root` moves the subject and leaves the tree line naming
+this guard's own checkout, so nothing about what was read is left implicit.
+
 Exit
 ----
     0  every header names exactly one subject, in an admitted form, and the state file's
        block is not yet archived
     1  a header naming none or several, a subject cell that is not the id it names, a
        missing state header, or a block filed twice
-    2  a file could not be read -- never a pass
+    2  a file could not be read, reported as `could not measure: ...` -- never a pass
 """
 
 from __future__ import annotations
@@ -73,14 +81,21 @@ FULL_CYCLE = re.compile(r"cyc\d{8}-\d{6}\Z")
 HOST_TURN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?[+-]\d{2}:\d{2}\Z")
 
 
-def default_memory_root() -> Path:
-    """The memory root of the agent this script ships inside.
+def checkout_root() -> Path:
+    """The checkout this script ships inside, derived from its own file.
 
-    Derived from the script's own location -- `<root>/scripts/check-cycle-record.py` --
-    rather than written as this host's home path, so a copy of the tree measures its own
-    memory instead of naming a directory that belongs to one installation.
+    Derived from `<root>/scripts/check-cycle-record.py` rather than written as this host's
+    home path, so a copy of the tree measures its own memory instead of naming a directory
+    that belongs to one installation -- and so the report's `tree:` line names this
+    checkout whatever the caller's cwd. A line that followed the cwd would make the same
+    report true of two different trees.
     """
-    return Path(__file__).resolve().parent.parent / ".emrg" / "memory"
+    return Path(__file__).resolve().parent.parent
+
+
+def default_memory_root() -> Path:
+    """The memory root of the agent this script ships inside."""
+    return checkout_root() / ".emrg" / "memory"
 
 
 def read_lines(path: Path) -> str:
@@ -173,6 +188,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     state = args.state if args.state is not None else root / STATE_NAME
     archive = args.archive if args.archive is not None else root / ARCHIVE_NAME
 
+    print(f"tree: {checkout_root()}")
     print(f"state:   {state}")
     print(f"archive: {archive}")
 
@@ -182,8 +198,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             texts[label] = read_lines(path)
         except (OSError, UnicodeDecodeError) as exc:
             print(
-                f"UNMEASURABLE: the {label} file could not be read ({exc.__class__.__name__}: "
-                f"{exc}) -- this is not a pass, it is a question this run could not ask"
+                f"could not measure: the {label} file could not be read "
+                f"({exc.__class__.__name__}: {exc}) -- this is not a pass, it is a question "
+                "this run could not ask"
             )
             return 2
 
