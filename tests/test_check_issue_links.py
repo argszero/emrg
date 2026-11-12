@@ -2898,6 +2898,30 @@ def test_the_version_is_read_where_the_title_presents_one_and_not_where_it_cites
     assert mod.release_version(title) == expected
 
 
+def test_a_release_word_that_is_the_tail_of_one_presents_no_release(mod) -> None:
+    """A hyphenated compound is not the release word, so it presents no release.
+
+    A word boundary sits between a hyphen and the letter after it, so `pre-release v0.3.44`
+    matched the same release-word-then-version pair a presentation does and the issue was
+    handed the artifact remedy for a version it did not ship. The release word has to be a
+    word rather than the tail of one. The accepted spellings below are the other half of the
+    assertion, because a rule that refused every hyphen would pass the refusals alone.
+    """
+    for title in (
+        "pre-release v0.3.44",
+        "non-release v0.3.44",
+        "re-release v0.3.44",
+        "press-release v0.3.44",
+        "post-publish v0.3.44",
+        "pre-cut v0.3.44",
+    ):
+        assert mod.release_version(title) is None, title
+
+    assert mod.release_version("Release v0.3.46") == "v0.3.46"
+    assert mod.release_version("Publish 0.3.52") == "v0.3.52"
+    assert mod.release_version("cut 0.3.40 so an upgrade carries it") == "v0.3.40"
+
+
 def test_a_bare_version_comes_back_in_the_form_the_tag_carries(mod) -> None:
     """The reader's value is an argument, so it has to be spelled the way the command takes it.
 
