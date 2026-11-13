@@ -96,7 +96,14 @@ ARCHIVE_NAME = "cycle-archive-20260913-state.md"
 #: between `snapshot ` and the comma that opens the date, and it is read from the line
 #: rather than from the block, because a header is what names the block a reader has to
 #: find.
-HEADER = re.compile(r"^## Current state \(snapshot (?P<subject>[^,)]+),")
+#:
+#: The indent is Markdown's, not a convenience: a level-2 heading may be indented by up to
+#: three spaces and still renders as one, so a header written that way is a header a reader
+#: sees. Anchored at column 0 it was a header this reading did not see -- and, because
+#: ``PRESENTS_SNAPSHOT`` was anchored there too, one it did not refuse either: an archive of
+#: 257 admitted blocks and one indented block reported 257 and exited 0. Four spaces and up
+#: stay unread, because that line is quoted text rather than a heading.
+HEADER = re.compile(r"^ {0,3}## Current state \(snapshot (?P<subject>[^,)]+),")
 CYCLE_ID = re.compile(r"cyc\d{8}-\d{6}")
 FULL_CYCLE = re.compile(r"cyc\d{8}-\d{6}\Z")
 #: The one exception, and it is stated rather than inferred from "not a cycle id": a
@@ -114,7 +121,7 @@ FENCE = re.compile(r"^ {0,3}(?P<marker>`{3,}|~{3,})(?P<info>.*)$")
 #: ``(snapshot``; they read ``## Displaced snapshot cyc... (archived by cyc...)`` and
 #: ``## Moved from the state file at cyc... (verbatim)``. A rule keyed on the *word* snapshot
 #: would red on those 57; keyed on the parenthetical it reds on none of them.
-PRESENTS_SNAPSHOT = re.compile(r"^## .*\(\s*snapshot")
+PRESENTS_SNAPSHOT = re.compile(r"^ {0,3}## .*\(\s*snapshot")
 
 
 def checkout_root() -> Path:
