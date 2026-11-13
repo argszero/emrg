@@ -1355,6 +1355,110 @@ def test_a_quoted_veto_in_a_code_fence_is_not_a_stated_one(mod):
     assert mod.classify("\u2705 LGTM\n\nReproduced:\n\n```\n\u274c Needs fix\n```\n") == "approve"
 
 
+def test_a_fence_marker_indented_with_a_tab_is_not_a_fence(mod):
+    """A tab indents four columns, so the marker is quoted text and the line under it is prose.
+
+    `_FENCE_RE` admitted ``\\s{0,3}`` while the comment above it claimed "up to 3
+    spaces". A tab is not a space: at the start of a line it advances to column 4, which
+    is an **indented code block**, so a renderer shows the *marker* as code and the line
+    beneath it as prose. Read as a fence, that line becomes a quotation — and a reviewer
+    who states a veto under a tab-indented marker has it dropped, with the approvals in
+    front of it left live, which is the direction `_fence_flags`' docstring refuses.
+
+    Measured 2026-11-13 (issue #2890): `classify` answered `comment` for the tab body and
+    `veto` for the same body with no marker at all, and `markdown_it` 4.2.0 renders that
+    line as a ``<p>``. Four spaces already answered `veto`, so only the tab was wrong.
+    """
+    veto = "\u274c Needs fix: the third leaks"
+    tabbed = f"\t```\n{veto}\n```\n\nChecked on Windows.\n"
+    assert mod.classify(tabbed) == "veto", (
+        "a tab-indented marker is an indented code block, so the veto under it is stated"
+    )
+    assert mod._fence_flags(tabbed.splitlines())[1] is False, (
+        "line 2 is content to a reader, and the flag has to say so"
+    )
+    # The controls, both sides: a fence at 0-3 spaces quotes, and 4 spaces is prose.
+    for spaces in (0, 1, 2, 3):
+        body = " " * spaces + f"```\n{veto}\n```\n\nChecked on Windows.\n"
+        assert mod.classify(body) == "comment", (
+            f"a {spaces}-space indent is still a fence: {body!r}"
+        )
+    assert mod.classify(f"    ```\n{veto}\n```\n\nChecked on Windows.\n") == "veto", (
+        "four spaces already read as prose - the tab fix matches that reading, it does "
+        "not replace it"
+    )
+    # The run character is not the question: a tilde fence under a tab is no fence either.
+    assert mod.classify(f"\t~~~\n{veto}\n~~~\n\nChecked on Windows.\n") == "veto"
+
+
+CYCLE_RECORD_SCRIPT = REPO_ROOT / "scripts" / "check-cycle-record.py"
+
+
+def _load_cycle_record():
+    """The other reader of the same fence rule, loaded from its own file.
+
+    Two readers answer one question here — is this line content, or is a fence quoting
+    it? `check-cycle-record.py` asks it of the state file and its archive, the counter
+    asks it of a review body. A rule carried by two readers is pinned by comparing them,
+    because an arm on one says nothing about the other.
+    """
+    spec = importlib.util.spec_from_file_location("check_cycle_record", CYCLE_RECORD_SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_two_fence_readers_answer_alike_on_every_indent(mod):
+    """The fence rule has two readers in this repo, so they are compared, not trusted.
+
+    They disagreed on exactly one class — the tab — and the counter's answer was the one
+    a renderer contradicts: it quoted a line `check-cycle-record.py` called content, which
+    is a stated veto dropped (issue #2890). Comparing the readers rather than pinning each
+    to a literal is what makes this fix stay fixed: a later change to either reader that
+    moves one indent class reddens here.
+
+    Whole per-line vectors, because an opener, its contents and its closer are three
+    different answers and a body-level comparison cannot say which one moved. A **bare
+    marker line** is excluded from the comparison: the counter names a fate for every line
+    it reads, the record lists content lines and a marker is not one of them, so the two
+    file the marker differently by construction — and a tab-indented marker makes the
+    column-0 closer below it an unmatched opener, which is a fact about the body rather
+    than about the rule. What the rule decides is the lines *between* markers, and those
+    are compared exactly.
+    """
+    record = _load_cycle_record()
+    veto = "\u274c Needs fix: the third leaks"
+    marker_line = re.compile(r"\s*(?:`{3,}|~{3,})\s*")
+    bodies = {"one tab": f"\t```\n{veto}\n```\n\nChecked on Windows.\n"}
+    for spaces in (0, 1, 2, 3, 4):
+        marker = " " * spaces + "```"
+        bodies[f"{spaces} spaces"] = f"{marker}\n{veto}\n```\n\nChecked on Windows.\n"
+    bodies["tilde under a tab"] = f"\t~~~\n{veto}\n~~~\n\nChecked on Windows.\n"
+    bodies["tilde at column 0"] = f"~~~\n{veto}\n~~~\n\nChecked on Windows.\n"
+    bodies["unbalanced"] = f"```\n{veto}\n"
+    compared: list[bool] = []
+    for label, body in bodies.items():
+        lines = body.splitlines()
+        counter = mod._fence_flags(lines)  # True = quoted
+        numbered = {number for number, _ in record.content_lines(body)}
+        carried = [number not in numbered for number, _ in enumerate(lines, 1)]
+        for index, line in enumerate(lines):
+            if marker_line.fullmatch(line) is not None:
+                continue
+            compared.append(counter[index])
+            assert counter[index] == carried[index], (
+                f"{label}, line {index + 1} ({line!r}): the counter quotes "
+                f"{counter[index]}, the cycle-record reader quotes {carried[index]} - "
+                "one fence rule, two answers"
+            )
+    assert compared, "the comparison had no subject: every line was a bare marker"
+    assert set(compared) == {True, False}, (
+        "a comparison that only ever sees one answer proves nothing about the other: "
+        f"{compared}"
+    )
+
+
 def test_nested_fences_close_by_length_not_by_toggle(mod):
     """A ``` example quoted inside a ```` block is content, not a fence.
 
