@@ -516,6 +516,44 @@ def test_an_indented_copy_of_the_state_block_is_still_filed_twice(
     )
 
 
+@pytest.mark.parametrize("fence_indent", [1, 2, 3])
+@pytest.mark.parametrize("header_indent", [0, 1, 2, 3])
+def test_a_fence_at_an_indent_still_quotes_what_it_holds(
+    tmp_path: Path, fence_indent: int, header_indent: int
+) -> None:
+    """A marker indented as Markdown admits opens a block, so its contents are quoted.
+
+    `FENCE` has always admitted `^ {0,3}`, and every fence test in this file opens its block
+    at column 0 -- so anchoring the marker at column 0 would leave the suite green while an
+    indented block stopped being read: the lines it holds would become content, and a header
+    quoted inside it would be counted as a block that does not exist, which is the fault the
+    fence reading was added to close.
+
+    The indent matters twice over now that `HEADER` admits one too: the two readers meet at a
+    shared indent, and a header indented one to three spaces inside a fence indented one to
+    three spaces is still quoted. All twelve combinations answer zero headers on the guard as
+    it stands; this pins them rather than stating them.
+    """
+    marker = " " * fence_indent + "```"
+    archive_body = (
+        header("cyc20261112-214138", tail="- displaced by " + CYCLE)
+        + "- an older block, outside the fence\n"
+        + marker + "\n"
+        + " " * header_indent
+        + header("cyc20260101-000000")
+        + "- an example, not a block\n"
+        + marker + "\n"
+    )
+    state, archive = build(tmp_path, header(CYCLE) + "- a fact\n", archive_body)
+    assert run(state, archive) == 0
+    assert [subject for _, subject in mod.archived_subjects(archive_body)] == [
+        "cyc20261112-214138"
+    ], (
+        "the block outside the fence is counted and the quoted one is not, whatever indent the "
+        "marker carries: " + repr(mod.archived_subjects(archive_body))
+    )
+
+
 @pytest.mark.parametrize("indent", [4, 6])
 def test_a_header_indented_past_the_heading_limit_is_quoted_text(
     tmp_path: Path, indent: int
