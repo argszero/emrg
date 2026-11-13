@@ -1410,7 +1410,13 @@ def _load_cycle_record():
 
 
 def test_the_two_fence_readers_answer_alike_on_every_indent(mod):
-    """The fence rule has two readers in this repo, so they are compared, not trusted.
+    """The fence rule is read by more than one script, so the readers are compared.
+
+    `tests/test_fence_carriers.py` discovers every reader of this rule in the tree and
+    pins each one's indent dialect; this test compares the two that must agree, because
+    their disagreement is what dropped a stated veto. The two that are compared are
+    `check-vote-count.py` and `check-cycle-record.py`; a third reads a deliberately wider
+    dialect, and the census is where that difference is held rather than argued.
 
     They disagreed on exactly one class — the tab — and the counter's answer was the one
     a renderer contradicts: it quoted a line `check-cycle-record.py` called content, which
