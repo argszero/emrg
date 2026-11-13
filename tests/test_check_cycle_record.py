@@ -34,6 +34,11 @@ The assertions are the halves of "does it answer that question":
   exited 0. The near-miss reading refuses it, and the arm that keeps it honest is the
   opposite direction: `## Displaced snapshot cyc... (archived by cyc...)` is a heading the
   archive really carries and must not be refused;
+* **the indent is Markdown's** -- a level-2 heading indented one to three spaces renders as
+  one, and anchored at column 0 both patterns missed it: neither counted nor refused, so an
+  archive of 257 blocks plus one indented block reported 257 and exited 0. Widening `HEADER`
+  alone would move that silence one space left, so the near-miss reading is widened with it,
+  and the arm at four spaces and up keeps the rule from admitting every value;
 * **unmeasurable is never a pass** -- an absent file and a file that is not UTF-8 text both
   answer exit 2, and the message says the question could not be asked.
 
@@ -443,6 +448,86 @@ def test_an_unbalanced_fence_does_not_hide_the_headers_after_it(tmp_path: Path) 
     assert [subject for _, subject in mod.archived_subjects(archive_body)] == [
         "cyc20261112-214138"
     ], "an unmatched opener must not hide the rest of the record"
+
+
+@pytest.mark.parametrize("indent", [1, 2, 3])
+def test_a_header_indented_as_markdown_admits_is_still_the_block(
+    tmp_path: Path, indent: int
+) -> None:
+    """A level-2 heading indented up to three spaces renders as one, so it is one.
+
+    Anchored at column 0 the reading counted an indented header nowhere: `HEADER` did not
+    match it and `PRESENTS_SNAPSHOT` did not refuse it, so an archive of 257 admitted blocks
+    plus one indented block reported 257 and exited 0 -- one block made invisible in
+    silence, which is the same pass #2884 closed one literal away.
+    """
+    indented_state = " " * indent + header(CYCLE)
+    indented_archive = " " * indent + header("cyc20261112-214138")
+    state, archive = build(
+        tmp_path, indented_state + "- a fact\n", indented_archive + "- an older block\n"
+    )
+    assert run(state, archive) == 0
+    assert mod.snapshot_subject(indented_state) == CYCLE
+    assert [subject for _, subject in mod.archived_subjects(indented_archive)] == [
+        "cyc20261112-214138"
+    ], "an indented header is a header, so the archive's count must see it"
+
+
+@pytest.mark.parametrize("indent", [1, 2, 3])
+def test_an_indented_drifted_heading_is_refused(tmp_path: Path, indent: int) -> None:
+    """The near-miss reading closes the drift direction at every admitted indent.
+
+    A heading that presents a snapshot and is not the admitted header is a finding; the
+    indent is where it has to be found, because widening `HEADER` alone would move the same
+    silence one space to the left.
+    """
+    drifted = " " * indent + header("cyc20261112-214138").replace(
+        "## Current state", "## Current State"
+    )
+    archive_tree = tmp_path / "archive"
+    archive_tree.mkdir()
+    state, archive = build(
+        archive_tree, header(CYCLE) + "- a fact\n", drifted + "- an older block\n"
+    )
+    assert run(state, archive) == 1
+    faults = mod.unrecognised_headers(drifted)
+    assert len(faults) == 1 and faults[0][1] == drifted.rstrip("\n")
+
+
+def test_an_indented_copy_of_the_state_block_is_still_filed_twice(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The append's own premise is read by identity, and the indent does not change identity.
+
+    The reading is the finding's own reason, not the exit code: an indented state header was
+    unread before the indent was widened, and that also exits 1 -- by reporting a header that
+    is present as missing. An arm keyed on the exit code would call both one answer.
+    """
+    state, archive = build(
+        tmp_path,
+        " " + header(CYCLE) + "- a fact\n",
+        "  " + header(CYCLE) + "- the same block, appended\n",
+    )
+    assert run(state, archive) == 1
+    printed = capsys.readouterr().out
+    assert "the same block the state file still opens" in printed, (
+        "the indent must be read as a header, so the fault is the duplicate and not a "
+        "missing header: " + printed
+    )
+
+
+@pytest.mark.parametrize("indent", [4, 6])
+def test_a_header_indented_past_the_heading_limit_is_quoted_text(
+    tmp_path: Path, indent: int
+) -> None:
+    """Four spaces and up is not a heading in Markdown, so it is quoted text, not a block.
+
+    This is the other half of the indent rule: without it, "read the indent" would be a rule
+    that admits every value and stops answering the question it was widened for.
+    """
+    line = " " * indent + header("cyc20261112-214138")
+    assert mod.unrecognised_headers(line) == [], "quoted text is not a drifted header"
+    assert mod.archived_subjects(line) == [], "quoted text is not a block"
 
 
 @pytest.mark.skipif(
