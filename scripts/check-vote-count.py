@@ -847,9 +847,21 @@ def _refuses(line: str) -> bool:
     return re.search(window + "LGTM", line, re.IGNORECASE) is not None
 
 
-# An opening or closing code fence, indented up to 3 spaces (the markdown limit).
+# An opening or closing code fence, indented by up to 3 **spaces** (the markdown limit).
 # ``` and ~~~ are both valid fence markers; the run length matters (see below).
-_FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
+#
+# Spaces, not `\s`. A tab at the start of a line advances to column 4, which is an
+# **indented code block** rather than a fence: the marker line is quoted text and the
+# lines under it are prose. Admitting `\t` read a *stated* veto as a quoted one and
+# dropped it, leaving the approvals in front of it live - the direction `_fence_flags`
+# refuses below, and the one that makes a run look mergeable over a body that states a
+# veto. Measured 2026-11-13 on `"\t```\n❌ Needs fix: x\n```\n"`: `classify` answered
+# `comment`, where the same body with no marker at all answers `veto`, and a CommonMark
+# renderer (`markdown_it` 4.2.0) puts that very line in a `<p>`. The four-space indent
+# already answered `veto`, so the tab was the only wrong class. The sibling reader in
+# `check-cycle-record.py` admits `^ {0,3}` and already called that line content, so the
+# two now agree on every indent class (issue #2890).
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
 
 def _fence_flags(lines: list[str]) -> list[bool]:
