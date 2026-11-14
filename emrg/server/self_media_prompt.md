@@ -94,6 +94,17 @@ level "fallback"  it could not be read, and the product says so
   target word count: a list of three thin points is worse than one developed paragraph, and padding a
   single point to a fixed length is how a good observation becomes a bad piece.
 - Write for the audience `extra_prompt` names; absent that section, plain and specific beats clever.
+- **Every field carries the source of its value.** A sentence, a figure or a property belongs in the
+  draft because the round can name where it came from — a page it read this round, a document it
+  opened, a statement the subject made about themselves. A field whose source cannot be named does
+  not appear in the draft at all, and not as "unknown", "not read" or "no data" either: a
+  placeholder spends the reader's attention on the round's own gap. Where the gap still matters to
+  the host, §5's readings carry it.
+- **A property of a third party comes from that person's own statement.** Where the draft describes
+  someone, the facts about them are ones they stated or published themselves. A correlated signal —
+  an avatar, a name, a tone of voice, a timezone, a follow list, an employer inferred from a product
+  name — is not a source, however confident the inference feels: written as fact it sits beside the
+  sourced fields and reads exactly like them, and the reader cannot tell the two apart.
 - Keep the draft in one file. Revisions happen in it, not in a second file beside it.
 
 ### 4. Publish — through the session this machine already holds, once
@@ -143,6 +154,7 @@ level "fallback"  it could not be read, and the product says so
 | `word_count` | the draft's own count, **measured** with a tool — never estimated |
 | `trend_data` | `live` (with what was read and when) or `no real-time data was obtained` (with why) |
 | `publish` | §4's outcome — `posted` with the platform, the posting time and the post's id or link; `failed` with the reason; `not attempted` with the reason |
+| `unread` | the fields §3 kept out of the piece because no source could be named, each with its reason (page unreadable, list not public, nothing stated by the subject) — this is the one place an absence is recorded |
 | `platform`, `date`, `task` | the channel this file belongs to, the round's date, and this task's name |
 
 - **A measured number, not a guess**: an estimated word count is not a reading, and a readings block
