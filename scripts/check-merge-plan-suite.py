@@ -1467,9 +1467,10 @@ def _ownership_lines(
             f"isolated re-run on this plan's own tree, and failed in none of the "
             f"{BASE_REPEATS} runs on the base tree: " + ", ".join(flaky)
             + "\nNo PR in this plan owns those rows either: a row that fails only some "
-            "of the time is not a property of either tree, so re-pushing one would void "
-            "its votes for a failure it may not fix. Re-run the full suite on the plan's "
-            "tree and read the row again before naming a PR."
+            "of the time is not a property of either tree, so pushing a one-line fix for "
+            "it would void that PR's standing votes for a failure the push may not "
+            "change. Re-run the full suite on the plan's tree and read the row again "
+            "before naming a PR."
         )
     return plan, base
 
