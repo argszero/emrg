@@ -1181,6 +1181,96 @@ def _pytest_rows(worktree: Path, rows: list[str], junit: Path) -> tuple[int, str
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
 
 
+# How many times each tree is asked about a red row. Three, not one, because one answer
+# cannot tell a row that fails every time from a row that fails some of the time - and
+# those two readings have opposite remedies (fix the PR, or do not touch the PR at all).
+BASE_REPEATS = 3
+PLAN_REPEATS = 3
+
+
+def _row_failures(
+    tip: str, rows: list[str], scratch: Path, repeats: int, what: str, subdir: str
+) -> dict[str, int]:
+    """How many of up to `repeats` isolated runs of `rows` fail on the tree at `tip`.
+
+    One tree, one materialisation, the rows asked `repeats` times. Asking *once* is what
+    this replaces, and the defect it removes was measured rather than argued (cycle
+    `cyc20261114-010704`, base `011a1730`, tree `0c63251ca221`): the row
+    `tests/test_session.py::TestInputHistory::test_the_file_is_capped_oldest_first` read
+    **PASS 3 / FAIL 5** across eight consecutive runs on one unchanged tree, failing as
+    `PermissionError: [WinError 5]` on the `os.replace` of `input_history.jsonl.tmp` at
+    `emrg/session.py:1034`. A single answer is then a coin flip, and the run that landed
+    on "passes" laid that row at a PR's door with the re-push sentence - advice that
+    spends the PR's standing votes on a failure no diff can fix.
+
+    The same question is asked of the plan's own tree, which is why `what` names the
+    tree in every refusal: two answers about two trees are compared with each other, and
+    a message that does not say which tree could not be measured is the ambiguity this
+    whole step exists to remove.
+
+    A row the tree does not contain cannot fail in it: pytest runs nothing at all when
+    one argument is unresolvable (measured), so a `not found` report is that answer and
+    the run is repeated without those rows. Any other code - an interpreter without
+    pytest, rc 3 - is a measurement error, because an unanswerable question is rc 2 and
+    never a verdict about a PR.
+
+    Rows are read from the junit report and intersected with the rows that were asked
+    for, so an id containing `" - "` is matched rather than truncated (issue #1386:
+    truncated, it is a row this tree does not contain, which reads as *this tree fails
+    nothing* and hands the row to whichever tree was asked the other question).
+    """
+    # Named per tree, in the scratch directory the caller owns: the base re-run and the
+    # plan's re-run are two measurements of two trees, and a shared path would let one
+    # overwrite the other's report.
+    worktree = scratch / subdir
+    # Outside the worktree, like the plan's report: nothing this tool writes may land in
+    # the tree whose suite is running.
+    junit = scratch / (worktree.name + "-junit.xml")
+    added = _run(["git", "worktree", "add", "--detach", str(worktree), tip])
+    if added.returncode != 0:
+        raise MeasurementError(f"could not materialise {what}: " + added.stderr.strip())
+    try:
+        _purge_bytecode(worktree)
+        failures: dict[str, int] = {row: 0 for row in rows}
+        asked = list(rows)
+        for _ in range(repeats):
+            if not asked:
+                break
+            rc, out = _pytest_rows(worktree, asked, junit)
+            if rc == 4:
+                missing = _unfound_ids(out, asked)
+                if not missing:
+                    raise MeasurementError(
+                        f"{what} could not be asked these rows (rc=4):\n"
+                        + out[-1000:].strip()
+                    )
+                # Asked again without them, and not counted as an answer: these rows are
+                # not a reading, they are rows that tree does not hold.
+                asked = [row for row in asked if row not in missing]
+                continue
+            if rc == 0:
+                continue
+            if rc != 1:
+                raise MeasurementError(
+                    f"{what} could not be measured (rc={rc}):\n" + out[-1000:].strip()
+                )
+            reported = _junit_rows(junit)
+            blamed = (
+                set(_failing_rows(out)) & set(asked)
+                if reported is None
+                else set(reported) & set(asked)
+            )
+            if not blamed:
+                raise MeasurementError(
+                    f"{what} could not be measured (rc={rc}):\n" + out[-1000:].strip()
+                )
+            for row in blamed:
+                failures[row] += 1
+        return failures
+    finally:
+        _run(["git", "worktree", "remove", "--force", str(worktree)])
+
+
 def _still_red_on(tip: str, rows: list[str], scratch: Path) -> set[str]:
     """Which of `rows` also fail on the tree at `tip`, measured the way the plan was.
 
@@ -1208,59 +1298,73 @@ def _still_red_on(tip: str, rows: list[str], scratch: Path) -> set[str]:
     (issue #1386: truncated, it is a row this tree does not contain, which reads as *the
     base fails nothing* and lays the row at a PR's door). Only a run that wrote no report
     falls back to matching its text summary against the rows.
+
+    The base is asked `BASE_REPEATS` times and **any** of those runs failing counts, so a
+    row that fails only some of the time is inherited rather than laid at a PR's door -
+    `_row_failures` carries the measurement that makes one answer insufficient.
     """
-    worktree = scratch / "base"
-    # Outside the base worktree, like the plan's report: nothing this tool writes may land
-    # in the tree whose suite is running.
-    junit = scratch / "base-junit.xml"
-    added = _run(["git", "worktree", "add", "--detach", str(worktree), tip])
-    if added.returncode != 0:
-        raise MeasurementError(
-            "could not materialise the base tree: " + added.stderr.strip()
-        )
-    try:
-        _purge_bytecode(worktree)
-        rc, out = _pytest_rows(worktree, rows, junit)
-        if rc == 4:
-            missing = _unfound_ids(out, rows)
-            if not missing:
-                raise MeasurementError(
-                    "the base tree could not be asked these rows (rc=4):\n"
-                    + out[-1000:].strip()
-                )
-            rows = [row for row in rows if row not in missing]
-            if not rows:
-                return set()
-            rc, out = _pytest_rows(worktree, rows, junit)
-        if rc == 0:
-            return set()
-        if rc == 1:
-            reported = _junit_rows(junit)
-            blamed = (
-                set(_failing_rows(out)) & set(rows)
-                if reported is None
-                else set(reported) & set(rows)
-            )
-            if blamed:
-                return blamed
-        raise MeasurementError(
-            f"the base tree could not be measured (rc={rc}):\n" + out[-1000:].strip()
-        )
-    finally:
-        _run(["git", "worktree", "remove", "--force", str(worktree)])
+    failures = _row_failures(tip, rows, scratch, BASE_REPEATS, "the base", "base")
+    return {row for row, failed in failures.items() if failed}
 
 
-def _owned_rows(failing: list[str], inherited: set[str]) -> list[str]:
+def _unstable_rows(tip: str, rows: list[str], scratch: Path) -> set[str]:
+    """Which of `rows` do not fail in *every* isolated re-run on the plan's own tree.
+
+    The other half of the same question, and the one the tool asked of nobody: the plan's
+    run is a single sample too, so "this tree fails this row" was read from one
+    observation on each side. A row that fails in the suite run and then passes when asked
+    alone on the same tree is not a property of that tree, and telling its author to
+    re-push is telling them to spend the standing votes for a failure a push may not
+    change - the same cost issue #1378 recorded, arriving through the other arm.
+
+    The question is deliberately the *isolated* one, which is the question the base is
+    asked (`_row_failures` runs the rows, not the suite, for the same reason on both
+    sides): two trees measured by two different questions are not comparable, and a
+    verdict that compares them is a verdict about the difference in questions.
+    """
+    failures = _row_failures(
+        tip, rows, scratch, PLAN_REPEATS, "this plan's tree", "recheck"
+    )
+    return {row for row in rows if failures.get(row, 0) < PLAN_REPEATS}
+
+
+def _owned_rows(
+    failing: list[str], inherited: set[str], unstable: set[str] | frozenset[str] = frozenset()
+) -> list[str]:
     """The failing rows no base tree fails: the one place the split is computed.
 
     Both the stderr paragraphs and the stdout verdict line describe this split, and a
     second copy of "which rows are the plan's" is a second answer to one question - the
     kind that drifts while both copies stay green against their own fixtures.
+
+    `unstable` is the third answer, and it is subtracted here rather than at the sentence
+    that would use it: a row that does not fail on every isolated re-run of the plan's own
+    tree is not owned by that tree either, and leaving it in `own` would put it back in
+    front of the re-push remedy from the one place this file keeps the split.
     """
-    return [row for row in failing if row not in inherited]
+    return [
+        row for row in failing if row not in inherited and row not in unstable
+    ]
 
 
-def _verdict_line(summary: str, failing: list[str], inherited: set[str]) -> str:
+def _flaky_rows(
+    failing: list[str], inherited: set[str], unstable: set[str] | frozenset[str]
+) -> list[str]:
+    """The rows that failed in the suite run and do not reproduce on either tree.
+
+    Separated from `_owned_rows` so that "owns nothing" and "owns nothing *because the
+    row never fails twice*" stay distinguishable: the first hands the row to the base, the
+    second hands it to nobody, and they print different remedies.
+    """
+    return [row for row in failing if row not in inherited and row in unstable]
+
+
+def _verdict_line(
+    summary: str,
+    failing: list[str],
+    inherited: set[str],
+    unstable: set[str] | frozenset[str] = frozenset(),
+) -> str:
     """The red verdict, saying whose failure it is on the stream the verdict is written to.
 
     Measured (cycle cyc20261019-123519, issue #2380): this line used to read
@@ -1274,11 +1378,21 @@ def _verdict_line(summary: str, failing: list[str], inherited: set[str]) -> str:
     as anything softer would be the "could not measure reported as passed" defect. What
     is added is the discriminator, on the line that already carries the verdict.
     """
-    own = _owned_rows(failing, inherited)
+    own = _owned_rows(failing, inherited, unstable)
     if own:
         return (
             f"suite FAILED: {summary} - this plan's tree owns {len(own)} of "
             f"{len(failing)} failing row(s)"
+        )
+    flaky = _flaky_rows(failing, inherited, unstable)
+    if flaky:
+        # The third state, and the one a single-sample reading could not produce: the
+        # row failed in the suite run and does not reproduce on either tree, so no PR
+        # is named - not even implicitly by a remedy that says to push one.
+        return (
+            f"suite FAILED: {summary} - this plan's tree owns none of the "
+            f"{len(failing)} failing row(s): {len(flaky)} of them do not fail on every "
+            "re-run of either tree"
         )
     return (
         f"suite FAILED: {summary} - every failing row fails on the base tree too, "
@@ -1287,15 +1401,25 @@ def _verdict_line(summary: str, failing: list[str], inherited: set[str]) -> str:
 
 
 def _ownership_lines(
-    base_tree: str, failing: list[str], inherited: set[str]
+    base_tree: str,
+    failing: list[str],
+    inherited: set[str],
+    unstable: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[str, str]:
     """Who owns the failing rows: the paragraphs that say so, or ``""`` for neither.
 
-    The plan's paragraph and the base's are built together so that they are halves of one
-    split - a row appears in at most one of them, and the union is `failing` - which is
-    the property that keeps the remedy honest. A row the base tree also fails must not
+    The plan's paragraph and the second one are built together so that they are halves of
+    one split - a row appears in at most one of them, and the union is `failing` - which
+    is the property that keeps the remedy honest. A row the base tree also fails must not
     reach the sentence that tells the caller to re-push a PR, and a row only the plan's
     tree fails must, restricted to those rows.
+
+    The second element carries both kinds of *not owned* row, because they print the same
+    thing on stdout's side ("no PR owns it") and differ only in what the reader should do
+    next: the inherited paragraph says fix the base, the flaky paragraph names no PR at
+    all and asks for a re-read. Neither may ever reach the re-push sentence - and a
+    reader who sees the two merged has still been told that no PR owns the row, which is
+    the one thing stdout alone could not say before issue #2380.
 
     A pure function of the split, so the wording is asserted without a git run; mutating
     it into "the base owns everything" is what the combination arm of the test pair
@@ -1315,7 +1439,7 @@ def _ownership_lines(
     stops earlier with rc 3), and each owned row does not fail on the base tree
     (`_still_red_on` ran it there - absent and passing are both "does not fail").
     """
-    own = _owned_rows(failing, inherited)
+    own = _owned_rows(failing, inherited, unstable)
     plan = ""
     if own:
         plan = (
@@ -1335,6 +1459,18 @@ def _ownership_lines(
             + "\nNo PR in this plan owns those rows, so re-pushing one would void its "
             "votes and re-run CI for a tree that is not the one failing: fix them on the "
             "base instead."
+        )
+    flaky = _flaky_rows(failing, inherited, unstable)
+    if flaky:
+        base += (
+            f"\n{len(flaky)} of the {len(failing)} failing row(s) did not fail in every "
+            f"isolated re-run on this plan's own tree, and failed in none of the "
+            f"{BASE_REPEATS} runs on the base tree: " + ", ".join(flaky)
+            + "\nNo PR in this plan owns those rows either: a row that fails only some "
+            "of the time is not a property of either tree, so pushing a one-line fix for "
+            "it would void that PR's standing votes for a failure the push may not "
+            "change. Re-run the full suite on the plan's tree and read the row again "
+            "before naming a PR."
         )
     return plan, base
 
@@ -1579,6 +1715,7 @@ def main(argv: list[str] | None = None) -> int:
         # path: a green run has no ownership question to answer.
         base_tree = ""
         inherited: set[str] = set()
+        unstable: set[str] = set()
         try:
             with tempfile.TemporaryDirectory(prefix="emrg-plan-suite-") as tmp:
                 passed, summary, tree_sha, failing = _suite_verdict(
@@ -1593,6 +1730,11 @@ def main(argv: list[str] | None = None) -> int:
                     try:
                         base_tree = _tree_of(base, "the base tree")
                         inherited = _still_red_on(base, failing, _scratch_root(tmp))
+                        # The plan's own tree, asked the same isolated question: a row
+                        # that does not reproduce there is owned by neither tree, and
+                        # the re-push remedy is the one thing that must not be printed
+                        # for it (a push voids the standing votes).
+                        unstable = _unstable_rows(tip, failing, _scratch_root(tmp))
                     except MeasurementError as exc:
                         print(f"could not measure the base: {exc}", file=sys.stderr)
                         if keep is not None:
@@ -1619,8 +1761,8 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return _verdict(1)
-        print(_verdict_line(summary, failing, inherited))
-        plan_text, base_text = _ownership_lines(base_tree, failing, inherited)
+        print(_verdict_line(summary, failing, inherited, unstable))
+        plan_text, base_text = _ownership_lines(base_tree, failing, inherited, unstable)
         if plan_text:
             print(plan_text, file=sys.stderr)
         if base_text:

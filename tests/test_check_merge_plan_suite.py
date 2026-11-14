@@ -2422,6 +2422,198 @@ def test_a_base_that_cannot_be_measured_is_not_a_verdict(
     assert "re-push the PR that owns the failure" not in err
 
 
+# --- a row that fails only sometimes is owned by no PR -----------------------------
+#
+# The ownership split asked each tree *once*, and one answer cannot tell a row that fails
+# every run from one that fails some of them. Measured on this host (cycle
+# `cyc20261114-010704`, base `011a1730`, tree `0c63251ca221`): the row
+# `tests/test_session.py::TestInputHistory::test_the_file_is_capped_oldest_first` read
+# PASS 3 / FAIL 5 across eight consecutive runs on one unchanged tree, failing as
+# `PermissionError: [WinError 5]` on the `os.replace` of `input_history.jsonl.tmp`. The
+# run that landed on "passes" laid that row at a PR's door and printed the re-push
+# sentence, which voids the PR's standing votes for a failure no diff can fix.
+#
+# So each tree is asked `BASE_REPEATS` / `PLAN_REPEATS` times, and the split has three
+# buckets instead of two: owned (fails every plan run, no base run), inherited (some base
+# run failed it - the safe side wins), and flaky (neither, so no PR is named at all).
+#
+# Every arm below either stubs the tree materialisation and the pytest calls, or drives a
+# throwaway fixture repo the `queue` fixture built. None runs this repository's suite,
+# starts a daemon, or reaches the auto-upgrade chain: the arms that use a real interpreter
+# run three one-line test files in a temporary git repo.
+
+
+FLAKY_ROW = '''import pathlib
+
+MARKER = pathlib.Path(__file__).with_name(".runs")
+
+
+def test_a_row_that_fails_only_some_of_the_time():
+    n = int(MARKER.read_text()) if MARKER.exists() else 0
+    MARKER.write_text(str(n + 1))
+    assert n % 2 == 1, "this row fails on alternate runs, so it is nobody's row"
+'''
+
+
+def test_the_base_is_asked_until_one_answer_can_speak(mod, monkeypatch, tmp_path: Path) -> None:
+    """Arm 1 and arm 4: one answer is not a reading, and any failure among them counts.
+
+    Both directions are pinned on the same stub, because a loop that returned "inherited"
+    unconditionally would satisfy the interesting direction alone - and would then hand
+    every red plan's rows to the base, which is the opposite defect to the one this
+    replaces.
+    """
+
+    class Done:
+        def __init__(self, rc: int = 0, out: str = "", err: str = "") -> None:
+            self.returncode, self.stdout, self.stderr = rc, out, err
+
+    row = "tests/test_session.py::TestInputHistory::test_the_file_is_capped_oldest_first"
+    (tmp_path / "base").mkdir()
+    monkeypatch.setattr(mod, "_run", lambda *a, **k: Done())
+
+    def ask(answers: list[tuple[int, str]]) -> tuple[set[str], list[int]]:
+        asked: list[int] = []
+
+        def fake_rows(worktree, rows, junit):
+            asked.append(len(rows))
+            return answers[len(asked) - 1]
+
+        monkeypatch.setattr(mod, "_pytest_rows", fake_rows)
+        return mod._still_red_on("deadbeef", [row], tmp_path), asked
+
+    assert mod.BASE_REPEATS >= 3, (
+        "three is the smallest number of answers that can tell a flake from a verdict"
+    )
+
+    failed = (1, f"FAILED {row} - PermissionError\n")
+    passed = (0, "")
+
+    # The measured shape: passes, then fails, then passes. The second answer wins.
+    inherited, asked = ask([passed, failed, passed])
+    assert len(asked) >= mod.BASE_REPEATS, (
+        f"the base was asked {len(asked)} time(s) - a single answer is the defect: {asked}"
+    )
+    assert inherited == {row}, "a base that failed the row even once has not freed it"
+
+    # Control: a base that passes it every time owns nothing there.
+    inherited, _ = ask([passed] * mod.BASE_REPEATS)
+    assert inherited == set()
+
+    # And the other end: failing every time is the same answer, not a different one.
+    inherited, _ = ask([failed] * mod.BASE_REPEATS)
+    assert inherited == {row}
+
+
+def test_a_row_that_does_not_fail_every_time_is_owned_by_neither_tree(
+    queue: tuple[Path, Path],
+) -> None:
+    """Arm 2 and arm 3, end to end: the flaky row reaches the verdict and names no PR.
+
+    The row is planted on the feature branch only, so the base tree does not contain it -
+    which is how a plan's own row looks - and it fails on alternate runs. The suite run
+    catches it failing, the isolated re-runs do not all fail, and the verdict must say so
+    instead of printing the re-push sentence.
+    """
+    repo, origin = queue
+    _branch_with(repo, "flaky", {"tests/test_flaky_row.py": FLAKY_ROW})
+    _publish(repo, origin, 6, "flaky")
+
+    proc = _run_tool(repo, "6")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "test_a_row_that_fails_only_some_of_the_time" in proc.stdout, (
+        "the flaky row is still the finding: a row that failed in the suite run is not "
+        "made green by not reproducing: " + proc.stdout
+    )
+    assert "do not fail on every re-run of either tree" in proc.stdout, (
+        "a reader that keeps only stdout must be able to tell this state from an owned "
+        "failure and from an inherited one: " + proc.stdout
+    )
+    # The sentence this state exists to withhold. A push voids the PR's standing votes,
+    # and a row that reproduces only sometimes cannot be fixed by one.
+    assert "re-push the PR that owns the failure" not in proc.stderr, proc.stderr
+    assert "rows this plan's tree owns" not in proc.stderr, proc.stderr
+    assert "Re-run the full suite" in proc.stderr, (
+        "the state must still say what to do next: " + proc.stderr
+    )
+
+
+def test_a_base_that_failed_the_row_once_keeps_it_off_the_pr(
+    queue: tuple[Path, Path],
+) -> None:
+    """Arm 4, end to end: the safe side wins when a row is both inherited and flaky.
+
+    The base holds the alternating row, so its own suite run catches one failure and its
+    re-runs see the other parity. Whatever the plan's re-runs say about the same row, the
+    base failed it, so no PR is named for it and the base paragraph is the one printed.
+    """
+    repo, origin = queue
+    _write(repo, "tests/test_flaky_in_the_base.py", FLAKY_ROW)
+    _commit(repo, "a base row that fails on alternate runs")
+    _git(repo, "push", "-q", "origin", "master")
+    _branch_with(repo, "unrelated", {"notes.md": "unrelated\n"})
+    _publish(repo, origin, 7, "unrelated")
+
+    proc = _run_tool(repo, "7")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "fail on the base tree" in proc.stderr, proc.stderr
+    assert "re-push the PR that owns the failure" not in proc.stderr, (
+        "the base failed this row, so the plan's PR is not its owner: " + proc.stderr
+    )
+
+
+def test_the_split_puts_every_failing_row_in_exactly_one_bucket(mod) -> None:
+    """Arm 5: the shipped discriminator still discriminates.
+
+    A deterministic red row on the plan's tree and a clean base is still *owned*, with its
+    remedy intact - the fix adds a third state, it does not turn the tool into one that
+    owns nothing. Pinned as a property of the split rather than of a sentence, so the
+    wording may change without the rule going quiet.
+    """
+    inherited = {"base_row"}
+    unstable = {"flaky_row"}
+    failing = ["owned_row", "base_row", "flaky_row"]
+    empty: frozenset[str] = frozenset()
+
+    assert mod._owned_rows(failing, inherited, unstable) == ["owned_row"]
+    assert mod._flaky_rows(failing, inherited, unstable) == ["flaky_row"]
+    assert mod._owned_rows(failing, inherited, empty) == ["owned_row", "flaky_row"]
+
+    owned_line = mod._verdict_line("2 failed", failing, inherited, unstable)
+    assert "owns 1 of 3" in owned_line, owned_line
+
+    plan_text, other_text = mod._ownership_lines("ab" * 20, failing, inherited, unstable)
+    assert "rows this plan's tree owns: owned_row" in plan_text, plan_text
+    assert "owned_row" not in other_text.split("did not fail in every")[0], (
+        "an owned row must not reach the base paragraph: " + other_text
+    )
+    assert "flaky_row" in other_text and "base_row" in other_text
+    # The two halves are a split, not two lists: no row in both, and the union is the
+    # whole of `failing`.
+    assert set(plan_text.split("owns: ")[1].split("\n")[0].split(", ")).isdisjoint(
+        {"base_row", "flaky_row"}
+    )
+
+
+def test_the_paragraph_withholds_the_remedy_it_cannot_justify(mod) -> None:
+    """Arm 3's wording half: the flaky paragraph names no PR and asks for no push."""
+
+    plan_text, other_text = mod._ownership_lines(
+        "cd" * 20, ["flaky_row"], set(), {"flaky_row"}
+    )
+    assert plan_text == "", (
+        "a row no tree fails consistently has no owner, so no PR may be named: "
+        + plan_text
+    )
+    assert "re-push" not in other_text, other_text
+    assert "No PR in this plan owns those rows either" in other_text, other_text
+    assert "flaky_row" in other_text
+    # A row that was never unstable still gets the base paragraph alone: the new bucket
+    # must not take over the state the old code already answered.
+    _, inherited_text = mod._ownership_lines("cd" * 20, ["base_row"], {"base_row"})
+    assert "did not fail in every" not in inherited_text, inherited_text
+
+
 def test_the_rows_are_read_from_the_report_and_not_invented(mod) -> None:
     """The rows are the run's own, because they are what the base is asked to re-run."""
     out = (
