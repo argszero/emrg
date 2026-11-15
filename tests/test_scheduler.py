@@ -1904,28 +1904,44 @@ def test_promote_template_takes_down_a_post_that_drew_no_interaction():
     )
     body = sections[owning[0]]
 
-    assert "72 hours" in body, (
+    # The rule is asserted through the forms each part may take, never through one sentence:
+    # a guard that pins a phrasing reddens when the sentence is legitimately rewritten, which
+    # makes the rewriting of prose — the thing a prompt template exists for — cost a red suite.
+    # What must not drift is the substance: a stated window, the criterion, the measure it
+    # rejects, the action, and what the action buys.
+    window = re.compile(r"\b72[-\s]*(?:hours?|hrs?)\b", re.I)
+    engagement = re.compile(r"\breactions?\b", re.I)
+    discussion = re.compile(r"\bcomments?\b", re.I)
+    reach = re.compile(r"\bviews?\b", re.I)
+    removal = re.compile(
+        r"\b(?:remov(?:e|es|ed|ing|al)|take (?:it )?down|taking it down|taken down"
+        r"|delet(?:e|es|ed|ing|ion)|unpublish(?:ed|ing)?)\b",
+        re.I,
+    )
+    lesson = re.compile(r"\bfailure[-\s]?cases?\b", re.I)
+
+    assert window.search(body), (
         "the take-down rule needs a stated window: without one a round cannot tell a post that "
         "drew nothing from one nobody has had a chance to read yet"
     )
-    assert "reactions" in body and "comments" in body, (
+    assert engagement.search(body) and discussion.search(body), (
         "the criterion is what readers did — reactions and comments — and it has to be named "
         "in the section a round reads before it publishes"
     )
-    assert "views" in body, (
+    assert reach.search(body), (
         "the rule judges interaction rather than reach, so it has to name the measure it rejects; "
         "a round reading only the accepted one cannot tell the two apart"
     )
-    assert "remove it from the platform" in body, (
+    assert removal.search(body), (
         "the action is a take-down, not a note: a post nobody engaged with keeps carrying this "
         "account's name on the channel for as long as it stands"
     )
-    assert "failure-case list" in body, (
+    assert lesson.search(body), (
         "a deletion with no recorded lesson lets the same post fail twice, so the rule carries "
         "what the removal buys: the failure case, with the change the next post makes"
     )
 
-    elsewhere = [name for name, text in sections.items() if "72 hours" in text and name != owning[0]]
+    elsewhere = [name for name, text in sections.items() if window.search(text) and name != owning[0]]
     assert not elsewhere, (
         f"the take-down window has one home, §2.y, and these sections carry it too: {elsewhere}"
     )
