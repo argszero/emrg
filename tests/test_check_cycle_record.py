@@ -379,6 +379,46 @@ def test_a_drifted_literal_prefix_is_a_fault_in_both_files(tmp_path: Path) -> No
     assert run(state, archive) == 1
 
 
+def test_the_verdict_refuses_a_drifted_header_and_not_only_the_reading(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The near-miss reading is consumed by one loop, and until this case nothing asked it to.
+
+    Four tests in this file drive `unrecognised_headers` directly, so they pin what the
+    function answers -- a different question from whether the verdict asks it. Measured
+    2026-11-13 against the guard as it stood: rewriting the consuming loop
+    (`for number, line in unrecognised_headers(texts[label]):`) to iterate an empty tuple left
+    this suite at `43 passed, 1 skipped`, unchanged. The tree could lose the refusal entirely
+    and still print the exact silence the reading exists to break -- "the archive's 1 block
+    header(s) each name exactly one subject", true of the set the drifted block is missing
+    from.
+
+    The archive below carries **one admitted header and one drifted header**, so the zero
+    header rule, the duplicate rule and the missing state header rule are all quiet and the
+    near-miss reading is the only thing that can answer. The assertion reads the finding's own
+    text rather than the exit code, for the reason the indented-copy case above gives: this
+    guard answers 1 for several unrelated reasons, so an exit-code-only case can pass on the
+    wrong refusal.
+    """
+    drifted = header("cyc20261112-214138").replace("## Current state", "## Current State")
+    state, archive = build(
+        tmp_path,
+        header(CYCLE) + "- a fact this cycle established\n",
+        header("cyc20261112-221305", tail="- displaced by " + CYCLE) + "- an older block\n"
+        + drifted
+        + "- a block nothing recognises\n",
+    )
+    assert run(state, archive) == 1
+    printed = capsys.readouterr().out
+    assert "not the admitted block header" in printed, (
+        "the verdict must refuse the drifted header instead of counting around it: " + printed
+    )
+    assert drifted.rstrip("\n") in printed, (
+        "the finding has to name the line it refused, or a reader cannot find the block: "
+        + printed
+    )
+
+
 def test_a_heading_the_record_really_carries_is_not_a_drifted_header(tmp_path: Path) -> None:
     """The archive holds `## Displaced snapshot cyc... (archived by cyc...)` blocks.
 
