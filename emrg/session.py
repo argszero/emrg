@@ -19,6 +19,7 @@ import logging
 import ntpath
 import os
 import secrets
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
@@ -42,6 +43,68 @@ _LLM_LOG_BACKUP_COUNT = 2
 #: flat — 200 is far past what anyone scrolls to and small enough that the file is one
 #: cheap read on every append.
 _INPUT_HISTORY_MAX = 200
+
+# ── input history · a rename a second handle can refuse (issue #2900) ─────────
+#: How long the rename of a freshly written input history keeps being retried before the
+#: save counts as failed. ``os.replace`` opens nothing and is atomic, but on Windows it
+#: also raises ``PermissionError`` (``WinError 5``) whenever another handle is open on the
+#: destination **at that instant** — a second handle in this process, an indexer, a
+#: scanner, a reader that has the file open for a moment. Nothing in the caller prevents
+#: that, and treating it as fatal loses the write: the new `.tmp` is left on disk, the old
+#: file stays, so the cap is not applied and the next read returns the previous content
+#: with nothing reporting that the save did not happen. Measured on Windows Server 2022
+#: against an unpatched tree: 11 failures in 14 samples of one test, the same command on
+#: the same tree answering differently between runs.
+#:
+#: The window is short on purpose. ``daemon.py`` calls the save from the message handler,
+#: on the event loop every other session shares, so this number is also the longest a
+#: stuck rename may stall them.
+_INPUT_HISTORY_REPLACE_BUDGET_SECONDS = 0.5
+
+#: The first pause between attempts, doubled after each failure, so a holder that lets go
+#: within milliseconds is not waited out at the full step.
+_INPUT_HISTORY_REPLACE_FIRST_DELAY_SECONDS = 0.02
+
+
+def _replace_input_history(tmp: Path, path: Path, budget: float | None = None) -> int:
+    """Rename the freshly written ``tmp`` over ``path``, retrying a transient holder.
+
+    Returns **the number of retried attempts**, and zero means the first one landed. The
+    caller reports a non-zero answer rather than discarding it: a save that needed a retry
+    is a save that would have been lost without one, and a silent retry would turn this
+    defect into a hidden one.
+
+    The bound is explicit — ``budget`` seconds, not "until it works" — and computed from
+    ``time.monotonic`` so a clock change cannot stretch it. When it is exhausted the
+    ``PermissionError`` is raised with the destination path and the operation named, which
+    is the part of the message this code controls; the platform's own wording rides along
+    as ``__cause__`` and is never asserted on, because it differs by locale.
+
+    This lives here rather than beside ``emrg/server/atomic.py``'s writers because of the
+    import direction: this module imports nothing from ``emrg.server``, and the server layer
+    is what imports *it*. The same failure mode reaches ``sessions_index._write`` and the
+    YAML writers that share ``atomic.py``; retrying those is a separate change, and this one
+    deliberately does not touch a writer whose promise is "never raises".
+    """
+    if budget is None:
+        budget = _INPUT_HISTORY_REPLACE_BUDGET_SECONDS
+    deadline = time.monotonic() + budget
+    delay = _INPUT_HISTORY_REPLACE_FIRST_DELAY_SECONDS
+    attempts = 0
+    while True:
+        try:
+            os.replace(tmp, path)
+        except PermissionError as exc:
+            attempts += 1
+            if budget <= 0 or time.monotonic() >= deadline:
+                raise PermissionError(
+                    f"could not replace {path} with {tmp.name}: another handle on the "
+                    f"destination did not let go within {budget:g}s ({attempts} attempt(s))"
+                ) from exc
+            time.sleep(delay)
+            delay *= 2
+            continue
+        return attempts
 
 
 def generate_session_id(cwd: Path) -> str:
@@ -1031,7 +1094,15 @@ class Session:
         with open(tmp, "w", encoding="utf-8") as f:
             for record in records:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        os.replace(tmp, path)
+        retries = _replace_input_history(tmp, path)
+        if retries:
+            logger.warning(
+                "input history %s landed after %d retried rename(s): the destination was "
+                "held open, and this save would have been lost without the retry "
+                "(issue #2900)",
+                path,
+                retries,
+            )
 
     def read_input_history(self) -> list[dict]:
         """The recorded prompts, oldest first — the order recall walks backwards through."""

@@ -2,6 +2,7 @@
 
 import ast
 import json
+import logging
 import os
 import re
 import warnings
@@ -1506,6 +1507,69 @@ class TestInputHistory:
         session = Session("s1", tmp_path)
         with pytest.raises(NotARegularFile):
             within(DEADLINE_SECONDS, lambda: session.append_input_history("hi"))
+
+    def test_a_transient_holder_on_the_destination_does_not_lose_the_save(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Windows refuses the rename while anything holds the destination open (#2900).
+
+        `os.replace` is atomic and opens nothing, which is why this save uses it — but on
+        Windows it also raises `WinError 5` when a second handle is open on the destination
+        at that instant, and preventing that is not in the caller's hands. Retried within a
+        bound, the write lands; the retry is **reported**, because a silent one would hide
+        the day the bound stops being enough.
+
+        Nothing here runs a real Windows failure: the first rename is made to fail in
+        process, so the arm measures this code rather than the host it happens to run on.
+        """
+        session = self._session(tmp_path)
+        real_replace = os.replace
+        attempts = []
+
+        def held_once_then_released(src, dst, *args, **kwargs):
+            attempts.append((str(src), str(dst)))
+            if len(attempts) == 1:
+                raise PermissionError(13, "The process cannot access the file", str(dst))
+            return real_replace(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr(os, "replace", held_once_then_released)
+        with caplog.at_level(logging.WARNING, logger="emrg.session"):
+            session.append_input_history("the prompt that would have been lost")
+
+        assert len(attempts) == 2, "the rename was tried again rather than abandoned"
+        assert [r["text"] for r in session.read_input_history()] == [
+            "the prompt that would have been lost"
+        ], "the save landed"
+        assert "retried rename" in caplog.text, "a retry is reported, not silent"
+
+    def test_a_holder_that_never_lets_go_fails_on_the_rename_not_on_the_content(
+        self, tmp_path, monkeypatch
+    ):
+        """The bound is real: with the window at zero the same call fails, on the rename.
+
+        Asserting on the error is what keeps this a reverse arm — a test that only read the
+        file back would pass for a save that failed for some other reason. What a read then
+        returns is still the previous content, which is the lost write the issue reports: the
+        cap was not applied and nothing said so.
+        """
+        from emrg import session as session_module
+
+        session = self._session(tmp_path)
+        session.append_input_history("what was there before")
+
+        def never(src, dst, *args, **kwargs):
+            raise PermissionError(13, "The process cannot access the file", str(dst))
+
+        monkeypatch.setattr(session_module, "_INPUT_HISTORY_REPLACE_BUDGET_SECONDS", 0.0)
+        monkeypatch.setattr(os, "replace", never)
+
+        with pytest.raises(PermissionError) as caught:
+            session.append_input_history("never lands")
+
+        message = str(caught.value)
+        assert str(session._input_history_path()) in message, "the error names the destination"
+        assert "could not replace" in message, "and the operation that failed"
+        assert [r["text"] for r in session.read_input_history()] == ["what was there before"]
 
     def _session_dir(self, tmp_path, name="s1"):
         return tmp_path / ".emrg" / "sessions" / name
