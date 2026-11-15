@@ -1851,6 +1851,86 @@ def test_promote_template_registration_blog_sections():
     assert "Registered accounts are long-term assets" in out, "红线 7 账号长期资产应渲染"
 
 
+def _promote_rendered_sections() -> dict[str, str]:
+    """The rendered promote prompt, split by heading, each section flattened.
+
+    Flattened for the same reason the self-media guard flattens: the source wraps a sentence
+    across lines, so a probe for a phrase that spans a wrap reads **0** against the raw render
+    and **1** against the same text with its whitespace collapsed. A probe that cannot hit is
+    not a finding.
+    """
+    import jinja2
+
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "emrg" / "server" / "promote_prompt.md"
+    )
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(template_path.read_text(encoding="utf-8"))
+    out = template.render(**_test_context(
+        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git",
+        owner="x", repo="y", local_source="/tmp/pm", source_dir="/tmp/pm",
+        session_id="s1", timestamp="20260815", task={"agent": "aitokenpool"},
+        agent={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
+    ))
+
+    sections: dict[str, str] = {}
+    name, body = "PREAMBLE", []
+    for line in out.splitlines():
+        if line.startswith("#"):
+            sections[name] = " ".join(" ".join(body).split())
+            name, body = line.strip("# ").strip(), []
+        else:
+            body.append(line)
+    sections[name] = " ".join(" ".join(body).split())
+    return sections
+
+
+def test_promote_template_takes_down_a_post_that_drew_no_interaction():
+    """§2.y owns blog publishing, and owns what becomes of a post that drew nothing.
+
+    The template measures a post's interaction (§6) and stated no action for a post whose own
+    figures say nobody engaged — the round recorded the number and the post stood, so a failed
+    post left no lesson and the next piece was written the same way. The section carrying the
+    rule is asserted, not the file: a rule read after the publishing decision it informs is a
+    rule the round meets too late.
+    """
+    sections = _promote_rendered_sections()
+
+    owning = [name for name in sections if "Blog Publishing" in name]
+    assert owning, (
+        "no rendered section owns blog publishing, so the readings below have no subject and "
+        "would pass vacuously"
+    )
+    body = sections[owning[0]]
+
+    assert "72 hours" in body, (
+        "the take-down rule needs a stated window: without one a round cannot tell a post that "
+        "drew nothing from one nobody has had a chance to read yet"
+    )
+    assert "reactions" in body and "comments" in body, (
+        "the criterion is what readers did — reactions and comments — and it has to be named "
+        "in the section a round reads before it publishes"
+    )
+    assert "views" in body, (
+        "the rule judges interaction rather than reach, so it has to name the measure it rejects; "
+        "a round reading only the accepted one cannot tell the two apart"
+    )
+    assert "remove it from the platform" in body, (
+        "the action is a take-down, not a note: a post nobody engaged with keeps carrying this "
+        "account's name on the channel for as long as it stands"
+    )
+    assert "failure-case list" in body, (
+        "a deletion with no recorded lesson lets the same post fail twice, so the rule carries "
+        "what the removal buys: the failure case, with the change the next post makes"
+    )
+
+    elsewhere = [name for name, text in sections.items() if "72 hours" in text and name != owning[0]]
+    assert not elsewhere, (
+        f"the take-down window has one home, §2.y, and these sections carry it too: {elsewhere}"
+    )
+
+
 # ── Evolution workspace self-heal (rant 2026-08-06T20:42:05, 方案 C) ──────
 
 

@@ -246,6 +246,15 @@ Different from participatory forum replies: this is long-form output on your own
   whether the words differ. The single exception is a **verbatim** cross-post of the
   original carrying its source link — a backup copy, which the reader can tell apart from
   a second article.
+- **A post that drew no interaction is taken down, and read as a failure rather than left
+  standing**: once a published post is past its first **72 hours** and its own figures say nobody
+  engaged — zero reactions and zero comments from anyone but this account — remove it from the
+  platform and record it in the failure-case list: the title, the date, the form it took, what the
+  piece was trying to do, and the one change the next post makes. Judge it on **interaction, never
+  on views**: reach is the platform's distribution, while engagement is the only evidence a reader
+  took the piece. Take down nothing that drew any engagement at all, and nothing still inside its
+  first 72 hours. The removal is not how the round forgets the post — the failure case is what it
+  buys, and a deletion with no recorded lesson lets the same post fail twice.
 - **Recording**: this round's closing summary carries the round's `blog posts` and
   `blog drafts` lines (§4); the standing lists — published posts (title + platform + link +
   publish time + topic) and the pending topic queue — are durable facts and live in memory
