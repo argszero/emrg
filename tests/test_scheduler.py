@@ -5082,7 +5082,7 @@ def test_self_media_template_carries_its_five_steps():
 
     for phrase, why in (
         ("no real-time data was obtained",
-         "§1's fallback level needs a fixed marker: a round without live data must still "
+         "the fallback level needs a fixed marker in §5's readings: a round without live data must still "
          "produce a product, and the host must be able to tell that product apart from one "
          "built on a signal"),
         ("List-style",
@@ -5263,6 +5263,78 @@ def test_self_media_template_renders_in_both_extra_prompt_states():
     out2 = template.render(**_test_context(task={"platform": "xiaohongshu"}, **base))
     assert "Task-specific Instructions" not in out2
     assert extra not in out2
+
+
+def _self_media_rendered_sections(extra_prompt: str | None) -> dict[str, str]:
+    """The rendered self-media prompt, split by heading, each section flattened.
+
+    Flattened deliberately: the source wraps a sentence across lines, so ``mark the
+    product`` reads **0** against the raw render and **1** against the same text with its
+    whitespace collapsed. A probe that cannot hit is not a discovery.
+    """
+    import jinja2
+
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(_self_media_template_text())
+    task = {"platform": "xiaohongshu"}
+    if extra_prompt is not None:
+        task["extra_prompt"] = extra_prompt
+
+    out = template.render(**_test_context(task=task))
+
+    sections: dict[str, str] = {}
+    name, body = "PREAMBLE", []
+    for line in out.splitlines():
+        if line.startswith("## ") or line.startswith("### "):
+            sections[name] = " ".join(" ".join(body).split())
+            name, body = line.strip("# ").strip(), []
+        else:
+            body.append(line)
+    sections[name] = " ".join(" ".join(body).split())
+    return sections
+
+
+def test_self_media_absence_is_recorded_in_the_readings_not_in_the_piece():
+    """§1's fallback and §3's no-placeholder rule have to name one home for an absence.
+
+    The two are neighbours in one prompt, and a round reads §1 first. §3 says a field whose
+    source cannot be named does not enter the draft, "not as 'unknown', 'not read' or 'no
+    data' either" — while §1 told the round to mark the product with the fallback marker.
+    A round obeying §1 writes a placeholder §3 forbids, and a round obeying §3 leaves the
+    absence unrecorded. The readings are the home the archive can carry; the piece is not.
+
+    Rendered, not grepped: a raw-text count answers "the file did not change", and the
+    per-section split is what makes "which section says this" a reading instead of a guess.
+    """
+    marker = "no real-time data was obtained"
+
+    for state, extra_prompt in (("configured", "voice: plain and specific"), ("absent", None)):
+        sections = _self_media_rendered_sections(extra_prompt)
+        flat = " ".join(sections.values())
+        assert marker in flat, (
+            f"[{state}] no rendered section carries the fallback marker: the assertions below are "
+            f"readings of a real prompt, and a prompt that lost the marker passes them vacuously"
+        )
+
+        carrying = [name for name, body in sections.items() if marker in body]
+        outside = [name for name in carrying if not name.startswith("5. Archive")]
+        assert not outside, (
+            f"[{state}] the absence marker belongs to §5's readings, and these sections tell a "
+            f"round to write it into the piece instead: {outside}"
+        )
+
+        grading = [name for name in sections if name.startswith("1. Read the trends")]
+        assert grading, f"[{state}] there is no §1 section to grade the trend read"
+        assert "§5" in sections[grading[0]], (
+            f"[{state}] §1 grades the trend read and is read before §3, so it has to name §5 as the "
+            f"home of an absence; otherwise the two sections disagree and the reader's order "
+            f"decides which rule applies"
+        )
+
+        assert "mark the product" not in flat, (
+            f"[{state}] the piece carries no placeholder (§3), so no section may tell a round to "
+            f"mark it"
+        )
 
 
 def test_self_media_is_listed_as_a_viewable_builtin(tmp_path):
