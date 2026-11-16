@@ -54,15 +54,17 @@ whole mandate:
 
 ```text
 level "live"      heat or trend data was actually read this round
-level "fallback"  it could not be read, and the product says so
+level "fallback"  it could not be read, and §5's readings say so
 ```
 
 - **Live.** Where heat data can really be read — a public trends page, an authorized API, a search
   over recent posts — read it, and record **what** was read and **when**. A handful of signals is
   this round's whole budget; the platform's entire corpus is not.
 - **Fallback.** Where it cannot be read — no access, a login wall, a page that fails, a tool that is
-  not installed — **do not simulate it**. Choose the topic from domain common sense and mark the
-  product **`no real-time data was obtained`**, naming the reason (no access / blocked / unreadable).
+  not installed — **do not simulate it**. Choose the topic from domain common sense, and record
+  the absence in §5's `trend_data` reading, with the reason (no access / blocked / unreadable). The
+  draft carries no marker for it: §3 keeps an unsourced field out of the piece rather than
+  labelling it there.
 - A round that reports a trend it never read is worse than a round with no live data. The second is
   honest and the host can act on it; the first teaches the host to trust a guess, and the next real
   signal is then read as one more guess.
@@ -154,7 +156,7 @@ level "fallback"  it could not be read, and the product says so
 | `word_count` | the draft's own count, **measured** with a tool — never estimated |
 | `trend_data` | `live` (with what was read and when) or `no real-time data was obtained` (with why) |
 | `publish` | §4's outcome — `posted` with the platform, the posting time and the post's id or link; `failed` with the reason; `not attempted` with the reason |
-| `unread` | the fields §3 kept out of the piece because no source could be named, each with its reason (page unreadable, list not public, nothing stated by the subject) — this is the one place an absence is recorded |
+| `unread` | the fields §3 kept out of the piece because no source could be named, each with its reason (page unreadable, list not public, nothing stated by the subject) — an absence belongs in these readings, and never in the piece |
 | `platform`, `date`, `task` | the channel this file belongs to, the round's date, and this task's name |
 
 - **A measured number, not a guess**: an estimated word count is not a reading, and a readings block
@@ -182,7 +184,7 @@ posted by an earlier round, or a draft-only `extra_prompt`.
 - 🛑 Never publish the same piece twice — no repost, no "just to be sure", no second attempt after a `failed` reading. One piece, one post, one attempt (§4)
 - 🛑 Never sign in, and never handle a credential: no password, no verification code, no cookie and no token read, stored or typed, and no account setting changed. A step that needs the host in person is a `blocked` item (§0), not a workaround
 - 🛑 Never record a publish as `posted` that the platform did not confirm — a guess recorded as a post teaches the host to trust a number that is not one
-- 🛑 Never report a trend as read when it was not: §1's fallback level, marked `no real-time data was obtained`, is the honest answer and a usable one
+- 🛑 Never report a trend as read when it was not: §1's fallback level is the honest answer and a usable one, and it records why in §5's `trend_data` reading rather than in the piece
 - 🛑 Never fill a missing value with an invented one — a platform, an account, a source or a figure that `extra_prompt` did not give you is reported, never guessed
 - 🛑 Never carry two products in one round: one file, one piece, one set of readings (§5)
 - 🛑 Do not do multiple unrelated things in one round
