@@ -1907,12 +1907,17 @@ def test_promote_template_takes_down_a_post_that_drew_no_interaction():
     # The rule is asserted through the forms each part may take, never through one sentence:
     # a guard that pins a phrasing reddens when the sentence is legitimately rewritten, which
     # makes the rewriting of prose — the thing a prompt template exists for — cost a red suite.
-    # What must not drift is the substance: a stated window, the criterion, the measure it
-    # rejects, the action, and what the action buys.
+    # What must not drift is the substance: a stated window, the engagement criterion, the
+    # reach reading that gates the sample, the precondition that the post was seen, the action,
+    # and what the action buys.
     window = re.compile(r"\b72[-\s]*(?:hours?|hrs?)\b", re.I)
     engagement = re.compile(r"\breactions?\b", re.I)
     discussion = re.compile(r"\bcomments?\b", re.I)
     reach = re.compile(r"\bviews?\b", re.I)
+    baseline = re.compile(
+        r"\b(?:baselines?|recent posts?|recent average|own average|its own recent)\b", re.I
+    )
+    unseen = re.compile(r"\bnot[-\s]?seen\b", re.I)
     removal = re.compile(
         r"\b(?:remov(?:e|es|ed|ing|al)|take (?:it )?down|taking it down|taken down"
         r"|delet(?:e|es|ed|ing|ion)|unpublish(?:ed|ing)?)\b",
@@ -1929,8 +1934,18 @@ def test_promote_template_takes_down_a_post_that_drew_no_interaction():
         "in the section a round reads before it publishes"
     )
     assert reach.search(body), (
-        "the rule judges interaction rather than reach, so it has to name the measure it rejects; "
-        "a round reading only the accepted one cannot tell the two apart"
+        "reach has to be named because it gates the sample: without it a round cannot tell a post "
+        "readers saw and passed from a post no reader ever met, and the second is not evidence "
+        "about the piece"
+    )
+    assert baseline.search(body), (
+        "reach is judged against this account's own recent posts, never a fixed number: an "
+        "absolute floor welds the rule shut for a small account, whose per-post reach is small "
+        "by nature, and the section has to say what the comparison is"
+    )
+    assert unseen.search(body), (
+        "a post below the baseline was not seen, not rejected, and the rule has to record it that "
+        "way — deleting it marks a piece as a failure on evidence nobody ever met"
     )
     assert removal.search(body), (
         "the action is a take-down, not a note: a post nobody engaged with keeps carrying this "
@@ -1939,6 +1954,11 @@ def test_promote_template_takes_down_a_post_that_drew_no_interaction():
     assert lesson.search(body), (
         "a deletion with no recorded lesson lets the same post fail twice, so the rule carries "
         "what the removal buys: the failure case, with the change the next post makes"
+    )
+    listing = sections[owning[0]]
+    assert re.search(r"standing lists", listing, re.I), (
+        "the failure-case list is a standing list, and the enumeration that carries the other "
+        "standing lists has to carry it: a round reaches for it and nothing says where it lives"
     )
 
     elsewhere = [name for name, text in sections.items() if window.search(text) and name != owning[0]]
