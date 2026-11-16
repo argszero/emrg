@@ -57,29 +57,38 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SYSTEM_PROMPT = REPO_ROOT / "emrg" / "server" / "prompts" / "system.j2"
 
-#: The block's identity in `system.j2`. The rule now sits in `## Writing`, beside the language
-#: policy and the lead-with-the-point rule — one section for everything about how the reply
-#: reads, instead of one section per historical complaint. A second copy appended anywhere in
-#: the template is still visible as a count of 2.
-PLAIN_HEADING = "## Writing"
+#: The block's identity in `system.j2`. The rules now sit in `## Talking to the host`, the first
+#: `## ` section of the file — how the reply reads comes before anything about what it is about.
+#: `## Writing` keeps the rules for text that leaves the reply (a subtitle, a pull request, a
+#: slide); the two sections are not copies of each other, and the exemption below stays there.
+#: A second copy appended anywhere in the template is still visible as a count of 2.
+PLAIN_HEADING = "## Talking to the host"
 
 #: Load-bearing terms, each a verbatim substring of the shipped wording, so this list cannot drift
-#: away from the sentence it checks without this file saying so. They cover the rule, both halves of
-#: its scope, and the repair it asks for — the semantics the four host messages asked for, in the
-#: wording the prompt states them in. The history (how often the host had to ask, and where each
+#: away from the sentence it checks without this file saying so. They cover the rule, its
+#: prohibition, the repair it asks for and the order it asks for — the semantics the four host
+#: messages asked for, in the wording the prompt states them in. The exemption that must accompany
+#: the prohibition no longer shares this block; it stayed in `## Writing`, and
+#: `test_the_prohibition_and_the_exemption_are_pinned_together` reads it there. The history (how often the host had to ask, and where each
 #: message was recorded) is not part of the artifact any more: it is in the charter, in the pull
 #: request that landed the rule and in this agent's memory.
 PLAIN_TERMS = (
-    "The host reads only your reply",                                # the rule itself
-    "a term only your records use, or a shorthand you coined, resolves to nothing",  # the prohibition
-    "Name the thing in their terms, and spell a short form's full name on first use",  # the repair
-    "Internal records keep their own language",                      # the half that prevents over-correction
-    "Lead with the point",                                           # conclusion first
+    "Say it in words the host already has",                          # the rule itself
+    "No term that exists only in your own notes or records, and no shorthand you coined",  # the prohibition
+    "name the thing in the host's terms, and spell a short form's full name the first time it appears",  # the repair
+    "The conclusion first, then the evidence, then where that evidence comes from",  # the order
+    "Never bury the answer in the middle of a report",               # the emphasis
 )
 
 
 def _block_after(text: str, heading: str) -> str:
-    """The block starting at ``heading``, up to the next `## ` heading or EOF.
+    """The block starting at ``heading``, up to the next `## ` heading, Jinja line or EOF.
+
+    A Jinja control line (`{% … %}`) ends the block for the same reason a heading does: what follows
+    it is not this section's prose. The template puts its section-wide `{% if %}` guard *between* two
+    headings, so a block that ran to the next heading would carry a directive the render has already
+    consumed, and comparing that block with the render would fail on a difference that is the
+    template working rather than the rule having changed.
 
     Returns ``""`` when the heading is absent — the caller asserts, so a missing block reads as a
     failure to measure rather than as a pass.
@@ -88,8 +97,8 @@ def _block_after(text: str, heading: str) -> str:
     if start == -1:
         return ""
     rest = text[start + len(heading):]
-    end = rest.find("\n## ")
-    return rest if end == -1 else rest[:end]
+    ends = [i for i in (rest.find("\n## "), rest.find("\n{%")) if i != -1]
+    return rest if not ends else rest[: min(ends)]
 
 
 def _missing_terms(text: str, terms: tuple[str, ...]) -> list[str]:
@@ -168,13 +177,19 @@ def test_the_prohibition_and_the_exemption_are_pinned_together() -> None:
     the state that produced the complaint. This asserts the pair explicitly, so a rewrite that keeps
     the pleasant half fails here with the reason rather than passing as a wording change.
     """
-    block = _block_after(SYSTEM_PROMPT.read_text(encoding="utf-8"), PLAIN_HEADING)
-    assert "a shorthand you coined, resolves to nothing" in block, (
+    text = SYSTEM_PROMPT.read_text(encoding="utf-8")
+    block = _block_after(text, PLAIN_HEADING)
+    assert "No term that exists only in your own notes or records, and no shorthand you coined" in block, (
         "the block no longer forbids coining a term at the host — the complaint it exists for"
     )
-    assert "Internal records keep their own language" in block, (
-        "the block no longer exempts internal records — read alone, the prohibition would strip the "
-        "agent's own memory and notes of the vocabulary they are written in"
+    assert "name the thing in the host's terms" in block, (
+        "the block no longer says what to do instead of coining a term — a prohibition without a "
+        "repair leaves the reader free to keep the term and only remove the explanation"
+    )
+    assert "Internal records keep their own language" in text, (
+        "the prompt no longer exempts internal records — read alone, the prohibition would strip the "
+        "agent's own memory and notes of the vocabulary they are written in. It sits in `## Writing`, "
+        "not in this block, so this half is read from the file rather than from the block"
     )
 
 
@@ -192,7 +207,7 @@ def test_the_scan_reports_absence() -> None:
     assert doubled.count(PLAIN_HEADING) == 2
     # ... and the other direction, so the extractors are not reading a constant: a block that
     # carries one term must report exactly the terms it lacks.
-    partial = f"{PLAIN_HEADING}\n\nLead with the point\n"
-    assert _block_after(partial, PLAIN_HEADING).strip() == "Lead with the point"
-    assert "Lead with the point" not in _missing_terms(partial, PLAIN_TERMS)
+    partial = f"{PLAIN_HEADING}\n\nNever bury the answer in the middle of a report\n"
+    assert _block_after(partial, PLAIN_HEADING).strip() == "Never bury the answer in the middle of a report"
+    assert "Never bury the answer in the middle of a report" not in _missing_terms(partial, PLAIN_TERMS)
     assert len(_missing_terms(partial, PLAIN_TERMS)) == len(PLAIN_TERMS) - 1

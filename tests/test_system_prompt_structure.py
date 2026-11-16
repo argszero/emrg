@@ -75,6 +75,7 @@ LIMIT_HEADINGS = (
 #: neither. The last entry is deliberate: the round's shape closes the file, after every rule a round
 #: must not break.
 EXPECTED_H2 = [
+    "## Talking to the host",
     "## Where you are",
     "## Agent context",
     "## Skills",
