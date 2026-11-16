@@ -209,8 +209,8 @@ def test_the_injection_documents_every_argument_it_writes():
 
     Both directions are the guard, and neither is a behavioural claim: the
     injection's own behaviour is pinned by the tests that drive it
-    (``test_shell_tool_mount.py``, ``test_boss_tool.py``,
-    ``test_subagent_tool.py``). This one pins the map.
+    (``test_shell_tool_mount.py``, ``test_subagent_tool.py``).
+    This one pins the map.
     """
     source = inspect.getsource(EmrgServer._inject_tool_arguments)
     written = set(re.findall(r'args\["(\w+)"\]\s*=', source))
