@@ -43,8 +43,8 @@ Two directories are not registered, and each for a stated reason rather than a g
   under ``~/.emrg/sessions/``, beside the runtime configuration. That mixes "where this
   installation keeps its files" into "a directory someone works in", and the register
   is the second thing only;
-* **any directory under an existing Agent's ``.emrg/``** — the sub-session slot, the
-  boss session, every directory the server derives. Those are that Agent's own
+* **any directory under an existing Agent's ``.emrg/``** — the sub-session slot, and
+  every other directory the server derives. Those are that Agent's own
   bookkeeping, reached through its path; they are not directories a host opened, and a
   row for one would claim the bookkeeping is a workspace. The test is the path alone,
   so it needs no name, no flag and no knowledge of who created the session.
@@ -219,7 +219,7 @@ class AgentRegistry:
                 return row
 
         # A directory under an existing Agent's `.emrg/` is that Agent's bookkeeping
-        # (the sub-session slot, the boss session), not a directory a host opened.
+        # (the sub-session slot), not a directory a host opened.
         for row in rows:
             inner = os.path.join(row.get("path") or "", ".emrg")
             if base == inner or base.startswith(inner + os.sep):

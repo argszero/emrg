@@ -31,8 +31,6 @@ These instructions amend this task for one installation; they are not a second t
 
 Get able to work: `gh` authenticated, the role known and locked, the source synced.
 
-**The round's first step is to call `boss`** — a separate session that owns this task's direction while this one does the work — and to treat its answer as the round's stance; whatever the answer does not mention is still this session's to decide. A session that is not offered `boss` has no owner to ask, and carries on without one.
-
 #### 0.1 GitHub CLI
 
 ```bash

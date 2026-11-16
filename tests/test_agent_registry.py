@@ -88,7 +88,7 @@ def test_a_subdirectory_of_a_registered_directory_gets_its_own_row(tmp_path):
 
 
 def test_a_directory_under_an_agents_emrg_is_not_registered(tmp_path):
-    """The sub-session slot and the boss session: that Agent's bookkeeping, not a workspace."""
+    """The sub-session slot: that Agent's bookkeeping, not a workspace."""
     reg = _registry(tmp_path)
     parent = tmp_path / "repo"
     parent.mkdir()

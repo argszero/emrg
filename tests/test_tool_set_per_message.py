@@ -395,7 +395,7 @@ def test_the_memory_reflection_loop_honours_the_same_set(tmp_path):
 
 
 class _UnlistedTool:
-    """A registered tool no whitelist names — the shape a `boss`-style role has."""
+    """A registered tool no whitelist names — the shape a role-only tool has."""
 
     def __init__(self, name: str) -> None:
         self._name = name
@@ -541,19 +541,16 @@ def test_the_scheduler_states_the_scheduled_task_set(tmp_path, monkeypatch):
     # websocket, a handler and a template, and test_scheduler.py already builds
     # all three for the neighbouring field (`input_history`).
     #
-    # The two sets were equal until #2467 gave scheduled rounds a tool a
-    # conversation must not have. What is asserted here is the **shape** of that
-    # difference rather than its contents: an equality against a literal would
-    # restate the implementation and go green on any change that kept the restatement
-    # in step, while the property below is the one that matters — the difference is
-    # exactly the owner role, and no tool is lost from either side.
+    # The two lists are one set. Each is stated in its own place so that a
+    # scheduled round carries the set someone chose for it rather than whatever a
+    # conversation happens to hold — but a tool offered to one kind of turn and
+    # withheld from the other is a deliberate split, not an accident of editing one
+    # list, so the assertion is equality and the next split has to be written here
+    # with its reason. A literal roster would be the wrong spelling: it restates the
+    # implementation and goes green on any change that kept the restatement in step.
     scheduled = set(scheduled_task_tool_names())
     default = set(default_tool_names())
-    assert scheduled - default == {"boss"}, (
-        "the two sets differ by the owner role and nothing else (#2467); any other "
-        f"difference is a tool that silently appeared on one side: {scheduled - default}"
-    )
-    assert not default - scheduled, (
-        "a tool offered to a conversation must stay available to a scheduled round; "
-        f"these were dropped: {default - scheduled}"
+    assert scheduled == default, (
+        "the two lists are one set; a tool on one side alone is a split nobody "
+        f"stated: {scheduled ^ default}"
     )
