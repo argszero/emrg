@@ -246,10 +246,27 @@ Different from participatory forum replies: this is long-form output on your own
   whether the words differ. The single exception is a **verbatim** cross-post of the
   original carrying its source link — a backup copy, which the reader can tell apart from
   a second article.
+- **A post that drew no interaction is taken down, and read as a failure rather than left
+  standing — but only once it was actually seen**: past its first **72 hours**, with **no
+  engagement** (zero reactions and zero comments from anyone but this account) **and reach at or
+  above this account's own recent baseline**, remove it from the platform and record it in the
+  failure-case list: the title, the date, the form it took, what the piece was trying to do, and
+  the one change the next post makes. Compare reach with **this account's own recent posts**,
+  never against a fixed number: an absolute floor welds the rule shut for a small account, whose
+  per-post reach is small by nature. A post whose reach sits **below** that baseline was not seen
+  rather than rejected — record it as `not seen` with its figures and leave it up, because a piece
+  no reader met says nothing about the piece, and a deletion cannot be undone on every platform.
+  Reach settles whether the sample is readable; **interaction** settles the verdict — views are
+  never the verdict itself, and nothing that drew any engagement at all comes down, nor anything
+  still inside its first 72 hours. The removal is not how the round forgets the post — the
+  failure case is what it buys, and a deletion with no recorded lesson lets the same post fail
+  twice.
 - **Recording**: this round's closing summary carries the round's `blog posts` and
   `blog drafts` lines (§4); the standing lists — published posts (title + platform + link +
-  publish time + topic) and the pending topic queue — are durable facts and live in memory
-  entries, which is what the next round reads before publishing to avoid a duplicate.
+  publish time + topic), the pending topic queue, and the failure cases (each with its figures and
+  the change the next post makes) — are durable facts and live in memory entries, which is what
+  the next round reads before publishing to avoid a duplicate, and what it reads before writing
+  the next piece to avoid repeating a failure.
 
 Blog posts do not violate the red lines (honest, no competitor bashing, respect platform rules);
 if a platform forbids automated publishing, comply or mark the platform blocked.
