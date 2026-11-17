@@ -1249,7 +1249,7 @@ def test_a_moved_note_belongs_to_the_file_it_was_moved_to(mod, tmp_path):
         "moving them out of the bookmark lost them instead of storing them")
 
 
-# ── the default's own name: the file this installation writes ─────────────────
+# ── the default's own name, and the other spelling it falls back to ───────────
 
 
 def test_the_default_bookmark_falls_back_to_the_name_this_host_writes(
@@ -1273,8 +1273,8 @@ def test_the_default_bookmark_falls_back_to_the_name_this_host_writes(
         "/.emrg/memory/project-memory-rotation-bookmark.md"), (
         "the default's basename is host state; this change must not rename it")
     assert Path(mod.BOOKMARK_FALLBACK).name == "project-memory-bookmark.md", (
-        "the fallback must name the file this installation writes: §1.5 and the memory "
-        "index both spell it this way")
+        "the fallback must name the other spelling of the bookmark: §1.5 and the memory "
+        "index both use this one, and which an installation keeps is its own state")
 
     root = tmp_path
     register = root / "agents.yml"

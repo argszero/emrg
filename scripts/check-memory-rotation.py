@@ -7,7 +7,9 @@ Usage
     uv run --no-sync python3 scripts/check-memory-rotation.py --bookmark <PATH> --all
     uv run --no-sync python3 scripts/check-memory-rotation.py --bookmark <PATH> --json
 
-    # the defaults both point at the paths this host uses
+    # The two defaults name this repository's own layout. An installation that keeps
+    # its bookmark under the other name is still read - the fallback covers that - and
+    # the run says which file it opened; any other layout is reached by naming both.
     uv run --no-sync python3 scripts/check-memory-rotation.py
 
 Why this exists
@@ -218,11 +220,12 @@ DEFAULT_AGENTS = "~/.emrg/agents.yml"
 #: `tests/test_check_memory_rotation.py` pins it, because renaming the constant renames no
 #: file, and step 0 then answers `not measurable` on every cycle from the merge onwards.
 #:
-#: Measured 2026-11-18 (issue #2951): *this* installation keeps its bookmark at the name
-#: §1.5 and the memory index both use, and has never written the name below - so the
-#: constant keeps its value and `BOOKMARK_FALLBACK` reaches the file this host writes. The
-#: two disagree, which is why the no-argument form used to answer `not measurable: no
-#: bookmark at <path>` on every cycle here.
+#: Which of the two bookmark names an installation keeps is **its own state**, not a
+#: property of this file: measured 2026-11-18 on the host that filed issue #2951 this
+#: name is absent and `BOOKMARK_FALLBACK`'s is present, and a review of that issue
+#: reported the reverse on another host. So neither name is universal, and the value
+#: below stays the one this repository has always carried - a test pins it - while the
+#: other is reached by the fallback and the run says which file it read.
 DEFAULT_BOOKMARK = "~/.emrg/evolution/emrg/.emrg/memory/project-memory-rotation-bookmark.md"
 
 #: The register's name before an Agent became the record of the directory a
@@ -241,9 +244,13 @@ DEFAULT_BOOKMARK = "~/.emrg/evolution/emrg/.emrg/memory/project-memory-rotation-
 #: reading never claims a subject it did not open.
 LEGACY_AGENTS = "~/.emrg/projects.yml"
 
-#: The bookmark **this** installation writes, reached only when the default is absent
-#: (issue #2951). The two names disagree, and nothing here has ever written the default's,
-#: so before this fallback the no-argument form could not be run on this host at all.
+#: The other name a bookmark is kept under, reached only when the default is absent
+#: (issue #2951). On the host that filed that issue the default's name is absent and this
+#: one is present, which is why the no-argument form could not be run there at all; a
+#: review reported the opposite pairing on a second host. Both are therefore live
+#: possibilities, neither is a replacement for the other, and the fallback fires only from
+#: the default - never on a path a caller named - so the reading is always about the file
+#: it opened.
 BOOKMARK_FALLBACK = "~/.emrg/evolution/emrg/.emrg/memory/project-memory-bookmark.md"
 
 
@@ -962,7 +969,7 @@ def main(argv: list[str] | None = None) -> int:
         if fallback_bookmark.exists():
             print(
                 f"note: {bookmark_path} does not exist - reading {fallback_bookmark}, "
-                f"the bookmark this installation writes",
+                f"the bookmark's other name",
                 file=sys.stderr,
             )
             bookmark_path = fallback_bookmark
