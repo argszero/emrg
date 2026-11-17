@@ -65,8 +65,12 @@ Per block:
     unclassified   renders a non-empty block and no row names its task
     gone           a row names it and it renders nothing (or its task is not in the table)
 
-`changed`, `rewritten`, `undigested`, `unclassified` and `gone` are the states that ask for a
-cycle's work; `unchanged` is the ordinary answer and costs nothing. A `gone` row is not tidiness: a block deleted from
+`changed`, `rewritten`, `unclassified` and `gone` ask for a **reading** - a block has to be
+opened and classified, or a row whose block is gone has to be retired. `undigested` asks for a
+**row edit** and no reading at all: the row already says what that block turned out to be, and
+what it lacks is the digest the output prints beside it. The two are counted apart for that
+reason, and each is given its own remedy. `unchanged` is the ordinary answer and costs nothing.
+A `gone` row is not tidiness: a block deleted from
 `tasks.yml` and left in the table keeps a classification alive for text that no longer renders.
 
 **`duplicate` is printed without `--all` even though its length is unchanged**, because what it
@@ -407,8 +411,14 @@ def main(argv=None):
     changed = [
         f
         for f in findings
-        if f[0] in ("changed", "unclassified", "rewritten", "undigested")
+        if f[0] in ("changed", "unclassified", "rewritten")
     ]
+    # `undigested` is the one state here that asks for a *row edit* rather than a reading: the
+    # row already says what the block turned out to be, and what it lacks is the digest. Counting
+    # it with the states that need a classification made the tally say `22 need classifying`
+    # over a table whose rows were all classified, and the sentence below then told the reader
+    # to re-classify them — which is precisely the re-reading this clock exists to prevent.
+    undigested = [f for f in findings if f[0] == "undigested"]
     gone = [f for f in findings if f[0] == "gone"]
 
     for state, task, detail in findings:
@@ -419,14 +429,22 @@ def main(argv=None):
     print(
         f"blocks: {len(rendered)} render, {len(unchanged)} unchanged, "
         f"{len(duplicate)} duplicate, {len(changed)} need classifying, "
+        f"{len(undigested)} need a digest, "
         f"{len(gone)} row(s) with nothing to render"
     )
 
-    if changed or gone:
-        print(
-            "classify the block(s) above in the rotation table before re-reading any "
-            "unchanged one - a block whose length and sha256 are unchanged has not moved"
-        )
+    if changed or undigested or gone:
+        if changed:
+            print(
+                "classify the block(s) above in the rotation table before re-reading any "
+                "unchanged one - a block whose length and sha256 are unchanged has not moved"
+            )
+        if undigested:
+            print(
+                "add the sha256 printed beside each undigested row above to that row's digest "
+                "cell, keeping its class and evidence - those rows are classified already, and "
+                "re-classifying them is the re-reading this clock exists to save"
+            )
         return 1
     print("every block renders unchanged text: the section 1.7 reading is the fingerprint list")
     return 0
