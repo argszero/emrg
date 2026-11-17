@@ -13,8 +13,9 @@ Why this exists
 The evolution prompt's section 1.7 rotates one task's `extra_prompt` per cycle and classifies the
 blocks it finds, and the classification costs a cycle's round: `ios-app-task` alone is 6,327
 characters that have to be read against a 381-line template before anything can be said about
-them. The rotation's own clock is therefore the **length list** - a block whose length is
-unchanged has not been re-read, so there is nothing to classify.
+them. The rotation's own clock is therefore a **fingerprint** - the block's length and the
+sha256 of its text - so a block that has not moved is not re-read and there is nothing to
+classify.
 
 That rule was prose, and it decayed three times. A cycle read the lengths, saw them unchanged,
 opened a body anyway and re-derived a row the table already carried; `cyc20261112-000449` and
@@ -27,6 +28,13 @@ not a rule; comparing them is what this file does.
 It is the same shape `check-memory-rotation.py` answers for section 1.5: a step every cycle takes,
 whose hand-written version answered wrongly while reading as clean.
 
+A length is a proxy for the text, and a guard that measures a proxy cannot see an edit that keeps
+the proxy. A block rewritten to the same number of characters read `unchanged` here, so it was
+never re-classified and the rotation quietly stopped covering it. So a row carries the sha256 of
+the text it classified, computed from the block itself and from nothing a reader wrote down, and
+a row written before those digests existed is reported as **unable to answer** rather than as
+unchanged - the rule this file already applies to every question it cannot measure.
+
 What it reads, and what it prints first
 --------------------------------------
 Two subjects, both named before any verdict:
@@ -35,7 +43,8 @@ Two subjects, both named before any verdict:
   `extra_prompt` may render;
 * the **rotation table** (`--table`, default
   `.emrg/memory/task-extra-prompt-rotation.md`) - one Markdown row per classified block,
-  carrying the block's length as it stood when that row was written.
+  carrying the block's length and the sha256 of its text as they stood when that row was
+  written.
 
 Both carriers of the field are read, in the precedence the prompt states: `config.extra_prompt`
 renders, and a record whose `config` carries none renders a top-level `extra_prompt` instead. A
@@ -48,14 +57,16 @@ one place.
 
 Per block:
 
-    unchanged      renders a non-empty block and its length is the row's number
+    unchanged      renders a non-empty block and the row's length and sha256 are both its own
     duplicate      as `unchanged`, but the record carries a second copy the precedence hides
     changed        renders a non-empty block and its length is not that number
+    rewritten      the length is the row's number and the sha256 is not: a same-length edit
+    undigested     the row carries no sha256, so it cannot answer the question at all
     unclassified   renders a non-empty block and no row names its task
     gone           a row names it and it renders nothing (or its task is not in the table)
 
-`changed`, `unclassified` and `gone` are the states that ask for a cycle's work; `unchanged`
-is the ordinary answer and costs nothing. A `gone` row is not tidiness: a block deleted from
+`changed`, `rewritten`, `undigested`, `unclassified` and `gone` are the states that ask for a
+cycle's work; `unchanged` is the ordinary answer and costs nothing. A `gone` row is not tidiness: a block deleted from
 `tasks.yml` and left in the table keeps a classification alive for text that no longer renders.
 
 **`duplicate` is printed without `--all` even though its length is unchanged**, because what it
@@ -66,8 +77,10 @@ re-classify. Its remedy is on the installation's side, not the rotation's.
 
 Exit codes
 ----------
-    0  every non-empty block has a row and its length is unchanged - the section 1.7 reading
-    1  a block moved, a block has no row, or a row's block is gone
+    0  every non-empty block has a row and its length and sha256 are unchanged - the section
+       1.7 reading
+    1  a block moved, a block's text moved under an unchanged length, a row carries no sha256
+       to compare, a block has no row, or a row's block is gone
     2  nothing was measured: the task table, the rotation table, or the YAML inside it could
        not be read, or the table carries no row this file can parse
 
@@ -81,7 +94,8 @@ The rotation table is an installation's own memory, and nothing creates it: a ch
 never run a cycle has no row for anything, so the first reading on it answers **2**. Naming the
 missing path without a next step is the dead end this file exists to remove, so **`--init` prints
 a skeleton** - the table header and one row per block that renders, carrying that block's length
-as it stands - for the caller to write to the table's path and then classify. It is printed and
+and its sha256 as they stand - for the caller to write to the table's path and then classify. It
+is printed and
 never written: recording what a block turned out to be is a reader's judgement, and a tool that
 filled in its own rows would be recording classifications nobody made.
 
@@ -89,13 +103,14 @@ What it does not do
 -------------------
 It **measures and never repairs**: it does not touch `~/.emrg/tasks.yml`, which is the host's
 file, and it does not rewrite the rotation table, because recording a classification needs a
-reader's judgement about what the block turned out to be. It prints the lengths; the cycle
-decides what a moved one means.
+reader's judgement about what the block turned out to be. It prints the lengths and the digests;
+the cycle decides what a moved one means.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import sys
@@ -112,10 +127,24 @@ DEFAULT_TABLE = REPO_ROOT / ".emrg" / "memory" / "task-extra-prompt-rotation.md"
 #: on a fixture, and the default is never exercised by a test.
 DEFAULT_TASKS = Path("~/.emrg/tasks.yml")
 
-#: One row of the rotation table: `| `task` | 6327 | class | evidence |`. The length is
-#: matched as a plain integer because that is what this file compares; the class and evidence
-#: cells are prose for a reader and are not parsed at all.
-TABLE_ROW = re.compile(r"^\|\s*`(?P<task>[^`]+)`\s*\|\s*(?P<chars>\d+)\s*\|")
+#: One row of the rotation table: `| `task` | 6327 | <sha256> | class | evidence |`. The length is
+#: matched as a plain integer and the digest as 64 hex characters, because those two are what
+#: this file compares; the class and evidence cells are prose for a reader and are not parsed at
+#: all. The digest cell is optional so a table written before it existed still parses - and that
+#: row is then reported as `undigested`, never as `unchanged`.
+TABLE_ROW = re.compile(
+    r"^\|\s*`(?P<task>[^`]+)`\s*\|\s*(?P<chars>\d+)\s*\|(?:\s*(?P<sha>[0-9a-fA-F]{64})\s*\|)?"
+)
+
+
+def digest(text):
+    """The sha256 of a block's rendered text: the row's second, and stronger, fingerprint.
+
+    Computed from the block and from nothing a reader wrote down. That is what lets an edit which
+    keeps the length show up at all - a length is a proxy for the text, and a guard measuring a
+    proxy cannot see an edit that keeps the proxy.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def rendered_blocks(records):
@@ -142,19 +171,28 @@ def rendered_blocks(records):
 
 
 def table_rows(text):
-    """`{task: chars}` from the rotation table's rows, in the order they are written."""
+    """`{task: (chars, sha256 or None)}` from the rotation table's rows, in written order.
+
+    A `None` digest is a row that cannot say what text it classified - either a table written
+    before the column existed or a cell left empty - and it is carried rather than defaulted, so
+    `classify` can report the row instead of answering for it.
+    """
     rows = {}
     for line in text.splitlines():
         match = TABLE_ROW.match(line)
         if match:
-            rows[match.group("task")] = int(match.group("chars"))
+            sha = match.group("sha")
+            rows[match.group("task")] = (
+                int(match.group("chars")),
+                sha.lower() if sha else None,
+            )
     return rows
 
 
 def classify(blocks, rows):
     """One `(state, task, detail)` per block and per orphan row, in a stable order.
 
-    The states are the four the docstring names. A block that renders nothing is left out
+    The states are the ones the docstring names. A block that renders nothing is left out
     entirely - it has no text to classify - while a row whose block renders nothing is
     reported, because that row is the one still claiming a classification.
     """
@@ -165,9 +203,28 @@ def classify(blocks, rows):
         if task not in rows:
             findings.append(("unclassified", task, f"{length} chars, no table row"))
             continue
-        if rows[task] != length:
+        chars, sha = rows[task]
+        if chars != length:
+            findings.append(("changed", task, f"table says {chars}, block is {length}"))
+            continue
+        if sha is None:
             findings.append(
-                ("changed", task, f"table says {rows[task]}, block is {length}")
+                (
+                    "undigested",
+                    task,
+                    f"{length} chars, but the row carries no sha256, so a same-length edit is "
+                    f"invisible to it: {digest(renders)} is this block's",
+                )
+            )
+            continue
+        if sha != digest(renders):
+            findings.append(
+                (
+                    "rewritten",
+                    task,
+                    f"{length} chars unchanged, but the text moved: table says {sha}, "
+                    f"block is {digest(renders)}",
+                )
             )
             continue
         if both:
@@ -181,7 +238,7 @@ def classify(blocks, rows):
             )
             continue
         findings.append(("unchanged", task, f"{length} chars, unchanged"))
-    for task, chars in rows.items():
+    for task, (chars, _sha) in rows.items():
         renders = blocks.get(task, ("", 0, False))[0]
         if not renders:
             findings.append(("gone", task, f"table says {chars} chars, nothing renders"))
@@ -232,27 +289,30 @@ def _load_table(path):
 def init_table(blocks):
     """The rotation table's skeleton, one row per block that renders.
 
-    The lengths are this host's, which is the point: the skeleton is only useful for the task
-    table it was printed from, and a reader classifies each row against the block it names.
+    The lengths and digests are this host's, which is the point: the skeleton is only useful for
+    the task table it was printed from, and a reader classifies each row against the block it
+    names.
     """
     rows = sorted(
-        (task, length) for task, (renders, length, _both) in blocks.items() if renders
+        (task, length, digest(renders))
+        for task, (renders, length, _both) in blocks.items()
+        if renders
     )
     lines = [
         "# The section 1.7 rotation table.",
         "#",
-        "# One row per task `extra_prompt` block that renders. The number is that block's length",
-        "# when the row was written; a block whose length is unchanged has not moved, so there is",
-        "# nothing to classify.",
+        "# One row per task `extra_prompt` block that renders. The number and the digest are that",
+        "# block's when the row was written; a block whose length *and* sha256 are unchanged has",
+        "# not moved, so there is nothing to classify.",
         "#",
         "# Replace `**unclassified**` with what the block turned out to be: `**already in",
         "# template**`, `**instance configuration**`, or `**missing from template**`.",
         "",
-        "| task | chars | class | evidence |",
-        "|---|---|---|---|",
+        "| task | chars | sha256 | class | evidence |",
+        "|---|---|---|---|---|",
     ]
-    for task, length in rows:
-        lines.append(f"| `{task}` | {length} | **unclassified** | printed by --init |")
+    for task, length, sha in rows:
+        lines.append(f"| `{task}` | {length} | {sha} | **unclassified** | printed by --init |")
     return "\n".join(lines) + "\n"
 
 
@@ -300,7 +360,8 @@ def main(argv=None):
         action="store_true",
         help=(
             "print a skeleton rotation table for this task table, one row per block that "
-            "renders, to be written to the table's path and classified"
+            "renders, carrying its length and sha256, to be written to the table's path and "
+            "classified"
         ),
     )
     args = parser.parse_args(argv)
@@ -343,7 +404,11 @@ def main(argv=None):
     rendered = [f for f in findings if f[0] != "gone"]
     unchanged = [f for f in findings if f[0] == "unchanged"]
     duplicate = [f for f in findings if f[0] == "duplicate"]
-    changed = [f for f in findings if f[0] in ("changed", "unclassified")]
+    changed = [
+        f
+        for f in findings
+        if f[0] in ("changed", "unclassified", "rewritten", "undigested")
+    ]
     gone = [f for f in findings if f[0] == "gone"]
 
     for state, task, detail in findings:
@@ -360,10 +425,10 @@ def main(argv=None):
     if changed or gone:
         print(
             "classify the block(s) above in the rotation table before re-reading any "
-            "unchanged one - a block whose length is unchanged has not moved"
+            "unchanged one - a block whose length and sha256 are unchanged has not moved"
         )
         return 1
-    print("every block renders unchanged text: the section 1.7 reading is the length list itself")
+    print("every block renders unchanged text: the section 1.7 reading is the fingerprint list")
     return 0
 
 

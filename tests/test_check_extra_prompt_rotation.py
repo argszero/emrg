@@ -32,6 +32,7 @@ filename is not importable by name (the dash).
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 from pathlib import Path
 
@@ -64,11 +65,33 @@ def _tasks(tmp_path: Path, records: list[dict], name: str = "tasks.yml") -> Path
     return path
 
 
-def _table(tmp_path: Path, rows: dict[str, int], name: str = "rotation.md") -> Path:
-    """Write a rotation table whose rows carry the given lengths, and return its path."""
-    lines = ["| task | chars | class | evidence |", "|---|---|---|---|"]
-    for task, chars in rows.items():
-        lines.append(f"| `{task}` | {chars} | **already in template** | measured earlier |")
+def _sha(text: str) -> str:
+    """The digest a row records for `text`, computed here rather than by the tool.
+
+    The column's contract is "the sha256 of the block's UTF-8 text", and a fixture that asked
+    the tool for the number would agree with the tool about a wrong one.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _row(text: str, chars: int | None = None) -> tuple[int, str]:
+    """An `(chars, sha256)` row for `text` - its own length, or `chars` when they differ."""
+    return (len(text) if chars is None else chars, _sha(text))
+
+
+def _table(
+    tmp_path: Path, rows: dict[str, tuple[int, str | None]], name: str = "rotation.md"
+) -> Path:
+    """Write a rotation table carrying the given `task -> (chars, sha256)` rows.
+
+    A `None` digest is written as an empty cell: a row that records no text and so cannot
+    answer whether the block moved.
+    """
+    lines = ["| task | chars | sha256 | class | evidence |", "|---|---|---|---|---|"]
+    for task, (chars, sha) in rows.items():
+        lines.append(
+            f"| `{task}` | {chars} | {sha or ''} | **already in template** | measured earlier |"
+        )
     path = tmp_path / name
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
@@ -90,7 +113,7 @@ def test_an_unchanged_block_reads_as_unchanged(mod, tmp_path, capsys):
     """The ordinary cycle: the length list is the reading, and it costs one command."""
     body = "x" * 40
     tasks = _tasks(tmp_path, [_record("zeta", text=body)])
-    table = _table(tmp_path, {"zeta": len(body)})
+    table = _table(tmp_path, {"zeta": _row(body)})
 
     assert mod.main(["--tasks", str(tasks), "--table", str(table)]) == 0
     out = capsys.readouterr().out
@@ -102,7 +125,7 @@ def test_a_moved_length_names_both_numbers(mod, tmp_path, capsys):
     """The one state the rotation exists to catch, and it has to be readable without a diff."""
     body = "x" * 40
     tasks = _tasks(tmp_path, [_record("zeta", text=body)])
-    table = _table(tmp_path, {"zeta": 25})
+    table = _table(tmp_path, {"zeta": _row(body, chars=25)})
 
     assert mod.main(["--tasks", str(tasks), "--table", str(table)]) == 1
     out = capsys.readouterr().out
@@ -113,7 +136,7 @@ def test_a_moved_length_names_both_numbers(mod, tmp_path, capsys):
 def test_a_block_with_no_row_needs_classifying(mod, tmp_path, capsys):
     """A new block cannot be silently outside the rotation."""
     tasks = _tasks(tmp_path, [_record("zeta", text="x" * 12)])
-    table = _table(tmp_path, {"other": 12})
+    table = _table(tmp_path, {"other": _row("x" * 12)})
 
     assert mod.main(["--tasks", str(tasks), "--table", str(table)]) == 1
     out = capsys.readouterr().out
@@ -123,7 +146,7 @@ def test_a_block_with_no_row_needs_classifying(mod, tmp_path, capsys):
 def test_a_row_whose_block_is_gone_is_reported(mod, tmp_path, capsys):
     """A row left behind keeps a classification alive for text that no longer renders."""
     tasks = _tasks(tmp_path, [_record("zeta")])
-    table = _table(tmp_path, {"zeta": 40})
+    table = _table(tmp_path, {"zeta": _row("x" * 40)})
 
     assert mod.main(["--tasks", str(tasks), "--table", str(table)]) == 1
     out = capsys.readouterr().out
@@ -134,7 +157,7 @@ def test_a_top_level_block_renders_when_config_carries_none(mod, tmp_path, capsy
     """The carrier a probe of this question once missed, and it read as 'no blocks at all'."""
     body = "top-level rule"
     tasks = _tasks(tmp_path, [_record("zeta", top=body)])
-    table = _table(tmp_path, {"zeta": len(body)})
+    table = _table(tmp_path, {"zeta": _row(body)})
 
     assert mod.main(["--tasks", str(tasks), "--table", str(table)]) == 0
     out = capsys.readouterr().out
@@ -145,7 +168,7 @@ def test_the_config_copy_renders_and_the_duplicate_is_named(mod, tmp_path, capsy
     """Precedence, read as precedence: the config copy is measured, the other one is reported."""
     config_body = "y" * 30
     tasks = _tasks(tmp_path, [_record("zeta", text=config_body, top="z" * 99)])
-    table = _table(tmp_path, {"zeta": len(config_body)})
+    table = _table(tmp_path, {"zeta": _row(config_body)})
 
     assert mod.main(["--tasks", str(tasks), "--table", str(table)]) == 0
     out = capsys.readouterr().out
@@ -156,7 +179,7 @@ def test_the_config_copy_renders_and_the_duplicate_is_named(mod, tmp_path, capsy
 def test_the_subjects_are_named_before_the_verdict(mod, tmp_path, capsys):
     """A reading names what it read; a count without its subject is not reusable."""
     tasks = _tasks(tmp_path, [_record("zeta", text="x")])
-    table = _table(tmp_path, {"zeta": 1})
+    table = _table(tmp_path, {"zeta": _row("x")})
 
     assert mod.main(["--tasks", str(tasks), "--table", str(table)]) == 0
     out = capsys.readouterr().out
@@ -165,7 +188,7 @@ def test_the_subjects_are_named_before_the_verdict(mod, tmp_path, capsys):
 
 
 def test_a_missing_task_table_is_not_a_pass(mod, tmp_path, capsys):
-    table = _table(tmp_path, {"zeta": 1})
+    table = _table(tmp_path, {"zeta": _row("x")})
     assert mod.main(["--tasks", str(tmp_path / "absent.yml"), "--table", str(table)]) == 2
     assert "cannot measure" in capsys.readouterr().err
 
@@ -179,7 +202,7 @@ def test_a_missing_rotation_table_is_not_a_pass(mod, tmp_path, capsys):
 def test_yaml_that_does_not_parse_is_not_a_pass(mod, tmp_path, capsys):
     broken = tmp_path / "broken.yml"
     broken.write_text("name: [unclosed\n", encoding="utf-8")
-    table = _table(tmp_path, {"zeta": 1})
+    table = _table(tmp_path, {"zeta": _row("x")})
 
     assert mod.main(["--tasks", str(broken), "--table", str(table)]) == 2
     assert "cannot measure" in capsys.readouterr().err
@@ -189,7 +212,7 @@ def test_records_that_are_not_a_list_are_not_a_pass(mod, tmp_path, capsys):
     """A mapping where a list of records belongs must not read as an empty rotation."""
     wrong = tmp_path / "wrong.yml"
     wrong.write_text("zeta:\n  config:\n    extra_prompt: hi\n", encoding="utf-8")
-    table = _table(tmp_path, {"zeta": 2})
+    table = _table(tmp_path, {"zeta": _row("xx")})
 
     assert mod.main(["--tasks", str(wrong), "--table", str(table)]) == 2
     assert "not a list of records" in capsys.readouterr().err
@@ -208,7 +231,7 @@ def test_a_table_with_no_parsable_row_is_not_a_pass(mod, tmp_path, capsys):
 def test_it_measures_and_never_repairs(mod, tmp_path):
     """Neither file may move: recording a classification needs a reader's judgement."""
     tasks = _tasks(tmp_path, [_record("zeta", text="x" * 40)])
-    table = _table(tmp_path, {"zeta": 25})
+    table = _table(tmp_path, {"zeta": _row("x" * 40, chars=25)})
     tasks_before = tasks.read_bytes()
     table_before = table.read_bytes()
 
@@ -222,7 +245,7 @@ def test_all_lists_the_unchanged_blocks_too(mod, tmp_path, capsys):
     """`--all` prints the length list, which is what a cycle reads out loud."""
     body = "x" * 40
     tasks = _tasks(tmp_path, [_record("zeta", text=body), _record("eta", text="y" * 7)])
-    table = _table(tmp_path, {"zeta": len(body), "eta": 7})
+    table = _table(tmp_path, {"zeta": _row(body), "eta": _row("y" * 7)})
 
     assert mod.main(["--tasks", str(tasks), "--table", str(table)]) == 0
     default_out = capsys.readouterr().out
@@ -243,7 +266,7 @@ def test_init_prints_a_row_per_rendering_block(mod, tmp_path, capsys):
 
     assert mod.main(["--tasks", str(tasks), "--init"]) == 0
     out = capsys.readouterr().out
-    assert "| task | chars | class | evidence |" in out
+    assert "| task | chars | sha256 | class | evidence |" in out
     assert "| `zeta` | 40 |" in out
     assert "| `omega` | 9 |" in out, "a top-level block is a block here too"
     assert "`eta`" not in out, "nothing renders for eta, so there is nothing to classify"
@@ -279,6 +302,43 @@ def test_the_missing_table_remedy_names_init(mod, tmp_path, capsys):
     assert mod.main(["--tasks", str(tasks), "--table", str(tmp_path / "absent.md")]) == 2
     err = capsys.readouterr().err
     assert "cannot measure" in err and "--init" in err, err
+
+
+def test_a_same_length_edit_needs_classifying(mod, tmp_path, capsys):
+    """The hole a length-only clock left: the text moved and the number did not.
+
+    `cyc20261117-181812` found it by reading `classify` - `rows[task] != length` was the only
+    text-side test - so a block rewritten to the same number of characters answered `unchanged`
+    and was never re-classified.
+    """
+    before = "x" * 40
+    after = "y" * 40
+    tasks = _tasks(tmp_path, [_record("zeta", text=after)])
+    table = _table(tmp_path, {"zeta": _row(before)})
+
+    assert mod.main(["--tasks", str(tasks), "--table", str(table)]) == 1
+    out = capsys.readouterr().out
+    assert "rewritten" in out
+    assert "40 chars unchanged, but the text moved" in out
+    assert _sha(before) in out and _sha(after) in out, "both digests, so the row can be fixed"
+
+
+def test_a_row_with_no_digest_is_not_a_pass(mod, tmp_path, capsys):
+    """A row that records no text cannot answer the question, so it is reported, never clean.
+
+    This is the other direction of the arm above: there the digest was present and disagreed,
+    here it is absent - and absence reads as `undigested` with the digest that belongs in the
+    row, which is the difference between "nothing moved" and "could not measure".
+    """
+    body = "x" * 40
+    tasks = _tasks(tmp_path, [_record("zeta", text=body)])
+    table = _table(tmp_path, {"zeta": (len(body), None)})
+
+    assert mod.main(["--tasks", str(tasks), "--table", str(table)]) == 1
+    out = capsys.readouterr().out
+    assert "undigested" in out
+    assert "the row carries no sha256" in out
+    assert _sha(body) in out, "the remedy is the digest that belongs in that row"
 
 
 def test_init_with_no_rendering_block_is_not_a_pass(mod, tmp_path, capsys):
