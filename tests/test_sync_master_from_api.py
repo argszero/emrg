@@ -570,3 +570,161 @@ def test_a_materialized_chain_leaves_every_commit_readable_as_a_tree(tmp_path, m
         assert r.returncode == 0, f"{sha[:7]} is not readable as a tree: {r.stderr}"
     assert _git("rev-parse", "refs/heads/master",
                 cwd=target).stdout.decode().strip() == c2
+
+
+# ------------------------- the refs move, the files do not (issue #2939)
+
+
+def _commit_file(repo: Path, text: str, message: str) -> str:
+    """Commit `a.txt` with `text`, return the new HEAD sha."""
+    (repo / "a.txt").write_text(text, encoding="utf-8")
+    _git("add", "a.txt", cwd=repo)
+    r = _git("commit", "-q", "-m", message, cwd=repo, env=GIT_ENV)
+    assert r.returncode == 0, r.stderr
+    return _git("rev-parse", "HEAD", cwd=repo).stdout.decode().strip()
+
+
+def _branch(repo: Path) -> str:
+    return _git("symbolic-ref", "--short", "HEAD", cwd=repo).stdout.decode().strip()
+
+
+def test_a_moved_ref_leaves_a_worktree_that_differs_and_says_how_many_paths(tmp_path):
+    """The state that made a synced tree answer from the previous commit.
+
+    `git update-ref` moves a branch and touches neither the index nor the working
+    tree, so after a sync the refs name the new commit while every command that
+    opens a file answers from the old one - measured 2026-11-17, when a tree whose
+    `HEAD` declared `0.3.58` answered `__version__ = "0.3.57"` and `git status`
+    listed the difference as ten staged modifications (issue #2939).
+
+    The reading must also have left the files alone: repairs that discard local
+    work are the caller's decision, never a side effect of measuring.
+    """
+    mod = _load_module()
+    repo = _init_repo(tmp_path)
+    old = _commit_file(repo, "one\n", "first")
+    new = _commit_file(repo, "two\n", "second")
+
+    # The ordinary case first: the files and HEAD agree.
+    assert mod.worktree_state(new, cwd=str(repo)) == ("match", "")
+
+    # Now move the checked-out branch back, the way the sync moves it.
+    _git("update-ref", f"refs/heads/{_branch(repo)}", old, cwd=repo)
+
+    state, detail = mod.worktree_state(old, cwd=str(repo))
+    assert state == "differs", (state, detail)
+    assert detail == "1", detail
+    assert (repo / "a.txt").read_text(encoding="utf-8") == "two\n", (
+        "measuring the worktree must not rewrite it"
+    )
+
+
+def test_a_head_on_another_commit_is_named_rather_than_called_stale(tmp_path):
+    """`elsewhere` is its own answer: the files are the commit `HEAD` names.
+
+    A sync of a branch that is not the one checked out moves a ref the caller is
+    not standing on. Reporting that as "stale" would advise a reset that moves them
+    off their own branch, so the answer names the commit the files actually are.
+    """
+    mod = _load_module()
+    repo = _init_repo(tmp_path)
+    old = _commit_file(repo, "one\n", "first")
+    new = _commit_file(repo, "two\n", "second")
+
+    _git("update-ref", "refs/heads/side", new, cwd=repo)
+    assert _git("checkout", "-q", "side", cwd=repo).returncode == 0
+
+    state, detail = mod.worktree_state(old, cwd=str(repo))
+    assert state == "elsewhere", (state, detail)
+    assert detail == new[:7], (
+        "the answer names the commit the files actually are - after checking out "
+        "`side`, that is the newer commit, not the one the caller asked about"
+    )
+
+
+def test_an_untracked_file_is_not_a_difference_from_the_commit(tmp_path):
+    """An untracked file is in no commit, so it cannot differ from one.
+
+    `git status --porcelain` lists untracked paths by default, so a tree whose tracked
+    content and index hold `head` exactly, plus one scratch file, read `("differs",
+    "1")` and the run printed `1 path(s) differ from <head>`. The remedy it prints is
+    false for that cause as well: `git reset --hard HEAD` leaves untracked files alone,
+    so the caller runs it and the same warning returns on the next sync. Measured on a
+    probe repository: the default listing answers `?? scratch.txt`, and
+    `--untracked-files=no` answers nothing - the question this function is asking.
+
+    Both directions, because a fix that stopped counting tracked changes would pass the
+    first half alone.
+    """
+    mod = _load_module()
+    repo = _init_repo(tmp_path)
+    head = _commit_file(repo, "one\n", "first")
+
+    (repo / "scratch.txt").write_text("unrelated\n", encoding="utf-8")
+    assert _git("status", "--porcelain", cwd=repo).stdout.decode().strip().startswith("??")
+    assert mod.worktree_state(head, cwd=str(repo)) == ("match", ""), (
+        "an untracked file is in no commit, so it cannot differ from one"
+    )
+
+    (repo / "a.txt").write_text("two\n", encoding="utf-8")
+    assert mod.worktree_state(head, cwd=str(repo))[0] == "differs", (
+        "a tracked modification still differs"
+    )
+
+
+def test_a_git_that_cannot_answer_is_unmeasured_never_a_match(tmp_path, monkeypatch):
+    """A git that cannot answer has not agreed. The family's standing rule.
+
+    Built from a failing `git`, not from "a directory outside any repository": on
+    the host this was measured on, `tempfile.gettempdir()` **is** the checkout, so
+    `git rev-parse` inside the temp directory answers that checkout's own HEAD and
+    the arm would assert `elsewhere` while looking like it tested `unmeasured`
+    (measured 2026-11-17). A stub cannot move with the host's temp settings.
+    """
+    mod = _load_module()
+
+    class Failing:
+        returncode = 128
+        stdout = ""
+        stderr = "fatal: not a git repository (or any of the parent directories): .git"
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: Failing())
+
+    state, detail = mod.worktree_state("0" * 40, cwd=str(tmp_path))
+    assert state == "unmeasured", (state, detail)
+    assert "not a git repository" in detail, detail
+
+
+def test_the_script_reports_the_worktree_after_it_moves_the_refs():
+    """Said once, in the run that moved them - and only when something moved.
+
+    The `--ref <sha>` branch returns before any ref is created, and a failure stops
+    with "no refs touched"; neither has a new commit for a worktree to be in step
+    with, so neither may print this line. Pinned by position: the call sits after
+    the loop that moves the refs, in the same function that returns 0.
+    """
+    content = SCRIPT.read_text(encoding="utf-8")
+    # Bound the region at the loop that moves the refs, by its own text. Splitting on
+    # `update-ref` would not: the first occurrence is inside this PR's own docstring
+    # (`git update-ref` moves a *ref*), so the region would start above the call and run
+    # to end of file - a bound that bounds nothing, and every assertion below would hold
+    # wherever the print block sat (measured by the reviewer of issue #2939).
+    loop = content.index('for ref in (f"refs/heads/')
+    verdict = content.index("worktree_state(head)")
+    assert verdict > loop, (
+        "the worktree verdict must be printed after the loop that moves the refs"
+    )
+    after_refs = content[loop:]
+    assert "DISCARDS local edits" in after_refs, (
+        "the remedy must say what it costs"
+    )
+    assert "git reset --hard HEAD" in after_refs, "the remedy names the command"
+    assert content.count("worktree_state(") >= 2, "the helper is defined and used"
+
+    # The `--ref <sha>` path returns before any ref is created, so it must not print the
+    # line at all - the other half of requirement 3.
+    early_return = content.index("is an object name, not a branch")
+    assert content.index("worktree_state(head)") > early_return, (
+        "the verdict must not be printed on the path that creates no ref"
+    )
+

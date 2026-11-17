@@ -375,6 +375,50 @@ def rev_parse(ref: str) -> str:
     return r.stdout.decode().strip() if r.returncode == 0 else ""
 
 
+def worktree_state(head: str, cwd: str | None = None) -> tuple[str, str]:
+    """Whether this checkout's files now hold `head`, or whether that cannot be asked.
+
+    `git update-ref` moves a *ref*. It does not touch the index or the working tree,
+    so after this tool ends the refs name the new commit while every command that
+    opens a file still answers from the previous one: measured 2026-11-17, a tree
+    whose `HEAD` declared `0.3.58` answered `__version__ = "0.3.57"`, and
+    `git status` listed the difference as ten staged modifications. No downstream
+    reading catches it, because `git log`, `git rev-parse HEAD` and
+    `git show HEAD:<path>` are all correct - only comparing them to a file notices.
+
+    Four answers, and "could not be asked" is one of them:
+
+    * `match` - `HEAD` is `head`, and the index and working tree hold its content;
+    * `differs` - `HEAD` is `head` and N **tracked** path(s) differ from it. This tool
+      cannot tell its own stale index from a caller's uncommitted edits, so it says that
+      rather than choosing. An untracked file is not counted: it is in no commit, so it
+      cannot differ from one, and `git reset --hard HEAD` would not remove it - naming it
+      would make the remedy false for the cause it reported (issue #2939's review);
+    * `elsewhere` - `HEAD` is some other commit, named, because that is what the
+      files are; the ref this tool moved is not the one checked out;
+    * `unmeasured` - a git invocation failed, so no answer exists. Never a match.
+
+    It **measures and never repairs**: bringing the two into step discards local
+    edits, which is the caller's call and not a side effect of a sync.
+    """
+    r = subprocess.run(["git", "rev-parse", "-q", "--verify", "HEAD"], capture_output=True,
+                       text=True, encoding="utf-8", errors="replace", cwd=cwd)
+    if r.returncode != 0:
+        return ("unmeasured", "`git rev-parse HEAD` failed: " + (r.stderr.strip() or "no output"))
+    current = r.stdout.strip()
+    if current != head:
+        return ("elsewhere", current[:7])
+    s = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"],
+                       capture_output=True,
+                       text=True, encoding="utf-8", errors="replace", cwd=cwd)
+    if s.returncode != 0:
+        return ("unmeasured", "`git status --porcelain` failed: " + (s.stderr.strip() or "no output"))
+    changed = [line for line in s.stdout.splitlines() if line.strip()]
+    if changed:
+        return ("differs", str(len(changed)))
+    return ("match", "")
+
+
 def repo_from_origin() -> str:
     # encoding="utf-8": the origin URL is echoed back in SystemExit below, and a
     # clone directory may carry a non-ASCII byte; the locale codec would raise
@@ -505,6 +549,27 @@ def main() -> int:
     for ref in (f"refs/heads/{args.ref}", f"refs/remotes/origin/{args.ref}"):
         subprocess.run(["git", "update-ref", ref, head], check=True)
     print(f"updated refs/heads/{args.ref} and refs/remotes/origin/{args.ref} -> {head[:7]}")
+
+    # The refs are right from here on; the *files* are not, until someone says so.
+    # `update-ref` touches neither the index nor the working tree, so a caller that
+    # reads a file next reads the previous commit's content while `git log` answers
+    # about the new one (issue #2939). Said here, once, in the run that moved them.
+    state, detail = worktree_state(head)
+    if state == "match":
+        print(f"  the index and working tree hold {head[:7]}'s content")
+    elif state == "differs":
+        print(
+            f"  note: {detail} path(s) differ from {head[:7]}. `git reset --hard HEAD` "
+            f"brings them into step, and it DISCARDS local edits - run it only if those "
+            f"differences are this run's doing, not work you have in progress"
+        )
+    elif state == "elsewhere":
+        print(
+            f"  note: HEAD is {detail}, not {head[:7]} - the files in this checkout are "
+            f"{detail}'s content, and the ref this run moved is not the one checked out"
+        )
+    else:
+        print(f"  note: whether the files hold {head[:7]} could not be measured - {detail}")
     return 0
 
 
