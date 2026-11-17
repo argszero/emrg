@@ -1833,3 +1833,125 @@ def test_the_rules_are_re_read_because_they_are_amended_after_publication(render
         "the thread is allowed to override the page, which inverts the authority the section exists "
         "to place — the page is the rule and the thread is where it was corrected"
     )
+
+
+# --- what paces a round's submissions, and what ends a competition ----------------------------
+#
+# Two general rules the template left to each installation, found in three competition tasks'
+# own memory, which had each derived the same arithmetic for its own allowance and each written
+# down its own version of the end condition. Neither is a fact about one installation: the pace
+# follows from the allowance and the day, and the end condition follows from what the platform
+# says about the competition. Asserted against the sections that own the subjects, for the reason
+# the guards above give — this file discusses allowances and archiving in several places, so a
+# whole-document substring check stays green after the section itself is deleted.
+
+
+def _cross_round(text: str) -> str:
+    return _section(text, "### 4. Cross-round state lives in the session and its memory", "### 5.")
+
+
+def test_the_gap_between_batches_is_stated_as_arithmetic(rendered):
+    """§1: the ledger states the gap, so the gap has to be computable.
+
+    The rule that a quota is spent across its period was already here; what was missing is the
+    number, so every installation recomputed it and three competitions derived the same form —
+    `86400 ÷ (n + 1)`, giving 43200 for one submission a day, 7854 for ten, 28800 for two. A rule
+    that says "state the gap" without saying how the gap is computed is a rule each round answers
+    differently.
+    """
+    body = _flat(_assess(rendered))
+    assert "86400 ÷ (n + 1)" in body, (
+        "§1 no longer states the gap as arithmetic, so each round is free to invent its own interval"
+    )
+    assert "43200" in body and "28800" in body, (
+        "the form is stated without a worked value for either end of the range, so a round cannot "
+        "check its own substitution against anything"
+    )
+    assert "rounded **up**" in body, (
+        "an allowance that does not divide the day evenly has no stated rounding direction, and the "
+        "two directions differ by whether the round spends an attempt it meant to keep"
+    )
+    assert "day" in body and "n + 1" in body, (
+        "the reason the divisor is n + 1 rather than n is unstated — the reading window after the "
+        "last spend is what the extra interval buys"
+    )
+    assert "not daily" in body, (
+        "a competition with no daily allowance now has no rule for its gap, which is the case the "
+        "arithmetic cannot answer"
+    )
+
+
+def test_the_allowance_is_read_and_not_inferred_from_the_counter(rendered):
+    """§1: "zero remaining today" is necessarily true after the last spend, whatever `n` is.
+
+    A counter that answers zero for one submission a day and for five cannot distinguish them, so
+    an allowance read from it is a guess wearing the clothes of a reading. The rule names the two
+    admissible sources and keeps the platform's number above the configured one.
+    """
+    body = _flat(_assess(rendered))
+    assert "not an inference from the counter" in body, (
+        "§1 no longer says the allowance is a reading, so inferring it from the counter is licensed "
+        "again"
+    )
+    assert "whatever `n` is" in body or "whatever n is" in body, (
+        "the tautology is not stated, so the reason the counter is inadmissible is left to be "
+        "rediscovered"
+    )
+    assert "accepted submissions across the competition's own days of history" in body, (
+        "the fallback source for an allowance the platform never states is gone"
+    )
+    assert "the platform's governs" in body, (
+        "a configured allowance that disagrees with the platform's is no longer resolved, so both "
+        "numbers stand and every round picks one"
+    )
+
+
+def test_a_competition_ends_on_evidence_and_difficulty_is_not_evidence(rendered):
+    """§4: the archive rule existed and never said what establishes that a competition ended.
+
+    "Ended" is the one judgement that removes a competition from the set every round has to
+    traverse, so it is the judgement most worth pinning to a reading — and the one where the wrong
+    evidence is closest to hand, since a wide gap and a slow lever feel like reasons to stop.
+    """
+    body = _flat(_cross_round(rendered))
+    assert "ended" in body.lower() and "four things" in body, (
+        "the four evidence forms that establish an end are gone, so any progress word can archive a "
+        "competition"
+    )
+    assert "a progress word is not one of them" in body.lower(), (
+        "nothing excludes the status word the rule exists to keep out"
+    )
+    assert "leaves the traversal set" in body, (
+        "§1 still demands an increment from every competition, including one this section archived"
+    )
+    assert "does **not** end a competition is difficulty" in body or "does not end a competition is difficulty" in body, (
+        "the reverse guard is gone: difficulty, field strength and waiting can be read as an end "
+        "again, which is the slowdown §0.0 forbids arriving through another door"
+    )
+    assert "§0.0" in body, (
+        "the link back to the no-slowdown rule is missing, so the same recommendation can pass here "
+        "while being refused there"
+    )
+
+
+def test_a_round_hands_the_stopped_task_to_the_host_rather_than_switching_it_off(rendered):
+    """§4: with every competition ended, the round says so — and does not act on it.
+
+    An empty traversal set has two wrong answers: manufacture an increment to keep the task alive,
+    or switch the task off. The configuration is the host's file, and a round that edits it is
+    doing the thing the cycle's own rules forbid, so the decision is handed over in the summary.
+    """
+    body = _flat(_cross_round(rendered))
+    assert "nothing in the set is live" in body, (
+        "the empty set has no rule, so a round with nothing to do chooses its own answer"
+    )
+    assert "does not manufacture an increment" in body, (
+        "the first wrong answer is not excluded"
+    )
+    assert "does not switch itself off" in body, (
+        "the second wrong answer is not excluded — the template would licence editing the host's "
+        "task configuration"
+    )
+    assert "host's to change" in body, (
+        "the rule does not say whose decision it is, which is the whole content of the hand-over"
+    )
