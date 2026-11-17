@@ -1282,7 +1282,7 @@ def test_the_default_bookmark_falls_back_to_the_name_this_host_writes(
     row = (
         "| project | stamp | read by |\n"
         "| --- | --- | --- |\n"
-        "| `alpha` | 2026-11-18 00:00:00 | `cyc20261118-000000` |\n"
+        f"| `alpha` | {BASE} | `cyc20261118-000000` |\n"
     )
     preferred = root / "preferred.md"
     preferred.write_text(row, encoding="utf-8")
