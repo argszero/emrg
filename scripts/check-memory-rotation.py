@@ -212,9 +212,13 @@ DATE_SHAPED = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}[ T]")
 MEMORY_SUBDIR = (".emrg", "memory")
 SESSIONS_SUBDIR = (".emrg", "sessions")
 
-#: Both defaults are this host's paths. They are defaults rather than required
-#: arguments because step 0 runs every cycle on this installation; any other
-#: layout is reached by naming the two paths, and the report says which it read.
+#: The defaults name **this repository's** layout, which is not every installation's:
+#: measured 2026-11-18, the host that filed issue #2951 keeps its bookmark under the other
+#: name and has never written the one below, and a review of that issue reported the
+#: reverse pairing on a second host. They are defaults rather than required arguments
+#: because step 0 runs every cycle; another layout is reached by naming the two paths -
+#: and, for the bookmark, by `BOOKMARK_FALLBACK` when the default's name is absent - and
+#: the report says which file it read either way.
 DEFAULT_AGENTS = "~/.emrg/agents.yml"
 #: The basename is **host state and stays verbatim**: a test in
 #: `tests/test_check_memory_rotation.py` pins it, because renaming the constant renames no
