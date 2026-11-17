@@ -500,6 +500,28 @@ describe("Composer — 沙箱档位与额外可写根", () => {
   });
 });
 
+describe("Composer — 高度自适应（要求 6：涨到上限后内滚）", () => {
+  /** jsdom 没有布局，`scrollHeight` 恒为 0——所以量到的「内容高度」由测试给定，不写常量进组件 */
+  const withScrollHeight = (el: HTMLTextAreaElement, h: number) => {
+    Object.defineProperty(el, "scrollHeight", { value: h, configurable: true });
+  };
+
+  it("内容变高 → 框跟着长；超过上限 → 停在 150px 并改成内滚", () => {
+    const s = setup(createTranscriptStore());
+    const el = s.input();
+
+    withScrollHeight(el, 80);
+    s.setText("两行字");
+    expect(el.style.height).toBe("80px");
+    expect(el.style.overflowY).toBe("hidden");
+
+    withScrollHeight(el, 400);
+    s.setText("高度超过上限的一整段");
+    expect(el.style.height).toBe("150px");
+    expect(el.style.overflowY).toBe("auto");
+  });
+});
+
 describe("Composer — 草稿持久化（rant 2026-09-01T20:28:31）", () => {
   it("输入 → 草稿实时写入 store", async () => {
     const store = createTranscriptStore();
