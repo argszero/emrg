@@ -1247,3 +1247,68 @@ def test_a_moved_note_belongs_to_the_file_it_was_moved_to(mod, tmp_path):
     assert len(mod.narration_blocks(archive)) == 3, (
         "the moved notes are still notes, of the archive file - if they read as zero there, "
         "moving them out of the bookmark lost them instead of storing them")
+
+
+# ── the default's own name, and the other spelling it falls back to ───────────
+
+
+def test_the_default_bookmark_falls_back_to_the_name_this_host_writes(
+    mod, tmp_path, monkeypatch, capsys
+) -> None:
+    """Issue #2951: the default's file is not one this host writes, so `main([])` never ran.
+
+    Measured 2026-11-18: this checkout keeps its bookmark at `project-memory-bookmark.md`
+    - the name §1.5 and the memory index both use - and has never written the default's
+    name, so the no-argument form answered `not measurable: no bookmark at <that path>`
+    on every cycle. The tool built to end the hand-written step-0 probe could not replace
+    it on the host that ran it.
+
+    The default keeps its value - the basename is host state, and the test above pins that
+    - so the reading is reached by a fallback instead, on the register's own terms. Both
+    directions, because a fallback that never fires and one that always fires look
+    identical from a single arm. The constants are redirected at the module, so no host
+    path is opened.
+    """
+    assert mod.DEFAULT_BOOKMARK.endswith(
+        "/.emrg/memory/project-memory-rotation-bookmark.md"), (
+        "the default's basename is host state; this change must not rename it")
+    assert Path(mod.BOOKMARK_FALLBACK).name == "project-memory-bookmark.md", (
+        "the fallback must name the other spelling of the bookmark: §1.5 and the memory "
+        "index both use this one, and which an installation keeps is its own state")
+
+    root = tmp_path
+    register = root / "agents.yml"
+    register.write_text(f"- name: alpha\n  path: {root / 'alpha'}\n", encoding="utf-8")
+    row = (
+        "| project | stamp | read by |\n"
+        "| --- | --- | --- |\n"
+        f"| `alpha` | {BASE} | `cyc20261118-000000` |\n"
+    )
+    preferred = root / "preferred.md"
+    preferred.write_text(row, encoding="utf-8")
+    fallback = root / "fallback.md"
+    fallback.write_text(row, encoding="utf-8")
+
+    monkeypatch.setattr(mod, "DEFAULT_AGENTS", str(register))
+    monkeypatch.setattr(mod, "LEGACY_AGENTS", str(root / "absent-register.yml"))
+    monkeypatch.setattr(mod, "DEFAULT_BOOKMARK", str(preferred))
+    monkeypatch.setattr(mod, "BOOKMARK_FALLBACK", str(fallback))
+
+    assert mod.main([]) in (0, 1)
+    captured = capsys.readouterr()
+    assert str(preferred) in captured.out, (
+        "the run must say which bookmark it read, and with the default present that is "
+        f"the default: {captured.out}")
+    assert "does not exist - reading" not in captured.err, (
+        "the default is present, so nothing was fallen back to - a note here would say "
+        f"the run read a file it did not: {captured.err}")
+
+    preferred.unlink()
+    assert mod.main([]) in (0, 1)
+    captured = capsys.readouterr()
+    assert str(fallback) in captured.out, (
+        "with the default absent the reading must come from the fallback, and say so: "
+        f"{captured.out}")
+    assert "does not exist - reading" in captured.err, captured.err
+    assert str(fallback) in captured.err, (
+        f"the note must name the file it read instead: {captured.err}")
