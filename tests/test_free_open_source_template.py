@@ -12,9 +12,10 @@ Two subjects, and each is read in both directions:
    evicted to the end, or a level deleted each leaves a template that still reads fine and
    no longer says what the type is for — so the scan is self-tested by performing all
    three on the real text.
-2. **The boundaries.** Write scope, the sandbox tier, the fixed clone location, one
-   repository per cycle, the three things a closing summary names, and the participation
-   record living in session memory rather than a state file.
+2. **The boundaries.** Write scope (the workspace and every clone under it), the sandbox
+   tier, the fixed clone location, the subject being a workspace rather than one
+   repository, one repository per cycle, the three things a closing summary names, and the
+   participation record living in session memory rather than a state file.
 
 Named limit: this reads the template as text. It cannot show that a run obeys the order,
 that the levels resolve against a live account, or that the contributions are any good.
@@ -157,6 +158,16 @@ def test_the_level_scan_needs_the_heading_it_reads() -> None:
 REQUIREMENTS: dict[str, str] = {
     "a workspace rather than one repository, with no agent or record to add":
         "no agent, no task record and no configuration change",
+    # The consequence above is not the claim: a template can still keep "no configuration
+    # change" while saying it faces a single repository, and that template is the one this
+    # type exists to replace. So the subject sentence is named too.
+    "the type's subject is a workspace, not one repository":
+        "**this one faces a workspace**",
+    # The write scope is a boundary of this type, not only the sandbox tier's: covering a
+    # workspace of clones is what makes the scope larger than one repository, and narrowing
+    # it back to a single clone leaves every other sentence reading unchanged.
+    "the write scope is the workspace and every clone under it":
+        "**Never write outside the workspace and the clones under it**",
     "one repository, one contribution, per cycle":
         "**One repository, one contribution, one cycle.**",
     "clones land at a fixed place inside the workspace":
