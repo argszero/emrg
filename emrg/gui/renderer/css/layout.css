@@ -343,57 +343,35 @@
 }
 
 #input,
-.tiptap-input {
+.composer-textarea {
   flex: 1;
+  min-width: 0;
   border: none;
   background: transparent;
   box-shadow: none;
   resize: none;
+  min-height: 1.6em;
+  /* 上限与组件里的 MAX_INPUT_HEIGHT 是同一个数：超过它由 JS 打开内滚 */
   max-height: 150px;
   line-height: 1.6;
   padding: var(--sp-2) 0;
   outline: none;
-  overflow-y: auto;
+  overflow-y: hidden;
   font-family: inherit;
   font-size: inherit;
   color: var(--text-1);
   caret-color: var(--accent);
 }
 #input:focus,
-.tiptap-input:focus,
-.tiptap-input:focus-visible {
+.composer-textarea:focus,
+.composer-textarea:focus-visible {
   border: none;
   box-shadow: none;
   outline: none;
 }
-
-/* tiptap 内容可编辑区内部段落：默认 p 有 margin，输入框内收紧。
-   ⚠️ (rant 2026-08-28T22:26:29) DOM 中 .tiptap-input 与 .ProseMirror 是同一元素
-   （class="tiptap ProseMirror tiptap-input"），非嵌套关系——
-   旧选择器 .tiptap-input .ProseMirror 永不命中 → placeholder 不显示。 */
-.tiptap-input {
-  min-height: 1.6em;
-}
-.tiptap-input p {
-  margin: 0;
-}
-.tiptap-input p.is-editor-empty:first-child {
-  position: relative;
-}
-.tiptap-input p.is-editor-empty:first-child::before {
-  position: absolute;
-  left: 0;
-  top: 0;
-  content: attr(data-placeholder);
+.composer-textarea::placeholder {
   color: var(--text-3);
   pointer-events: none;
-}
-/* 编辑器外层（EditorContent className="composer-editor"）——
-   ⚠️ (rant 2026-08-28T22:26:29) 无 CSS 定义时编辑器只占内容宽度，
-   send-btn 被文本推着走；须 flex:1 撑满 .composer-card。 */
-.composer-editor {
-  flex: 1;
-  min-width: 0;
 }
 
 .composer-hint {
@@ -417,16 +395,13 @@
   line-height: 1.5;
 }
 
-/* ── Stage 2 mini 格式栏（rant 2026-08-28T14:07:29：粗体/斜体/删除线/代码/链接/列表/引用/标题） ── */
-.fmt-bar {
-  display: flex;
-  gap: 2px;
-  padding: 0 var(--sp-2) var(--sp-2);
-}
-.fmt-btn {
+/* ── 附件按钮（issue #2920：粘贴、拖拽之外的第三个入口；不再是格式栏） ── */
+.attach-btn {
+  flex: none;
   min-width: 28px;
-  height: 26px;
-  padding: 0 var(--sp-2);
+  height: 28px;
+  margin-bottom: var(--sp-2);
+  padding: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -441,19 +416,10 @@
     background var(--dur-fast) var(--ease),
     color var(--dur-fast) var(--ease);
 }
-.fmt-btn:hover {
+.attach-btn:hover {
   background: var(--bg-soft);
   color: var(--text-1);
 }
-.fmt-btn.active {
-  background: var(--accent-soft);
-  color: var(--accent);
-}
-.fmt-label-bold { font-weight: 700; }
-.fmt-label-italic { font-style: italic; }
-.fmt-label-strike { text-decoration: line-through; }
-.fmt-label-code { font-family: var(--font-mono, monospace); font-size: 12px; }
-.fmt-label-heading { font-weight: 600; }
 
 /* ── 断连横幅 ───────────────────────────── */
 #conn-banner {

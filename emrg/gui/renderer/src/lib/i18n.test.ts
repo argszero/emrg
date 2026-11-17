@@ -88,11 +88,15 @@ describe("词典完整性守卫（防漂移）", () => {
   // 2026-10-11 issue #2113：device flow 的两个提示串 → 431。
   // 2026-10-22 issue #2490：调度窗口 9 个键（含下限插值）→ 440。
   // 2026-11-09 issue #2774：aitokenpool 账号登录 21 个键 → 465。
-  it("zh/en 各 465 个 key 且完全对齐", () => {
+  // 2026-11-17 issue #2920：输入框改纯文本后，格式栏与链接对话框的 15 个键
+  // （chooseImage / formatBar / bold / italic / strike / code / link / bullet /
+  // bulletList / ordered / orderedList / quote / heading / linkPrompt /
+  // linkDialogTitle）随它们一起删除，附件入口新增 3 个 → 465 - 15 + 3 = 453。
+  it("zh/en 各 453 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(465);
-    expect(enKeys.length).toBe(465);
+    expect(zhKeys.length).toBe(453);
+    expect(enKeys.length).toBe(453);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);

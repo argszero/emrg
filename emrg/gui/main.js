@@ -451,6 +451,19 @@ vision = false
     // GUI 用 sha256 前 8 hex —— 两端同字节的文件名 hash 不同（同一图在 TUI/GUI 各贴
     // 一次会各存一份，功能无碍，仅存储），GUI 自身去重自洽（同字节 → 同文件名 → 跳过写盘）。
     //
+    /**
+     * `<agent>/.emrg/sessions/<id>/<sub>` 的**唯一**构造点。
+     *
+     * 两个 handler（图片、任意文件）落盘到同一个会话目录的两个子目录，路径只能有一份拼法：
+     * `tests/test_session.py` 钉住 GUI 侧「整个 Electron 客户端里只有一处拼出这段路径」，
+     * 与 Python 侧由单一 producer 产出的那条规则对齐。它们共享文件系统、不共享运行时，所以
+     * 这里不可能调用 Python 那份，能做的是不要出现第二份。
+     */
+    function sessionSubdir(sessionId, sub) {
+      const projectRoot = resolveSessionCwd(sessionId) || DEFAULT_CWD;
+      return path.join(projectRoot, ".emrg", "sessions", sessionId, sub);
+    }
+
     // ⚠️ 算法只能从**打包运行时**支持的摘要里选，不能从开发机上的 node 选（issue #2363）：
     // Electron 自带的 Node 编译在 BoringSSL 上，它报的摘要是 md4/md5/ripemd160/sha1/
     // sha224/sha256/sha384/sha512/sha512-256，**没有 blake2b**。这里原本用 blake2b512，
@@ -475,8 +488,7 @@ vision = false
       if (!ext) refuse(`unsupported image type ${mm[1].toLowerCase()}`);
       const buf = Buffer.from(data, "base64");
       if (buf.length === 0) refuse("invalid image data");
-      const projectRoot = resolveSessionCwd(sessionId) || DEFAULT_CWD;
-      const imagesDir = path.join(projectRoot, ".emrg", "sessions", sessionId, "images");
+      const imagesDir = sessionSubdir(sessionId, "images");
       fs.mkdirSync(imagesDir, { recursive: true });
       // 文件名字面清洗镜像 TUI safe_label（. 保留以便 .png 类后缀友好，去尾部 ._）
       const safeLabel = label.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 40).replace(/[._]+$/, "") || "image";
@@ -486,6 +498,43 @@ vision = false
       if (!fs.existsSync(finalPath)) fs.writeFileSync(finalPath, buf); // 同名去重
       logger.info(`[gui:saveImage] ${filename} (${buf.length} bytes)`);
       return { path: finalPath, mime: `image/${mm[1].toLowerCase()}` };
+    });
+
+    // 任意文件附件（issue #2920）：与 `emrg:saveImage` 同一条落盘路径、同一套命名与去重，
+    // 落点从 `images/` 换成 `files/`。
+    //
+    // 分成两个 IPC 而不是一个，是因为两端**拿到的东西不一样**：图片的落盘结果要变成 vision
+    // 内容随消息发给模型（`images[]`），其它文件只是一段路径文字，模型自己用 read 工具去读。
+    // 一个 handler 既返回 mime 又返回路径、由调用方猜哪一半有用，是把两种语义压进一个字段。
+    //
+    // 大小上限与图片同档（~21MB base64）：这里不是安全边界，是「不要因为一次误拖一个
+    // 几个 G 的镜像把 renderer 和 IPC 一起卡住」的护栏。
+    ipcMain.handle("emrg:saveFile", async (_e, { sessionId, data, name, mime } = {}) => {
+      const refuse = (why) => {
+        logger.warn(`[gui:saveFile] refused: ${why}`);
+        throw new Error(why);
+      };
+      if (!validateSessionId(sessionId)) refuse("invalid session_id");
+      if (typeof data !== "string" || !data || data.length > 28_000_000) refuse("invalid file data");
+      if (typeof name !== "string" || !name || name.length > 200) refuse("invalid file name");
+      if (mime !== undefined && (typeof mime !== "string" || mime.length > 200)) refuse("invalid mime");
+      const buf = Buffer.from(data, "base64");
+      if (buf.length === 0) refuse("invalid file data");
+      const filesDir = sessionSubdir(sessionId, "files");
+      fs.mkdirSync(filesDir, { recursive: true });
+      // 原文件名尽量保住（模型与宿主都靠它认文件），字符集与图片同名清洗，长度放宽到 80
+      const safeName =
+        name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 80).replace(/[._]+$/, "") || "file";
+      const dot = safeName.lastIndexOf(".");
+      const stem = dot > 0 ? safeName.slice(0, dot) : safeName;
+      const ext = dot > 0 ? safeName.slice(dot + 1) : "";
+      // 同字节 → 同文件名（与图片同一条去重性质），hash 只能取打包运行时支持的摘要（#2363）
+      const h = crypto.createHash("sha256").update(buf).digest("hex").slice(0, 8);
+      const filename = ext ? `${stem}_${h}.${ext}` : `${stem}_${h}`;
+      const finalPath = path.join(filesDir, filename);
+      if (!fs.existsSync(finalPath)) fs.writeFileSync(finalPath, buf);
+      logger.info(`[gui:saveFile] ${filename} (${buf.length} bytes)`);
+      return { path: finalPath };
     });
 
     // rant 2026-09-30T09:35:04 要求 4：「系统给的图不受白名单所限」。

@@ -41,9 +41,17 @@ export type ParseResult =
   | { type: "command"; cmd: string; args: string[] }
   | { type: "unknown"; cmd: string };
 
+/** 一个指令词的形状：`/` + 单词（不含第二段斜杠、点号等路径特征） */
+const COMMAND_WORD = /^\/[a-z0-9][a-z0-9_-]*$/;
+
 /**
  * 解析输入：/ 开头且匹配注册表 → { type:"command", cmd, args }；
- * / 开头未匹配 → { type:"unknown", cmd }；否则 { type:"message" }。
+ * / 开头的**指令词**未匹配 → { type:"unknown", cmd }；否则 { type:"message" }。
+ *
+ * 「指令词」是 `/` 加一个单词。这条界线是附件逼出来的（issue #2920）：非图片附件落盘后
+ * 正文里就是它的绝对路径，而附着在空输入框里的第一行恰好以 `/` 开头——`/tmp/notes.txt`
+ * 曾被当成一条打错的指令吞掉，宿主看到「未知指令」而不是自己的消息。路径不是指令，所以
+ * 带第二段斜杠或点号的东西一律是消息；`/foobar` 仍然按打错的指令报出来。
  */
 export function parseInput(text: unknown): ParseResult {
   const t = String(text ?? "").trim();
@@ -51,8 +59,10 @@ export function parseInput(text: unknown): ParseResult {
   const [cmd, ...args] = t.split(/\s+/);
   const key = cmd.toLowerCase();
   if (COMMANDS[key]) return { type: "command", cmd: key, args };
+  if (!COMMAND_WORD.test(key)) return { type: "message" };
   return { type: "unknown", cmd: key };
 }
+
 
 /** 解析 i18n hint：词典键 → 当前语言文案（t 由调用方注入，i18n 未就绪时回退键本身） */
 export function hintText(cmd: string, t: TranslateFn): string {

@@ -8,7 +8,6 @@ import {
   imagePlaceholder,
   menuForPrefix,
   menuNavigate,
-  normalizePlaceholders,
   partitionRequeue,
   queueSend,
   resolveSendImages,
@@ -200,25 +199,6 @@ describe("imagePlaceholder / toSafeImageLabel", () => {
     expect(toSafeImageLabel("")).toBe("image");
     expect(toSafeImageLabel("🙂")).toBe("image");
     expect(toSafeImageLabel("a".repeat(60)).length).toBe(40);
-  });
-});
-
-describe("normalizePlaceholders", () => {
-  it("reverts tiptap-markdown backslash-escaped placeholders to literal text", () => {
-    expect(normalizePlaceholders("\\[📷 shot\\] hello", ["[📷 shot]"])).toBe("[📷 shot] hello");
-  });
-
-  it("leaves already-literal placeholders untouched", () => {
-    expect(normalizePlaceholders("[📷 shot] hello", ["[📷 shot]"])).toBe("[📷 shot] hello");
-  });
-
-  it("does not alter unrelated escaped brackets (only known labels)", () => {
-    expect(normalizePlaceholders("\\[keep\\] [📷 a]", ["[📷 a]"])).toBe("\\[keep\\] [📷 a]");
-  });
-
-  it("handles multiple placeholders", () => {
-    const md = "\\[📷 a\\] mid \\[📷 b\\] end";
-    expect(normalizePlaceholders(md, ["[📷 a]", "[📷 b]"])).toBe("[📷 a] mid [📷 b] end");
   });
 });
 
