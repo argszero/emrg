@@ -1842,7 +1842,11 @@ def test_promote_template_registration_blog_sections():
     # B. Blog Publishing section
     assert "Blog Publishing (deep content output)" in out, "Blog Publishing 节应渲染"
     assert "blogger.com / Dev.to / Medium" in out, "博客渠道应渲染"
-    assert "≤1 post/week" in out, "发布节奏 ≤1 篇/周 应渲染"
+    # The cadence the template states now. The superseded `≤1 post/week` survives only in
+    # the note recording why it was replaced, so probing for it read green while the live
+    # rule was absent -- measured by deleting `at least 2 posts/week` from the template and
+    # watching all six promote tests pass.
+    assert "at least 2 posts/week" in out, "发布节奏 至少 2 篇/周 应渲染"
     # B. blog state fields + §0.4 linkage
     assert "blog posts" in out, "状态文件 blog posts 字段应渲染"
     assert "blog drafts" in out, "状态文件 blog drafts 字段应渲染"
