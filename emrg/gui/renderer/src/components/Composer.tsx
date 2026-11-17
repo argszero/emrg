@@ -612,7 +612,10 @@ export function Composer({
         continue;
       }
       const placeholder = imagePlaceholder(display);
-      at = insertRaw(placeholder, at);
+      // 分隔符收在插入里（TUI 同形：`inp.insert(placeholder + "\n")`，`emrg/client/app.py`）：
+      // 两个附件连着落盘时，没有它就拼成一个谁也不是的字面量（`…/a_1.txt…/b_2.txt`），
+      // 模型按这个「路径」去读，两个文件一个都打不开。
+      at = insertRaw(placeholder + "\n", at);
       pendingRef.current = [...pendingRef.current, { path: res.path, label: placeholder, mime: res.mime || mime }];
       setPending(pendingRef.current);
       logRef.current("info", `[composer:attach] image ${res.path}`);
@@ -649,7 +652,9 @@ export function Composer({
         continue;
       }
       logRef.current("info", `[composer:attach] file ${res.path}`);
-      at = insertRaw(res.path, at);
+      // 同 `attachImages` 的分隔符：两个文件连着拖进来时，正文里必须是两个路径，
+      // 不是一个把第二个路径接在第一个末尾的字面量。
+      at = insertRaw(res.path + "\n", at);
     }
     return at;
   }

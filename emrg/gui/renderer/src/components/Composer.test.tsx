@@ -833,7 +833,7 @@ describe("Composer — 任意文件附件（issue #2920 要求 4）", () => {
     await waitFor(() => expect(saveFile).toHaveBeenCalledTimes(1));
     expect(saveFile.mock.calls[0][0]).toMatchObject({ sessionId: "s1", name: "notes.txt", mime: "text/plain" });
     // 模型拿到的是一个路径，不是整份内容——它自己按需读
-    await waitFor(() => expect(s.value()).toBe("/tmp/notes.txt"));
+    await waitFor(() => expect(s.value()).toBe("/tmp/notes.txt\n"));
     expect(saveImage).not.toHaveBeenCalled();
     expect(logLine).toHaveBeenCalledWith("info", expect.stringContaining("[composer:attach] file /tmp/notes.txt"));
   });
@@ -848,7 +848,7 @@ describe("Composer — 任意文件附件（issue #2920 要求 4）", () => {
 
     await waitFor(() => expect(saveFile).toHaveBeenCalledTimes(1));
     expect(saveFile.mock.calls[0][0]).toMatchObject({ name: "dropped.tiff" });
-    await waitFor(() => expect(s.value()).toBe("/tmp/dropped.tiff"));
+    await waitFor(() => expect(s.value()).toBe("/tmp/dropped.tiff\n"));
   });
 
   it("一次拖入多个文件 → 每个都落盘，路径按顺序插进正文", async () => {
@@ -865,7 +865,9 @@ describe("Composer — 任意文件附件（issue #2920 要求 4）", () => {
     );
 
     await waitFor(() => expect(saveFile).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(s.value()).toBe("/tmp/a.txt/tmp/b.csv"));
+    // 两个路径必须是两个路径。没有分隔符时它们拼成 `…/a.txt…/b.csv` —— 一个谁也不是的
+    // 字面量：模型拿它去读，两个文件一个都打不开（TUI 在插入处就补 `"\n"`，两端同形）。
+    await waitFor(() => expect(s.value()).toBe("/tmp/a.txt\n/tmp/b.csv\n"));
   });
 
   it("文件落盘被拒也出声（fileReasonSave），正文里不留路径", async () => {
@@ -893,7 +895,7 @@ describe("Composer — 任意文件附件（issue #2920 要求 4）", () => {
 
     await waitFor(() => expect(saveImage).toHaveBeenCalledTimes(1));
     expect(saveImage.mock.calls[0][0]).toMatchObject({ sessionId: "s1", mime: "image/png", label: "pick" });
-    await waitFor(() => expect(s.value()).toBe("[📷 pick]"));
+    await waitFor(() => expect(s.value()).toBe("[📷 pick]\n"));
     expect(saveFile).not.toHaveBeenCalled();
     expect(logLine).toHaveBeenCalledWith("info", expect.stringContaining("[composer:attach] image /tmp/pick.png"));
   });
@@ -908,7 +910,7 @@ describe("Composer — 任意文件附件（issue #2920 要求 4）", () => {
 
     await waitFor(() => expect(saveFile).toHaveBeenCalledTimes(1));
     expect(saveFile.mock.calls[0][0]).toMatchObject({ name: "picked.csv", mime: "text/csv" });
-    await waitFor(() => expect(s.value()).toBe("/tmp/picked.csv"));
+    await waitFor(() => expect(s.value()).toBe("/tmp/picked.csv\n"));
     expect(saveImage).not.toHaveBeenCalled();
   });
 
@@ -934,7 +936,7 @@ describe("Composer — 任意文件附件（issue #2920 要求 4）", () => {
 
     await waitFor(() => expect(saveImage).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(saveFile).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(s.value()).toBe("[📷 two]/tmp/two.txt"));
+    await waitFor(() => expect(s.value()).toBe("[📷 two]\n/tmp/two.txt\n"));
   });
 });
 
@@ -997,7 +999,7 @@ describe("Composer — 附件随消息发出（issue #2920 要求 3/4）", () =>
     });
 
     s.paste(makeCarrier({ files: [textFile()], types: ["Files"] }));
-    await waitFor(() => expect(s.value()).toBe("/tmp/notes.txt"));
+    await waitFor(() => expect(s.value()).toBe("/tmp/notes.txt\n"));
     s.press("Enter");
 
     await waitFor(() => expect(sent).toHaveLength(1));
