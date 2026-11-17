@@ -1855,9 +1855,11 @@ def test_the_gap_between_batches_is_stated_as_arithmetic(rendered):
 
     The rule that a quota is spent across its period was already here; what was missing is the
     number, so every installation recomputed it and three competitions derived the same form —
-    `86400 ÷ (n + 1)`, giving 43200 for one submission a day, 7854 for ten, 28800 for two. A rule
-    that says "state the gap" without saying how the gap is computed is a rule each round answers
-    differently.
+    `86400 ÷ (n + 1)`: 43200 for one submission a day and 28800 for two, both exact; and 7855 for
+    ten, where the division does not come out — `86400 ÷ 11` is 7854.5…, carried **up** by the
+    rule's direction, because a gap rounded down spends the attempt the rule is trying to keep. A
+    rule that says "state the gap" without saying how the gap is computed is a rule each round
+    answers differently.
     """
     body = _flat(_assess(rendered))
     assert "86400 ÷ (n + 1)" in body, (
