@@ -1,6 +1,6 @@
-// Auto-generated from renderer/js/i18n.js (Batch 1 remainder — full dictionary port).
-// Source of truth: the vanilla DICTS object (373 keys, zh/en parity). Do not hand-edit;
-// regenerate by extracting the DICTS literal from i18n.js.
+// Ported from the vanilla renderer's DICTS object (Batch 1 remainder — full dictionary port).
+// This file is the source of truth now: the vanilla `renderer/js/i18n.js` it was extracted
+// from is gone, so it is edited here, and `i18n.test.ts` holds the count and the zh/en parity.
 
 /** Full zh dictionary (port of i18n.js DICTS.zh) */
 export const ZH_DICT: Record<string, string> = {
