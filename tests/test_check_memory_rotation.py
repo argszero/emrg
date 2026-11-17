@@ -1312,3 +1312,41 @@ def test_the_default_bookmark_falls_back_to_the_name_this_host_writes(
     assert "does not exist - reading" in captured.err, captured.err
     assert str(fallback) in captured.err, (
         f"the note must name the file it read instead: {captured.err}")
+
+
+def test_an_explicit_bookmark_is_never_second_guessed(mod, tmp_path, monkeypatch, capsys):
+    """The fallback belongs to the default alone, exactly as the register's does.
+
+    A caller that named a bookmark asked about that bookmark. Falling back on it would answer a
+    question nobody put, and would hide a mistyped path behind a plausible reading of a different
+    file - the same failure `test_an_explicit_register_is_never_second_guessed` pins one code path
+    over, which this change's clause had no twin for.
+
+    Both directions are asserted, because a fallback that never fires and one that fires
+    everywhere look identical from a single arm. Here the default's name is **absent** and the
+    fallback's file is **present**, so the fallback would fire if the caller's path did not
+    exclude it: the run must report unmeasurable, name the path the caller gave, and name the
+    fallback's file nowhere.
+    """
+    root = _root(tmp_path, "explicit-bookmark")
+    _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 1))
+    register = _agents(tmp_path / "agents.yml", [{"name": "explicit", "path": root}])
+    fallback = _bookmark(tmp_path / "the-other-name.md", [("`explicit`", BASE)])
+
+    monkeypatch.setattr(mod, "DEFAULT_AGENTS", str(register))
+    monkeypatch.setattr(mod, "LEGACY_AGENTS", str(tmp_path / "absent-register.yml"))
+    monkeypatch.setattr(mod, "DEFAULT_BOOKMARK", str(tmp_path / "the-default-name.md"))
+    monkeypatch.setattr(mod, "BOOKMARK_FALLBACK", str(fallback))
+
+    missing = tmp_path / "named-by-caller.md"
+    assert mod.main(["--bookmark", str(missing)]) == 2, (
+        "a bookmark the caller named and that is absent is unmeasurable, not replaced by "
+        "another file")
+
+    captured = capsys.readouterr()
+    assert "not measurable" in captured.err, captured.err
+    assert str(missing) in captured.err, (
+        f"the verdict must name the path the caller gave: {captured.err}")
+    assert str(fallback) not in captured.out and str(fallback) not in captured.err, (
+        "a named path must never be second-guessed: naming the fallback here would mean the "
+        f"run answered about a file the caller did not name: {captured.out}{captured.err}")
