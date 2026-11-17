@@ -484,6 +484,43 @@ def test_a_url_and_an_anchor_are_not_rows_that_point_nowhere(
     assert "row links 0, unresolved: 0" in out
 
 
+def test_a_drive_letter_is_a_path_and_not_a_url(mod) -> None:
+    """A scheme is two characters or more, so `C:` cannot pass for one.
+
+    Measured 2026-11-18: with the one-letter form, `C:/x/a.md` and `C:\\x\\a.md` matched
+    `NON_FILE_TARGET` and were dropped before the resolution reading counted them, so the
+    report said "no row carries a ](target) link" about an index that carried one, and a
+    dead absolute path was never reported. Both directions are asserted, because widening
+    the exemption back would restore the defect while every other test stayed green.
+    """
+    for drive in ("C:/x/a.md", "C:\\x\\a.md", "d:/notes/entry.md"):
+        assert not mod.NON_FILE_TARGET.match(drive), (
+            f"{drive!r} is a path on this machine, not a URL - exempting it means a row "
+            "linking an absolute path is never measured"
+        )
+    for exempt in ("https://example.com/x.md", "mailto:x@y.z", "file:///tmp/a.md", "#head"):
+        assert mod.NON_FILE_TARGET.match(exempt), (
+            f"{exempt!r} is what the exemption list is for; it must still be skipped"
+        )
+
+
+def test_a_missing_absolute_path_is_reported_with_its_line(mod, tmp_path, capsys) -> None:
+    """The consequence of the exemption, end to end: a dead absolute link is a finding.
+
+    The target is spelled as a drive path on every platform, so this leg discriminates on
+    the runner that has drives and still asserts something true where it does not: the
+    string names a file that is not there, and a row pointing at it is a row pointing into
+    nothing.
+    """
+    path = _index(tmp_path, "links.md", ["- [a](C:/definitely/not/here.md)"])
+
+    assert mod.main([str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "row links 1" in out, out
+    assert "C:/definitely/not/here.md" in out, out
+    assert "which is not beside" in out, out
+
+
 def test_several_links_in_one_row_are_all_resolved(mod, tmp_path, capsys) -> None:
     """A hand-written pointer row carries several links; each is a thing to follow.
 

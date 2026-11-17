@@ -380,7 +380,15 @@ CODE_SPAN = re.compile(r"`[^`]*`")
 #: is not this tree's to resolve, and a bare `#anchor` names a heading in the
 #: index itself. Named here as the whole exemption list, because an exemption
 #: that grows silently is how a check becomes vacuous.
-NON_FILE_TARGET = re.compile(r"^(?:[a-z][a-z0-9+.-]*:|#)", re.IGNORECASE)
+#:
+#: A scheme needs **two** characters, which is what keeps a Windows drive letter
+#: out. Measured 2026-11-18: `C:/x/a.md` and `C:\x\a.md` matched the one-letter
+#: form, so an absolute path was exempted as though it were a URL - `row links 0`,
+#: and a summary sentence saying no row carried a link at all. A dead absolute
+#: path then went unreported while the report claimed the reading had no subject.
+#: The schemes this exemption exists for (`https`, `http`, `mailto`, `file`) are
+#: all longer than one letter, so nothing URL-shaped starts being resolved.
+NON_FILE_TARGET = re.compile(r"^(?:[a-z][a-z0-9+.-]+:|#)", re.IGNORECASE)
 
 #: A detail file's frontmatter block: the `---` fence, its body, and the closing fence.
 #: Anchored at the start of the file, because that is where the store renders it
