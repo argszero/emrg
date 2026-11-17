@@ -942,6 +942,67 @@ def test_a_detail_file_no_row_names_is_reported_with_its_name(mod, tmp_path, cap
     assert "detail file a.md" not in out, "the named file must not be reported: " + out
 
 
+# ── the failing summary: the faults it found, not the faults it knows ─────────
+
+
+def test_the_failure_summary_names_the_fault_found_and_no_other(
+    mod, tmp_path, capsys
+) -> None:
+    """A run that finds one fault reports one fault.
+
+    Measured 2026-11-18: an index holding one row for four active detail files printed the
+    fixed sentence naming all four families, three of them contradicted by the lines
+    directly above it (`over 512: 0`, `no table row, so the cell reading had no subject`,
+    `row links 1, unresolved: 0`). The summary is the line a `| tail` takes, so it may not
+    send its reader to three readings that came back clean while the missing rows - the
+    fault that exists - go unmentioned.
+    """
+    _entry(tmp_path, "a.md")
+    _entry(tmp_path, "b.md")
+    path = _index(tmp_path, "index.md", ["# Memory Index", "", "- [A](a.md)"])
+
+    assert mod.main([str(path)]) == 1
+    summary = [line for line in capsys.readouterr().out.splitlines() if line.strip()][-1]
+
+    assert "1 active detail file(s) named by no row" in summary, summary
+    assert "over a number the rule names" not in summary, summary
+    assert "cells do not match" not in summary, summary
+    assert "resolving to no file" not in summary, summary
+
+
+def test_the_failure_summary_names_a_cell_fault_when_that_is_the_fault(
+    mod, tmp_path, capsys
+) -> None:
+    """The other direction on the same line: the family that fired is the one named.
+
+    Without this arm, a summary that named nothing at all would pass the test above - and
+    a failure report that names no fault is the defect inverted, not the fix.
+    """
+    path = _cell_index(tmp_path, "bare.md", ["| a1 | `||` is not a pipe in cmd |"])
+
+    assert mod.main([str(path)]) == 1
+    summary = [line for line in capsys.readouterr().out.splitlines() if line.strip()][-1]
+
+    assert "table row(s) whose cells do not match its header's" in summary, summary
+    assert "over a number the rule names" not in summary, summary
+    assert "named by no row" not in summary, summary
+
+
+def test_the_failure_summary_names_the_number_a_row_passed(mod, tmp_path, capsys) -> None:
+    """And the length family, carrying the bound the row passed rather than the family alone."""
+    bound = mod.INDEX_TITLE_MAX_CHARS
+    _detail(tmp_path, "f.md")
+    path = _index(tmp_path, "long.md", ["# Memory Index", "", _row("tail", bound + 1)])
+
+    assert mod.main([str(path)]) == 1
+    summary = [line for line in capsys.readouterr().out.splitlines() if line.strip()][-1]
+
+    assert "over a number the rule names" in summary, summary
+    assert f"{bound} chars per row" in summary, summary
+    assert "cells do not match" not in summary, summary
+    assert "named by no row" not in summary, summary
+
+
 def test_a_file_named_inside_a_code_span_is_named(mod, tmp_path, capsys) -> None:
     """Named, not linked: a merged row's backticks are the shape the rule prescribes.
 

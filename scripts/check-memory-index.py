@@ -960,13 +960,44 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(summary)
         return 0
 
+    # The failing summary names the faults this run *found*, not the four it could have
+    # found. Its pass-path twin above already appends a coverage clause for every reading
+    # it did not take, because the summary is the line a `| tail` takes; the failing side
+    # needs the same discipline pointed the other way. Measured 2026-11-18: an index
+    # holding one row for four active detail files printed the fixed sentence listing all
+    # four faults, three of them contradicted by the lines directly above it (`over 512:
+    # 0`, `no table row`, `unresolved: 0`), so the one line a reader takes sent them to
+    # three clean readings instead of to the three rows that are missing.
+    faults: list[str] = []
+    over_numbers = [
+        reading
+        for reading in readings
+        if reading.lines > MEMORY_INDEX_ROW_CAP
+        or reading.chars > INDEX_SIZE_WARN
+        or reading.over(INDEX_TITLE_MAX_CHARS)
+    ]
+    if over_numbers:
+        faults.append(
+            f"{len(over_numbers)} of {len(readings)} index(es) over a number the rule "
+            f"names ({MEMORY_INDEX_ROW_CAP} lines, {INDEX_SIZE_WARN} chars, "
+            f"{INDEX_TITLE_MAX_CHARS} chars per row)"
+        )
+    cell_faults = sum(len(reading.cell_faults) for reading in readings)
+    if cell_faults:
+        faults.append(f"{cell_faults} table row(s) whose cells do not match its header's")
+    unresolved_links = sum(len(reading.unresolved()) for reading in readings)
+    if unresolved_links:
+        faults.append(f"{unresolved_links} row link(s) resolving to no file beside it")
+    unnamed = sum(len(reading.unnamed_details) for reading in readings)
+    if unnamed:
+        faults.append(f"{unnamed} active detail file(s) named by no row")
+    # `findings` is built from exactly these four conditions, so a non-zero count here
+    # always yields at least one clause; there is no empty-list case to spell out.
     print(
-        f"{len(findings)} of {len(readings)} index(es) over a number the rule names, "
-        "carrying a row whose cells do not match its header's, carrying a row link "
-        "that resolves nowhere, or naming no row for an active detail file beside it; "
-        "the rule is compacted in "
-        "place, by the agent itself, and a stale row is rewritten or dropped when "
-        "the detail file is gone"
+        f"{len(findings)} of {len(readings)} index(es) with a finding: "
+        + "; ".join(faults)
+        + "; the rule is compacted in place, by the agent itself, and a stale row is "
+        "rewritten or dropped when the detail file is gone"
     )
     return 1
 
