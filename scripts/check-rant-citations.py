@@ -164,6 +164,7 @@ INSTRUCTION_FILES = (
     "emrg/server/competition_prompt.md",   # a task template added 2026-10-03 (#1822)
     "emrg/server/evolution_prompt.md",     # swept: the red line covers the running copy
     "emrg/server/feishu_prompt.md",        # a task template (#2441)
+    "emrg/server/free_open_source_prompt.md",  # a task template added 2026-11-17 (#2929)
     "emrg/server/ios_app_prompt.md",       # a task template added 2026-10-14 (#2251)
     "emrg/server/journal_prompt.md",
     "emrg/server/open_source_prompt.md",
