@@ -653,14 +653,27 @@ _PROGRESS_PAIRED = re.compile(
     r"(?i)\bissues?[ \t]*#(\d+)[^\n]{0,40}?(?:→|->)[ \t]*PR[ \t]*#\d+"
 )
 
-#: The word `issue` and a number **anywhere** on the line: the mention. Wider than both
-#: statement shapes above on purpose, because it answers a different question — not "is this
-#: the pairing?" but "does this entry name an issue at all?". A prose sentence states a
-#: pairing in the one spelling neither shape can tell from a mention (`Merged. Issue #2565
-#: closed by PR #2566`), and a row that answered `no issue yet` to it told the next cycle to
-#: file an issue the entry itself had already named. Reading the mention does not promote it
-#: to the pairing: a number inside a sentence still pairs with nothing, and the row says so.
-_PROGRESS_MENTION = re.compile(r"(?i)\bissues?[ \t]*#(\d+)")
+#: The pairing spelled as prose instead of with an arrow: the word `issue`, the number, and
+#: — within a bounded gap — the pull request that carried it (`Merged. Issue #2565 closed by
+#: PR #2566`). Neither statement shape above reads this one: the anchor wants the token at the
+#: start of the line, and `_PROGRESS_PAIRED` wants its own arrow. So the row said `no issue
+#: yet`, which is an instruction to file one, over a number the entry had written itself.
+#:
+#: **The pull request on the far side is what tells a pairing from a narration**, and that is
+#: the whole discriminator. A cycle also writes sentences into this same field about other
+#: work — `R5 is closed this cycle because issue #2633 is open …` — and that entry has no
+#: issue of its own: its row must still offer the work (`test_a_narrated_number_leaves_the_rant
+#: _looking_unfiled`). Keying on the PR keeps the two apart, because a narration about another
+#: issue does not name the PR that carried anything, while a rewritten pairing keeps the PR
+#: and only loses the arrow. The gap is bounded so the far side has to be this number's own
+#: PR rather than another pairing further along the line.
+#:
+#: This does not promote the number to the pairing: `_progress_issues` still answers `[]` for
+#: the prose form, which two tests pin. What changes is only that the row no longer claims the
+#: entry names nothing.
+_PROGRESS_PAIRED_PROSE = re.compile(
+    r"(?i)\bissues?[ \t]*#(\d+)[^\n]{0,40}?\bPR[ \t]*#\d+"
+)
 
 
 def _progress_issues(progress: object) -> list[int]:
@@ -705,29 +718,33 @@ def _progress_issues(progress: object) -> list[int]:
 
 
 def _progress_mentions(progress: object) -> list[int]:
-    """The numbers an entry's `progress` **names** without stating either pairing shape.
+    """The numbers an entry's `progress` pairs with a PR in prose, without stating a pairing.
 
     The counterpart of `_progress_issues`, and deliberately not folded into it: promoting a
-    mention to the pairing is the defect that test pins against, because a cycle writes
-    "the gate is closed because issue #2633 is open" into this same field and a rant that
-    reads as filed stops moving with nobody deciding to stop it.
+    mention to the pairing is the defect two tests pin against, because a cycle writes "the
+    gate is closed because issue #2633 is open" into this same field and a rant that reads as
+    filed stops moving with nobody deciding to stop it.
 
     What it recovers is the other half of the same fact. `progress` is rewritten whole on
     every status change, so recording a merge turns `issue #2565 → PR #2566 …` into
     `Merged. Issue #2565 closed by PR #2566 …` — every fact kept, the token moved off the
     line's start. Neither statement shape reads that, and `no issue yet` is an instruction
     to file one; over a number the entry itself spelled, that instruction invites the
-    duplicate this row exists to prevent. So the row reports the number as named-and-unpaired
-    instead of as an absence, and the reader decides by opening the issue.
+    duplicate this row exists to prevent. So the row reports the number as paired-in-prose
+    and the reader decides by opening the issue.
+
+    **A number narrated without a PR is not read here at all** — that sentence is about
+    other work, not about this entry, and its row must still offer the work. The PR on the
+    far side is the discriminator; see `_PROGRESS_PAIRED_PROSE`.
 
     A number stated in either shape is never repeated here — the caller renders it in its
-    own state — and `PR #N` is not read as an issue at all, because the word before the
+    own state — and `PR #N` on its own is not read as an issue, because the word before the
     number has to be `issue`.
     """
     text = progress if isinstance(progress, str) else ""
     stated = set(_progress_issues(text))
     seen: list[int] = []
-    for match in _PROGRESS_MENTION.finditer(text):
+    for match in _PROGRESS_PAIRED_PROSE.finditer(text):
         number = int(match.group(1))
         if number not in stated and number not in seen:
             seen.append(number)
@@ -1536,10 +1553,12 @@ def render_rant(rant: Rant) -> str:
     number the API would not resolve, which is a question for the reader, not an absence.
 
     `#N named (not the handle)` is the last one, and it is neither of those: the entry
-    spells the number without stating the pairing (`Merged. Issue #2565 closed by PR
-    #2566`), so the row cannot say the work is filed and must not say it is missing. It
-    names the number and the fact that it is not the handle, and the reader opens the
-    issue — a row that answered `no issue yet` here told the next cycle to file one.
+    spells the pairing in prose instead of in either shape the anchor reads (`Merged. Issue
+    #2565 closed by PR #2566`), so the row cannot say the work is filed and must not say it
+    is missing. It names the number and the fact that it is not the handle, and the reader
+    opens the issue — a row that answered `no issue yet` here told the next cycle to file
+    one. A number narrated without a PR is not this state at all: that sentence is about
+    other work, and its row keeps saying `no issue yet`, which is what asks for the file.
     """
     tokens = [f"#{n}" for n in rant.issues]
     tokens += [f"#{n} closed" for n in rant.closed_issues]

@@ -2710,8 +2710,28 @@ def test_a_pairing_written_in_prose_is_named_not_reported_as_absent(monkeypatch)
 
     The row therefore states the number and that it is not the handle. It does not state
     whether the issue is open: the pairing was never read, so its state was never asked.
+
+    **Both directions, because the rule is keyed on the PR.** A sentence that names a number
+    without one is a narration about other work, and its row must keep offering the work —
+    that is `test_a_narrated_number_leaves_the_rant_looking_unfiled`, which CI caught this
+    change breaking on its first push. So the unit arms below pin the discriminator itself.
     """
     tool = _fresh_tool()
+
+    assert tool._progress_mentions(
+        "Merged. Issue #2565 closed by PR #2566 (squash ffdf65f1)"
+    ) == [2565], "a prose pairing names its issue and its PR"
+    assert tool._progress_mentions(
+        "R5 is closed this cycle because issue #2633 is open, and a rant becomes work "
+        "only by opening its issue first."
+    ) == [], "a narration names a number and no PR, so it is not this entry's pair"
+    assert tool._progress_mentions(
+        "Half 1 (#1086 age alarm): PR #1088 MERGED, issue #1086 CLOSED"
+    ) == [], "a PR before the number is not the number's own PR"
+    assert tool._progress_mentions("merged as PR #2599 only") == [], (
+        "the word before the number has to be `issue`"
+    )
+
     _links(
         monkeypatch,
         tool,
