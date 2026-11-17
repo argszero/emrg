@@ -453,6 +453,24 @@ def test_load_and_start_competition_task(tmp_path):
     assert snapshot["templates"] == {"competition-task": "competition_prompt.md"}
 
 
+def test_load_and_start_free_open_source_task(tmp_path):
+    """`free-open-source` tasks start a TaskHandler with the free-form template.
+
+    Rant 2026-11-17T16:58:18 (issue #2929): the type faces a workspace of clones and picks
+    its own repository, so it differs from `open-source` in its template and in nothing
+    else — the shared TaskHandler is reused. What can be wrong is therefore the wiring, and
+    the failure mode is a crash at start: a type whose template is missing or misnamed.
+    """
+    snapshot = asyncio.run(_boot(tmp_path, [
+        {"name": "free-os-task", "type": "free-open-source",
+         "config": {"agent": "freeos"},
+         "interval": 3600, "enabled": True},
+    ]))
+
+    assert snapshot["coros"] == 2  # the handler plus the reconcile loop
+    assert snapshot["templates"] == {"free-os-task": "free_open_source_prompt.md"}
+
+
 def test_load_and_start_ios_app_task(tmp_path):
     """`ios-app` tasks start a TaskHandler with the `ios-app` template.
 

@@ -1143,6 +1143,9 @@ def test_no_template_names_a_memory_root_other_than_the_two() -> None:
         "competition_prompt.md": 1,
         "evolution_prompt.md": 1,
         "feishu_prompt.md": 0,
+        # Two: the agent memory the workspace holds, and the session memory §1.3 keeps
+        # its two lists in. A floor rather than a count that may drift down.
+        "free_open_source_prompt.md": 2,
         "ios_app_prompt.md": 2,
         "journal_prompt.md": 2,
         "open_source_prompt.md": 3,

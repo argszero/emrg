@@ -194,6 +194,12 @@ TASK_TEMPLATES: dict[str, str] = {
     "evolution": "evolution_prompt.md",
     "paper": "paper_prompt.md",
     "open-source": "open_source_prompt.md",
+    # The free form of the type above: `open-source` binds one task to one repository,
+    # while `free-open-source` faces a workspace of clones and picks its own repository
+    # from five levels of source (rant 2026-11-17T16:58:18, issue #2929). Registered here
+    # like every other built-in type, so the validator accepts it and one table names
+    # every template.
+    "free-open-source": "free_open_source_prompt.md",
     "promote": "promote_prompt.md",
     "journal": "journal_prompt.md",
     "competition": "competition_prompt.md",
