@@ -1842,7 +1842,10 @@ def test_promote_template_registration_blog_sections():
     # B. Blog Publishing section
     assert "Blog Publishing (deep content output)" in out, "Blog Publishing 节应渲染"
     assert "blogger.com / Dev.to / Medium" in out, "博客渠道应渲染"
-    assert "≤1 post/week" in out, "发布节奏 ≤1 篇/周 应渲染"
+    # 发布节奏断言的是模板**现在**写的那条规则，整条一起断言，所以少掉任何一半都会红。
+    # 被取代的 `≤1 post/week` 仍然留在同一条规则里——作为记录「为什么换掉它」的沿革注记——
+    # 所以断言它等于在规则的正文之外报绿：规则被删掉，注记还在，测试照样通过（issue #2926）。
+    assert "1-3 days per post — at least 2 posts/week" in out, "发布节奏规则应渲染：1-3 天一篇，每周至少 2 篇"
     # B. blog state fields + §0.4 linkage
     assert "blog posts" in out, "状态文件 blog posts 字段应渲染"
     assert "blog drafts" in out, "状态文件 blog drafts 字段应渲染"
