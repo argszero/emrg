@@ -718,7 +718,17 @@ def test_every_runnable_guard_comes_back_clean_on_this_checkout(run_guard_once) 
             f"{'says the indexes are within the rule' if within else 'carries no OK line'} "
             f"— the exit code and the reading must be one answer:\n{out}"
         )
-        assert proc.returncode == 0 or "over a number the rule names" in out, (
+        # Both spellings of a finding line, because one guard now has more than one: the
+        # index guard reports the family it found (`with a finding: 3 active detail
+        # file(s) named by no row`), and only its length family still carries the older
+        # `over a number the rule names` phrase. Keying on that phrase alone made this
+        # assertion impossible to satisfy for the other three families - which nothing
+        # noticed while this checkout's index stayed clean, since the first arm carried it.
+        assert (
+            proc.returncode == 0
+            or "over a number the rule names" in out
+            or "with a finding:" in out
+        ), (
             f"{name}: rc=1 must carry that guard's own finding line, or the exit code is "
             f"not a verdict this leg can read:\n{out}"
         )
