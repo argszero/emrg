@@ -389,9 +389,11 @@ def worktree_state(head: str, cwd: str | None = None) -> tuple[str, str]:
     Four answers, and "could not be asked" is one of them:
 
     * `match` - `HEAD` is `head`, and the index and working tree hold its content;
-    * `differs` - `HEAD` is `head` and N path(s) differ from it. This tool cannot
-      tell its own stale index from a caller's uncommitted edits, so it says that
-      rather than choosing;
+    * `differs` - `HEAD` is `head` and N **tracked** path(s) differ from it. This tool
+      cannot tell its own stale index from a caller's uncommitted edits, so it says that
+      rather than choosing. An untracked file is not counted: it is in no commit, so it
+      cannot differ from one, and `git reset --hard HEAD` would not remove it - naming it
+      would make the remedy false for the cause it reported (issue #2939's review);
     * `elsewhere` - `HEAD` is some other commit, named, because that is what the
       files are; the ref this tool moved is not the one checked out;
     * `unmeasured` - a git invocation failed, so no answer exists. Never a match.
@@ -406,7 +408,8 @@ def worktree_state(head: str, cwd: str | None = None) -> tuple[str, str]:
     current = r.stdout.strip()
     if current != head:
         return ("elsewhere", current[:7])
-    s = subprocess.run(["git", "status", "--porcelain"], capture_output=True,
+    s = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"],
+                       capture_output=True,
                        text=True, encoding="utf-8", errors="replace", cwd=cwd)
     if s.returncode != 0:
         return ("unmeasured", "`git status --porcelain` failed: " + (s.stderr.strip() or "no output"))
