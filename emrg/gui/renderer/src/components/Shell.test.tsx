@@ -125,7 +125,7 @@ function deltaFrame(sid: string, text: string): DaemonEventFrame {
   return { type: "message_delta", sid, data: { chunks: [{ request_id: `req-${sid}`, content: text }] } };
 }
 
-/** 向 tiptap 编辑器输入文本（Stage 1：textarea → contenteditable，fireEvent.change 失效） */
+/** 向输入框输入文本（纯文本框：userEvent.type 打真字符，onChange 逐字收） */
 async function typeIntoComposer(text: string) {
   const input = await screen.findByTestId("composer-input");
   await userEvent.type(input, text);
@@ -1087,8 +1087,8 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
   // 有自己的测试（方向键怎么走），Shell 两者都不测 —— 而那几条接线恰恰是上一张 ❌ 点名的
   // 东西：删掉任意一条，其余全套仍然绿。这两条测试就是那些接线的看守。
 
-  /** 编辑器当前文本（tiptap contenteditable 的 textContent） */
-  const composerText = () => screen.getByTestId("composer-input").textContent;
+  /** 输入框当前文本（纯文本框：值在 `value` 上，不在 textContent 上） */
+  const composerText = () => (screen.getByTestId("composer-input") as HTMLTextAreaElement).value;
 
   /** 在输入框上按一个键（Composer 的 handleKeyDown 挂在同一个元素上） */
   function pressInComposer(key: string) {

@@ -11,6 +11,9 @@ const api = {
   sendMessage: (payload) => ipcRenderer.invoke("emrg:sendMessage", payload),
   // rant 2026-09-02T15:23:53：图片落盘（粘贴/拖拽 → base64 → main 写 <cwd>/.emrg/sessions/<sid>/images/）
   saveImage: (payload) => ipcRenderer.invoke("emrg:saveImage", payload),
+  // issue #2920：任意文件附件落盘（同一条路径、另一个目录），返回绝对路径——
+  // 图片走 vision，其它文件只把这行路径放进正文，由模型自己读。
+  saveFile: (payload) => ipcRenderer.invoke("emrg:saveFile", payload),
   // rant 2026-09-30T09:35:04 要求 4：系统给的图不受白名单所限——粘贴收到的是 renderer
   // 解不了的格式（macOS 的 TIFF）时，向 main 要剪贴板里的图（NSImage 解码 → PNG）。
   readClipboardImage: () => ipcRenderer.invoke("emrg:readClipboardImage"),

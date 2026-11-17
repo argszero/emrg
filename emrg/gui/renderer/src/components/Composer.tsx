@@ -1,9 +1,4 @@
-import { useEffect, useRef, useState, type MutableRefObject } from "react";
-import { EditorContent, useEditor, useEditorState, type Editor } from "@tiptap/react";
-import StarterKit from "@tiptap/starter-kit";
-import Placeholder from "@tiptap/extension-placeholder";
-import { Markdown } from "tiptap-markdown";
-import DOMPurify from "../../../vendor/dompurify.min.js";
+import { useEffect, useRef, useState } from "react";
 import { parseInput } from "../lib/commands";
 import {
   CMD_MENU_CLOSED,
@@ -12,10 +7,10 @@ import {
   queueSend,
   imagePlaceholder,
   toSafeImageLabel,
-  collectImageFiles,
+  collectFiles,
+  isImageFile,
   declaredTypes,
   declaresImageOrFile,
-  normalizePlaceholders,
   resolveSendImages,
   type CmdMenuState,
   type ImageAttach,
@@ -24,24 +19,23 @@ import {
 import { genRequestId } from "../lib/utils";
 import { useI18n } from "../lib/i18n";
 import type { TranscriptStore } from "../lib/transcript";
-import { LinkDialog } from "./LinkDialog";
 
 /**
- * Composer — 输入框 + / 补全菜单 + 发送流（tiptap 版，rant 2026-08-28T14:07:29 Stage 1）。
+ * Composer — 输入框 + / 补全菜单 + 发送流（issue #2920：纯文本）。
  *
- * Stage 1 = 编辑器核心替换：textarea → @tiptap/react 内容可编辑编辑器
- * （StarterKit + Link + Placeholder + tiptap-markdown 序列化）。
- * - 序列化（rant 核心原则）：发送时 editor.storage.markdown.getMarkdown() 出 markdown
- *   字符串，走现有 sendMessage 路径。history.jsonl / 协议层 / TUI 零改动；
- *   存储仍是 markdown str，双端渲染不变。
- * - 保留现有功能：Enter=发送 / Shift+Enter=换行（hardBreak）/ Ctrl+Enter=发送、
- *   / 补全菜单（editor.onUpdate + keydown 拦截）、高度自适应 ≤150px（CSS max-height）、
- *   G143 requestId 预生成、P2 busy 队列注入（#655）、失败恢复（setContent 回填 markdown）。
- * - Stage 2（本 cycle）：mini 格式栏（粗体/斜体/删除线/行内代码/链接/无序/有序/引用/标题）
- *   + 格式快捷键（⌘B/I/⇧S/E/K/⇧7/⇧8/⇧B/Alt 1-3——K/⇧7/⇧8 为显式补挂，其余 StarterKit 内置）
- *   + DOMPurify 粘贴净化（transformPastedHTML 拦截 HTML 粘贴路径，防恶意脚本）。
- * - sendMessage 注入式（测试传假实现；默认 window.emrg.sendMessage）。
- * - 类名与 vanilla 一致（composer-card / cmd-menu / cmd-menu-item / send-btn）。
+ * 这个框的用途是把宿主想说的话原样打进去、原样发出去。它此前是一个 markdown 富文本
+ * 编辑器（tiptap + tiptap-markdown）：字被当格式渲染、发送前先序列化再补一道反转义、
+ * 粘贴来回改写字符——三件事都与「原样」相反。现在它是一个 `<textarea>`：不解析、不渲染、
+ * 不转义，发送的字符串就是框里的字符串。
+ *
+ * 图片插在文字中间这件事与富文本无关，只是当年搭在富文本上：现在它是一段字面标记
+ * `[📷 label]`，落在光标处，三个入口（粘贴 / 拖拽 / 选择文件）都走同一条落盘路径。
+ * 任意文件同样三个入口，区别只在结尾——图片按视觉交给模型（vision 内容），其它文件落盘
+ * 后把**路径**写进正文，模型自己用 read 工具去读。
+ *
+ * 保留的行为一条都没动（每条都有测试）：Enter 发送 / Shift+Enter 换行 / 开头 `/` 唤起
+ * 补全 / ↑↓ 召回历史 / 草稿实时保存与恢复 / 高度自适应到上限后内滚 / 发送失败回填 /
+ * busy 时排队。格式栏、格式快捷键与链接对话框随 markdown 编辑体验一起删除。
  */
 
 export interface SendOptions {
@@ -66,6 +60,17 @@ export interface SaveImagePayload {
 export interface SaveImageResult {
   path: string;
   mime?: string;
+}
+/** emrg:saveFile 入参（issue #2920：任意文件，保留原名以便认得出来） */
+export interface SaveFilePayload {
+  sessionId?: string | null;
+  data: string;
+  name: string;
+  mime?: string;
+}
+/** emrg:saveFile 返回值（落盘路径——这一行就是模型读它所需的全部） */
+export interface SaveFileResult {
+  path: string;
 }
 /**
  * emrg:readClipboardImage 返回值——剪贴板里的图，已由 main 归一为 PNG（rant
@@ -93,6 +98,8 @@ export interface ComposerProps {
   sendMessage?: (opts: SendOptions) => Promise<SendResult>;
   /** 注入图片落盘函数（默认 window.emrg.saveImage；测试传假实现） */
   saveImage?: (payload: SaveImagePayload) => Promise<SaveImageResult>;
+  /** 注入文件落盘函数（默认 window.emrg.saveFile；测试传假实现） */
+  saveFile?: (payload: SaveFilePayload) => Promise<SaveFileResult>;
   /**
    * 注入剪贴板读图函数（默认 window.emrg.readClipboardImage；测试传假实现）。
    * 只在粘贴路径上、且事件里没有任何**本端能直接收**的图片时使用：macOS 给的
@@ -102,7 +109,7 @@ export interface ComposerProps {
   readClipboardImage?: () => Promise<ClipboardImage | null>;
   /**
    * 注入日志函数（默认 preload 的 window.emrg.log → ~/.emrg/emrg-gui.log）。
-   * 图片路径的每一次成功/拒绝都要留痕（rant 2026-09-30T09:35:04 要求 3）：
+   * 图片/文件路径的每一次成功与拒绝都要留痕（rant 2026-09-30T09:35:04 要求 3）：
    * 该功能上线至今 IPC 一次没被走到，而日志里查不出为什么——因为拒绝全被吞了。
    */
   logLine?: (level: string, msg: string) => void;
@@ -172,8 +179,6 @@ export interface ComposerProps {
    * 不传 = 不渲染入口（单挂载/单测），与 `onSandboxChange` 的约定一致。
    */
   onManageSandboxRoots?: () => void;
-  /** 测试注入：挂载后回填 tiptap Editor 实例（命令驱动测试用） */
-  editorRef?: MutableRefObject<Editor | null>;
   /**
    * 把一段文本放进输入框（issue #2384，GUI 半边）。
    *
@@ -185,6 +190,7 @@ export interface ComposerProps {
   insertRequest?: { id: number; text: string } | null;
 }
 
+/** 输入框的高度上限：超过它就内滚（CSS 与这里读的是同一个数） */
 const MAX_INPUT_HEIGHT = 150;
 
 /** 沙箱三档（rant 2026-08-20T18:18，vanilla mode-switcher 同款；重构回归恢复） */
@@ -202,7 +208,7 @@ function sanitizeSandbox(v: string | null | undefined): SandboxTier | null {
  *
  * 它是一条快路径，不是「系统给什么」的边界（rant 2026-09-30T09:35:04 要求 4）：名单外的
  * 图片不再是静默丢弃，而是先请 main 把剪贴板里的图归一成 PNG，只有那一步也拿不到才拒绝。
- * 提到模块级是为了让 `attachImages` 与粘贴入口读**同一份**名单——两份名单必然漂移。
+ * 提到模块级是为了让图片落盘与粘贴入口读**同一份**名单——两份名单必然漂移。
  */
 const SUPPORTED_IMAGE_MIME: ReadonlySet<string> = new Set([
   "image/png",
@@ -227,32 +233,17 @@ function base64Bytes(b64: string): ArrayBuffer {
   return buf;
 }
 
-/** 格式命令（Stage 2）：以 editor 为参的纯函数——editor 单例闭包经 fmtRef 桥接给按钮/快捷键 */
-function cycleHeading(ed: Editor | null): void {
-  if (!ed) return;
-  // tiptap v3 isActive/getAttributes 在混合选区（heading + 尾随空段落）不可靠 →
-  // 从选区起点所在块节点直接读级别（toggleHeading 会把末块转标题并追加尾随空段落）
-  const { from } = ed.state.selection;
-  const parent = ed.state.doc.resolve(from).parent;
-  const level = parent.type.name === "heading" ? (parent.attrs.level as number) : 0;
-  const next = level >= 3 ? 0 : level + 1; // p → h1 → h2 → h3 → p
-  if (next === 0) ed.chain().focus().setParagraph().run();
-  else ed.chain().focus().toggleHeading({ level: next as 1 | 2 | 3 }).run();
+/**
+ * 一批待落盘的附件（issue #2920）。三个字段对应三条互不相同的结尾：
+ * - `images` —— 本端能直接收的图 → `emrg:saveImage` → 正文一段 `[📷 label]` + vision 内容；
+ * - `askClipboard` —— 事件里没有能直接收的图（macOS 的 TIFF 就是这个形状）→ 先问 main 要剪贴板里的图；
+ * - `files` —— 其它一切 → `emrg:saveFile` → 正文里一行落盘路径。
+ */
+interface AttachPlan {
+  images?: File[];
+  files?: File[];
+  askClipboard?: { declared: string[]; refused: string[] } | null;
 }
-
-/** 格式栏按钮定义（id → 命令 + 标签类 + i18n key） */
-const FMT_BUTTONS = [
-  { id: "bold", label: "B", labelClass: "fmt-label-bold" },
-  { id: "italic", label: "I", labelClass: "fmt-label-italic" },
-  { id: "strike", label: "S", labelClass: "fmt-label-strike" },
-  { id: "code", label: "</>", labelClass: "fmt-label-code" },
-  { id: "link", label: "🔗", labelClass: "" },
-  { id: "bullet", label: "•", labelClass: "" },
-  { id: "ordered", label: "1.", labelClass: "" },
-  { id: "quote", label: "❝", labelClass: "" },
-  { id: "heading", label: "H", labelClass: "fmt-label-heading" },
-] as const;
-
 
 export function Composer({
   store,
@@ -261,6 +252,7 @@ export function Composer({
   busy: busyProp,
   sendMessage: send,
   saveImage: saveImageProp,
+  saveFile: saveFileProp,
   readClipboardImage: readClipboardProp,
   logLine: logLineProp,
   cancel: cancelProp,
@@ -270,15 +262,15 @@ export function Composer({
   inputHistory = null,
   onPromptSent,
   onManageSandboxRoots,
-  editorRef,
   insertRequest = null,
 }: ComposerProps) {
   const { t } = useI18n();
   const [menu, setMenu] = useState<CmdMenuState>(CMD_MENU_CLOSED);
+  const [text, setText] = useState("");
   const [hasText, setHasText] = useState(false);
   const [internalBusy, setInternalBusy] = useState(false);
   const busy = busyProp ?? internalBusy;
-  // busy 的 ref 桥接（keydown 一次性闭包内读实时 busy——Esc 停止判断，rant 2026-09-02T20:30:05）
+  // busy 的 ref 桥接（keydown 闭包内读实时 busy——Esc 停止判断，rant 2026-09-02T20:30:05）
   const busyRef = useRef(busy);
   busyRef.current = busy;
   // 沙箱档位（重构回归恢复，rant 2026-08-30T16:34:29）：默认 workspace-write（vanilla 同款），
@@ -294,32 +286,29 @@ export function Composer({
     if (parentOwnsTier) onSandboxChange?.(next);
     else setLocalTier(next);
   };
-  // ⚠️ (rant 2026-08-28T22:27:01) 链接改用应用内对话框收集 URL（Electron 禁用 window.prompt）
-  const [linkDialogOpen, setLinkDialogOpen] = useState(false);
-  const [linkHref, setLinkHref] = useState("");
   const queuedRef = useRef<Map<string, Array<{ requestId: string; text: string; sandbox?: string | null; images?: ImageAttach[] | null }>>>(new Map());
   // 图片附加（rant 2026-09-02T15:23:53）：pending 语义对齐 TUI _pending_images——
-  // 占位符删除即弃图（发送时 filter）；ref 镜像供 tiptap 一次性闭包读写
+  // 占位符删除即弃图（发送时 filter）；ref 是同步副本（异步落盘期间文本可能又被改动）
   const [pending, setPending] = useState<ImageAttach[]>([]);
   const pendingRef = useRef<ImageAttach[]>([]);
-  const attachRef = useRef<(files: File[], at?: number | null) => void>(() => {});
-  const insertRawRef = useRef<(text: string, at?: number | null) => void>(() => {});
-  /** 隐藏的选图入口（rant 2026-09-30T09:35:04 缺口 1：此前 renderer 里没有任何
-   * `input type="file"`，所以「选择图片插入」这条入口根本不存在）。它不新增落盘
-   * 路径——选中的 File 直接交给 attachRef，与粘贴/拖拽走同一条 attachImages。 */
+  const attachRef = useRef<(plan: AttachPlan, at?: number | null) => void>(() => {});
+  /** 隐藏的附件入口（粘贴、拖拽之外的第三个）。issue #2920 起它不再只收图片：`accept`
+   * 去掉了，图片与任意文件都从这里进来，落盘走两条 IPC、正文里留两种东西。 */
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  // tiptap 选项闭包只创建一次 → 变化值走 ref 桥接（menu/submit/selectCmd/t）
+  const taRef = useRef<HTMLTextAreaElement | null>(null);
+  // 输入框内容的同步副本：异步落盘回调在 await 之后要读「现在的文本」，不能读闭包里那份
+  const textRef = useRef(text);
   const menuRef = useRef(menu);
   menuRef.current = menu;
   const tRef = useRef(t);
   tRef.current = t;
-  // 草稿读写（rant 2026-09-01T20:28:31）：useEditor 闭包只创建一次 → store/sid 走 ref 桥接
+  // 草稿读写（rant 2026-09-01T20:28:31）：store/sid 走 ref 桥接
   const storeRef = useRef(store);
   storeRef.current = store;
   const sidRef = useRef(sid);
   sidRef.current = sid;
   // 输入历史召回（issue #2349 part 2/2）：列表来自 daemon（per-session、耐久、跨客户端），
-  // 本组件只走指针。这三样都是 tiptap 一次性闭包内的活动状态，所以走 ref 桥接：
+  // 本组件只走指针：
   //   * inputHistoryRef —— prop 的实时镜像（列表随会话切换、或 daemon 重新读过而变）；
   //   * historyIndexRef —— 当前召回位置，-1 = 未在召回中；
   //   * historySavedRef —— 第一次按 ↑ 之前宿主正在写的那份草稿，走到最新一条再按 ↓ 时还给他。
@@ -331,19 +320,8 @@ export function Composer({
   // 那一刻要用的是最新的父级实现。
   const onPromptSentRef = useRef(onPromptSent);
   onPromptSentRef.current = onPromptSent;
-  // 格式命令 ref 桥接（editor/菜单闭包只创建一次 → 变化值走 ref）
-  const fmtRef = useRef<Record<string, () => void>>({});
-  fmtRef.current = {
-    bold: () => editor?.chain().focus().toggleBold().run(),
-    italic: () => editor?.chain().focus().toggleItalic().run(),
-    strike: () => editor?.chain().focus().toggleStrike().run(),
-    code: () => editor?.chain().focus().toggleCode().run(),
-    bullet: () => editor?.chain().focus().toggleBulletList().run(),
-    ordered: () => editor?.chain().focus().toggleOrderedList().run(),
-    quote: () => editor?.chain().focus().toggleBlockquote().run(),
-    heading: () => cycleHeading(editor),
-    link: () => openLinkDialog(),
-  };
+  /** 插入后把光标放回去（渲染之后才能设：受控 textarea 的值在这一帧才更新） */
+  const caretAfterRenderRef = useRef<number | null>(null);
 
   // 发送函数解析（默认走 preload 桥）
   const sendFn =
@@ -373,6 +351,15 @@ export function Composer({
   const saveRef = useRef(saveFn);
   saveRef.current = saveFn;
 
+  // 文件落盘函数解析（issue #2920：默认走 preload 桥 emrg:saveFile）
+  const saveFileFn =
+    saveFileProp ??
+    ((payload: SaveFilePayload) =>
+      (window as unknown as { emrg?: { saveFile?: (p: SaveFilePayload) => Promise<SaveFileResult> } }).emrg
+        ?.saveFile?.(payload) ?? Promise.reject(new Error("window.emrg.saveFile unavailable")));
+  const saveFileRef = useRef(saveFileFn);
+  saveFileRef.current = saveFileFn;
+
   // 剪贴板读图解析（rant 2026-09-30T09:35:04 要求 4：默认走 preload 桥
   // emrg:readClipboardImage）。缺桥（jsdom / 旧 preload）→ reject，由调用方变成可见提示。
   const readClipboardFn =
@@ -395,231 +382,76 @@ export function Composer({
     });
   const logRef = useRef(logFn);
   logRef.current = logFn;
-  /** 图片路径的可见拒绝（rant 要求 3：每次拒绝都要看得见，且有对称的日志行） */
-  const [imageNotice, setImageNotice] = useState<string | null>(null);
-  const refuseImage = (key: string, params?: Record<string, unknown>): void => {
+  /** 附件路径的可见拒绝（要求 3：每次拒绝都要看得见，且有对称的日志行） */
+  const [notice, setNotice] = useState<string | null>(null);
+  const refuse = (key: string, params?: Record<string, unknown>): void => {
     const msg = tRef.current(key, params);
-    setImageNotice(msg);
-    logRef.current("warn", `[composer:image] refused: ${msg}`);
+    setNotice(msg);
+    logRef.current("warn", `[composer:attach] refused: ${msg}`);
   };
-  // tiptap 一次性闭包内读写 editor 的桥（editor 变量在 useEditor 之后才声明）
-  const editorBoxRef = useRef<Editor | null>(null);
 
-  const editor = useEditor({
-    extensions: [
-      StarterKit.configure({ link: { openOnClick: false } }),
-      Placeholder.configure({ placeholder: tRef.current("composer.placeholder") }),
-      Markdown,
-    ],
-    content: "",
-    editorProps: {
-      attributes: {
-        class: "tiptap-input",
-        "data-testid": "composer-input",
-        "aria-label": tRef.current("composer.placeholder"),
-      },
-      handleKeyDown: (_view, event) => {
-        // / 补全菜单键盘导航（vanilla rant 19:44 P1）：↑↓ 移动、Enter 选择、Esc 关闭
-        const m = menuRef.current;
-        if (m.items.length > 0) {
-          if (event.key === "ArrowDown") {
-            event.preventDefault();
-            setMenu(menuNavigate(m, 1));
-            return true;
-          }
-          if (event.key === "ArrowUp") {
-            event.preventDefault();
-            setMenu(menuNavigate(m, -1));
-            return true;
-          }
-          if (event.key === "Enter" && !event.shiftKey) {
-            event.preventDefault();
-            const item = m.items[m.index];
-            if (item) selectCmdRef.current(item.cmd);
-            return true;
-          }
-          if (event.key === "Escape") {
-            event.preventDefault();
-            setMenu(CMD_MENU_CLOSED);
-            return true;
-          }
-        }
-        // 输入历史召回（issue #2349 part 2/2，GUI 半边）：↑ 往回走、↓ 往前走到最新一条再
-        // 一次就还回草稿。三条边界与 TUI 同语义，且都不是"顺手"能对的：
-        //   1. **只在可视行的边界上**——`endOfTextblock` 问的是"这个方向还能不能在本段落
-        //      里移动光标"，所以多行草稿内部的方向键仍然是光标移动，召回只在首行按 ↑ /
-        //      末行按 ↓ 时发生；
-        //   2. **未在召回中时 ↓ 什么也不做**——否则往下一行打字会突然吞掉光标；
-        //   3. **草稿先存再覆盖**，并在走过最新一条之后原样还回去。
-        // 列表为 null（还没问过 daemon）或空（这个会话没输入过）时一律放行，于是"读不到
-        // 历史"和"历史是空的"在键盘上表现一致，正是宿主感受到的那个事实。
-        if (event.key === "ArrowUp" || event.key === "ArrowDown") {
-          const list = inputHistoryRef.current;
-          const box = editorBoxRef.current;
-          const up = event.key === "ArrowUp";
-          if (!list || list.length === 0 || !box) return false;
-          if (!box.view.endOfTextblock(up ? "up" : "down")) return false;
-          const cur = historyIndexRef.current;
-          // ↓ 且不在召回中：光标照常下移。
-          if (!up && cur < 0) return false;
-          const next = up
-            ? cur < 0
-              ? list.length - 1
-              : Math.max(0, cur - 1)
-            : cur + 1 < list.length
-              ? cur + 1
-              : -1;
-          event.preventDefault();
-          historyIndexRef.current = next;
-          if (next < 0) {
-            // 走过最新一条：召回结束，草稿原样回来（空草稿就是清空框）。
-            box.commands.setContent(historySavedRef.current);
-            historySavedRef.current = "";
-          } else {
-            if (cur < 0) {
-              const draft = (
-                box.storage as unknown as { markdown: { getMarkdown(): string } }
-              ).markdown.getMarkdown();
-              historySavedRef.current = normalizePlaceholders(
-                draft,
-                pendingRef.current.map((p) => p.label),
-              );
-            }
-            box.commands.setContent(list[next]);
-          }
-          // 召回文本的末尾是宿主下一步要接着打的地方。
-          box.commands.focus("end");
-          return true;
-        }
-        // Escape 停止回复（rant 2026-09-02T20:30:05：busy 时副入口，对齐 TUI ESC 中断肌肉记忆）。
-        // 菜单开着时上方分支已拦截 Esc 只关菜单不误停；非 busy 时 Esc 放行（无副作用）。
-        if (event.key === "Escape" && busyRef.current) {
-          event.preventDefault();
-          stopRef.current();
-          return true;
-        }
-        // Enter（非 Shift）与 Ctrl+Enter 同发送（Ctrl+Enter 的 ctrlKey 不影响首分支）；
-        // Shift+Enter 交给 tiptap hardBreak（换行）
-        if (event.key === "Enter" && !event.shiftKey) {
-          event.preventDefault();
-          void submitRef.current();
-          return true;
-        }
-        // 格式快捷键（Stage 2）：K/⇧7/⇧8 无内置绑定 → 显式补挂；其余（B/I/⇧S/E/⇧B/Alt 1-3）
-        // 由 StarterKit 内置 keymap 处理（这里 return false 放行）
-        const mod = event.metaKey || event.ctrlKey;
-        if (mod && event.code === "Digit8" && event.shiftKey) {
-          event.preventDefault();
-          fmtRef.current.bullet();
-          return true;
-        }
-        if (mod && event.code === "Digit7" && event.shiftKey) {
-          event.preventDefault();
-          fmtRef.current.ordered();
-          return true;
-        }
-        if (mod && event.key.toLowerCase() === "k") {
-          event.preventDefault();
-          fmtRef.current.link();
-          return true;
-        }
-        return false;
-      },
-      // Stage 2 粘贴安全：HTML 粘贴路径经 DOMPurify 净化（script/事件属性剥离；
-      // tiptap-markdown 的纯文本粘贴分支本身无 HTML 注入面）
-      transformPastedHTML: (html) => DOMPurify.sanitize(html),
-      // rant 2026-09-02T15:23:53：剪贴板图片粘贴——同带 text/plain 先插文本
-      // （对齐 TUI「文本粘贴后追加图」），图片逐张走「附加图片」落盘 + 占位符
-      // rant 2026-09-30T09:35:04：①两个面都取（files + items），②拒绝出声
-      handlePaste: (_view, event) => {
-        const cd = event.clipboardData as unknown as ImageCarrier | null;
-        if (!cd) return false;
-        setImageNotice(null);
-        const imgs = collectImageFiles(cd);
-        const types = declaredTypes(cd);
-        const text = (cd as unknown as DataTransfer).getData("text/plain");
-        const ed = editorBoxRef.current;
-        // 要求 4：事件里没有**本端能直接收**的图，不等于剪贴板里没有图——macOS 给的
-        // TIFF 正是这一种。先请 main 把剪贴板里的图归一成 PNG（有 NSImage 的一侧），
-        // 再走同一条 attach 路径；名单外的图因此不再以「拒绝」收场。
-        //
-        // 只在**一张都收不了**时才走这条：混合粘贴（png + tiff）里 png 已能直接落盘，
-        // 再取一次剪贴板会把同一张图重复附加。
-        if (imgs.filter(isSupportedImage).length === 0 && (imgs.length > 0 || declaresImageOrFile(types))) {
-          event.preventDefault();
-          let at: number | null = null;
-          if (text && ed) {
-            const from = ed.state.selection.from;
-            insertRawRef.current(text, from);
-            at = from + text.length;
-          }
-          clipboardAttachRef.current(types, imgs.map((f) => f.type || "(no type)"), at);
-          return true;
-        }
-        if (imgs.length === 0) return false;
-        event.preventDefault();
-        if (text && ed) {
-          const from = ed.state.selection.from;
-          insertRawRef.current(text, from);
-          attachRef.current(imgs, from + text.length);
-        } else {
-          attachRef.current(imgs, null);
-        }
-        return true;
-      },
-      // rant 2026-09-02T15:23:53：拖拽图片文件进输入区
-      handleDrop: (_view, event) => {
-        const dt = event.dataTransfer as unknown as ImageCarrier | null;
-        if (!dt) return false;
-        setImageNotice(null);
-        const imgs = collectImageFiles(dt);
-        if (imgs.length === 0) return false;
-        event.preventDefault();
-        attachRef.current(imgs, null);
-        return true;
-      },
-    },
-    onUpdate: ({ editor }) => {
-      const text = editor.getText();
-      const trimmed = text.trim();
-      setHasText(trimmed.length > 0);
-      // / 指令补全：以 / 开头且无空格（仍处于指令词）→ 弹出菜单
-      if (trimmed.startsWith("/") && !trimmed.includes(" ")) setMenu(menuForPrefix(trimmed, tRef.current));
-      else setMenu(CMD_MENU_CLOSED);
-      // 草稿持久化（rant 2026-09-01T20:28:31）：实时写 store（markdown 序列化），
-      // 切视图（组件卸载）不丢；发送后 clearContent → onUpdate 空内容 → 草稿自动清空
-      const md = (editor.storage as unknown as { markdown: { getMarkdown(): string } }).markdown.getMarkdown();
-      storeRef.current.setComposerDraft(md, sidRef.current);
-    },
-    onCreate: ({ editor }) => {
-      setHasText(!editor.isEmpty);
-      // 草稿恢复（rant 2026-09-01T20:28:31）：重挂载后经 tiptap-markdown setContent 解析回填
-      const d = storeRef.current.getComposerDraft(sidRef.current);
-      if (d) {
-        editor.commands.setContent(d);
-        setHasText(true);
-      }
-    },
-    immediatelyRender: false,
+  /** 光标位置（没有元素时落到末尾） */
+  const caretNow = (): number => taRef.current?.selectionStart ?? textRef.current.length;
+
+  /**
+   * 写入输入框内容。**同步先写 ref 再写 state**：一次点击可能连着插两段（先文本、后图片
+   * 标记），后一段必须看见前一段——state 要等下一帧，ref 不等。
+   */
+  function applyText(next: string, caret?: number | null): void {
+    textRef.current = next;
+    setText(next);
+    setHasText(next.trim().length > 0);
+    const trimmed = next.trim();
+    // / 指令补全：以 / 开头且无空格（仍处于指令词）→ 弹出菜单
+    if (trimmed.startsWith("/") && !trimmed.includes(" ")) setMenu(menuForPrefix(trimmed, tRef.current));
+    else setMenu(CMD_MENU_CLOSED);
+    // 草稿持久化（rant 2026-09-01T20:28:31）：实时写 store，切视图（组件卸载）不丢
+    storeRef.current.setComposerDraft(next, sidRef.current);
+    if (caret != null) caretAfterRenderRef.current = caret;
+  }
+
+  /** 在光标处（或 `at` 处）原样插入一段字面文本，返回插入后的位置 */
+  function insertRaw(chunk: string, at?: number | null): number {
+    const cur = textRef.current;
+    const pos = Math.max(0, Math.min(at ?? caretNow(), cur.length));
+    applyText(cur.slice(0, pos) + chunk + cur.slice(pos), pos + chunk.length);
+    return pos + chunk.length;
+  }
+
+  // 高度自适应（≤ MAX_INPUT_HEIGHT，之后内滚）+ 插入后的光标复位。
+  // 无依赖数组 = 每次渲染都量一次：内容只可能随渲染变，量早了用的是上一帧的高度。
+  useEffect(() => {
+    const el = taRef.current;
+    if (el) {
+      el.style.height = "auto";
+      const content = el.scrollHeight || 0;
+      el.style.height = `${Math.min(content, MAX_INPUT_HEIGHT)}px`;
+      el.style.overflowY = content > MAX_INPUT_HEIGHT ? "auto" : "hidden";
+    }
+    const caret = caretAfterRenderRef.current;
+    if (caret != null && el) {
+      caretAfterRenderRef.current = null;
+      el.focus();
+      el.setSelectionRange(caret, caret);
+    }
   });
 
-  // 会话切换：保存旧会话草稿 → 载入新会话草稿（组件不卸载，editor 复用）
+  // 草稿恢复（rant 2026-09-01T20:28:31）：挂载后把这份会话的草稿放回来
+  useEffect(() => {
+    const d = storeRef.current.getComposerDraft(sidRef.current);
+    if (d) applyText(d);
+    // 只在挂载时读一次：之后输入框的实时内容属于宿主，不是受控值
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 会话切换：保存旧会话草稿 → 载入新会话草稿（组件不卸载）
   const prevSidRef = useRef(sid);
   useEffect(() => {
     const prev = prevSidRef.current;
-    if (prev === sid || !editor) return;
-    if (prev != null) {
-      const md = (editor.storage as unknown as { markdown: { getMarkdown(): string } }).markdown.getMarkdown();
-      storeRef.current.setComposerDraft(md, prev);
-    }
+    if (prev === sid) return;
+    if (prev != null) storeRef.current.setComposerDraft(textRef.current, prev);
     const d = sid != null ? storeRef.current.getComposerDraft(sid) : "";
-    if (d) {
-      editor.commands.setContent(d);
-      setHasText(true);
-    } else {
-      editor.commands.clearContent();
-      setHasText(false);
-    }
+    applyText(d ?? "");
     prevSidRef.current = sid;
     // 召回指针属于会话（issue #2349 part 2/2）：换了会话，位置与草稿快照都归零，
     // 否则在新会话里按 ↓ 会把上一个会话的草稿塞进来。
@@ -628,108 +460,337 @@ export function Composer({
     // 会话切换：pending 图片属旧会话输入（TUI 语义——占位符即图的生命周期），丢弃
     pendingRef.current = [];
     setPending([]);
-  }, [sid, editor, store]);
-
-  // 测试注入：editor 实例回填（兼作 tiptap 一次性闭包的实例桥）
-  useEffect(() => {
-    editorBoxRef.current = editor;
-    if (editorRef) editorRef.current = editor;
-    return () => {
-      editorBoxRef.current = null;
-      if (editorRef) editorRef.current = null;
-    };
-  }, [editor, editorRef]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sid, store]);
 
   // 外部一次性插入（issue #2384，GUI 半边）：`/rewind` 选中那条的原文回到输入框。
   //
   // 以 `id` 去重而不是「值变了就覆盖」：宿主的实时输入属于宿主，一次请求只应生效
-  // 一次，否则之后每次重渲染都会把它写回输入框，把宿主接着打的字盖掉。光标置于末尾
-  // （`focus("end")`）、绝不自动发送——发不发由宿主决定。
+  // 一次，否则之后每次重渲染都会把它写回输入框，把宿主接着打的字盖掉。光标置于末尾、
+  // 绝不自动发送——发不发由宿主决定。
   const appliedInsertRef = useRef<number | null>(null);
   useEffect(() => {
-    if (!insertRequest || !editor) return;
+    if (!insertRequest) return;
     if (appliedInsertRef.current === insertRequest.id) return;
     appliedInsertRef.current = insertRequest.id;
-    editor.commands.setContent(insertRequest.text);
-    editor.commands.focus("end");
-    setHasText(insertRequest.text.trim().length > 0);
-    setMenu(CMD_MENU_CLOSED);
-    // 草稿一起写：切走再回来的「重挂载」路径读的是 store，不是 editor。
-    storeRef.current.setComposerDraft(insertRequest.text, sidRef.current);
-  }, [insertRequest, editor, store]);
+    applyText(insertRequest.text, insertRequest.text.length);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [insertRequest]);
 
-  // 格式栏激活态（Stage 2）：订阅 editor 事务，按钮高亮当前格式（无 deps → 每次事务重算）
-  const active =
-    useEditorState({
-      editor,
-      selector: ({ editor: e }) => ({
-        bold: e?.isActive("bold") ?? false,
-        italic: e?.isActive("italic") ?? false,
-        strike: e?.isActive("strike") ?? false,
-        code: e?.isActive("code") ?? false,
-        bullet: e?.isActive("bulletList") ?? false,
-        ordered: e?.isActive("orderedList") ?? false,
-        quote: e?.isActive("blockquote") ?? false,
-        heading: e?.isActive("heading") ?? false,
-      }),
-    }) ?? {
-      bold: false,
-      italic: false,
-      strike: false,
-      code: false,
-      bullet: false,
-      ordered: false,
-      quote: false,
-      heading: false,
-    };
-
-  // ⚠️ (rant 2026-08-28T22:27:01) 链接用应用内对话框收集 URL（Electron 禁用 window.prompt）
-  function openLinkDialog(): void {
-    if (!editor) return;
-    if (editor.isActive("link")) {
-      // 已激活链接 → 直接解除（不在对话框内处理，避免歧义）
-      editor.chain().focus().extendMarkRange("link").unsetLink().run();
+  /* ── 键盘：补全菜单 / 输入历史 / Esc 停止 / Enter 发送 ── */
+  function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>): void {
+    // / 补全菜单键盘导航（vanilla rant 19:44 P1）：↑↓ 移动、Enter 选择、Esc 关闭
+    const m = menuRef.current;
+    if (m.items.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setMenu(menuNavigate(m, 1));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setMenu(menuNavigate(m, -1));
+        return;
+      }
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        const item = m.items[m.index];
+        if (item) selectCmdRef.current(item.cmd);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setMenu(CMD_MENU_CLOSED);
+        return;
+      }
+    }
+    // 输入历史召回（issue #2349 part 2/2，GUI 半边）：↑ 往回走、↓ 往前走到最新一条再
+    // 一次就还回草稿。三条边界与 TUI 同语义，且都不是"顺手"能对的：
+    //   1. **只在行的边界上**——`\n` 是纯文本框里唯一可靠的行边界（自动折行的半行不该算
+    //      "已经离开第一行"），所以光标前没有换行才算在首行、后没有换行才算在末行；
+    //   2. **未在召回中时 ↓ 什么也不做**——否则往下一行打字会突然吞掉光标；
+    //   3. **草稿先存再覆盖**，并在走过最新一条之后原样还回去。
+    // 列表为 null（还没问过 daemon）或空（这个会话没输入过）时一律放行，于是"读不到
+    // 历史"和"历史是空的"在键盘上表现一致，正是宿主感受到的那个事实。
+    if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      const list = inputHistoryRef.current;
+      const up = e.key === "ArrowUp";
+      if (!list || list.length === 0) return;
+      const cur = textRef.current;
+      const caret = taRef.current?.selectionStart ?? cur.length;
+      const onFirstLine = cur.lastIndexOf("\n", Math.max(0, caret - 1)) === -1;
+      const onLastLine = cur.indexOf("\n", caret) === -1;
+      if (up ? !onFirstLine : !onLastLine) return;
+      const idx = historyIndexRef.current;
+      // ↓ 且不在召回中：光标照常下移。
+      if (!up && idx < 0) return;
+      const next = up
+        ? idx < 0
+          ? list.length - 1
+          : Math.max(0, idx - 1)
+        : idx + 1 < list.length
+          ? idx + 1
+          : -1;
+      e.preventDefault();
+      historyIndexRef.current = next;
+      if (next < 0) {
+        // 走过最新一条：召回结束，草稿原样回来（空草稿就是清空框）。
+        const draft = historySavedRef.current;
+        historySavedRef.current = "";
+        applyText(draft, draft.length);
+      } else {
+        if (idx < 0) historySavedRef.current = cur;
+        applyText(list[next], list[next].length);
+      }
       return;
     }
-    // 预填当前选区 href（若有）或默认 https://
-    let cur = "";
-    try {
-      cur = editor.getAttributes("link").href ?? "";
-    } catch {
-      cur = "";
+    // Escape 停止回复（rant 2026-09-02T20:30:05：busy 时副入口，对齐 TUI ESC 中断肌肉记忆）。
+    // 菜单开着时上方分支已拦截 Esc 只关菜单不误停；非 busy 时 Esc 放行（无副作用）。
+    if (e.key === "Escape" && busyRef.current) {
+      e.preventDefault();
+      stopRef.current();
+      return;
     }
-    setLinkHref(cur || "https://");
-    setLinkDialogOpen(true);
+    // Enter（非 Shift）与 Ctrl+Enter 同发送；Shift+Enter 交给 textarea 原生换行
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      void submitRef.current();
+    }
   }
-  function applyLink(href: string): void {
-    if (!editor) return;
-    editor.chain().focus().extendMarkRange("link").setLink({ href }).run();
-    setLinkDialogOpen(false);
+
+  /** 选择补全项：填充输入框 + 关菜单（用户可继续回车执行，vanilla selectCmd） */
+  function selectCmd(cmd: string): void {
+    applyText(cmd, cmd.length);
+    // applyText 会按前缀重新算菜单；选完这一项就该收起（vanilla selectCmd 同行为），
+    // 否则同一次回车既选了项又把菜单原样留在屏幕上。
+    setMenu(CMD_MENU_CLOSED);
+    taRef.current?.focus();
   }
-  function cancelLink(): void {
-    setLinkDialogOpen(false);
+  const selectCmdRef = useRef<(cmd: string) => void>(selectCmd);
+  selectCmdRef.current = selectCmd;
+
+  /* ── 附件落盘：图片按图片、其它文件给路径（issue #2920） ── */
+
+  /** File → base64（FileReader，保留字节序与 data URL 解码一致） */
+  function fileToBase64(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => {
+        const dataUrl = String(r.result || "");
+        resolve(dataUrl.split(",", 2)[1] ?? "");
+      };
+      r.onerror = () => reject(r.error ?? new Error("FileReader error"));
+      r.readAsDataURL(file);
+    });
+  }
+
+  /**
+   * 逐张「附加图片」：落盘（IPC saveImage，返回绝对路径）→ 光标处插入占位符 →
+   * 记 pendingImages（path/label 语义同 TUI _pending_images；position 发送时算）。
+   * 返回下一个可用的插入位置。
+   */
+  async function attachImages(files: File[], pos: number, currentSid: string): Promise<number> {
+    let at = pos;
+    for (const file of files) {
+      const mime = (file.type || "").toLowerCase();
+      let b64: string;
+      try {
+        b64 = await fileToBase64(file);
+      } catch (err) {
+        refuse("composer.imageReasonRead", { msg: String((err as Error)?.message ?? err) });
+        continue;
+      }
+      const n = pendingRef.current.length + 1;
+      const stem = file.name ? file.name.replace(/\.[^.]+$/, "") : "";
+      const display = stem ? toSafeImageLabel(stem) : `Image ${n}`;
+      let res: SaveImageResult;
+      try {
+        res = await saveRef.current({ sessionId: currentSid, data: b64, label: display, mime });
+      } catch (err) {
+        // 落盘失败（无会话/类型不支持/超限）——说清是哪一条，并留一行对称的日志
+        refuse("composer.imageReasonSave", { msg: String((err as Error)?.message ?? err) });
+        continue;
+      }
+      const placeholder = imagePlaceholder(display);
+      at = insertRaw(placeholder, at);
+      pendingRef.current = [...pendingRef.current, { path: res.path, label: placeholder, mime: res.mime || mime }];
+      setPending(pendingRef.current);
+      logRef.current("info", `[composer:attach] image ${res.path}`);
+    }
+    return at;
+  }
+
+  /**
+   * 逐个「附加文件」（issue #2920）：落盘（IPC saveFile）→ 光标处插入**一行路径**。
+   *
+   * 为什么是路径而不是内容：模型有一整套文件工具，一个路径让它按需读、按需截取，
+   * 而把整个文件塞进消息只会把上下文一次性烧掉。图片是例外——它没有「读一部分」这回事。
+   */
+  async function attachFiles(files: File[], pos: number, currentSid: string): Promise<number> {
+    let at = pos;
+    for (const file of files) {
+      let b64: string;
+      try {
+        b64 = await fileToBase64(file);
+      } catch (err) {
+        refuse("composer.fileReasonRead", { msg: String((err as Error)?.message ?? err) });
+        continue;
+      }
+      let res: SaveFileResult;
+      try {
+        res = await saveFileRef.current({
+          sessionId: currentSid,
+          data: b64,
+          name: file.name || "file",
+          mime: file.type || undefined,
+        });
+      } catch (err) {
+        refuse("composer.fileReasonSave", { msg: String((err as Error)?.message ?? err) });
+        continue;
+      }
+      logRef.current("info", `[composer:attach] file ${res.path}`);
+      at = insertRaw(res.path, at);
+    }
+    return at;
+  }
+
+  /**
+   * 事件里没有**本端能直接收**的图片时，改问 main 要剪贴板里的图（rant 要求 4）。
+   *
+   * macOS 把菜单栏、截图工具给的图声明为 `image/tiff`，renderer 解不了（Chromium 只出
+   * png/jpeg/gif/webp/bmp/svg，canvas 也没有 TIFF 解码器）——同一次粘贴，TUI 收得到、
+   * GUI 只能拒绝。转换发生在有 NSImage 的一侧（main 的 `clipboard.readImage()` →
+   * `toPNG()`），拿回来的 PNG 走**同一条**图片落盘路径：同一套占位符、同一套拒绝。
+   *
+   * 拿不到就拒绝，且不静默（要求 3）：可见的提示说清**事件里到底给了什么**——
+   * 名单外的文件（`imageReasonClipboard`，报出它的类型）或什么都没取到
+   * （`imageReasonEmpty`，报出事件声明的类型）——而「剪贴板里没有图 / 桥不可用 /
+   * IPC 报错」的具体原因另留一行 warn 日志。
+   */
+  async function attachClipboard(
+    plan: { declared: string[]; refused: string[] },
+    pos: number,
+    currentSid: string,
+  ): Promise<number> {
+    let img: ClipboardImage | null = null;
+    let why = "the clipboard holds no image";
+    try {
+      img = await readClipboardRef.current();
+    } catch (err) {
+      why = String((err as Error)?.message ?? err);
+    }
+    if (!img || !img.data) {
+      // 转换这一路也拿不到：可见的提示说清**事件里给了什么**（要求 3），具体原因
+      // （剪贴板里没有图 / 桥不可用 / IPC 报错）另留一行日志，两者都不静默。
+      logRef.current("warn", `[composer:attach] clipboard fallback failed: ${why}`);
+      if (plan.refused.length > 0) refuse("composer.imageReasonClipboard", { types: plan.refused.join(", ") });
+      else refuse("composer.imageReasonEmpty", { types: plan.declared.join(", ") || "(nothing)" });
+      return pos;
+    }
+    logRef.current(
+      "info",
+      `[composer:attach] clipboard fallback: ${plan.refused.join(", ") || "(no file)"} → ${img.mime || "image/png"}`,
+    );
+    const file = new File([base64Bytes(img.data)], img.name || "clipboard.png", { type: img.mime || "image/png" });
+    return attachImages([file], pos, currentSid);
+  }
+
+  /**
+   * 一批附件的入口（三个来源共用）：图片 → 剪贴板归一（若需要）→ 其它文件。
+   * 顺序就是它们在正文里出现的顺序，位置从 `at` 起逐个顺延。
+   */
+  async function attach(plan: AttachPlan, at?: number | null): Promise<void> {
+    const currentSid = sidRef.current;
+    if (!currentSid) {
+      refuse("composer.imageReasonNoSession");
+      return;
+    }
+    const images = plan.images ?? [];
+    const files = plan.files ?? [];
+    logRef.current(
+      "info",
+      `[composer:attach] ${images.length} image(s), ${files.length} file(s)${
+        plan.askClipboard ? ", clipboard fallback" : ""
+      }`,
+    );
+    let pos = at ?? caretNow();
+    if (images.length > 0) pos = await attachImages(images, pos, currentSid);
+    if (plan.askClipboard) pos = await attachClipboard(plan.askClipboard, pos, currentSid);
+    if (files.length > 0) pos = await attachFiles(files, pos, currentSid);
+    taRef.current?.focus();
+  }
+  attachRef.current = (plan, at) => {
+    void attach(plan, at);
+  };
+
+  /**
+   * 把一次事件里的文件分成三类（粘贴、拖拽、选择文件共用）：
+   * - `images`：本端能直接收的图；
+   * - `undecodable`：声明是图、但本端解不了的类型（macOS 的 TIFF）——粘贴时请剪贴板归一，
+   *   拖拽/选择文件时当作普通文件落盘（那本来就是磁盘上的一个文件，不是剪贴板里的图）；
+   * - `files`：其它一切。
+   */
+  function classify(list: File[]): { images: File[]; undecodable: File[]; files: File[] } {
+    const images = list.filter(isSupportedImage);
+    const others = list.filter((f) => !isSupportedImage(f));
+    const undecodable = others.filter((f) => isImageFile(f) && !isSupportedImage(f));
+    const files = others.filter((f) => !undecodable.includes(f));
+    return { images, undecodable, files };
+  }
+
+  /** 粘贴：文件先取文本（对齐 TUI「文本落、附件随后」），再交给 attach */
+  function onPaste(e: React.ClipboardEvent<HTMLTextAreaElement>): void {
+    const cd = e.clipboardData as unknown as ImageCarrier | null;
+    if (!cd) return;
+    setNotice(null);
+    const list = collectFiles(cd);
+    const types = declaredTypes(cd);
+    const { images, undecodable, files } = classify(list);
+    const pasted = (cd as unknown as DataTransfer).getData("text/plain");
+    // 纯文本粘贴：交给 textarea 的原生行为，一个字都不改
+    if (list.length === 0 && !declaresImageOrFile(types)) return;
+    e.preventDefault();
+    let at: number | null = null;
+    if (pasted) at = insertRaw(pasted);
+    // 名单外的图：只有在**一张能直接收的都没有**时才去问剪贴板——混合粘贴（png + tiff）里
+    // png 已经能落盘，再取一次剪贴板会把同一张图重复附加（rant 要求 4 的既有教训）。
+    let askClipboard: AttachPlan["askClipboard"] = null;
+    if (images.length === 0 && (undecodable.length > 0 || list.length === 0)) {
+      askClipboard = { declared: types, refused: undecodable.map((f) => f.type || "(no type)") };
+    } else if (undecodable.length > 0) {
+      // 有能直接收的图：不重复取剪贴板，只把收不了的那几张的类型说出来
+      refuse("composer.imageReasonType", { types: undecodable.map((f) => f.type || "(no type)").join(", ") });
+    }
+    if (images.length === 0 && files.length === 0 && !askClipboard) return;
+    attachRef.current({ images, files, askClipboard }, at);
+  }
+
+  /** 拖拽 / 选择文件：一律当磁盘上的文件——解不了的图也落盘给路径，不问剪贴板 */
+  function onTakeFiles(list: File[]): void {
+    if (list.length === 0) return;
+    setNotice(null);
+    const { images, undecodable, files } = classify(list);
+    const all = [...files, ...undecodable];
+    if (images.length === 0 && all.length === 0) return;
+    attachRef.current({ images, files: all, askClipboard: null }, null);
   }
 
   async function submit(): Promise<void> {
-    if (!editor) return;
-    // tiptap-markdown 的 storage 类型不并入 Editor.storage（Storage 泛型）——运行时存在，显式取值
-    const mdRaw = (editor.storage as unknown as { markdown: { getMarkdown(): string } }).markdown.getMarkdown();
-    // rant 2026-09-02T15:23:53：tiptap-markdown 会把占位符转义成 \[📷 …\]（防被当链接语法），
-    // 发送前还原字面量——daemon 收到的文本与 TUI 完全一致（历史互操作）
-    const md = normalizePlaceholders(mdRaw, pendingRef.current.map((p) => p.label));
-    const value = md.trim();
+    // 发送即原文（issue #2920 要求 2）：这里取的字符串就是框里的字符串，只去掉首尾空白
+    // （纯空白不算一条消息）。没有 markdown 序列化，也没有发送前的反转义。
+    const value = textRef.current.trim();
     if (!value) return;
     // 发送即召回结束（issue #2349 part 2/2）：下一次 ↑ 从最新一条重新开始，而保存的草稿
     // 已经随这条消息离手——留着它会在 ↓ 走到尽头时把上一条消息塞回空输入框。
     historyIndexRef.current = -1;
     historySavedRef.current = "";
     // 图片收敛（TUI 同语义）：占位符仍在文本中的保留（删了占位符即弃图）；
-    // position = 字面占位符在文本中的字符偏移（daemon 按 position 切块）
+    // position = 标记在文本中的字符偏移（daemon 按 position 切块）
     const images = resolveSendImages(pendingRef.current, value);
     const parsed = parseInput(value);
     if (parsed.type !== "message") {
       // 指令：清输入 + 关菜单 + 路由（vanilla rant 19:44 P1：/ 开头不进 sendMessage）
-      editor.commands.clearContent();
+      applyText("", 0);
       setMenu(CMD_MENU_CLOSED);
       onCommand?.({
         type: parsed.type,
@@ -749,13 +810,10 @@ export function Composer({
     // G143：send 前预生成 requestId——消除 IPC 往返竞态窗口。（G143 原本还用它给消息打
     // 「自有流」标；那是客户端自持的“谁的消息”判定，已按 rant 2026-09-29T15:52:49 要求 3
     // 移除：daemon 是唯一状态源，客户端只是渲染器。）
-    // 铸在这里、并在插入消息行时就交给它：这一行要靠这个 id 认领 daemon 随后送来的
-    // `user_message` / `steer_committed` 帧里的时刻（rant 2026-10-17T10:03:08）——
-    // 客户端自己不知道这条消息是什么时候被记下的，也不许编一个。
     const requestId = genRequestId();
     store.addUserMessage(value, sid, { requestId });
-    editor.commands.clearContent();
-    // B3：消息已发送 → 清除草稿（tiptap 内容即草稿，发送即清）
+    // 消息已发送 → 清输入（输入框内容即草稿，发送即清）
+    applyText("", 0);
     if (wasBusy) {
       queueSend(queuedRef.current, sid, { requestId, text: value, sandbox: tier, images });
     }
@@ -776,9 +834,9 @@ export function Composer({
       onPromptSentRef.current?.(sid, value);
     } catch {
       setInternalBusy(false);
-      // G49：失败恢复输入框，文案不责怪用户（copy.sendFailed）；markdown 回填
+      // G49：失败恢复输入框，文案不责怪用户（copy.sendFailed）；原文回填
       store.addSystemMessage(t("copy.sendFailed"), sid);
-      editor.commands.setContent(value);
+      applyText(value, value.length);
     }
   }
   const submitRef = useRef<() => Promise<void>>(submit);
@@ -802,162 +860,22 @@ export function Composer({
   const stopRef = useRef<() => void>(stop);
   stopRef.current = stop;
 
-  /** 选择补全项：填充输入框 + 关菜单（用户可继续回车执行，vanilla selectCmd） */
-  function selectCmd(cmd: string): void {
-    if (!editor) return;
-    editor.commands.setContent(cmd); // tiptap-markdown setContent 解析 markdown → 纯文本段落
-    setMenu(CMD_MENU_CLOSED);
-    editor.commands.focus();
-  }
-  const selectCmdRef = useRef<(cmd: string) => void>(selectCmd);
-  selectCmdRef.current = selectCmd;
-
-  /* ── 图片附加（rant 2026-09-02T15:23:53：粘贴/拖拽 → IPC 落盘 → 光标处占位符）── */
-
-  /** 原始文本直插（不经 tiptap-markdown 解析——粘贴文本/占位符都要字面量） */
-  function insertRawText(text: string, at?: number | null): void {
-    const ed = editorBoxRef.current;
-    if (!ed) return;
-    const pos = at ?? ed.state.selection.from;
-    ed.view.dispatch(ed.state.tr.insertText(text, pos));
-  }
-  insertRawRef.current = insertRawText;
-
-  /** File → base64（FileReader，保留字节序与 data URL 解码一致） */
-  function fileToBase64(file: File): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const r = new FileReader();
-      r.onload = () => {
-        const dataUrl = String(r.result || "");
-        resolve(dataUrl.split(",", 2)[1] ?? "");
-      };
-      r.onerror = () => reject(r.error ?? new Error("FileReader error"));
-      r.readAsDataURL(file);
-    });
-  }
-
-  /**
-   * 逐张「附加图片」：落盘（IPC saveImage，返回绝对路径）→ 光标处插入占位符 →
-   * 记 pendingImages（path/label/position 语义同 TUI _pending_images）。
-   */
-  async function attachImages(files: File[], at?: number | null): Promise<void> {
-    const ed = editorBoxRef.current;
-    const sid = sidRef.current;
-    if (!ed || !sid) {
-      refuseImage("composer.imageReasonNoSession");
-      return;
-    }
-    const imgs = files.filter(isSupportedImage);
-    const rejected = files.filter((f) => !isSupportedImage(f));
-    if (rejected.length > 0) {
-      // 系统给什么就得能看到什么（rant 要求 4）：被白名单拒绝的如实说出类型，
-      // 而不是静默丢弃 —— macOS 菜单栏给的 TIFF 正是此前无声消失的那一类
-      refuseImage("composer.imageReasonType", {
-        types: rejected.map((f) => f.type || "(no type)").join(", "),
-      });
-    }
-    if (imgs.length === 0) return;
-    logRef.current("info", `[composer:image] attach ${imgs.length} file(s): ${imgs.map((f) => f.type).join(", ")}`);
-    let pos = at ?? ed.state.selection.from;
-    for (const file of imgs) {
-      const mime = file.type.toLowerCase();
-      let b64: string;
-      try {
-        b64 = await fileToBase64(file);
-      } catch (err) {
-        refuseImage("composer.imageReasonRead", { msg: String((err as Error)?.message ?? err) });
-        continue;
-      }
-      const n = pendingRef.current.length + 1;
-      const stem = file.name ? file.name.replace(/\.[^.]+$/, "") : "";
-      const display = stem ? toSafeImageLabel(stem) : `Image ${n}`;
-      let res: SaveImageResult;
-      try {
-        res = await saveRef.current({ sessionId: sid, data: b64, label: display, mime });
-      } catch (err) {
-        // 落盘失败（无会话/类型不支持/超限）——说清是哪一条，并留一行对称的日志
-        refuseImage("composer.imageReasonSave", { msg: String((err as Error)?.message ?? err) });
-        continue;
-      }
-      const placeholder = imagePlaceholder(display);
-      insertRawText(placeholder, pos);
-      pos += placeholder.length;
-      pendingRef.current = [...pendingRef.current, { path: res.path, label: placeholder, mime: res.mime || mime }];
-      setPending(pendingRef.current);
-      logRef.current("info", `[composer:image] attached ${res.path}`);
-    }
-    ed.commands.focus();
-  }
-  attachRef.current = (files, at) => {
-    void attachImages(files, at);
-  };
-
-  /**
-   * 事件里没有**本端能直接收**的图片时，改问 main 要剪贴板里的图（rant 要求 4）。
-   *
-   * macOS 把菜单栏、截图工具给的图声明为 `image/tiff`，renderer 解不了（Chromium 只出
-   * png/jpeg/gif/webp/bmp/svg，canvas 也没有 TIFF 解码器）——同一次粘贴，TUI 收得到、
-   * GUI 只能拒绝。转换发生在有 NSImage 的一侧（main 的 `clipboard.readImage()` →
-   * `toPNG()`），拿回来的 PNG 走**同一条** `attachImages`：同一个落盘 IPC、同一套
-   * 占位符、同一套拒绝。白名单因此只是快路径，不再是「系统给什么」的边界。
-   *
-   * 拿不到就拒绝，且不静默（要求 3）：可见的提示说清**事件里到底给了什么**——
-   * 名单外的文件（`imageReasonClipboard`，报出它的类型）或什么都没取到
-   * （`imageReasonEmpty`，报出事件声明的类型）——而「剪贴板里没有图 / 桥不可用 /
-   * IPC 报错」的具体原因另留一行 warn 日志。
-   */
-  async function attachClipboardImage(types: string[], refused: string[], at: number | null): Promise<void> {
-    const ed = editorBoxRef.current;
-    const sid = sidRef.current;
-    if (!ed || !sid) {
-      refuseImage("composer.imageReasonNoSession");
-      return;
-    }
-    let img: ClipboardImage | null = null;
-    let why = "the clipboard holds no image";
-    try {
-      img = await readClipboardRef.current();
-    } catch (err) {
-      why = String((err as Error)?.message ?? err);
-    }
-    if (!img || !img.data) {
-      // 转换这一路也拿不到：可见的提示说清**事件里给了什么**（要求 3），具体原因
-      // （剪贴板里没有图 / 桥不可用 / IPC 报错）另留一行日志，两者都不静默。
-      logRef.current("warn", `[composer:image] clipboard fallback failed: ${why}`);
-      if (refused.length > 0) refuseImage("composer.imageReasonClipboard", { types: refused.join(", ") });
-      else refuseImage("composer.imageReasonEmpty", { types: types.join(", ") || "(nothing)" });
-      return;
-    }
-    logRef.current(
-      "info",
-      `[composer:image] clipboard fallback: ${refused.join(", ") || "(no file)"} → ${img.mime || "image/png"}`,
-    );
-    const file = new File([base64Bytes(img.data)], img.name || "clipboard.png", { type: img.mime || "image/png" });
-    await attachImages([file], at);
-  }
-  const clipboardAttachRef = useRef<(types: string[], refused: string[], at: number | null) => void>(() => {});
-  clipboardAttachRef.current = (types, refused, at) => {
-    void attachClipboardImage(types, refused, at);
-  };
-
   return (
     <div
       className="composer"
       data-testid="composer"
       onDragOver={(e) => {
-        // 允许图片文件拖入（否则浏览器显示 no-drop，drop 事件不触发）
+        // 允许文件拖入（否则浏览器显示 no-drop，drop 事件不触发）
         const t = e.dataTransfer?.types;
         if (t && Array.from(t).includes("Files")) e.preventDefault();
       }}
       onDrop={(e) => {
-        if (e.defaultPrevented) return; // tiptap handleDrop 已处理（编辑器内）
         const dt = e.dataTransfer as unknown as ImageCarrier | null;
         if (!dt) return;
-        setImageNotice(null);
-        const imgs = collectImageFiles(dt);
-        if (!imgs.length) return;
+        const list = collectFiles(dt);
+        if (!list.length) return;
         e.preventDefault();
-        attachRef.current(imgs, null);
+        onTakeFiles(list);
       }}
     >
       {menu.items.length > 0 ? (
@@ -980,51 +898,6 @@ export function Composer({
           ))}
         </div>
       ) : null}
-      <div className="fmt-bar" role="toolbar" aria-label={t("composer.formatBar")} data-testid="fmt-bar">
-        {FMT_BUTTONS.map((b) => (
-          <button
-            key={b.id}
-            type="button"
-            className={`fmt-btn${active[b.id as keyof typeof active] ? " active" : ""}`}
-            title={t(`composer.${b.id}`)}
-            aria-label={t(`composer.${b.id}`)}
-            aria-pressed={active[b.id as keyof typeof active]}
-            data-testid={`fmt-${b.id}`}
-            onMouseDown={(e) => e.preventDefault()} // 防失焦——保持选区，点击后命令可作用于选中文本
-            onClick={() => fmtRef.current[b.id]()}
-          >
-            <span className={b.labelClass}>{b.label}</span>
-          </button>
-        ))}
-        {/* 第三条入口：选择图片（与粘贴、拖拽并列）。按钮只负责打开系统选图，
-            落盘/占位符全交给 attachRef —— 三条入口一条路径，失败提示也共用一套 */}
-        <button
-          type="button"
-          className="fmt-btn"
-          title={t("composer.chooseImage")}
-          aria-label={t("composer.chooseImage")}
-          data-testid="composer-attach-image"
-          onMouseDown={(e) => e.preventDefault()} // 防失焦——与格式按钮同款
-          onClick={() => fileInputRef.current?.click()}
-        >
-          <span className="fmt-label-image">🖼</span>
-        </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*"
-          multiple
-          hidden
-          data-testid="composer-image-input"
-          onChange={(e) => {
-            const el = e.currentTarget;
-            const picked = Array.from(el.files ?? []);
-            // 复位：同一张图连续选两次也要再触发 change（不清空则第二次没有事件）
-            el.value = "";
-            if (picked.length > 0) attachRef.current(picked, null);
-          }}
-        />
-      </div>
       <div className="mode-switcher" role="group" aria-label={t("composer.sandboxTitle")} data-testid="sandbox-switcher">
         {SANDBOX_TIERS.map((tierKey) => {
           const i18nKey =
@@ -1077,7 +950,46 @@ export function Composer({
         ) : null}
       </div>
       <div className="composer-card">
-        <EditorContent editor={editor} className="composer-editor" />
+        <textarea
+          ref={taRef}
+          className="composer-textarea"
+          data-testid="composer-input"
+          aria-label={t("composer.placeholder")}
+          placeholder={t("composer.placeholder")}
+          rows={1}
+          spellCheck={false}
+          value={text}
+          onChange={(e) => applyText(e.target.value)}
+          onKeyDown={onKeyDown}
+          onPaste={onPaste}
+        />
+        {/* 第三条入口：选择图片或任意文件（与粘贴、拖拽并列）。按钮只负责打开系统文件框，
+            落盘与插入全交给 attachRef —— 三条入口一条路径，失败提示也共用一套 */}
+        <button
+          type="button"
+          className="attach-btn"
+          title={t("composer.attach")}
+          aria-label={t("composer.attach")}
+          data-testid="composer-attach"
+          onMouseDown={(e) => e.preventDefault()} // 防失焦——插入要落在原光标处
+          onClick={() => fileInputRef.current?.click()}
+        >
+          📎
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          hidden
+          data-testid="composer-file-input"
+          onChange={(e) => {
+            const el = e.currentTarget;
+            const picked = Array.from(el.files ?? []);
+            // 复位：同一个文件连续选两次也要再触发 change（不清空则第二次没有事件）
+            el.value = "";
+            onTakeFiles(picked);
+          }}
+        />
         {busy ? (
           <button
             type="button"
@@ -1103,17 +1015,11 @@ export function Composer({
           </button>
         )}
       </div>
-      {imageNotice ? (
-        <div className="composer-notice" role="alert" data-testid="composer-image-notice">
-          {imageNotice}
+      {notice ? (
+        <div className="composer-notice" role="alert" data-testid="composer-notice">
+          {notice}
         </div>
       ) : null}
-      <LinkDialog
-        open={linkDialogOpen}
-        currentHref={linkHref}
-        onApply={applyLink}
-        onCancel={cancelLink}
-      />
     </div>
   );
 }

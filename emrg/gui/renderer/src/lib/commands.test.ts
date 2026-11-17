@@ -41,6 +41,13 @@ describe("parseInput", () => {
   it("unknown command", () => {
     expect(parseInput("/foobar")).toEqual({ type: "unknown", cmd: "/foobar" });
   });
+  // issue #2920：非图片附件落盘后正文里是绝对路径，而附着在空输入框里的第一行恰好以 /
+  // 开头——它是一段路径，不是打错的指令。
+  it("a slashed path is a message, not an unknown command", () => {
+    expect(parseInput("/tmp/notes.txt")).toEqual({ type: "message" });
+    expect(parseInput("/tmp/report.csv 读一下")).toEqual({ type: "message" });
+    expect(parseInput("/etc/hosts")).toEqual({ type: "message" });
+  });
 });
 
 describe("getCompletions", () => {

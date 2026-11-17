@@ -157,20 +157,6 @@ export function toSafeImageLabel(raw: string): string {
   return cleaned || "image";
 }
 
-/**
- * tiptap-markdown 序列化会把字面占位符转义为 `\[📷 …\]`（防被当作链接/图片语法），
- * 发送前还原已知标签的字面量——保证 daemon 收到的文本与 TUI 完全一致（位置/判活
- * 都以还原后的字面量占位符为基准）。
- */
-export function normalizePlaceholders(md: string, labels: string[]): string {
-  let out = md;
-  for (const label of labels) {
-    const escaped = label.replace(/[\[\]]/g, (ch) => `\\${ch}`);
-    if (escaped !== label) out = out.split(escaped).join(label);
-  }
-  return out;
-}
-
 /** 事件里可能携带图片的两个面（DataTransfer 与 ClipboardEvent.clipboardData 同形） */
 export interface ImageCarrier {
   files?: ArrayLike<File> | null;
@@ -180,7 +166,17 @@ export interface ImageCarrier {
 }
 
 /**
- * 从一次粘贴/拖拽事件里取图片文件：`files` 里有图就用 `files`；只有当 `files` 一个图都没有时，
+ * 一个 File 是不是图片（无 type 视为不是）。
+ *
+ * 这是**唯一**的一处分类：图片按视觉交给模型，其它文件落盘、只把路径写进正文
+ * （issue #2920）。两处各判一遍，必然漂移出一类「本端当图、落盘当文件」的东西。
+ */
+export function isImageFile(f: File | null | undefined): f is File {
+  return !!f && typeof f.type === "string" && f.type.startsWith("image/");
+}
+
+/**
+ * 从一次粘贴/拖拽事件里取文件：`files` 里有文件就用 `files`；只有当 `files` 一个都没有时，
  * 才去读 `items[i].getAsFile()`。
  *
  * 为什么不「两个都读、按对象去重」（2026-10-21 在 EMRG.app 里跑探针应用实测）：同一次粘贴里，
@@ -198,20 +194,26 @@ export interface ImageCarrier {
  * 为了不重新引入一次静默丢弃，代价是零 —— `files` 有值时这里根本不读它。
  *
  * 拖入两个同名同大小的不同文件仍然返回两个：这里不按内容去重，`files` 里有几个就是几个。
+ *
+ * 取的是**全部**文件而不只是图片（issue #2920）：类型筛选从取件里搬到了 `isImageFile`，
+ * 于是同一份事件不再需要读两遍才能同时拿到图和附件。
  */
-export function collectImageFiles(carrier: ImageCarrier | null | undefined): File[] {
+export function collectFiles(carrier: ImageCarrier | null | undefined): File[] {
   if (!carrier) return [];
-  const isImage = (f: File | null | undefined): f is File =>
-    !!f && typeof f.type === "string" && f.type.startsWith("image/");
-  const fromFiles = Array.from(carrier.files ?? []).filter(isImage);
+  const fromFiles = Array.from(carrier.files ?? []);
   if (fromFiles.length > 0) return fromFiles;
   const out: File[] = [];
   for (const it of Array.from(carrier.items ?? [])) {
     if (!it || it.kind !== "file" || typeof it.getAsFile !== "function") continue;
     const f = it.getAsFile();
-    if (isImage(f) && !out.includes(f)) out.push(f);
+    if (f && !out.includes(f)) out.push(f);
   }
   return out;
+}
+
+/** 一次事件里的图片子集（旧入口，保留给只关心图片的调用方与它们的测试）。 */
+export function collectImageFiles(carrier: ImageCarrier | null | undefined): File[] {
+  return collectFiles(carrier).filter(isImageFile);
 }
 
 /**
