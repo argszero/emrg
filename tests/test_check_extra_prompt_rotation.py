@@ -341,6 +341,69 @@ def test_a_row_with_no_digest_is_not_a_pass(mod, tmp_path, capsys):
     assert _sha(body) in out, "the remedy is the digest that belongs in that row"
 
 
+def test_an_undigested_row_is_not_counted_as_needing_classification(mod, tmp_path, capsys):
+    """Two jobs, two tallies: a row that lacks a digest is classified already.
+
+    Measured 2026-11-17 on a copy of a real rotation table — 22 rows, every one carrying its
+    class and evidence, none carrying a digest — the guard printed `22 need classifying` and
+    told the reader to classify them. Following that sentence re-reads every block, which is
+    the cost the rotation exists to avoid; what those rows need is the digest the same output
+    prints beside each one.
+    """
+    body = "x" * 40
+    tasks = _tasks(tmp_path, [_record("zeta", text=body)])
+    table = _table(tmp_path, {"zeta": (len(body), None)})
+
+    assert mod.main(["--tasks", str(tasks), "--table", str(table)]) == 1
+    out = capsys.readouterr().out
+
+    assert "0 need classifying" in out, out
+    assert "1 need a digest" in out, out
+    assert "22 need classifying" not in out and "1 need classifying" not in out, out
+
+
+def test_the_undigested_remedy_names_the_digest_not_a_classification(mod, tmp_path, capsys):
+    """The tally is half of it; the instruction under it is what a reader acts on.
+
+    The remedy has to name the row edit — add the printed sha256, keep the class — and must
+    not carry the classification sentence, whose subject is a block that moved or has no row.
+    """
+    body = "x" * 40
+    tasks = _tasks(tmp_path, [_record("zeta", text=body)])
+    table = _table(tmp_path, {"zeta": (len(body), None)})
+
+    assert mod.main(["--tasks", str(tasks), "--table", str(table)]) == 1
+    out = capsys.readouterr().out
+
+    assert "add the sha256 printed beside each undigested row" in out, out
+    assert "keeping its class and evidence" in out, out
+    assert "classify the block(s) above" not in out, (
+        "an undigested row is classified already; telling the reader to classify it is the "
+        "re-reading this clock exists to save"
+    )
+    assert _sha(body) in out, "the remedy is the digest that belongs in that row"
+
+
+def test_a_moved_block_still_asks_for_a_classification(mod, tmp_path, capsys):
+    """The other direction: separating the tallies must not silence the reading they came from.
+
+    A block whose length moved needs a decision nobody has made yet, so it keeps the
+    classification sentence — and it must not be reported as needing a digest, which would
+    send the reader to edit a row whose number is the thing that disagrees.
+    """
+    body = "x" * 40
+    tasks = _tasks(tmp_path, [_record("zeta", text=body)])
+    table = _table(tmp_path, {"zeta": _row(body, chars=25)})
+
+    assert mod.main(["--tasks", str(tasks), "--table", str(table)]) == 1
+    out = capsys.readouterr().out
+
+    assert "1 need classifying" in out, out
+    assert "0 need a digest" in out, out
+    assert "classify the block(s) above" in out, out
+    assert "add the sha256 printed beside each undigested row" not in out, out
+
+
 def test_init_with_no_rendering_block_is_not_a_pass(mod, tmp_path, capsys):
     """A skeleton with no rows would be an empty table, and an empty table is not a reading."""
     tasks = _tasks(tmp_path, [_record("zeta"), _record("eta")])
