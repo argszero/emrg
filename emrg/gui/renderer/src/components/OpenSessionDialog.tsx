@@ -1,5 +1,6 @@
+import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../lib/i18n";
-import { agentRowView, sessionRowView, type AgentRow, type SessionRow } from "../lib/openSession";
+import { agentRowView, matchesQuery, sessionRowView, type AgentRow, type SessionRow } from "../lib/openSession";
 import { Dialog } from "./Dialog";
 import { DialogActions } from "./HelpDialog";
 
@@ -52,6 +53,19 @@ export function OpenSessionDialog({
   const { t } = useI18n();
   const title = step === "sessions" ? t("openSession.titleAgent", { agent: projectName || "…" }) : t("openSession.title");
 
+  // 两个列表各一个搜索框，共用一份查询状态：清空即恢复全部（要求 3）。
+  const [query, setQuery] = useState("");
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  const searchLabel = step === "agents" ? t("openSession.searchAgents") : t("openSession.searchSessions");
+
+  // 打开对话框或走到下一步时清空查询并把焦点放进搜索框（要求 4）——进去直接打字，
+  // 不用先点一下。查询属于上一次的列表，带进下一次就会让新列表看着是空的。
+  useEffect(() => {
+    if (!open) return;
+    setQuery("");
+    searchRef.current?.focus();
+  }, [open, step]);
+
   const renderProjects = () => {
     if (error) {
       return (
@@ -74,7 +88,15 @@ export function OpenSessionDialog({
         </div>
       );
     }
-    return agents.map((p) => {
+    const shown = agents.filter((p) => matchesQuery(query, p.name, p.path));
+    if (shown.length === 0) {
+      return (
+        <div className="help-row" data-testid="open-session-no-matches">
+          <span className="help-hint">{t("openSession.noMatches")}</span>
+        </div>
+      );
+    }
+    return shown.map((p) => {
       const v = agentRowView(p, t);
       return (
         <div className="help-row" key={p.path || p.name || ""} data-testid="open-session-agent" style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)" }}>
@@ -126,7 +148,15 @@ export function OpenSessionDialog({
         </div>
       );
     }
-    return sessions.map((s) => {
+    const shown = sessions.filter((s) => matchesQuery(query, s.title, s.session_id));
+    if (shown.length === 0) {
+      return (
+        <div className="help-row" data-testid="open-session-no-matches">
+          <span className="help-hint">{t("openSession.noMatches")}</span>
+        </div>
+      );
+    }
+    return shown.map((s) => {
       const v = sessionRowView(s, currentSid, t);
       return (
         <button
@@ -150,6 +180,16 @@ export function OpenSessionDialog({
       <p style={{ color: "var(--text-2)", fontSize: "var(--fs-secondary)", margin: "0 0 var(--sp-3)" }}>
         {t("openSession.desc")}
       </p>
+      <input
+        ref={searchRef}
+        type="text"
+        data-testid="open-session-search"
+        aria-label={searchLabel}
+        placeholder={searchLabel}
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        style={{ width: "100%", boxSizing: "border-box", margin: "0 0 var(--sp-2)", padding: "4px 8px" }}
+      />
       <div className="help-list" data-testid="open-session-list">
         {step === "agents" ? renderProjects() : renderSessions()}
       </div>

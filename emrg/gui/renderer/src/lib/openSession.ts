@@ -57,3 +57,15 @@ export function sessionRowView(s: SessionRow, currentSid: string | null, t?: TFu
   if (act) marks.push(act);
   return { label: s.title || s.session_id, marks };
 }
+
+/**
+ * 搜索框的匹配规则——两个列表共用一条，避免各写一遍就各错一处。
+ *
+ * 忽略首尾空格与大小写；空查询（或只有空格）匹配全部，所以清空输入即恢复整个列表。
+ * 多个字段是「或」的关系：agent 按名字与路径都能找到，会话按标题与会话 id 都能找到。
+ */
+export function matchesQuery(query: string, ...fields: Array<string | null | undefined>): boolean {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return true;
+  return fields.some((field) => (field || "").toLowerCase().includes(needle));
+}

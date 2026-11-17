@@ -45,7 +45,7 @@ describe("OpenSessionDialog", () => {
 
   it("空项目列表 → noAgents", () => {
     setup({ agents: [] });
-    expect(screen.getByTestId("open-session-empty")).toHaveTextContent("还没有项目");
+    expect(screen.getByTestId("open-session-empty")).toHaveTextContent("还没有 agent");
   });
 
   it("error → loadFailed 行", () => {
@@ -97,5 +97,100 @@ describe("OpenSessionDialog", () => {
     expect(onNewSession).toHaveBeenCalledTimes(1);
     await userEvent.click(screen.getByTestId("open-session-new-agent"));
     expect(onNewAgent).toHaveBeenCalledTimes(1);
+  });
+
+  // ── issue #2924：两步各一个搜索框 ──────────────────────────────────────
+
+  it("agent 搜索：按名字过滤，不区分大小写、忽略首尾空格（不用回车）", async () => {
+    setup();
+    await userEvent.type(screen.getByTestId("open-session-search"), "  AITOKEN  ");
+    const rows = screen.getAllByTestId("open-session-agent");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent("aitokenpool");
+  });
+
+  it("agent 搜索：路径也能匹配，不只名字", async () => {
+    setup();
+    // "/x/emrg" 只在 path 里；名字是 "emrg"，两者都命中这一行——用只出现在路径里的串
+    await userEvent.type(screen.getByTestId("open-session-search"), "/x/emrg");
+    const rows = screen.getAllByTestId("open-session-agent");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent("emrg");
+  });
+
+  it("清空搜索恢复整个列表", async () => {
+    setup();
+    const box = screen.getByTestId("open-session-search");
+    await userEvent.type(box, "aitoken");
+    expect(screen.getAllByTestId("open-session-agent")).toHaveLength(1);
+    await userEvent.clear(box);
+    expect(screen.getAllByTestId("open-session-agent")).toHaveLength(2);
+  });
+
+  it("会话搜索：标题与会话 id 都能匹配", async () => {
+    setup({ step: "sessions", sessions, projectName: "emrg", currentSid: "s1" });
+    const box = screen.getByTestId("open-session-search");
+    await userEvent.type(box, "重构");
+    expect(screen.getAllByTestId("open-session-session")).toHaveLength(1);
+    await userEvent.clear(box);
+    // 大小写不敏感：id 存的是小写 "s2"
+    await userEvent.type(box, "S2");
+    const rows = screen.getAllByTestId("open-session-session");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent("s2");
+  });
+
+  it("有列表但没匹配 → 说「没有匹配的结果」，不落进「还没有」那个空态", async () => {
+    setup();
+    await userEvent.type(screen.getByTestId("open-session-search"), "zzz");
+    expect(screen.queryAllByTestId("open-session-agent")).toHaveLength(0);
+    expect(screen.getByTestId("open-session-no-matches")).toHaveTextContent("没有匹配的结果");
+    expect(screen.queryByTestId("open-session-empty")).toBeNull();
+  });
+
+  it("会话步：没匹配同样说「没有匹配的结果」，不是「还没有会话」", async () => {
+    setup({ step: "sessions", sessions, projectName: "emrg" });
+    await userEvent.type(screen.getByTestId("open-session-search"), "zzz");
+    expect(screen.getByTestId("open-session-no-matches")).toHaveTextContent("没有匹配的结果");
+    expect(screen.queryByTestId("open-session-empty")).toBeNull();
+  });
+
+  it("本来一条都没有 → 仍是「还没有」，不是「没有匹配」", () => {
+    setup({ agents: [] });
+    expect(screen.getByTestId("open-session-empty")).toHaveTextContent("还没有 agent");
+    expect(screen.queryByTestId("open-session-no-matches")).toBeNull();
+  });
+
+  it("打开时焦点就在搜索框", () => {
+    setup();
+    expect(screen.getByTestId("open-session-search")).toHaveFocus();
+  });
+
+  it("走到下一步：查询清空、焦点回到搜索框", async () => {
+    const { rerender } = setup();
+    await userEvent.type(screen.getByTestId("open-session-search"), "emrg");
+    rerender(
+      <I18nProvider lang="zh">
+        <OpenSessionDialog open step="sessions" sessions={sessions} projectName="emrg" />
+      </I18nProvider>,
+    );
+    const box = screen.getByTestId("open-session-search");
+    expect(box).toHaveValue("");
+    expect(box).toHaveFocus();
+    expect(screen.getAllByTestId("open-session-session")).toHaveLength(2);
+  });
+
+  it("加载中与加载失败仍然只渲染各自那一行（搜索框不改变这两个态）", () => {
+    setup({ agents: null });
+    expect(screen.getByTestId("open-session-loading")).toHaveTextContent("加载中");
+    expect(screen.queryByTestId("open-session-no-matches")).toBeNull();
+  });
+
+  it("中文文案指 agent 时说 agent，不说「项目」", () => {
+    setup();
+    expect(screen.getByTestId("open-session-search")).toHaveAttribute("placeholder", "按名字或路径筛选");
+    const dialog = screen.getByTestId("open-session-dialog");
+    expect(dialog.textContent).not.toContain("项目");
+    expect(dialog.textContent).toContain("agent");
   });
 });

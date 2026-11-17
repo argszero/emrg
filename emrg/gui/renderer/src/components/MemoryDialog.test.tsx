@@ -40,7 +40,7 @@ describe("MemoryDialog", () => {
 
   it("空列表 → app.noMemories（agent scope 文案）", () => {
     setup({ memories: [] });
-    expect(screen.getByTestId("memory-empty")).toHaveTextContent("项目");
+    expect(screen.getByTestId("memory-empty")).toHaveTextContent("agent");
   });
 
   it("空列表（session scope）→ session 文案", () => {

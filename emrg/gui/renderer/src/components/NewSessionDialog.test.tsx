@@ -39,7 +39,7 @@ describe("NewSessionDialog", () => {
 
   it("空项目列表 → noAgents", () => {
     setup({ agents: [] });
-    expect(screen.getByTestId("new-session-empty")).toHaveTextContent("还没有项目");
+    expect(screen.getByTestId("new-session-empty")).toHaveTextContent("还没有 agent");
   });
 
   it("error → loadFailed 行", () => {
