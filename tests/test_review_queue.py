@@ -2698,6 +2698,89 @@ def test_a_pairing_behind_a_merge_prefix_keeps_its_issue(monkeypatch):
     )
 
 
+def test_a_pairing_written_in_prose_is_named_not_reported_as_absent(monkeypatch):
+    """The spelling neither statement shape can tell from a mention, answered as its own state.
+
+    `Merged. Issue #2565 closed by PR #2566` keeps every fact of a pairing and carries no
+    token that separates it from “because issue #2633 is open”: the arrow is what the second
+    statement shape reads, and prose has none. So the number is not the handle here — and it
+    is not an absence either, which is what `no issue yet` claimed. That word is an
+    instruction to file one, so over a number the entry itself spelled it buys a duplicate
+    issue and three approvals for work already filed (issue #2933).
+
+    The row therefore states the number and that it is not the handle. It does not state
+    whether the issue is open: the pairing was never read, so its state was never asked.
+    """
+    tool = _fresh_tool()
+    _links(
+        monkeypatch,
+        tool,
+        [_row("2026-11-17T12:34:40+08:00", "in_progress",
+              progress="Merged. Issue #2565 closed by PR #2566 (squash ffdf65f1)")],
+    )
+
+    (rant,) = tool.open_rant_rows(None, tool.REPO)
+
+    assert (rant.issues, rant.mentioned_issues) == ([], [2565]), (
+        "the prose form is named, never promoted to the pairing"
+    )
+    row = tool.render_rant(rant)
+    assert "#2565 named (not the handle)" in row, row
+    assert "no issue yet" not in row, (
+        "the entry names the number, so the row must not tell the next cycle to file one"
+    )
+
+
+def test_a_number_the_row_already_states_is_not_repeated_as_a_mention(monkeypatch):
+    """The mention is the leftover, not a second rendering of a number already answered.
+
+    A pairing that *is* stated resolves into one of the three states above, and repeating it
+    as a mention would print the same number twice in one row — `#2637, #2637 named (not the
+    handle)` — which reads as two claims about one issue. The same holds for the issue-side
+    fallback: a pairing the entry never wrote is `#N` on the row, and it is not also unpaired.
+    """
+    tool = _fresh_tool()
+    _links(monkeypatch, tool,
+           [_row("2026-11-17T12:34:40+08:00", "in_progress",
+                 progress="issue #2637 → PR #2640 merged")],
+           issues=[(2637, "")])
+
+    (rant,) = tool.open_rant_rows(None, tool.REPO)
+
+    assert (rant.issues, rant.mentioned_issues) == ([2637], []), (
+        "a stated handle is answered once, in its own state"
+    )
+    row = tool.render_rant(rant)
+    assert row.count("#2637") == 1, row
+
+
+def test_the_document_carries_the_named_but_unpaired_reading(monkeypatch):
+    """A machine consumer has to tell “named but unpaired” from “never named”.
+
+    `issues == []` answers neither question on its own, which is why the closed and unread
+    answers are already fields of their own. The prose form adds the third, and it joins them
+    rather than being left to be inferred from an empty list (issue #2933).
+    """
+    tool = _fresh_tool()
+    _links(
+        monkeypatch,
+        tool,
+        [
+            _row("2026-11-17T12:34:40+08:00", "in_progress",
+                 progress="Merged. Issue #2565 closed by PR #2566"),
+            _row("2026-11-17T13:00:00+08:00", "pending", progress="nothing filed yet"),
+        ],
+    )
+
+    doc = json.loads(tool._as_json([], tool.open_rant_rows(None, tool.REPO), tool.REPO))
+    rows = {row["timestamp"]: row for row in doc if row.get("subject") == "rant"}
+
+    named = rows["2026-11-17T12:34:40+08:00"]
+    assert (named["issues"], named["mentioned_issues"]) == ([], [2565]), named
+    absent = rows["2026-11-17T13:00:00+08:00"]
+    assert (absent["issues"], absent["mentioned_issues"]) == ([], []), absent
+
+
 def test_a_number_the_api_will_not_resolve_is_unread_not_absent(monkeypatch):
     """"Not there" and "could not be asked" are different answers, and the row says which.
 
