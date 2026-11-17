@@ -70,6 +70,20 @@ level "fallback"  it could not be read, and §5's readings say so
   signal is then read as one more guess.
 - Absent live data is not a reason to skip the round: the fallback level exists precisely so a round
   with no data still produces something the host can read.
+- **When the piece needs material a trend figure cannot give**, the round looks in several *kinds* of
+  source rather than one: a repository's own authors and their commits, people a project's documents
+  cite, records already on this machine, a signed-in session on the network, a public ranking or
+  index. The list is not closed — what it rules out is searching one place, finding nothing there,
+  and treating that as "there is nothing".
+- **The kinds that answered and the kinds that did not are both recorded**, in §5's readings: what
+  was tried, what it returned, and why a kind did not work (not present, not public, not readable
+  from this machine). A round that tried one source and a round that tried five are indistinguishable
+  in the archive unless the attempts are written down, and the next round then repeats the same dead
+  end. The failed kinds are a reading, never a line in the piece: §3 keeps an unsourced field out of
+  the draft.
+- **"Nothing was found" is a claim about the search, not about the world.** It is written as which
+  kinds were tried and what each answered, so the host can see whether the subject is barren or the
+  search was narrow.
 
 ### 2. Choose the topic — one topic, and where it came from
 
