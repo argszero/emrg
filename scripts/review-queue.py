@@ -596,7 +596,9 @@ class Rant:
 
 
 #: The handle R5 writes into a rant's `progress`: the word `issue` and the number **as the
-#: statement the line begins with**. Anchored on that word rather than on a bare `#N`,
+#: statement the line begins with** — one of the two shapes that state a pairing, the other
+#: being `_PROGRESS_PAIRED` below, which reads the number followed by its own arrow to the
+#: PR wherever the pair sits. Anchored on that word rather than on a bare `#N`,
 #: because the same line normally names the PR too (`issue #2110 (closed) → PR #2111
 #: merged`) and a PR number is not what this row reports. The tail continues the list only
 #: in the forms a writer actually uses for it — `#1/#2`, `#1, #2`, `#1 and #2`.
@@ -611,9 +613,11 @@ class Rant:
 #: and because the issue-side fallback below runs only for an entry that names **no**
 #: number, the wrong pairing also suppresses the reading that would have answered.
 #:
-#: The cost is entries that spell the handle inside a sentence rather than at the start of
-#: a line (`Merged. Issue #2565 closed by PR #2566 …`, `Done: issue #2352 -> PR #2362`).
-#: They lose their pairing here, and the fallback below does not recover them: it reads an
+#: The cost is entries that state the pairing in prose instead of in either shape
+#: (`Merged. Issue #2565 closed by PR #2566 …`): the arrow form of that same sentence
+#: (`Done: issue #2352 -> PR #2362`) is read by `_PROGRESS_PAIRED`, and the prose form
+#: carries no token that tells it from a mention. Such an entry loses its pairing here, and
+#: the fallback below does not recover it: it reads an
 #: `Origin:` line, which only the older convention wrote. Whether that costs a rendered row
 #: depends on the number, not on the spelling. A number belonging to another project — `the
 #: research direction of journal issue #124` — was never this entry's handle, so refusing it
@@ -628,6 +632,21 @@ _PROGRESS_ISSUE = re.compile(
     r"(?im)^[ \t]*[*_]{0,2}issues?[ \t]*#(\d+)((?:\s*(?:,|/|&|\band\b)\s*#\d+)*)"
 )
 _PROGRESS_MORE = re.compile(r"#(\d+)")
+
+#: The pairing's other shape: the number with its own arrow to the PR, wherever on the line
+#: it sits. R5's canonical spelling is `issue #1985 (closed COMPLETED) → PR #1986 merged`,
+#: and a cycle rewriting that field once the PR merges keeps every fact and only prefixes
+#: the sentence — `MERGED 2026-11-17T06:03:11Z — issue #2920 → PR #2921 …`. The token moved
+#: off the line's start, which is the one thing the anchor above reads, so the row claimed
+#: `no issue yet` over an issue named in that very text and closed two hours earlier.
+#:
+#: What makes this a statement rather than a mention is the arrow and the pull request on
+#: its far side: `… because issue #2633 is open` names a number and stops, while a pairing
+#: R5 wrote names the PR that carries it. The gap is bounded so the far side has to be this
+#: number's own arrow rather than another pairing further along the line.
+_PROGRESS_PAIRED = re.compile(
+    r"(?i)\bissues?[ \t]*#(\d+)[^\n]{0,40}?(?:→|->)[ \t]*PR[ \t]*#\d+"
+)
 
 
 def _progress_issues(progress: object) -> list[int]:
@@ -644,20 +663,26 @@ def _progress_issues(progress: object) -> list[int]:
     a rant that has not been taken on (or one filed under the older convention, which the
     caller resolves from the issue side).
 
-    **It has to begin its line.** The handle and the prose share one field, so the shape
-    that tells them apart is where the token sits: a pairing R5 wrote is a statement
-    (`issue #2637 → PR #2640 …`), while a number inside a sentence is a mention
-    (`… because issue #2633 is open …`), and only the first one says this rant became an
-    issue. `^` is applied with `re.M`, so a `progress` that appends a correction after a
-    newline still carries the handle written earlier, and a mention anywhere on a line
-    that already holds other words pairs with nothing.
+    **It has to be a statement.** The handle and the prose share one field, so what tells
+    them apart is what the token does, not which words surround it: a pairing R5 wrote is
+    a statement — the word `issue` beginning its line (`issue #2637 → PR #2640 …`) or the
+    number followed by its own arrow to the PR, wherever that pair sits on the line
+    (`MERGED <sha> — issue #2920 → PR #2921 …`) — while a number inside a sentence is a
+    mention (`… because issue #2633 is open …`), and only the first two say this rant
+    became an issue. `^` is applied with `re.M`, so a `progress` that appends a correction
+    after a newline still carries the handle written earlier, and a mention anywhere on a
+    line that already holds other words pairs with nothing.
     """
     text = progress if isinstance(progress, str) else ""
     first = _PROGRESS_ISSUE.search(text)
-    if not first:
+    if first:
+        numbers = [int(first.group(1))]
+        numbers.extend(int(n) for n in _PROGRESS_MORE.findall(first.group(2) or ""))
+    else:
+        paired = _PROGRESS_PAIRED.search(text)
+        numbers = [int(paired.group(1))] if paired else []
+    if not numbers:
         return []
-    numbers = [int(first.group(1))]
-    numbers.extend(int(n) for n in _PROGRESS_MORE.findall(first.group(2) or ""))
     seen: list[int] = []
     for number in numbers:
         if number not in seen:

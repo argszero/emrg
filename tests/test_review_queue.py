@@ -2667,6 +2667,37 @@ def test_an_issue_the_entry_names_and_that_is_closed_says_so(monkeypatch):
     assert links.states_asked == [2342]
 
 
+def test_a_pairing_behind_a_merge_prefix_keeps_its_issue(monkeypatch):
+    """Measured 2026-11-17: the row said `no issue yet` over an issue named in that very text.
+
+    Recording a merge rewrites the field — `issue #2920 → PR #2921 …` became `MERGED <sha>
+    — issue #2920 → PR #2921 …` — which keeps every fact and moves the token off the line's
+    start. The anchor gives up a bare mention on purpose (a rant must not look filed because
+    its `progress` names some other issue), but this number is followed by its own arrow to
+    the PR, so the entry still states the pairing, and the row owes it the state the issue is
+    in rather than the absence the entry contradicts. `no issue yet` is an instruction —
+    file one — so printing it here invites the duplicate this row exists to prevent.
+    """
+    tool = _fresh_tool()
+    links = _links(
+        monkeypatch,
+        tool,
+        [_row("2026-11-17T12:34:40+08:00", "in_progress",
+              progress="MERGED 2026-11-17T06:03:11Z — issue #2920 → PR #2921 "
+                       "(squash 71f35fad); every requirement on the landing tree")],
+    )
+    links.states = {2920: "closed"}
+
+    (rant,) = tool.open_rant_rows(None, tool.REPO)
+
+    assert (rant.issues, rant.closed_issues) == ([], [2920])
+    row = tool.render_rant(rant)
+    assert "#2920 closed" in row, row
+    assert "no issue yet" not in row, (
+        "the entry names the issue, so the row must not tell the next cycle to file one"
+    )
+
+
 def test_a_number_the_api_will_not_resolve_is_unread_not_absent(monkeypatch):
     """"Not there" and "could not be asked" are different answers, and the row says which.
 
@@ -2795,6 +2826,8 @@ def test_the_handle_is_read_where_a_statement_may_begin(monkeypatch):
         "the gate is closed because issue #2633 is open": [],
         "Merged. Issue #2565 closed by PR #2566": [],
         "issue #1985 → PR #1986 merged": [1985],  # control: the same text, stated
+        # The same statement behind a prefix: what a cycle writes after the merge lands.
+        "MERGED 2026-11-17T06:03:11Z — issue #2920 → PR #2921 merged": [2920],
         "Half 1 (#1086 age alarm): PR #1088 MERGED, issue #1086 CLOSED": [],
         "no number here at all": [],
     }
