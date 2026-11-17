@@ -92,11 +92,13 @@ describe("词典完整性守卫（防漂移）", () => {
   // （chooseImage / formatBar / bold / italic / strike / code / link / bullet /
   // bulletList / ordered / orderedList / quote / heading / linkPrompt /
   // linkDialogTitle）随它们一起删除，附件入口新增 3 个 → 465 - 15 + 3 = 453。
-  it("zh/en 各 453 个 key 且完全对齐", () => {
+  // 2026-11-17 issue #2924：打开会话对话框两步各加一个搜索框，新增
+  // searchAgents / searchSessions / noMatches 3 个键 → 453 + 3 = 456。
+  it("zh/en 各 456 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(453);
-    expect(enKeys.length).toBe(453);
+    expect(zhKeys.length).toBe(456);
+    expect(enKeys.length).toBe(456);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);

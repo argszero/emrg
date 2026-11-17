@@ -106,7 +106,7 @@ describe("WorkspaceView", () => {
     expect(screen.getByTestId("agent-sessions")).toBeInTheDocument();
     expect(screen.getByText("emrg 的会话")).toBeInTheDocument();
     // 返回
-    await userEvent.click(screen.getByText("← 返回项目列表"));
+    await userEvent.click(screen.getByText("← 返回 agent 列表"));
     expect(screen.getByTestId("agent-list")).toBeInTheDocument();
   });
 
