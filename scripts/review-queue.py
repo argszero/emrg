@@ -568,9 +568,11 @@ class Rant:
     carries is still resolved as a fallback, for entries filed before that rule; nothing
     new depends on it.
 
-    Three states, because they are three instructions to the reader: `#N` (an open issue —
+    Four states, because they are four instructions to the reader: `#N` (an open issue —
     work is filed), `#N closed` (its PR merged, or it was closed without one — read it
-    before filing anything, the duplicate this row exists to prevent) and `no issue yet`.
+    before filing anything, the duplicate this row exists to prevent), `#N named (not the
+    handle)` (the entry names the number without stating a pairing — read that issue before
+    filing anything, because the work may well be filed) and `no issue yet`.
     A number the API could not resolve is `#N unread`, never folded into `no issue yet`:
     "not there" and "could not be asked" are different answers. Several numbers mean
     several issues claim one rant, a fault `check-issue-links.py` reports as a duplicate
@@ -592,6 +594,9 @@ class Rant:
     issues: list[int] = field(default_factory=list)
     closed_issues: list[int] = field(default_factory=list)
     unread_issues: list[int] = field(default_factory=list)
+    #: Numbers the entry names without stating them as the pairing: not filed, not absent —
+    #: the answer that keeps `no issue yet` from standing over a number the entry spelled.
+    mentioned_issues: list[int] = field(default_factory=list)
     agent: str = ""
 
 
@@ -648,6 +653,28 @@ _PROGRESS_PAIRED = re.compile(
     r"(?i)\bissues?[ \t]*#(\d+)[^\n]{0,40}?(?:→|->)[ \t]*PR[ \t]*#\d+"
 )
 
+#: The pairing spelled as prose instead of with an arrow: the word `issue`, the number, and
+#: — within a bounded gap — the pull request that carried it (`Merged. Issue #2565 closed by
+#: PR #2566`). Neither statement shape above reads this one: the anchor wants the token at the
+#: start of the line, and `_PROGRESS_PAIRED` wants its own arrow. So the row said `no issue
+#: yet`, which is an instruction to file one, over a number the entry had written itself.
+#:
+#: **The pull request on the far side is what tells a pairing from a narration**, and that is
+#: the whole discriminator. A cycle also writes sentences into this same field about other
+#: work — `R5 is closed this cycle because issue #2633 is open …` — and that entry has no
+#: issue of its own: its row must still offer the work (`test_a_narrated_number_leaves_the_rant
+#: _looking_unfiled`). Keying on the PR keeps the two apart, because a narration about another
+#: issue does not name the PR that carried anything, while a rewritten pairing keeps the PR
+#: and only loses the arrow. The gap is bounded so the far side has to be this number's own
+#: PR rather than another pairing further along the line.
+#:
+#: This does not promote the number to the pairing: `_progress_issues` still answers `[]` for
+#: the prose form, which two tests pin. What changes is only that the row no longer claims the
+#: entry names nothing.
+_PROGRESS_PAIRED_PROSE = re.compile(
+    r"(?i)\bissues?[ \t]*#(\d+)[^\n]{0,40}?\bPR[ \t]*#\d+"
+)
+
 
 def _progress_issues(progress: object) -> list[int]:
     """The issue numbers an entry's `progress` names, in the order it names them.
@@ -686,6 +713,40 @@ def _progress_issues(progress: object) -> list[int]:
     seen: list[int] = []
     for number in numbers:
         if number not in seen:
+            seen.append(number)
+    return seen
+
+
+def _progress_mentions(progress: object) -> list[int]:
+    """The numbers an entry's `progress` pairs with a PR in prose, without stating a pairing.
+
+    The counterpart of `_progress_issues`, and deliberately not folded into it: promoting a
+    mention to the pairing is the defect two tests pin against, because a cycle writes "the
+    gate is closed because issue #2633 is open" into this same field and a rant that reads as
+    filed stops moving with nobody deciding to stop it.
+
+    What it recovers is the other half of the same fact. `progress` is rewritten whole on
+    every status change, so recording a merge turns `issue #2565 → PR #2566 …` into
+    `Merged. Issue #2565 closed by PR #2566 …` — every fact kept, the token moved off the
+    line's start. Neither statement shape reads that, and `no issue yet` is an instruction
+    to file one; over a number the entry itself spelled, that instruction invites the
+    duplicate this row exists to prevent. So the row reports the number as paired-in-prose
+    and the reader decides by opening the issue.
+
+    **A number narrated without a PR is not read here at all** — that sentence is about
+    other work, not about this entry, and its row must still offer the work. The PR on the
+    far side is the discriminator; see `_PROGRESS_PAIRED_PROSE`.
+
+    A number stated in either shape is never repeated here — the caller renders it in its
+    own state — and `PR #N` on its own is not read as an issue, because the word before the
+    number has to be `issue`.
+    """
+    text = progress if isinstance(progress, str) else ""
+    stated = set(_progress_issues(text))
+    seen: list[int] = []
+    for match in _PROGRESS_PAIRED_PROSE.finditer(text):
+        number = int(match.group(1))
+        if number not in stated and number not in seen:
             seen.append(number)
     return seen
 
@@ -807,6 +868,15 @@ def open_rant_rows(rants: str | None = None, repo: str = REPO) -> list[Rant]:
         if not numbers:
             open_here = sorted(by_timestamp.get(stamp, []))
             closed_here = sorted(closed_by_timestamp.get(stamp, []))
+        # The row states what it already answers; a number reported in one of those states
+        # is not repeated as a mention. `stated_here` includes the issue-side fallback, so a
+        # pairing the entry never wrote is not re-reported as unpaired beside it.
+        stated_here = set(open_here) | set(closed_here) | set(unread_here)
+        mentioned_here = [
+            number
+            for number in _progress_mentions(row.get("progress"))
+            if number not in stated_here
+        ]
         out.append(
             Rant(
                 timestamp=stamp,
@@ -815,6 +885,7 @@ def open_rant_rows(rants: str | None = None, repo: str = REPO) -> list[Rant]:
                 issues=sorted(open_here),
                 closed_issues=sorted(closed_here),
                 unread_issues=sorted(unread_here),
+                mentioned_issues=sorted(mentioned_here),
                 # The ledger's own key is `agent` (the record's target); the name
                 # this model keeps for the concept is its own, and the output rows below
                 # still label it `agent`.
@@ -1478,12 +1549,21 @@ def render_rant(rant: Rant) -> str:
     duplicate this repo's link reading exists to report. The row states that the issue is
     closed and stops there: a close by merge and a close without one are not
     distinguishable from here, so the cycle reads the issue rather than being told which
-    it was. `#N unread` is the fourth answer and a different one again: the entry names a
+    it was. `#N unread` is another answer again: the entry names a
     number the API would not resolve, which is a question for the reader, not an absence.
+
+    `#N named (not the handle)` is the last one, and it is neither of those: the entry
+    spells the pairing in prose instead of in either shape the anchor reads (`Merged. Issue
+    #2565 closed by PR #2566`), so the row cannot say the work is filed and must not say it
+    is missing. It names the number and the fact that it is not the handle, and the reader
+    opens the issue — a row that answered `no issue yet` here told the next cycle to file
+    one. A number narrated without a PR is not this state at all: that sentence is about
+    other work, and its row keeps saying `no issue yet`, which is what asks for the file.
     """
     tokens = [f"#{n}" for n in rant.issues]
     tokens += [f"#{n} closed" for n in rant.closed_issues]
     tokens += [f"#{n} unread" for n in rant.unread_issues]
+    tokens += [f"#{n} named (not the handle)" for n in rant.mentioned_issues]
     where = ", ".join(tokens) if tokens else "no issue yet"
     excerpt = " ".join(rant.message.split())
     if len(excerpt) > 110:
@@ -1596,11 +1676,16 @@ def _as_json(
             "timestamp": rant.timestamp,
             "status": rant.status,
             "issues": rant.issues,
-            # The other two answers a pair of numbers can be in, named as fields rather
+            # The other answers a pair of numbers can be in, named as fields rather
             # than left to be inferred from an empty `issues`: a consumer that read only
-            # `issues == []` would count a closed issue and a never-filed rant the same.
+            # `issues == []` would count a closed issue, a number the API would not
+            # resolve, a number named without the pairing, and a never-filed rant alike.
             "closed_issues": rant.closed_issues,
             "unread_issues": rant.unread_issues,
+            # The number the entry spells without stating the pairing. The row renders it
+            # as `#N named (not the handle)` instead of `no issue yet`, and this field is
+            # how a machine consumer tells "named but unpaired" from "never named".
+            "mentioned_issues": rant.mentioned_issues,
             "message": rant.message,
             "agent": rant.agent,
             # The prose rendering withholds another agent's rows (a cycle's report is
