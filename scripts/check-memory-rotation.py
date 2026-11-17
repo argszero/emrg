@@ -214,15 +214,15 @@ SESSIONS_SUBDIR = (".emrg", "sessions")
 #: arguments because step 0 runs every cycle on this installation; any other
 #: layout is reached by naming the two paths, and the report says which it read.
 DEFAULT_AGENTS = "~/.emrg/agents.yml"
-#: The bookmark keeps its **pre-rename basename**, and the difference from the
-#: register above is the whole point: the register's move is a migration
-#: (`emrg.config` performs it), so naming the new file and falling back over the
-#: window is right. The bookmark is moved by **nothing** — no code in this tree
-#: renames it, it is a file this installation writes and this tool reads — so a
-#: renamed constant renames no file and answers `not measurable` on every cycle
-#: from then on. A name whose value is host state is preserved verbatim, which is
-#: the same rule the register already obeys one line down: its fallback still
-#: spells the **old** name (`projects.yml`) rather than translating it.
+#: The basename is **host state and stays verbatim**: a test in
+#: `tests/test_check_memory_rotation.py` pins it, because renaming the constant renames no
+#: file, and step 0 then answers `not measurable` on every cycle from the merge onwards.
+#:
+#: Measured 2026-11-18 (issue #2951): *this* installation keeps its bookmark at the name
+#: §1.5 and the memory index both use, and has never written the name below - so the
+#: constant keeps its value and `BOOKMARK_FALLBACK` reaches the file this host writes. The
+#: two disagree, which is why the no-argument form used to answer `not measurable: no
+#: bookmark at <path>` on every cycle here.
 DEFAULT_BOOKMARK = "~/.emrg/evolution/emrg/.emrg/memory/project-memory-rotation-bookmark.md"
 
 #: The register's name before an Agent became the record of the directory a
@@ -240,6 +240,11 @@ DEFAULT_BOOKMARK = "~/.emrg/evolution/emrg/.emrg/memory/project-memory-rotation-
 #: the fallback reads what is there and **says which file it read**, so the
 #: reading never claims a subject it did not open.
 LEGACY_AGENTS = "~/.emrg/projects.yml"
+
+#: The bookmark **this** installation writes, reached only when the default is absent
+#: (issue #2951). The two names disagree, and nothing here has ever written the default's,
+#: so before this fallback the no-argument form could not be run on this host at all.
+BOOKMARK_FALLBACK = "~/.emrg/evolution/emrg/.emrg/memory/project-memory-bookmark.md"
 
 
 class Unmeasurable(Exception):
@@ -950,6 +955,17 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             agents_path = legacy_path
+    # The bookmark's one window, on the same terms: only the default may fall back, and the
+    # run says which file it read rather than presenting one name's answer as another's.
+    if args.bookmark == DEFAULT_BOOKMARK and not bookmark_path.exists():
+        fallback_bookmark = Path(os.path.expanduser(BOOKMARK_FALLBACK))
+        if fallback_bookmark.exists():
+            print(
+                f"note: {bookmark_path} does not exist - reading {fallback_bookmark}, "
+                f"the bookmark this installation writes",
+                file=sys.stderr,
+            )
+            bookmark_path = fallback_bookmark
     try:
         reading = read(agents_path, bookmark_path)
     except Unmeasurable as exc:
