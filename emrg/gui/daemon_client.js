@@ -166,6 +166,29 @@ const RESPONSE_TYPES = {
   task_template_delete: "template_result",
 };
 
+/** The response types the renderer reads as a `command_result` (issue #2982).
+ *
+ * Each of these has two destinations, and the two must be the same one. With
+ * nobody waiting, `_classify` emits it as `command_result` (the whitelist branch
+ * below). With a caller waiting (`sendCommandAndWait`), the same frame is claimed
+ * by `_resolvePending` first — and being claimed says "the waiter has it", never
+ * "the renderer does not want it". Before this list was named in both places the
+ * claim won all four, so whether the renderer saw a frame depended on whether
+ * some caller happened to be awaiting at that instant: opening a session that is
+ * already running awaits `resume_session`, so the daemon's turn snapshot
+ * (`meta.turn`) died in a main-process log line and the GUI's stopwatch never
+ * started.
+ *
+ * `rewind_result` is deliberately absent: `main.js` re-forwards that one itself
+ * (#2351), so a second emit here would render the rewind twice.
+ */
+const COMMAND_RESULT_TYPES = Object.freeze([
+  "resume_result",
+  "model_set",
+  "session_deleted",
+  "clear_result",
+]);
+
 /** The cwd a `session_cwd_result` frame names, or the caller's own candidate.
  *
  * The daemon answers where a session lives so that a client does not have to
@@ -1026,8 +1049,15 @@ class DaemonClient {
 
   // G1/G57 分类
   _classify(frame) {
-    // 命令响应优先（pending 配对）
-    if (this._resolvePending(frame)) return;
+    // 命令响应优先（pending 配对）。但认领 ≠ 渲染层用不着（issue #2982）：名单里的
+    // 那几帧（`COMMAND_RESULT_TYPES`）在没人等的时候本来就走下面的 `command_result`
+    // 分支，所以有等待者时补发同一去向——否则同一帧的去向取决于「此刻是否恰好有人
+    // 在 await」。实测：GUI 打开一个已在跑的会话时 `conn-manager` 正 await
+    // `resume_session`，daemon 的轮状态快照就被这行吞掉，渲染层永远收不到。
+    if (this._resolvePending(frame)) {
+      if (COMMAND_RESULT_TYPES.includes(frame.type)) this._emit("command_result", frame);
+      return;
+    }
 
     if (frame.type === "sandbox_set") {
       // The session's sandbox tier (rant 2026-09-30T09:30:16, GUI half). One frame
@@ -1100,7 +1130,7 @@ class DaemonClient {
       this._emit("list_result", frame);
       return;
     }
-    if (["resume_result", "model_set", "session_deleted", "clear_result"].includes(frame.type)) {
+    if (COMMAND_RESULT_TYPES.includes(frame.type)) {
       this._emit("command_result", frame);
       return;
     }

@@ -36,7 +36,7 @@ class ConnManager {
     this.isPackaged = isPackaged;
     this._conns = new Map(); // sid -> { conn, projectPath }
     this._daemonConn = null; // daemon 级连接（ping/list_sessions 等非会话命令）
-    this._openHooks = new Set(); // (sid, conn) => void（新会话连接建立时）
+    this._openHooks = new Set(); // (sid, conn, projectPath, resumeSnapshot) => void（新会话连接建立时）
     this._recoverHooks = new Set(); // () => void（recoverAll 完成后）
     // daemon 重启恢复（rant 15:07:19 P2）：短窗口内所有连接同时断 → 判定 daemon 重启
     // → 全部重连重订阅；单条断 → 独立退避重试（多会话场景，单会话全断走恢复）。
@@ -92,13 +92,36 @@ class ConnManager {
       isPackaged: this.isPackaged,
       deltaBatchMs: 16, // P2：delta 批量（G122 16ms）每连接一份（#626）
     });
+    // The daemon's reply to `resume_session` is the only place a session opened
+    // *after* its turn began can learn that the turn is running and when it
+    // started — `turn_start` is broadcast once, at the instant the turn begins,
+    // so a later client never hears it (issue #2982). The same reply is the only
+    // source of the stored sandbox tier, the extra writable roots and the typed
+    // grants, each for the same reason: those are broadcasts too, and no
+    // broadcast is replayed.
+    //
+    // It has to be handed out explicitly, because nothing is listening when it
+    // arrives. `main.js` attaches the per-connection renderer bridge in its
+    // `onOpen` hook, and that hook runs *after* this await returns, so the frame
+    // would be delivered to an empty listener set. The snapshot therefore
+    // travels as the hook's fourth argument, and the caller forwards it exactly
+    // as it forwards every other frame.
+    let resumeSnapshot = null;
     try {
       await conn.ensureConnected({ skipStart: true }); // daemon 已就绪 → 只连不拉
       this.logger.info(`[connMgr] open connected sid=${sid} projectPath=${projectPath}`);
       if (resume) {
         this.logger.info(`[connMgr] resume_session send sid=${sid} cwd=${projectPath}`);
         const res = await conn.sendCommandAndWait("resume_session", { session_id: sid, cwd: projectPath }, 5000);
+        resumeSnapshot = res;
         this.logger.info(`[connMgr] resume_session OK sid=${sid} res=${JSON.stringify(res).slice(0, 300)}`);
+        // A line that reads without parsing the JSON above, and that survives its
+        // truncation: whether a turn is running, and the instant the renderer's
+        // timer starts from when it is.
+        const turn = res && res.meta ? res.meta.turn : null;
+        const running = !!(turn && turn.running === true);
+        const startedAt = turn && typeof turn.started_at === "number" ? turn.started_at : null;
+        this.logger.info(`[connMgr] resume snapshot sid=${sid} running=${running} started_at=${startedAt}`);
       }
     } catch (e) {
       conn.close(); // resume 失败（会话已删等）→ 不泄漏连接
@@ -115,7 +138,7 @@ class ConnManager {
     });
     this._conns.set(sid, { conn, projectPath });
     for (const cb of this._openHooks) {
-      try { cb(sid, conn, projectPath); } catch (e) { this.logger.warn(`[gui] connManager onOpen hook error: ${e.message}`); }
+      try { cb(sid, conn, projectPath, resumeSnapshot); } catch (e) { this.logger.warn(`[gui] connManager onOpen hook error: ${e.message}`); }
     }
     return conn;
   }
