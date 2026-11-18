@@ -54,3 +54,49 @@ describe("IconRail", () => {
     expect(onSwitchView).toHaveBeenCalledTimes(VIEWS.length);
   });
 });
+
+describe("图标轨的结构（issue #2986）", () => {
+  function railEl(): Element {
+    const rail = document.querySelector(".icon-rail");
+    expect(rail).toBeTruthy();
+    return rail as Element;
+  }
+
+  it("顶部标识是仓库的 SVG，不是任何文字符号", () => {
+    setup();
+    const mark = railEl().querySelector(".rail-mark");
+    expect(mark).toBeTruthy();
+    expect(mark!.querySelector("svg")).toBeTruthy();
+    // 文字符号会随字体变形、换字号就走样，而且要它命名一件东西它也命名不了
+    expect((mark!.textContent || "").trim()).toBe("");
+  });
+
+  it("轨宽就是契约的 60px（常量经 style 落到元素上）", () => {
+    setup();
+    expect((railEl() as HTMLElement).style.width).toBe("60px");
+  });
+
+  it("五个页面按钮连续排列，弹性占位在它们之后（设置不被推到底部）", () => {
+    setup();
+    const rail = railEl();
+    const items = Array.from(rail.querySelectorAll(".rail-item"));
+    // 五个页面 + 主题切换
+    expect(items.length).toBe(6);
+    const children = Array.from(rail.children);
+    const fifthAt = children.indexOf(items[4]);
+    const spacerAt = children.indexOf(rail.querySelector(".rail-spacer") as Element);
+    expect(fifthAt).toBeGreaterThan(-1);
+    expect(spacerAt).toBeGreaterThan(-1);
+    expect(fifthAt).toBeLessThan(spacerAt);
+  });
+
+  it("底部有主题切换按钮与 daemon 连接点，且用自绘气泡而不是浏览器原生 title", () => {
+    setup();
+    const rail = railEl();
+    expect(rail.querySelector('[data-testid="rail-theme"]')).toBeTruthy();
+    expect(rail.querySelector('[data-testid="rail-conn"]')).toBeTruthy();
+    // 原生 title 由窗口管理器绘制，偏移、淡入、层级都做不到，所以轨里一个都不许有
+    expect(rail.querySelectorAll("[title]").length).toBe(0);
+    expect(rail.querySelectorAll('[role="tooltip"]').length).toBeGreaterThan(0);
+  });
+});

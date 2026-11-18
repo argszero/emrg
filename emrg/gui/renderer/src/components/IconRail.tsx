@@ -1,22 +1,32 @@
 import type { ReactNode } from "react";
 import { useI18n } from "../lib/i18n";
 import { RAIL_WIDTH, type SidebarViewId } from "../lib/cockpit";
+import { useTheme, nextMode } from "../lib/theme";
+import { EmrgMark } from "./EmrgMark";
 
 /**
- * IconRail — the 60px column at the far left (issue #2959 item 2).
+ * IconRail — the 60px column at the far left, drawn to the prototype (issue #2986).
  *
- * Four page icons, drawn as lines rather than emoji, and the current page marked. The
- * four are the pages the contract names; settings keeps its own door at the bottom of
- * the rail, because removing a reachable surface was never part of the rebuild and a
- * settings panel nobody can open is a feature lost in a layout change.
+ * What the prototype fixes, and what this file therefore states literally:
  *
- * The rail is a *column*, not a row inside the sidebar: the sidebar became the list of
- * open sessions, and a rail that shared its width would move every time the list was
- * resized.
+ *  - the top mark is the repository's own EMRG icon, not a character;
+ *  - five page buttons in one contiguous run — sessions, agents, tasks, rants,
+ *    settings — because settings is a page like the other four. It used to sit on its
+ *    own at the bottom behind a flexible spacer, which read as a different kind of
+ *    thing from the four it opens;
+ *  - the spacer, the theme toggle and the daemon dot come *after* the five;
+ *  - the tooltip is drawn, not the browser's `title`. A native tooltip is painted by
+ *    the window manager: it cannot be offset from the button, it cannot fade, and on a
+ *    rail this narrow it covers the icon it names.
+ *
+ * Every icon path is the prototype's `d` data verbatim. Redrawing one approximately is
+ * the defect that made the last rail look like a different product.
  */
 export interface IconRailProps {
   activeView: SidebarViewId;
   onSwitchView: (view: SidebarViewId) => void;
+  /** The daemon dot: filled while this client holds a connection. */
+  connected?: boolean;
 }
 
 interface RailItem {
@@ -25,74 +35,104 @@ interface RailItem {
   icon: ReactNode;
 }
 
+const svg = (children: ReactNode) => (
+  <svg viewBox="0 0 24 24" aria-hidden="true">
+    {children}
+  </svg>
+);
+
+/** The five pages, in the prototype's order, settings last among them. */
 const ITEMS: RailItem[] = [
   {
     view: "sessions",
     labelKey: "nav.sessions",
-    icon: (
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M20 15a3 3 0 0 1-3 3H8l-4 3V6a3 3 0 0 1 3-3h10a3 3 0 0 1 3 3z" />
-      </svg>
+    icon: svg(
+      <>
+        <path d="M20 15a3 3 0 0 1-3 3H9l-4 3v-3.5A3 3 0 0 1 3 15V6a3 3 0 0 1 3-3h11a3 3 0 0 1 3 3Z" />
+        <path d="M8 8h8M8 12h5" />
+      </>,
     ),
   },
   {
     view: "agents",
     labelKey: "nav.agents",
-    icon: (
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2.5h5a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2z" />
-      </svg>
+    icon: svg(
+      <>
+        <path d="M4 8.5 12 4l8 4.5-8 4.5-8-4.5Z" />
+        <path d="M4 12.5 12 17l8-4.5M4 16.5 12 21l8-4.5" />
+      </>,
     ),
   },
   {
     view: "tasks",
     labelKey: "nav.tasks",
-    icon: (
-      <svg viewBox="0 0 24 24" aria-hidden="true">
+    icon: svg(
+      <>
         <circle cx="12" cy="12" r="8.5" />
         <path d="M12 7.5V12l3 2" />
-      </svg>
+      </>,
     ),
   },
   {
     view: "rants",
     labelKey: "nav.rants",
-    icon: (
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M4 10v4l11 5V5z" />
-        <path d="M18 9.5a4 4 0 0 1 0 5" />
-      </svg>
+    icon: svg(
+      <>
+        <path d="M4 10v4a1 1 0 0 0 1 1h2l3.5 3.5V5.5L7 9H5a1 1 0 0 0-1 1Z" />
+        <path d="M15 8.5a4 4 0 0 1 0 7M18 6a7.5 7.5 0 0 1 0 12" />
+      </>,
+    ),
+  },
+  {
+    view: "settings",
+    labelKey: "nav.settings",
+    icon: svg(
+      <>
+        <path d="M4 7h9M17 7h3M4 12h3M11 12h9M4 17h9M17 17h3" />
+        <circle cx="15" cy="7" r="2" />
+        <circle cx="9" cy="12" r="2" />
+        <circle cx="15" cy="17" r="2" />
+      </>,
     ),
   },
 ];
 
-const SETTINGS: RailItem = {
-  view: "settings",
-  labelKey: "nav.settings",
-  icon: (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="12" cy="12" r="3" />
-      <path d="M12 3.5v2.2M12 18.3v2.2M3.5 12h2.2M18.3 12h2.2M6.2 6.2l1.6 1.6M16.2 16.2l1.6 1.6M17.8 6.2l-1.6 1.6M7.8 16.2l-1.6 1.6" />
-    </svg>
-  ),
-};
+const MOON = svg(<path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11Z" />);
 
-export function IconRail({ activeView, onSwitchView }: IconRailProps) {
+const SUN = svg(
+  <>
+    <circle cx="12" cy="12" r="4.2" />
+    <path d="M12 2.8v2.3M12 18.9v2.3M2.8 12h2.3M18.9 12h2.3M5.5 5.5l1.7 1.7M16.8 16.8l1.7 1.7M18.5 5.5l-1.7 1.7M7.2 16.8l-1.7 1.7" />
+  </>,
+);
+
+export function IconRail({ activeView, onSwitchView, connected = false }: IconRailProps) {
   const { t } = useI18n();
-  const button = (item: RailItem) => (
-    <button
-      key={item.view}
-      type="button"
-      className={`rail-item side-nav-item${activeView === item.view ? " active" : ""}`}
-      data-view={item.view}
-      data-testid={`nav-${item.view}`}
-      aria-label={t(item.labelKey)}
-      title={t(item.labelKey)}
-      onClick={() => onSwitchView(item.view)}
-    >
-      {item.icon}
-    </button>
-  );
+  const { resolved, setMode } = useTheme();
+
+  const button = (item: RailItem) => {
+    const label = t(item.labelKey);
+    return (
+      <button
+        key={item.view}
+        type="button"
+        className={`rail-item side-nav-item${activeView === item.view ? " active" : ""}`}
+        data-view={item.view}
+        data-testid={`nav-${item.view}`}
+        aria-label={label}
+        // No `title`: the tooltip below is drawn, and a native one would appear on top
+        // of it a second later (issue #2986).
+        onClick={() => onSwitchView(item.view)}
+      >
+        {item.icon}
+        <span className="rail-tip" role="tooltip" data-testid={`rail-tip-${item.view}`}>
+          {label}
+        </span>
+      </button>
+    );
+  };
+
+  const themeLabel = t(resolved === "light" ? "rail.toDark" : "rail.toLight");
 
   return (
     <nav
@@ -101,12 +141,32 @@ export function IconRail({ activeView, onSwitchView }: IconRailProps) {
       aria-label="Navigation"
       style={{ width: RAIL_WIDTH }}
     >
-      <div className="rail-mark" aria-hidden="true">
-        ✦
+      <div className="rail-mark" data-testid="rail-mark">
+        <EmrgMark size={32} />
       </div>
       {ITEMS.map(button)}
       <div className="rail-spacer" />
-      {button(SETTINGS)}
+      <button
+        type="button"
+        className="rail-item rail-theme"
+        data-testid="rail-theme"
+        aria-label={themeLabel}
+        data-theme-mode={resolved}
+        onClick={() => setMode(nextMode(resolved))}
+      >
+        {resolved === "light" ? MOON : SUN}
+        <span className="rail-tip" role="tooltip" data-testid="rail-tip-theme">
+          {themeLabel}
+        </span>
+      </button>
+      <div
+        className={`rail-conn${connected ? " on" : ""}`}
+        data-testid="rail-conn"
+        data-connected={connected ? "true" : "false"}
+        aria-label={t("rail.connected")}
+      >
+        <span className="rail-conn-dot" />
+      </div>
     </nav>
   );
 }

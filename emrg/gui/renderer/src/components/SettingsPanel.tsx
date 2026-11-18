@@ -17,7 +17,7 @@ import { AtpLoginDialog } from "./AtpLoginDialog";
  *   默认模型 + [[llm.models]] 增删改设默认（vanilla renderModelList/saveModelForm 对等）。
  * - 主题三选（vanilla applyTheme 对等：data-theme attr）；语言选择（i18n setLocale）。
  */
-export type SettingsTab = "model" | "github" | "appearance" | "language" | "about" | "templates";
+export type SettingsTab = "model" | "sandbox" | "appearance" | "shortcuts" | "about";
 
 export interface SettingsPanelProps {
   /** 版本号（Shell appState.currentVersion 注入） */
@@ -147,13 +147,21 @@ export function recentText(it: RecentImprovement): string {
   return ops.join(" · ");
 }
 
+/**
+ * The five sections, in the prototype's order (issue #2986).
+ *
+ * The page used to offer six tabs, two of them — GitHub and language — that the
+ * prototype does not have. Dropping them outright would have removed a reachable
+ * feature, so the connection UI moved under *about* and the language selector under
+ * *appearance*, where both belong; what the prototype fixes is the tab names the host
+ * navigates by, and those are now exactly these five.
+ */
 const TABS: { id: SettingsTab; labelKey: string }[] = [
-  { id: "model", labelKey: "settings.groupModel" },
-  { id: "github", labelKey: "settings.groupGithub" },
-  { id: "appearance", labelKey: "settings.groupAppearance" },
-  { id: "language", labelKey: "settings.groupLanguage" },
-  { id: "about", labelKey: "settings.aboutTitle" },
-  { id: "templates", labelKey: "settings.taskTemplates" },
+  { id: "model", labelKey: "settings.tabModel" },
+  { id: "sandbox", labelKey: "settings.tabSandbox" },
+  { id: "appearance", labelKey: "settings.tabAppearance" },
+  { id: "shortcuts", labelKey: "settings.tabShortcuts" },
+  { id: "about", labelKey: "settings.tabAbout" },
 ];
 
 export function SettingsPanel({ version = "", evolutionCount = null }: SettingsPanelProps) {
@@ -227,7 +235,7 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
 
   // templates tab 激活 → 加载类型列表（vanilla initTaskManagement 每次打开刷新）
   useEffect(() => {
-    if (tab === "templates") void loadTemplates();
+    if (tab === "model") void loadTemplates();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
@@ -735,20 +743,22 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
     <section className="workspace-view" data-view="settings" data-testid="panel-settings">
       <div className="workspace-view-body">
         <h2 className="workspace-view-title">{t("settings.title")}</h2>
-        <div className="panel-tabs" role="tablist" data-testid="settings-tabs">
-          {TABS.map(({ id, labelKey }) => (
-            <button
-              key={id}
-              type="button"
-              className={`panel-tab${tab === id ? " active" : ""}`}
-              data-settings-tab={id}
-              data-testid={`settings-tab-${id}`}
-              onClick={() => setTab(id)}
-            >
-              {t(labelKey)}
-            </button>
-          ))}
-        </div>
+        <div className="settings-shell">
+          <nav className="settings-nav" role="tablist" data-testid="settings-tabs">
+            {TABS.map(({ id, labelKey }) => (
+              <button
+                key={id}
+                type="button"
+                className={`settings-nav-item${tab === id ? " active" : ""}`}
+                data-settings-tab={id}
+                data-testid={`settings-tab-${id}`}
+                onClick={() => setTab(id)}
+              >
+                {t(labelKey)}
+              </button>
+            ))}
+          </nav>
+          <div className="settings-content">
 
         {msg && (
           <div className={`settings-msg ${msg.kind}`} data-testid="settings-msg">
@@ -915,7 +925,7 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
         )}
 
         {/* ── GitHub ── */}
-        {tab === "github" && (
+        {tab === "about" && (
           <div className="panel-tab-body" data-settings-body="github" data-testid="settings-body-github">
             <div className="settings-group">
               <div className="hint" style={{ marginBottom: 6 }} data-testid="github-status">
@@ -999,7 +1009,7 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
         )}
 
         {/* ── 语言 ── */}
-        {tab === "language" && (
+        {tab === "appearance" && (
           <div className="panel-tab-body" data-settings-body="language" data-testid="settings-body-language">
             <div className="settings-group">
               <label>
@@ -1072,7 +1082,7 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
         )}
 
         {/* ── 自定义类型（task templates，vanilla renderTemplateList 对等） ── */}
-        {tab === "templates" && (
+        {tab === "model" && (
           <div className="panel-tab-body" data-settings-body="templates" data-testid="settings-body-templates">
             <div className="settings-group">
               <div className="settings-group-title">{t("settings.taskTemplates")}</div>
@@ -1162,6 +1172,39 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
             </div>
           </div>
         )}
+
+            {/* ── 沙箱与权限 ── */}
+            {tab === "sandbox" && (
+              <div className="panel-tab-body" data-settings-body="sandbox" data-testid="settings-body-sandbox">
+                <div className="settings-group">
+                  <div className="settings-group-title">{t("settings.sandboxTitle")}</div>
+                  <div className="hint" data-testid="settings-sandbox-hint">
+                    {t("settings.sandboxBody")}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ── 快捷键 ── */}
+            {tab === "shortcuts" && (
+              <div className="panel-tab-body" data-settings-body="shortcuts" data-testid="settings-body-shortcuts">
+                <div className="settings-group">
+                  <div className="settings-group-title">{t("settings.shortcutsTitle")}</div>
+                  <div className="task-list" data-testid="shortcut-list">
+                    <div className="task-row">
+                      <span className="task-name">↑</span>
+                      <span className="task-hint">{t("settings.shortcutRecall")}</span>
+                    </div>
+                    <div className="task-row">
+                      <span className="task-name">Esc</span>
+                      <span className="task-hint">{t("settings.shortcutInterrupt")}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
 
         <div className="panel-actions" style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
           <button type="button" className="btn btn-primary" data-testid="settings-save" disabled={busy} onClick={saveSettings}>

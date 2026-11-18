@@ -900,15 +900,20 @@ dialog::backdrop {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  min-height: 23px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+}
+.task-row:hover {
+  border-color: var(--border);
   background: var(--bg-soft);
 }
 .task-name {
   font-weight: 600;
   flex-shrink: 0;
-  max-width: 40%;
+  max-width: 330px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -930,35 +935,29 @@ dialog::backdrop {
   flex-shrink: 0;
 }
 /* rant 21:36:01：Rant 面板 5 列 + 状态徽标三态配色（已完成绿 / 进行中琥珀 / 待处理灰） */
+/* Six fixed columns, so the header and every row agree on where a column starts.
+ * With flex the widths were shares of whatever the row happened to hold, so the
+ * status column began in a different place on every line — which is why a list that
+ * was meant to be scanned had to be read. The last 50px is the action column the
+ * header names by leaving it empty. */
 .rant-head {
-  display: flex;
-  gap: 8px;
-  padding: 2px 8px 6px;
-  font-size: var(--fs-aux);
+  display: grid;
+  grid-template-columns: 92px 64px 58px 106px 1fr 50px;
+  gap: 10px;
+  align-items: center;
+  padding: 0 9px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+  font-size: 10.5px;
   font-weight: 600;
+  letter-spacing: 0.04em;
   color: var(--text-3);
 }
-.rant-head .rant-col-time,
-.rant-row .rant-col-time {
-  flex: 0 0 150px;
-}
-.rant-head .rant-col-agent,
-.rant-row .rant-col-agent {
-  flex: 0 0 90px;
-}
-.rant-head .rant-col-status,
-.rant-row .rant-col-status {
-  flex: 0 0 76px;
-}
-.rant-head .rant-col-progress,
-.rant-row .rant-col-progress {
-  flex: 1.2;
-  min-width: 0;
-}
-.rant-head .rant-col-content,
-.rant-row .rant-col-content {
-  flex: 2;
-  min-width: 0;
+.rant-row {
+  display: grid;
+  grid-template-columns: 92px 64px 58px 106px 1fr 50px;
+  gap: 10px;
+  align-items: center;
 }
 .rant-head span,
 .rant-row .rant-col-time,
