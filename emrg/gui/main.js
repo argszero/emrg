@@ -945,6 +945,18 @@ vision = false
       return { sessions: frame.sessions || [] };
     });
 
+    // 搜索浮层的历史面（issue #2978）：**全部** 已注册 agent 的全部会话，一次问完。
+    //
+    // 与上面那条的区别不是参数多少，而是主语：这条的主语是 daemon 的 agent 注册表，
+    // 不是调用方给的一个目录。所以这里刻意**不传 cwd、也不兜 DEFAULT_CWD** ——
+    // 「拿一个默认目录充当全部」正是被登记的那个缺陷（宿主 43 个 agent、80 个会话，
+    // 浮层只够到 12 个），在这条路径上写死任何目录都会把它原样复活。每行自带
+    // `agent` 与 `cwd`，渲染层据此把这一行开在它自己的 agent 下。
+    ipcMain.handle("emrg:listAllSessions", async () => {
+      const frame = await requireConn().sendCommandAndWait("list_all_sessions", {}, 5000);
+      return { sessions: frame.sessions || [] };
+    });
+
     // P5：新建项目 = 轻量命令带 cwd → daemon 隐式 _touch_agent 注册（零改动）
     ipcMain.handle("emrg:registerAgent", async (_e, { path: p }) => {
       if (typeof p !== "string" || !p) throw new Error("invalid agent path");

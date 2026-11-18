@@ -135,6 +135,14 @@ export interface SessionHit {
   sid: string;
   title: string;
   agent: string;
+  /**
+   * The directory of the agent this session belongs to, when the listing named it.
+   *
+   * A history row is opened under its own agent (issue #2978), and this is the path
+   * that carries it there. Empty means "this listing did not say" — the caller then
+   * falls back to the daemon's own resolution rather than to a default directory.
+   */
+  cwd?: string;
   /** Last activity, epoch ms; 0 when nothing said. */
   at: number;
   /** Already open in the left column. */
@@ -163,6 +171,50 @@ function knownAgent(s: SessionInfo): string {
   return typeof a === "string" ? a : "";
 }
 
+function knownCwd(s: SessionInfo): string {
+  const c = s.cwd;
+  return typeof c === "string" ? c : "";
+}
+
+/**
+ * Two listings of the same sessions, merged into one row per session id (issue #2978).
+ *
+ * The overlay reads two sources: the active agent's listing, which the app state keeps
+ * live, and the daemon's whole-register listing, which is fetched afresh each time the
+ * overlay opens. They overlap — the active agent's sessions are in both — and a row
+ * that appeared twice would be counted twice, so the merge is by id.
+ *
+ * Which copy wins is the part worth stating: the row that **names its agent**. A row
+ * without one cannot be found by agent name, and that is half of what the box is for;
+ * a row without a directory cannot open under its own agent. Everything else is the
+ * same `meta.json` read twice, so a field one copy is missing is the read that missed
+ * it, not a different fact, and the other copy fills it.
+ *
+ * Order is not this function's business: `sessionHits` stamps each row's time and
+ * `searchSessions` sorts the groups.
+ */
+export function mergeSessionRows(primary: SessionInfo[], all: SessionInfo[]): SessionInfo[] {
+  const bySid = new Map<string, SessionInfo>();
+  for (const s of [...all, ...primary]) {
+    if (!s || typeof s.session_id !== "string" || !s.session_id) continue;
+    const kept = bySid.get(s.session_id);
+    if (!kept) {
+      bySid.set(s.session_id, s);
+      continue;
+    }
+    const named = knownAgent(kept) || knownCwd(kept) ? kept : s;
+    const other = named === kept ? s : kept;
+    bySid.set(s.session_id, {
+      ...other,
+      ...named,
+      title: knownTitle(named) || knownTitle(other),
+      agent: knownAgent(named) || knownAgent(other),
+      cwd: knownCwd(named) || knownCwd(other),
+    });
+  }
+  return [...bySid.values()];
+}
+
 /**
  * Every session this client can name, open ones first and each list by last activity.
  *
@@ -181,6 +233,7 @@ export function sessionHits(openSessions: OpenSessionEntry[], knownSessions: Ses
       sid: entry.sid,
       title: entry.title || (k ? knownTitle(k) : ""),
       agent: entry.projectName || (k ? knownAgent(k) : ""),
+      cwd: k ? knownCwd(k) : "",
       at: Number.isNaN(at) ? 0 : at,
       open: true,
     });
@@ -192,6 +245,7 @@ export function sessionHits(openSessions: OpenSessionEntry[], knownSessions: Ses
       sid: s.session_id,
       title: knownTitle(s),
       agent: knownAgent(s),
+      cwd: knownCwd(s),
       at: knownTime(s),
       open: false,
     });

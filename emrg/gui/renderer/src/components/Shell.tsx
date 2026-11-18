@@ -10,6 +10,7 @@ import { TaskFormDialog, type TaskFormPayload } from "./TaskFormDialog";
 import { RantDialog } from "./RantDialog";
 import type { AgentRec, RantRec, TaskRec } from "../lib/workspaceView";
 import type { SessionRow } from "../lib/openSession";
+import type { SessionInfo } from "../lib/sidebar";
 import { SessionColumn } from "./SessionColumn";
 import { IconRail } from "./IconRail";
 import { StatusBand } from "./StatusBand";
@@ -26,6 +27,7 @@ import {
   RIGHT_COLUMN_MIN,
   clampWidth,
   columnBounds,
+  mergeSessionRows,
   persistColumnWidth,
   sessionHits,
   storedColumnWidth,
@@ -90,6 +92,12 @@ import { replayHistoryRecords, replayHistoryRecordsPrepend, type HistoryRecord }
 interface WorkspaceBridge {
   listAgents(): Promise<AgentRec[]>;
   listAgentSessions(p: { projectPath: string }): Promise<{ sessions: SessionRow[] }>;
+  /**
+   * Every registered agent's sessions, in one answer (issue #2978). Optional because a
+   * packaged client from before the message existed answers `undefined`, and the
+   * overlay then shows what the app state already holds instead of nothing at all.
+   */
+  listAllSessions?(): Promise<{ sessions: SessionInfo[] }>;
   listTasks(): Promise<TaskRec[]>;
   listRants(p: { status?: string }): Promise<RantRec[]>;
   switchSession(p: { sessionId: string; projectPath?: string }): Promise<unknown>;
@@ -376,11 +384,15 @@ export function Shell() {
     }
   }
 
-  async function selectProjectSession(p: AgentRec, sid: string) {
+  async function selectProjectSession(p: Pick<AgentRec, "path">, sid: string) {
     const b = wsBridge();
     if (!b?.switchSession) return;
     try {
-      await b.switchSession({ sessionId: sid });
+      // The row's own agent travels with the switch (issue #2978). Without it the main
+      // process has to work the directory out afterwards, and a history row belonging
+      // to another agent could open under whichever agent happened to be active — the
+      // messages then read out of the wrong directory, or out of an empty one.
+      await b.switchSession({ sessionId: sid, ...(p.path ? { projectPath: p.path } : {}) });
     } catch (e) {
       // 切换失败：人没有离开当前视图，所以拒绝要出现在**这里**（issue #2637）——
       // 以前这一行没有 try，拒绝变成未处理的 Promise rejection，点一下像没反应。
@@ -555,10 +567,42 @@ export function Shell() {
   const inspectorActions = useMemo(() => turnActions(turnEntries), [turnEntries]);
   const inspectorFiles = useMemo(() => turnFiles(turnEntries), [turnEntries]);
 
-  /** What the search overlay can reach: the open sessions plus the daemon's listing. */
+  /**
+   * The whole register's sessions, fetched each time the overlay opens (issue #2978).
+   *
+   * `appState.sessions` is the active agent's listing — what the left column shows —
+   * and the overlay's subject is every registered agent, so it asks once on open
+   * rather than once per agent. Read on open rather than on mount for the reason the
+   * daemon reads its register live: an agent registered while the app is running must
+   * be findable next time the box opens.
+   *
+   * A daemon that cannot answer leaves what the app state already holds. The host
+   * opened this box to find a session, and an error surface where the results go is
+   * not an answer to that.
+   */
+  const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
+  useEffect(() => {
+    if (!searchOpen) return;
+    const ask = wsBridge()?.listAllSessions;
+    if (!ask) return;
+    let live = true;
+    void (async () => {
+      try {
+        const res = await ask();
+        if (live) setAllSessions(res.sessions ?? []);
+      } catch {
+        if (live) setAllSessions([]);
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [searchOpen]);
+
+  /** What the search overlay can reach: the open sessions plus every agent's listing. */
   const searchHits = useMemo(
-    () => sessionHits(appState.openSessions, appState.sessions),
-    [appState.openSessions, appState.sessions],
+    () => sessionHits(appState.openSessions, mergeSessionRows(appState.sessions, allSessions)),
+    [appState.openSessions, appState.sessions, allSessions],
   );
 
   /** The left column's bounds for this window, and the width it renders at today. */
@@ -615,7 +659,11 @@ export function Shell() {
       selectSession(sid);
       return;
     }
-    await selectProjectSession({}, sid);
+    // The overlay row carries the agent it belongs to (issue #2978), so the session
+    // opens under that agent. A row whose listing named no directory passes none, and
+    // the daemon's own session index answers instead of any default here.
+    const row = searchHits.find((h) => h.sid === sid);
+    await selectProjectSession({ path: row?.cwd }, sid);
   }
 
   /** 选择会话：切换 sid + 回会话视图（vanilla switchSession → activeView="sessions"） */

@@ -3192,6 +3192,12 @@ class EmrgServer:
                 return
             await self._handle_list_sessions(Path(cwd), ws)
 
+        elif msg_type == "list_all_sessions":
+            # issue #2978: no `cwd` argument on purpose -- the register is the subject,
+            # so there is no directory a caller could name to narrow it, and none it
+            # could forget to name.
+            await self._handle_list_all_sessions(ws)
+
         elif msg_type == "resolve_session_cwd":
             session_id = msg.get("session_id", "")
             if not session_id:
@@ -6811,6 +6817,63 @@ class EmrgServer:
         sessions = Session.list_sessions(cwd)
         await self._send(ws, {
             "type": "sessions_list",
+            "sessions": sessions,
+        })
+
+    async def _handle_list_all_sessions(self, ws) -> None:
+        """Every session of every registered agent, in one frame (issue #2978).
+
+        The search overlay is the one surface that has to reach a session the left
+        column does not show, and `list_sessions` cannot answer it: that command takes
+        one `cwd`, so a client wanting the whole machine sends it once per agent and
+        merges forty-three answers over one connection. Measured on this host when the
+        issue was filed: 43 registered agents holding 80 sessions, of which the overlay
+        reached 12 -- the agent with 23 of them contributed none, because nothing ever
+        asked about it.
+
+        So the **register** is the subject here, not a directory a caller names.
+        `self._agents.entries()` is what `list_agents` answers from, which is what keeps
+        the overlay's coverage and the agent panel's coverage one number rather than
+        two. Each row is the session's own `meta.json` -- the dict `list_sessions`
+        returns -- plus the `agent` it belongs to and that agent's `cwd`, so a client
+        can open the row under its own agent instead of inferring a directory after the
+        fact.
+
+        Read live, not from a snapshot, for the reason `_handle_list_skills` gives: an
+        agent registered while the app is open must be findable the next time the
+        overlay opens. The scan leaves the event loop, as `_detect_git_remote` does
+        below in `_handle_list_agents`: one agent's slow tree must not stop the daemon
+        answering anyone, and one agent's unreadable tree is that agent's silence, never
+        the listing's.
+        """
+        entries = self._agents.entries()
+
+        async def _sessions_of(entry: dict) -> list[dict]:
+            path = entry.get("path", "")
+            if not path:
+                return []
+            try:
+                rows = await asyncio.to_thread(Session.list_sessions, Path(path))
+            except (OSError, ValueError, json.JSONDecodeError):
+                return []
+            name = entry.get("name", "")
+            return [
+                {**row, "agent": name, "cwd": path}
+                for row in rows
+                if isinstance(row, dict)
+            ]
+
+        batches = await asyncio.gather(*(_sessions_of(e) for e in entries))
+        sessions = [row for batch in batches for row in batch]
+        # The order `list_sessions` keeps per agent, kept across the whole set: the
+        # clients sort their own groups, and a frame that arrives pre-ordered lets a
+        # client that only shows the head still show the most recent.
+        sessions.sort(
+            key=lambda m: m.get("updated_at") or m.get("created_at", ""),
+            reverse=True,
+        )
+        await self._send(ws, {
+            "type": "all_sessions",
             "sessions": sessions,
         })
 

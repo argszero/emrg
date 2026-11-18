@@ -185,3 +185,26 @@ test("字符串里的 // 不是注释起点（剥除不能吃掉同一行后面�
     "a trailing line comment is still a comment",
   );
 });
+
+test("搜索浮层的取数不带 cwd，也不兜 DEFAULT_CWD（issue #2978 的残留检查）", () => {
+  // 浮层的主语是 daemon 的 agent 注册表，不是调用方给的一个目录。这条守卫问的是
+  // 「这条路径上还有没有第二个目录在充当『全部』」—— 宿主登记的缺陷正是它：本机 43 个
+  // agent、80 个会话，浮层只够到 12 个，因为它问的永远是一个目录。
+  //
+  // 两侧都断言：`listAllSessions` 走新命令且不带目录；`listAgentSessions` 确实带着
+  // `cwd` —— 否则「没命中 cwd」可能只是这段匹配根本看不见 cwd。
+  const all = stripComments(handlerRegion(source, "listAllSessions"));
+  assert.match(all, /list_all_sessions/, "浮层必须问那条按注册表取数的命令");
+  assert.ok(
+    !/\bcwd\b/.test(all),
+    `浮层的取数路径里不该出现任何目录：一个写死的目录就是被登记的那个缺陷\n${all}`,
+  );
+  assert.ok(
+    !/DEFAULT_CWD/.test(all),
+    "更不该有默认目录兜底 —— 兜底会让「只列一个目录」原样复活",
+  );
+
+  // 对照：同一份源码里，单个 agent 的那条**确实**带 cwd，所以上一条不是在与假想形状搏斗。
+  const one = stripComments(handlerRegion(source, "listAgentSessions"));
+  assert.match(one, /\bcwd\b/, "对照：单个 agent 的取数确实带 cwd");
+});
