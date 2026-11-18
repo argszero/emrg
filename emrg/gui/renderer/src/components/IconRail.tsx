@@ -15,6 +15,11 @@ import { EmrgMark } from "./EmrgMark";
  *    own at the bottom behind a flexible spacer, which read as a different kind of
  *    thing from the four it opens;
  *  - the spacer, the theme toggle and the daemon dot come *after* the five;
+ *  - nothing here wears a class from the sidebar nav this rail replaced. Those rules
+ *    outlived the layout that used them (`css/layout.css`), and `.side-nav-item`'s
+ *    `flex: 1` kept matching the new buttons by class name: five 40px boxes became
+ *    119px tall each and the icons spread down the whole column. A class name is not
+ *    a namespace — the rail owns `icon-rail` / `rail-item` and only those;
  *  - the tooltip is drawn, not the browser's `title`. A native tooltip is painted by
  *    the window manager: it cannot be offset from the button, it cannot fade, and on a
  *    rail this narrow it covers the icon it names.
@@ -116,7 +121,7 @@ export function IconRail({ activeView, onSwitchView, connected = false }: IconRa
       <button
         key={item.view}
         type="button"
-        className={`rail-item side-nav-item${activeView === item.view ? " active" : ""}`}
+        className={`rail-item${activeView === item.view ? " active" : ""}`}
         data-view={item.view}
         data-testid={`nav-${item.view}`}
         aria-label={label}
@@ -136,7 +141,7 @@ export function IconRail({ activeView, onSwitchView, connected = false }: IconRa
 
   return (
     <nav
-      className="icon-rail side-nav"
+      className="icon-rail"
       data-testid="side-nav"
       aria-label="Navigation"
       style={{ width: RAIL_WIDTH }}

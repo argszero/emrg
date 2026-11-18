@@ -1,70 +1,12 @@
-/* layout.css — 整体布局：左侧边栏 + 工作区（#workspace 会话/面板视图 + 输入卡片）
- * 结构：
- *   #app
- *     #sidebar（品牌区 + 新对话 + 分组列表 + 底部设置/连接圆点）
- *     #main（#workspace 视图容器 + #empty-state 欢迎屏 + #composer-wrap 输入卡片）
- */
 
-#app {
-  display: flex;
-  height: 100vh;
-  width: 100vw;
-  position: relative;
-}
-
-/* ── 侧边栏 ─────────────────────────────── */
-#sidebar {
-  width: 264px;
-  min-width: 220px;
-  display: flex;
-  flex-direction: column;
-  height: 100%; /* 撑满 #app 高度，让 .sidebar-footer 能贴底（rant 2026-08-22T07:10:44） */
-  background: var(--bg-panel);
-  border-right: 1px solid var(--border);
-}
-
-.sidebar-brand {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: var(--sp-4) var(--sp-4) var(--sp-3);
-  font-size: var(--fs-title-lg);
-  font-weight: 600;
-  color: var(--text-1);
-}
-.sidebar-brand .brand-star {
-  color: var(--accent);
-  font-size: 18px;
-}
-
-/* 侧边栏导航（rant 14:10:14 P1：5 入口 activity-bar 式） */
-.side-nav {
-  display: flex;
-  gap: 2px;
-  padding: 0 var(--sp-3) var(--sp-2);
-}
-.side-nav-item {
-  flex: 1;
-  min-height: 30px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-card);
-  background: transparent;
-  color: var(--text-2);
-  font-size: 15px;
-  line-height: 1;
-  cursor: pointer;
-  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
-}
-.side-nav-item:hover {
-  background: var(--bg-soft);
-  color: var(--text-1);
-}
-.side-nav-item.active {
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  color: var(--accent);
-}
-/* 工作区视图（rant 18:55:09 v0.2：面板从侧边栏移入 #workspace，整块工作区显示）——
- * 默认隐藏；.active 时填充整个工作区（宽布局，不再受侧边栏 264px 限制） */
+/* This file carries only the rules something on a page actually wears. The old
+ * shell's layout rules lived here long after their elements were gone, and a rule is
+ * not dead code: it keeps matching by class name, so `.side-nav-item`'s `flex: 1`
+ * stretched the icon rail's 40px buttons to 119px the day the rail reused the name.
+ * `cockpit.test.ts` holds the rule now — every name declared here must be worn by a
+ * live source file, comments not counted as a wearer.
+ *
+ * 工作区视图——默认隐藏；.active 时填充整个工作区 */
 .workspace-view {
   display: none;
   flex-direction: column;
@@ -133,28 +75,6 @@
   border-top: 1px solid var(--border);
 }
 
-/* 成长状态卡（WorkBuddy P3：自进化可见化） */
-.growth-card {
-  margin: 0 var(--sp-3) var(--sp-3);
-  padding: var(--sp-2) var(--sp-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 8%, transparent), transparent);
-}
-.growth-line {
-  font-size: var(--fs-secondary);
-  font-weight: 600;
-  color: var(--text-1);
-}
-.growth-line b {
-  color: var(--accent);
-}
-.growth-note {
-  margin-top: 2px;
-  font-size: var(--fs-aux);
-  color: var(--text-3);
-}
-
 /* P4 slice 2：打开会话区（跨项目 tab）——紧贴新对话按钮，视觉轻量 */
 #open-sessions {
   padding-bottom: var(--sp-1);
@@ -162,86 +82,6 @@
   max-height: 40%;
   overflow-y: auto;
 }
-/* ── 主区 ───────────────────────────────── */
-#main {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  position: relative;
-  background: var(--bg);
-}
-
-/* 工作区包装（rant 18:55:09 v0.2 起：#chat-view 更名 #workspace——会话视图 + 面板视图的
- * 公共父容器；每会话一个 .session-view，每面板一个 .workspace-view，display 互斥切换） */
-#workspace {
-  flex: 1;
-  position: relative;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-
-/* 每会话滚动容器：只有激活会话可见，切换 display 保留状态（浏览器 tab 效果） */
-.session-view {
-  position: absolute;
-  inset: 0;
-  overflow-y: auto;
-  display: none;
-  flex-direction: column;
-  gap: var(--sp-3);
-  padding: var(--sp-5) var(--sp-5) var(--sp-4);
-  /* rant 21:28:49：去掉 smooth——JS scrollTop=scrollHeight 也走平滑动画，工具行快速
-     连续追加时滚不到底 → 最新内容不可见。JS 跳转全部即时；用户手动滚动不受影响。 */
-}
-.session-view.active {
-  display: flex;
-}
-/* 会话标题栏：项目/名称(id) 或 项目/id，滚动置顶、全宽贴边（负 margin 抵消 .session-view padding） */
-.session-header {
-  position: sticky;
-  top: 0;
-  z-index: 5;
-  flex-shrink: 0;
-  margin: calc(-1 * var(--sp-5)) calc(-1 * var(--sp-5)) var(--sp-3) !important;
-  padding: var(--sp-3) var(--sp-5);
-  width: auto !important;
-  max-width: none !important;
-  font-size: var(--fs-secondary);
-  color: var(--text-2);
-  background: var(--bg);
-  border-bottom: 1px solid var(--border);
-}
-/* P3 finalize：会话连接断开标记（P4 每会话容器可见；激活会话另走全局横幅） */
-.session-view.disconnected {
-  opacity: 0.55;
-}
-.session-view.disconnected::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background: repeating-linear-gradient(45deg, transparent 0 8px, rgba(128, 128, 128, 0.08) 8px 16px);
-}
-#workspace > *:not(.session-view):not(.workspace-view),
-.session-view > * {
-  width: 100%;
-  max-width: 760px;
-  margin-left: auto;
-  margin-right: auto;
-}
-/* 工具执行全宽左对齐（宿主 2026-08-20 17:50:30）：消息正文保持 760px 阅读宽度，
-   工具行/组/输出不受限，铺满整个聊天窗口左侧。 */
-.session-view > .tool-row,
-.session-view > .tool-group,
-.session-view > .tool-group .tool-group-rows,
-.session-view > .tool-output,
-.session-view > .tool-expand-btn {
-  max-width: none;
-  margin-left: 0;
-  margin-right: 0;
-}
-
 /* 输入区（宿主 2026-08-20 17:50:30：状态栏/输入框 100% 全宽，不再 808px 居中） */
 #composer-wrap {
   position: relative; /* / 指令补全菜单锚点（rant 19:44 P1） */
@@ -269,7 +109,6 @@
   box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow-md);
 }
 
-#input,
 .composer-textarea {
   flex: 1;
   min-width: 0;
@@ -289,7 +128,6 @@
   color: var(--text-1);
   caret-color: var(--accent);
 }
-#input:focus,
 .composer-textarea:focus,
 .composer-textarea:focus-visible {
   border: none;
@@ -299,13 +137,6 @@
 .composer-textarea::placeholder {
   color: var(--text-3);
   pointer-events: none;
-}
-
-.composer-hint {
-  text-align: center;
-  font-size: var(--fs-aux);
-  color: var(--text-3);
-  margin-top: var(--sp-2);
 }
 
 /* 图片路径的可见拒绝（rant 2026-09-30T09:35:04 要求 3：拒绝必须看得见）。
@@ -365,29 +196,6 @@
   animation: banner-in var(--dur-med) var(--ease);
 }
 
-/* ── GitHub 连接横幅（Windows GCM rant Stage 2） ────── */
-#github-banner {
-  position: absolute;
-  top: var(--sp-3);
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  background: var(--amber-soft);
-  color: var(--amber);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 6px var(--sp-3) 6px var(--sp-4);
-  font-size: var(--fs-secondary);
-  box-shadow: var(--shadow-md);
-  z-index: 20;
-  animation: banner-in var(--dur-med) var(--ease);
-  white-space: nowrap;
-  max-width: 90%;
-}
-#github-banner .btn { padding: 4px 12px; min-height: 0; font-size: var(--fs-secondary); }
-
 /* ── 升级完成横幅（rant 2026-08-20T18:30:57：版本变化 → 提示 + 一键重启） ── */
 #upgrade-banner {
   position: absolute;
@@ -411,208 +219,9 @@
 }
 #upgrade-banner .btn { padding: 4px 12px; min-height: 0; font-size: var(--fs-secondary); }
 
-/* ── 侧边栏折叠（⌘B / 窄屏） ────────────── */
-body.sidebar-collapsed #sidebar {
-  display: none;
-}
-body.sidebar-collapsed #app {
-  /* 主区自动占满 */
-}
-
 /* 窄屏自动收起侧边栏 */
-@media (max-width: 720px) {
-  #sidebar {
-    display: none;
-  }
-  /* #workspace 现为绝对定位包装（padding 移入 .session-view，避免滚动条内缩） */
-  .session-view {
-    padding: var(--sp-4) var(--sp-4) var(--sp-3);
-  }
+@media (max-width: 720px){
   #composer-wrap {
     padding: var(--sp-2) var(--sp-3) var(--sp-3);
   }
-}
-.result-tab {
-  background: none;
-  border: none;
-  padding: var(--sp-1) var(--sp-3);
-  font-size: var(--fs-secondary);
-  color: var(--text-3);
-  cursor: pointer;
-  border-radius: 6px;
-  white-space: nowrap;
-}
-.result-tab:hover {
-  color: var(--text-1);
-  background: var(--bg-soft);
-}
-.result-tab.active {
-  color: var(--text-1);
-  background: var(--bg-soft);
-  font-weight: 600;
-}
-
-/* ── P3.3：文件查看器（基础版） ── */
-.result-viewer {
-  overflow: hidden;
-}
-.viewer-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-2);
-  padding: var(--sp-2) var(--sp-3);
-  border-bottom: 1px solid var(--border);
-  flex: none;
-}
-.viewer-path {
-  font-size: var(--fs-small);
-  color: var(--text-2);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.viewer-open {
-  flex: none;
-  background: none;
-  border: 1px solid var(--border);
-  color: var(--text-2);
-  font-size: var(--fs-small);
-  padding: 2px var(--sp-2);
-  border-radius: 6px;
-  cursor: pointer;
-}
-.viewer-open:hover {
-  color: var(--text-1);
-  background: var(--bg-soft);
-}
-.viewer-pre {
-  flex: 1;
-  overflow: auto;
-  margin: 0;
-  padding: var(--sp-3);
-  font-size: var(--fs-small);
-  line-height: 1.5;
-  white-space: pre;
-  color: var(--text-1);
-}
-/* P3.3：查看器图片直显 + md 渲染 */
-.viewer-img {
-  flex: 1;
-  object-fit: contain;
-  max-width: 100%;
-  padding: var(--sp-3);
-  box-sizing: border-box;
-}
-.viewer-md {
-  flex: 1;
-  overflow: auto;
-  padding: var(--sp-3);
-  font-size: var(--fs-secondary);
-  line-height: 1.6;
-  color: var(--text-1);
-}
-.viewer-md h1, .viewer-md h2, .viewer-md h3 { margin: var(--sp-2) 0; }
-.viewer-md code {
-  background: var(--bg-soft);
-  border-radius: 4px;
-  padding: 1px 4px;
-}
-.viewer-md pre code {
-  display: block;
-  padding: var(--sp-3);
-  overflow-x: auto;
-}
-.artifact-rel {
-  font-size: var(--fs-small);
-  color: var(--text-3);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* 产物卡片 */
-.result-item {
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg);
-  overflow: hidden;
-}
-.result-item.done { border-left: 3px solid var(--accent); }
-.result-item.failed { border-left: 3px solid var(--red); }
-.result-head {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: var(--sp-2) var(--sp-3);
-  cursor: pointer;
-  user-select: none;
-}
-.result-tool {
-  font-size: var(--fs-secondary);
-  font-weight: 600;
-  color: var(--text-1);
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.result-elapsed {
-  font-size: 11px;
-  color: var(--text-3);
-}
-.result-chevron {
-  color: var(--text-3);
-  font-size: 10px;
-  transition: transform 0.15s;
-}
-.result-item.expanded .result-chevron {
-  transform: rotate(180deg);
-}
-.result-body {
-  padding: var(--sp-2) var(--sp-3) var(--sp-3);
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 11px;
-  color: var(--text-2);
-  border-top: 1px solid var(--border);
-  white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 180px;
-  overflow-y: auto;
-  position: relative;
-}
-.result-copy {
-  position: sticky;
-  bottom: 4px;
-  float: right;
-  margin: 4px 0 0 8px;
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--bg-panel);
-  color: var(--text-2);
-  cursor: pointer;
-}
-.result-copy:hover {
-  color: var(--accent);
-  border-color: var(--accent);
-}
-.result-file {
-  padding: var(--sp-2) var(--sp-3);
-  border-top: 1px solid var(--border);
-  font-size: var(--fs-secondary);
-  cursor: pointer;
-  color: var(--blue);
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-}
-.result-file::before {
-  content: "📄";
-  font-size: 12px;
-}
-.result-file:hover {
-  background: var(--accent-soft);
-  color: var(--accent);
 }

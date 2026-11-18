@@ -206,6 +206,10 @@
   position: relative;
   display: grid;
   place-items: center;
+  /* 盒子是写出来的，不是长出来的：按钮的高度必须恒等于上面那两个数字。没有这一行时，
+   * 另一个样式表里一条 `flex: 1` 就能把五个按钮按列均分整根轨（实测 40px 变 119px，
+   * 图标于是散落到轨的每一个高度上），而 `width`/`height` 在那条规则面前不算数。 */
+  flex: none;
   width: 40px;
   height: 40px;
   padding: 0;
