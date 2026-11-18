@@ -248,6 +248,28 @@ are swept like every other file's and the frozen-debt list is empty (the mechani
 hold a site out of the rule are exercised by synthetic tests rather than by a real
 entry). `--measure` prints the whole inventory.
 
+**Guards that answer their question in one command.** Each of these reads the tree it is
+standing in, prints `tree: <what it read>` before its verdict, and keeps "clean" apart
+from "could not measure" — exit `2` is never a pass. Run them from the repository root.
+
+| command | the question it answers |
+|---|---|
+| `uv run --no-sync python3 scripts/check-batching-share.py` | how many calls one round carries, and whether a lone one says what it is waiting for |
+| `uv run --no-sync python3 scripts/check-citation-resolves.py` | does a test citation name the node id pytest would actually collect |
+| `uv run --no-sync python3 scripts/check-cycle-record.py` | did a cycle's record land where it belongs, and which block did it displace |
+| `uv run --no-sync python3 scripts/check-extra-prompt-rotation.py` | which task `extra_prompt` blocks moved since the rotation table classified them |
+| `uv run --no-sync python3 scripts/check-gui-package-refs.py` | is every path electron-builder resolves for the GUI actually there |
+| `uv run --no-sync python3 scripts/check-release-orphan-tags.py` | which tags carry no GitHub Release object at all |
+| `uv run --no-sync python3 scripts/check-release-owed.py` | does this tree declare a version that no tag carries |
+| `uv run --no-sync python3 scripts/check-undefined-names.py` | is a name read in a scope that nothing in the module binds |
+
+The guards that own a long-form section above (`check-workflows.py`,
+`check-retry-bounds.py`, `check-rant-citations.py`, and the release, merge and packaging
+gates named in `Agent.md`) are not repeated here. What holds this table from decaying is
+`tests/test_every_check_script_is_named_in_a_doc.py`: it discovers both classes rather than
+reading either list, so a guard that arrives undocumented fails the suite by name instead of
+waiting for someone to notice it is missing from a document.
+
 ### Electron GUI
 
 ```bash
