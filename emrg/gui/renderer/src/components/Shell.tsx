@@ -238,15 +238,43 @@ export function Shell() {
   // `startedAtMs` (`formatElapsed`, the same reader the sidebar's stopwatch uses), so
   // the shell keeps no second copy of that arithmetic to drift from it.
 
-  // open_sessions 广播到达且尚无激活会话 → 自动选第一个（vanilla 同语义）
+  /**
+   * 当前会话以**后台广播的那条**为准（rant 2026-11-18T18:41:06 清单 2，issue #2985 遗留项）。
+   *
+   * 以前这里只有一条规则：没有激活会话就取 `openSessions[0]` —— 也就是渲染层自己按
+   * 列表顺序挑一条，而列表顺序是「最近活跃」，不是「后台当前」。三条取值必须分开读：
+   *   - `undefined` 后台没说过（旧主进程、测试帧）：不动，沿用旧规则；
+   *   - `string`    就是这条：采用它，不许再按列表挑；
+   *   - `null`      后台刚关掉它的当前会话：按规则挑一条仍然有效的，**并且告诉后台**
+   *                （清单 9），否则下一条广播还把 `null` 送回来，页面停在空白。
+   */
   useEffect(() => {
-    if (activeSid === null && appState.openSessions.length > 0) {
-      const sid = appState.openSessions[0].sid;
-      setActiveSid(sid);
-      void loadHistory(sid);
+    const reported = appState.reportedSid;
+    if (reported === undefined) {
+      if (activeSid === null && appState.openSessions.length > 0) {
+        const sid = appState.openSessions[0].sid;
+        setActiveSid(sid);
+        void loadHistory(sid);
+      }
+      return;
     }
+    if (typeof reported === "string") {
+      if (reported === activeSid) return;
+      setActiveSid(reported);
+      setActiveView("sessions");
+      void loadHistory(reported);
+      return;
+    }
+    // reported === null：当前会话没了。挑一条仍然有效的（列表按 lastActive 降序），
+    // 没有任何一条就退回「没有会话」——留着旧的 sid 只会让页面看着有会话却是空的。
+    const next = appState.openSessions[0]?.sid ?? null;
+    if (next === null) {
+      if (activeSid !== null) setActiveSid(null);
+      return;
+    }
+    if (next !== activeSid) void selectSession(next);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appState.openSessions, activeSid]);
+  }, [appState.reportedSid, appState.openSessions, activeSid]);
 
   /** 重新装配一个会话的 transcript：丢掉分页状态与「已加载」标记，从头回放一次。 */
   async function reloadHistory(sid: string) {
@@ -666,11 +694,37 @@ export function Shell() {
     await selectProjectSession({ path: row?.cwd }, sid);
   }
 
-  /** 选择会话：切换 sid + 回会话视图（vanilla switchSession → activeView="sessions"） */
-  function selectSession(sid: string | null): void {
+  /**
+   * 选择会话：对话区、输入框、**后台当前会话**在同一次操作里换过去
+   * （rant 2026-11-18T18:41:06 清单 1「三处同一」）。
+   *
+   * 以前这里只改本地的 `activeSid`，后台当前会话原地不动 —— 屏幕在 B、后台在 A，
+   * 之后所有「以当前会话为准」的操作都落在 A 上，正是这条 rant 的形状。
+   *
+   * 顺序不是风格：先问后台，成功才换屏幕。反过来在后台拒绝时留下半切状态（屏幕 B、
+   * 后台 A、输入框发到 B）。后台没有这条通道（jsdom / 未接 preload）时退回纯本地切换，
+   * 因为那时「后台当前会话」这个量不存在，而不是它拒绝了。
+   */
+  async function selectSession(sid: string | null): Promise<void> {
+    if (!sid) {
+      setActiveSid(null);
+      setActiveView("sessions");
+      return;
+    }
+    const b = wsBridge();
+    if (b?.switchSession) {
+      try {
+        await b.switchSession({ sessionId: sid });
+      } catch (e) {
+        // 人没有离开当前会话，所以拒绝必须出现在这里，而不是变成一次没反应的点击。
+        setSwitchError((e as Error)?.message ?? String(e));
+        return;
+      }
+    }
+    setSwitchError(null);
     setActiveSid(sid);
     setActiveView("sessions");
-    if (sid) void loadHistory(sid);
+    void loadHistory(sid);
   }
 
   // ── 历史按需加载（rant 2026-09-01T20:19:40：GUI 打开会话不显示历史——链路从未接线）──

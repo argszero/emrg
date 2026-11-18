@@ -115,6 +115,17 @@ export interface DaemonAppState {
   evolutionCount: number | null;
   sessions: SessionSummary[];
   openSessions: OpenSessionEntry[];
+  /**
+   * The session the backend reports as current (rant 2026-11-18T18:41:06, issue #2985).
+   *
+   * Three states, and `undefined` is the one that keeps this honest: absent means the
+   * backend has not said (an older main process, and the frames most tests emit, which
+   * carry the list alone), `null` means it says it has none — the one it had was just
+   * closed — and a string is that session. Reading "not reported" as "none" is how a
+   * renderer switches the host away from a session nothing disowned: an absence is not
+   * a negative answer.
+   */
+  reportedSid?: string | null;
   /** 每会话 busy 锁（P3 slice 1：done/cancelled 按 sid 释放，不误清激活会话） */
   busyBySid: Record<string, boolean>;
   /** 每会话 turn 开始时刻（epoch ms；rant 2026-09-02T10:36:26 daemon turn_start 权威广播） */
@@ -433,7 +444,14 @@ export interface InitResult {
   version?: string;
   sessions?: SessionSummary[];
   open_sessions?: OpenSessionEntry[];
-  active_sid?: string | null;
+  /**
+   * The session the backend restored as current.
+   *
+   * Spelled as `emrg:getOpenSessions`' return, the `open_sessions` broadcast and
+   * `gui_state.json` spell it — one fact, one name, every carrier. It said `active_sid`
+   * here and nowhere else, so this reader looked for a field no writer sent.
+   */
+  activeSid?: string | null;
 }
 
 /** 注入依赖（onEvent/emrg 不设默认，接线层显式传入） */
@@ -992,8 +1010,15 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
         break;
       }
       case "open_sessions": {
-        const os = data as { openSessions?: OpenSessionEntry[] };
-        store.update((s) => ({ ...s, openSessions: os.openSessions || [] }));
+        const os = data as { openSessions?: OpenSessionEntry[]; activeSid?: string | null };
+        store.update((s) => ({
+          ...s,
+          openSessions: os.openSessions || [],
+          // The broadcast carries the backend's current session beside the list; take
+          // it only when the payload actually carries the key, and keep `null`
+          // distinct from "no such field" (see `reportedSid`).
+          ...("activeSid" in os ? { reportedSid: os.activeSid ?? null } : {}),
+        }));
         break;
       }
       case "disconnected": {
@@ -1090,6 +1115,10 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
       currentVersion: result.current_version || s.currentVersion,
       sessions: result.sessions || s.sessions,
       openSessions: result.open_sessions || s.openSessions,
+      // The opening reading, from the same field the later broadcasts send. Absent
+      // (an older main process) leaves whatever was known alone rather than claiming
+      // the backend has no current session.
+      ...(result.activeSid !== undefined ? { reportedSid: result.activeSid ?? null } : {}),
     }));
   }
 

@@ -405,7 +405,12 @@ vision = false
         version: APP_VERSION, // WorkBuddy P3：版本号随 package.json 走（此前 renderer 硬编码 v0.2.7）
         sessions,
         open_sessions: openSessionsList(),
-        active_sid: currentSessionId, // P4 slice 2：恢复后的激活会话（renderer 直接采用）
+        // One name for this fact across every carrier (rant 2026-11-18T18:41:06):
+        // `emrg:getOpenSessions`' return, the `open_sessions` broadcast and
+        // `gui_state.json` all say `activeSid`; this one said `active_sid`, so the
+        // renderer read a field no other carrier sent and adopted nothing. Absent
+        // means "not reported", `null` means "none" — they are not the same answer.
+        activeSid: currentSessionId, // P4 slice 2：恢复后的激活会话（renderer 直接采用）
       };
     });
 
