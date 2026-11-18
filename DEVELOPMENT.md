@@ -194,7 +194,7 @@ Unlike `schedule`, this is a **poll**: the scheduler already sleeps for the task
 
 - **`emrgd`** — The daemon: runs the LLM tool-calling loop, manages sessions, drives evolution (a persistent background thread keeps thinking/evolving even while idle)
 - **`emrg`** — Your terminal: streaming markdown, command autocomplete, session browser
-- **Skills** — Dynamically loaded modules (browser harness, installers, etc.)
+- **Skills** — Dynamically loaded modules (browser harness, installers, etc.) — the contract an author satisfies to add one is [docs/skills.md](docs/skills.md)
 - **Memory** — YAML frontmatter + Markdown files, auto-indexed, searchable
 
 ### Project structure
@@ -209,6 +209,7 @@ emrg/
 │   ├── skills/             # Dynamically loadable modules
 │   └── __main__.py         # CLI entry point
 ├── tests/
+├── docs/                   # Contract and design pages (skills, GUI redesign)
 ├── .github/workflows/      # CI pipeline (pytest + conflict marker check)
 ├── MANIFESTO.md            # Design constitution
 └── pyproject.toml
