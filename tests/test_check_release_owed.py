@@ -311,3 +311,134 @@ def test_no_tags_at_all_is_a_measurement_and_says_a_release_is_owed(tmp_path, ca
 
     assert rc == 1, out
     assert "A RELEASE IS OWED" in out, out
+
+
+# --- a stale local tag list is not a release owed ---------------------------------------
+#
+# A fixture under `tmp_path` *is* the whole repository, so its tag list cannot be stale and
+# the remote is the seam. Each of the four answers is pinned, and the two that decide the
+# verdict -- `present` and `absent` -- are pinned against each other: removing the
+# distinction reddens one of them whichever way it is removed.
+
+
+def _remote(monkeypatch, mod, state: str, detail: str = "the remote answered") -> None:
+    """Pin what the remote says, without touching the network."""
+    monkeypatch.setattr(mod, "remote_tag_state", lambda root, version: (state, detail))
+
+
+def test_a_stale_tag_list_is_not_a_release_owed(tmp_path, capsys, monkeypatch):
+    """The checkout's list stops one release short; the repository carries the tag.
+
+    Measured on this host 2026-11-18 (`cyc20261118-113027`) on master `4111b6be`: the
+    checkout's newest tag was `v0.3.58` while `v0.3.59` was published as Latest with 11
+    assets, and the guard answered `A RELEASE IS OWED ... the newest tag is v0.3.58` with
+    the remedy `git tag -a v0.3.59` and a push. The first command of that remedy fails,
+    because the tag exists -- so the reader learns nothing about the state they are in,
+    which is that their checkout is stale.
+    """
+    mod = _load()
+    root = _repo(tmp_path / "stale", "0.3.59", ["v0.3.58"])
+    _remote(monkeypatch, mod, "present", "the remote carries refs/tags/v0.3.59")
+
+    rc, out = _run(mod, root, capsys)
+
+    assert rc == 2, f"a list that cannot see the tag has not answered the question:\n{out}"
+    assert "NOT MEASURABLE" in out, out
+    assert "stale" in out, f"the state has to be named, not implied:\n{out}"
+    assert "git fetch --tags" in out, f"the remedy is the fetch, not a tag:\n{out}"
+    assert "A RELEASE IS OWED" not in out, (
+        f"this exact sentence on a published release is the fault being fixed:\n{out}")
+
+
+def test_a_version_the_remote_does_not_carry_is_still_owed(tmp_path, capsys, monkeypatch):
+    """The case the tool exists for, and the fix must not soften it.
+
+    Same local shape as the stale test above -- declared `0.3.59`, newest local tag
+    `v0.3.58` -- with the one fact reversed: the remote answers that it carries no such
+    tag. The two tests are the pair that makes the distinction do work.
+    """
+    mod = _load()
+    root = _repo(tmp_path / "absent", "0.3.59", ["v0.3.58"], commits_after_tag=1)
+    _remote(monkeypatch, mod, "absent", "the remote carries no refs/tags/v0.3.59")
+
+    rc, out = _run(mod, root, capsys)
+
+    assert rc == 1, out
+    assert "A RELEASE IS OWED" in out, out
+    assert "git tag -a v0.3.59" in out, f"the genuine case keeps the tag remedy:\n{out}"
+    assert "1 commit(s)" in out, f"the count is what makes the gap real:\n{out}"
+
+
+def test_a_remote_that_cannot_be_asked_leaves_the_local_verdict(tmp_path, capsys, monkeypatch):
+    """Offline is not stale: the checkout's own reading stands, and says so.
+
+    A screen that stopped working without a network would be replaced by its reader's
+    memory of it, which is how the release chain lost nine commits in the first place.
+    """
+    mod = _load()
+    root = _repo(tmp_path / "offline", "0.3.59", ["v0.3.58"])
+    _remote(monkeypatch, mod, "unknown", "the tags of example/example could not be read")
+
+    rc, out = _run(mod, root, capsys)
+
+    assert rc == 1, out
+    assert "A RELEASE IS OWED" in out, out
+    assert "tag list alone" in out, (
+        f"the reader must know the remote added nothing to this verdict:\n{out}")
+
+
+def test_a_remote_lightweight_tag_still_owes_the_release(tmp_path, capsys, monkeypatch):
+    """A tag on the remote is not enough -- it has to be one that publishes."""
+    mod = _load()
+    root = _repo(tmp_path / "light-remote", "0.3.59", ["v0.3.58"])
+    _remote(
+        monkeypatch,
+        mod,
+        "lightweight",
+        "the remote carries refs/tags/v0.3.59 as a commit object, which `verify-tag` rejects",
+    )
+
+    rc, out = _run(mod, root, capsys)
+
+    assert rc == 1, out
+    assert "A RELEASE IS OWED" in out, out
+    assert "verify-tag" in out, f"why it does not count is the near miss:\n{out}"
+
+
+def test_an_empty_local_list_with_the_tag_on_the_remote_is_stale(
+    tmp_path, capsys, monkeypatch
+):
+    """A clone made without tags is the same defect one step further out."""
+    mod = _load()
+    root = _repo(tmp_path / "no-tags-remote", "0.3.59", [])
+    _remote(monkeypatch, mod, "present", "the remote carries refs/tags/v0.3.59")
+
+    rc, out = _run(mod, root, capsys)
+
+    assert rc == 2, out
+    assert "NOT MEASURABLE" in out, out
+    assert "A RELEASE IS OWED" not in out, out
+
+
+def test_a_settled_tree_never_asks_the_remote(tmp_path, capsys, monkeypatch):
+    """The network is paid for only where the answer can change.
+
+    A stale list can only ever **understate** the repository: it is missing tags, never
+    holding ones the remote lacks. So it cannot turn a declared version into a tag that is
+    there, and `OK` -- like "behind" and the near-miss buckets -- stays a reading of the
+    checkout alone.
+    """
+    mod = _load()
+    root = _repo(tmp_path / "settled-offline", "0.3.58", ["v0.3.58"])
+
+    def _refuse(root_, version):
+        raise AssertionError(
+            "the remote must not be asked when the checkout's own list settles the question"
+        )
+
+    monkeypatch.setattr(mod, "remote_tag_state", _refuse)
+
+    rc, out = _run(mod, root, capsys)
+
+    assert rc == 0, out
+    assert "nothing is owed" in out, out
