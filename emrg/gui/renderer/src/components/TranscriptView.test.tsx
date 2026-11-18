@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { TranscriptView } from "./TranscriptView";
-import { createTranscriptStore, type TranscriptStore } from "../lib/transcript";
-import { I18nProvider } from "../lib/i18n";
+import { TranscriptView, summaryLine } from "./TranscriptView";
+import { createTranscriptStore, type ToolGroup, type TranscriptStore } from "../lib/transcript";
+import { I18nProvider, t as translate } from "../lib/i18n";
 import {
   createMarkdownRenderer,
   type MarkdownRenderer,
@@ -442,7 +442,7 @@ describe("TranscriptView", () => {
     expect(container.querySelector(".tool-time")).not.toBeInTheDocument();
   });
 
-  it("连续工具合并组：摘要随调用增长，收起只由点击决定（rant 2026-10-17T19:23:08）", () => {
+  it("连续工具合并组：新组默认收起，摘要带最后一行，收起只由点击决定（#2980 / rant 2026-10-17T19:23:08）", () => {
     const store = createTranscriptStore({ t: (k) => k });
     store.handleToolStart({ tool_call_id: "t1", tool_name: "bash", request_id: "r1" }, "s1");
     store.handleToolEnd({ tool_call_id: "t1", tool_name: "bash", elapsed: 0.4, content: "" }, "s1");
@@ -450,34 +450,55 @@ describe("TranscriptView", () => {
     store.handleToolEnd({ tool_call_id: "t2", tool_name: "read", elapsed: 1.2, content: "" }, "s1");
     const { container } = setup(store, "s1");
     const group = container.querySelector(".tool-group")!;
-    // 宿主还没点过 bar：组是展开的，而且此后每一次开始/结束/追加都不改变它——
-    // 旧版本在这里断言 `collapsed`，那个断言正是"每个 tool_end 收起、每个 tool_start
-    // 展开"的跳动被当成正确行为的地方。
-    expect(group).not.toHaveClass("collapsed");
+    // #2980：宿主还没点过 bar，新组就是**收起**的——跑过十几个工具的一轮不再先把十几行
+    // 铺开。旧版本在这里断言 `not.toHaveClass("collapsed")`，那正是「新组一律展开」的来源。
+    expect(group).toHaveClass("collapsed");
     expect(container.querySelectorAll(".tool-row")).toHaveLength(2);
-    expect(container.querySelector(".tool-group-summary")).toHaveTextContent("2 个工具执行 · 1.6s");
-    // 新工具并入组：行数增长，状态不动
+    // 摘要是「几次 + 多久 + 最后一行」（#2980 验收 3）。
+    expect(container.querySelector(".tool-group-summary")).toHaveTextContent(
+      "2个工具执行 1.6s（read 已读取文件）",
+    );
+    // 摘要里的最后一行就是点开后那一行**折叠形态**的文字：两处各写一套措辞就会是同一个
+    // 事实的两个说法。这里从句子的渲染产物上取，不从函数上取。
+    const latestRow = container.querySelectorAll(".tool-row")[1]!;
+    const renderedLatest = [".tool-call-label", ".tool-name", ".tool-label", ".tool-intent"]
+      .map((sel) => latestRow.querySelector(sel)?.textContent ?? "")
+      .filter(Boolean)
+      .join(" ");
+    expect(renderedLatest).toBe("read 已读取文件");
+    expect(container.querySelector(".tool-group-summary")!.textContent).toContain(
+      `（${renderedLatest}）`,
+    );
+    // 新工具并入组：行数增长，摘要随 tool_start 就刷新（不等 tool_end），状态不动
     act(() => {
-      store.handleToolStart({ tool_call_id: "t3", tool_name: "edit", request_id: "r1" }, "s1");
+      store.handleToolStart(
+        { tool_call_id: "t3", tool_name: "edit", request_id: "r1", intent: "改一处排版" },
+        "s1",
+      );
     });
     expect(container.querySelectorAll(".tool-row")).toHaveLength(3);
-    expect(group).not.toHaveClass("collapsed");
+    expect(group).toHaveClass("collapsed");
+    expect(container.querySelector(".tool-group-summary")).toHaveTextContent(
+      "3个工具执行 1.6s（edit 正在修改文件… 改一处排版）",
+    );
     act(() => {
       store.handleToolEnd({ tool_call_id: "t3", tool_name: "edit", elapsed: 0.3, content: "" }, "s1");
     });
     expect(container.querySelectorAll(".tool-row")).toHaveLength(3);
-    expect(group).not.toHaveClass("collapsed");
-    expect(container.querySelector(".tool-group-summary")).toHaveTextContent("3 个工具执行 · 1.9s");
-    // 点击 bar → 收起（唯一入口）
+    expect(group).toHaveClass("collapsed");
+    expect(container.querySelector(".tool-group-summary")).toHaveTextContent(
+      "3个工具执行 1.9s（edit 已修改文件 改一处排版）",
+    );
+    // 点击 bar → 展开（唯一入口）
     act(() => {
       (container.querySelector(".tool-group-bar") as HTMLElement).click();
     });
-    expect(group).toHaveClass("collapsed");
-    // 收起之后再来一个工具：仍然收起，不因为 tool_start 就翻开
+    expect(group).not.toHaveClass("collapsed");
+    // 展开之后再来一个工具：仍然展开，不因为 tool_start 就收起
     act(() => {
       store.handleToolStart({ tool_call_id: "t4", tool_name: "bash", request_id: "r1" }, "s1");
     });
-    expect(group).toHaveClass("collapsed");
+    expect(group).not.toHaveClass("collapsed");
   });
 
   it("广播流与 own stream 均不显示 remote 标签（rant 2026-08-28T22:16:36 去掉）", () => {
@@ -743,5 +764,55 @@ describe("流式只重渲染正在变化的那一条", () => {
     });
     // 第二个 token 的文本必须出现在屏幕上：订阅下沉后若某一帧没重渲染，流式就冻在那里了
     expect(screen.getByText("hello world")).toBeInTheDocument();
+  });
+});
+
+/**
+ * #2980 验收 3 的四种缺省，一句一句钉住。
+ *
+ * 有两种缺省在屏幕上都表现为「少一点东西」：没有量过耗时的时候，消失的是时间；没有最后
+ * 一行的时候，消失的是整个括号。只有分开断言，才说得清消失的不是数量、也不是一对空括号。
+ * 用的 t 是真词典（`translate(k, p, "zh")`）——断言的字符串就是宿主看到的那一行。
+ */
+describe("#2980：组摘要的四种缺省", () => {
+  const zh = (k: string, p?: Record<string, unknown>) => translate(k, p, "zh");
+
+  /** 组由真 store 生成：`count` 与 `timed` 是 `updateToolGroup` 算出来的，不是这里拼的。 */
+  function groupOf(first: number | undefined, second: number | undefined): ToolGroup {
+    const store = createTranscriptStore({ t: (k) => k });
+    const calls: Array<[string, string, number | undefined]> = [
+      ["a", "bash", first],
+      ["b", "read", second],
+    ];
+    for (const [id, name, elapsed] of calls) {
+      store.handleToolStart({ tool_call_id: id, tool_name: name, request_id: "r1" }, "s1");
+      store.handleToolEnd(
+        { tool_call_id: id, tool_name: name, content: "", ...(elapsed === undefined ? {} : { elapsed }) },
+        "s1",
+      );
+    }
+    const entry = store.getEntries("s1").find((e) => e.kind === "tool-group");
+    expect(entry, "两个连续的工具没有并成一组").toBeDefined();
+    return (entry as { group: ToolGroup }).group;
+  }
+
+  it("有时间、有最后一行 → 数量 + 时间 + 折起来的那一行", () => {
+    expect(summaryLine(groupOf(0.4, 1.2), "read 已读取文件", zh)).toBe(
+      "2个工具执行 1.6s（read 已读取文件）",
+    );
+  });
+
+  it("有时间、没有最后一行 → 括号整组不出现，不是一对空括号", () => {
+    expect(summaryLine(groupOf(0.4, 1.2), "", zh)).toBe("2个工具执行 1.6s");
+  });
+
+  it("没有时间、有最后一行 → 不出现 0.0s（重放的老记录一行都没量过）", () => {
+    expect(summaryLine(groupOf(undefined, undefined), "read 已读取文件", zh)).toBe(
+      "2个工具执行（read 已读取文件）",
+    );
+  });
+
+  it("既没有时间也没有最后一行 → 只剩数量", () => {
+    expect(summaryLine(groupOf(undefined, undefined), "", zh)).toBe("2个工具执行");
   });
 });

@@ -3681,14 +3681,20 @@ class EmrgServer:
                     r = records[i]
                     rtype = r.get("type")
                     if rtype == "tool_result":
-                        history_messages.append({
+                        projected: dict = {
                             "record_index": i,
                             "kind": "tool_result",
                             "tool_call_id": r.get("tool_call_id", ""),
                             "tool_name": r.get("tool_name", ""),
                             "content": r.get("content", "") or "",
                             "error": bool(r.get("error")),
-                        })
+                        }
+                        # Issue #2980: a record written before the daemon started
+                        # measuring carries no duration, and must project exactly
+                        # as it did — so the key appears only when it was recorded.
+                        if isinstance(r.get("elapsed"), (int, float)):
+                            projected["elapsed"] = r["elapsed"]
+                        history_messages.append(projected)
                     elif rtype == "message" and r.get("role") in ("user", "assistant", "system"):
                         item: dict = {
                             "record_index": i,
@@ -5279,6 +5285,14 @@ class EmrgServer:
                     intent = (args or {}).get("intent") or "-"
                     logger.info("tool call: %s — %s", tc_name, redact_string(intent))
 
+                    # Issue #2980: the clock behind a tool row's "耗时". It starts
+                    # here — the instant before the start frame goes out — so the
+                    # number describes exactly the span the host watches a spinner
+                    # for, an escalation's approval wait included. `monotonic`
+                    # because a wall clock can step; seconds, because that is the
+                    # unit both clients print.
+                    call_started = time.monotonic()
+
                     # Notify client (broadcast to all session subscribers)
                     await self._broadcast(session.session_id, {
                         "type": "tool_start",
@@ -5344,6 +5358,13 @@ class EmrgServer:
                             error=True,
                         )
 
+                    # Issue #2980: one measurement, two carriers. The frame below
+                    # feeds a live row; this record feeds the replay of a session
+                    # reopened later. Writing it into only one of them is the
+                    # defect the issue reports — the field existed and no producer
+                    # ever filled it, so every row and every group summary read 0.
+                    elapsed = round(time.monotonic() - call_started, 3)
+
                     # Persist tool_result (tool_calls are already in the
                     # assistant message, no separate tool_call record needed).
                     session.append_message({
@@ -5352,6 +5373,7 @@ class EmrgServer:
                         "tool_call_id": tc_id,
                         "content": result.content,
                         "error": result.error,
+                        "elapsed": elapsed,
                     })
 
                     # Add tool result to conversation
@@ -5369,6 +5391,7 @@ class EmrgServer:
                         "tool_call_id": tc_id,
                         "content": result.content,
                         "error": result.error,
+                        "elapsed": elapsed,
                     })
 
                 # Issue #2683: this response's own count, recorded for the next

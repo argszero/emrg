@@ -180,7 +180,7 @@ describe("replayHistoryRecords is equivalent to the live stream", () => {
     expect(kinds).toEqual(["user", "assistant", "tool-group", "assistant", "tool-row", "assistant"]);
     const group = replay.getEntries(SID)[2] as { group: { rows: unknown[]; summary: { count: number } | null } };
     expect(group.group.rows).toHaveLength(2);
-    expect(group.group.summary).toEqual({ count: 2, totalElapsed: 0 });
+    expect(group.group.summary).toEqual({ count: 2, totalElapsed: 0, timed: false });
   });
 
   it("carries each tool row's intent out of tool_calls[].function.arguments", () => {
@@ -562,5 +562,111 @@ describe("时刻：回放与实时同值", () => {
         e.kind === "user" || e.kind === "assistant" ? e.timestamp : undefined,
       );
     expect(stamps(replayed)).toEqual(stamps(live));
+  });
+});
+
+/**
+ * #2980：回放的耗时来自记录里的实测值，不是 0。
+ *
+ * 宿主报的三处读数里，前两处（工具行 `· 0.0s`、合并组 `{count} 个工具执行 · 0.0s`）缺的是
+ * 实时 `tool_end` 帧上的字段，第三处（重开会话之后同样为 0）缺的是这一段：记录里有，回放
+ * 不交下去。所以这里钉的是回放这一半 —— daemon 算得再准，少这一步，重开一个会话看到的仍是 0。
+ */
+describe("#2980：回放把记录里的实测耗时交给行与合并组", () => {
+  const oneCall = (elapsed?: number): HistoryRecord[] => [
+    { record_index: 0, kind: "message", role: "user", content: "q" },
+    {
+      record_index: 1,
+      kind: "message",
+      role: "assistant",
+      content: "…",
+      tool_calls: [{ id: "c1", function: { name: "bash" } }],
+    },
+    {
+      record_index: 2,
+      kind: "tool_result",
+      tool_call_id: "c1",
+      tool_name: "bash",
+      content: "out",
+      ...(elapsed === undefined ? {} : { elapsed }),
+    },
+  ];
+
+  it("一行：记录写了多久，行上就是多久", () => {
+    const store = createTranscriptStore();
+    replayHistoryRecords(oneCall(1.25), SID, store);
+    const row = store.getEntries(SID).find((e) => e.kind === "tool-row") as {
+      row: { elapsed?: number };
+    };
+    expect(row.row.elapsed).toBe(1.25);
+  });
+
+  it("合并组：摘要的数字是各行之和，不是 0", () => {
+    const records: HistoryRecord[] = [
+      { record_index: 0, kind: "message", role: "user", content: "q" },
+      {
+        record_index: 1,
+        kind: "message",
+        role: "assistant",
+        content: "…",
+        tool_calls: [
+          { id: "c1", function: { name: "bash" } },
+          { id: "c2", function: { name: "bash" } },
+        ],
+      },
+      { record_index: 2, kind: "tool_result", tool_call_id: "c1", tool_name: "bash", content: "a", elapsed: 1.25 },
+      { record_index: 3, kind: "tool_result", tool_call_id: "c2", tool_name: "bash", content: "b", elapsed: 2.5 },
+    ];
+    const store = createTranscriptStore();
+    replayHistoryRecords(records, SID, store);
+    const group = store.getEntries(SID).find((e) => e.kind === "tool-group") as {
+      group: { summary: { count: number; totalElapsed: number } | null };
+    };
+    expect(group.group.summary).toEqual({ count: 2, totalElapsed: 3.75, timed: true });
+  });
+
+  it("旧记录（本没有这个字段）不写 0：行上仍旧没有耗时", () => {
+    const store = createTranscriptStore();
+    replayHistoryRecords(oneCall(), SID, store);
+    const row = store.getEntries(SID).find((e) => e.kind === "tool-row") as {
+      row: { elapsed?: number };
+    };
+    expect(row.row.elapsed).toBeUndefined();
+  });
+});
+
+/**
+ * 落单的结果（其助手记录不在本页）走另一条分支，也把记录里的耗时交下去。
+ *
+ * 这一行没有对应的工具行可写——`handleToolEnd` 找不到 `call_tool_id` 就返回——但两条
+ * 分支交给 store 的仍然是同一个形状。少了这一个字段，两条分支对同一条记录给出两种
+ * 说法，而回放的两个分支本来就该是同一个入口的两次调用。
+ */
+describe("#2980：落单的工具结果同样带耗时", () => {
+  it("记录里量了多久，交下去的就是多久", () => {
+    const sink = {
+      addUserMessage: vi.fn(),
+      handleDelta: vi.fn(),
+      handleDone: vi.fn(),
+      handleToolStart: vi.fn(),
+      handleToolEnd: vi.fn(),
+      addSystemMessage: vi.fn(),
+    };
+    replayHistoryRecords(
+      [{
+        record_index: 0,
+        kind: "tool_result",
+        tool_call_id: "orphan",
+        tool_name: "bash",
+        content: "out",
+        elapsed: 4.5,
+      }],
+      SID,
+      sink,
+    );
+    expect(sink.handleToolEnd).toHaveBeenCalledWith(
+      expect.objectContaining({ tool_call_id: "orphan", elapsed: 4.5 }),
+      SID,
+    );
   });
 });
