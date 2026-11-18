@@ -1,5 +1,3 @@
-import fs from "node:fs";
-import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   BODY_MIN,
@@ -245,20 +243,26 @@ describe("findBodyWidthCaps", () => {
   });
 
   it("**真实的样式表**里没有任何一条封住正文的固定宽度", () => {
-    const dirs = ["src", "css"];
-    const files: string[] = [];
-    for (const dir of dirs) {
-      const abs = path.resolve(process.cwd(), dir);
-      for (const name of fs.readdirSync(abs)) {
-        if (name.endsWith(".css")) files.push(path.join(abs, name));
-      }
-    }
+    // 走打包器自己的读法，不用 `node:fs`：渲染层的 tsconfig 只声明了
+    // `vite/client` 与 jest-dom 两个类型库，`node:` 导入和 `process` 全局
+    // 在干净安装上会让 `npm run typecheck` 直接红 —— 只有本机 `emrg/gui`
+    // 恰好把 `@types/node` 提升上来时才看不见。`tests/test_renderer_node_types.py`
+    // 钉住这条线，免得好不容易修掉的依赖再长回来。
+    const sheets = import.meta.glob(["../*.css", "../../css/*.css"], {
+      query: "?raw",
+      import: "default",
+      eager: true,
+    }) as Record<string, string>;
+    const entries = Object.entries(sheets);
     // 名字先读出来：一个空列表会让下面那句 vacuously 通过
-    expect(files.length).toBeGreaterThan(2);
+    expect(entries.length).toBeGreaterThan(2);
+    // 两个目录都得读到 — 只有 src 命中时下面这句会红，说明 ../../css 那条 glob 没生效
+    expect(entries.some(([file]) => !file.includes("css/"))).toBe(true);
+    expect(entries.some(([file]) => file.includes("css/"))).toBe(true);
     const offenders: string[] = [];
-    for (const file of files) {
-      for (const cap of findBodyWidthCaps(fs.readFileSync(file, "utf8"))) {
-        offenders.push(`${path.relative(process.cwd(), file)}: ${cap.selector} { max-width: ${cap.value} }`);
+    for (const [file, text] of entries) {
+      for (const cap of findBodyWidthCaps(text)) {
+        offenders.push(`${file}: ${cap.selector} { max-width: ${cap.value} }`);
       }
     }
     expect(offenders).toEqual([]);
