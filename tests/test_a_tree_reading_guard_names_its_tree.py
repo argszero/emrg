@@ -183,6 +183,7 @@ TAKES_A_TREE_ARGUMENT = {
 #: `--root` and was not listed, so nothing pointed it at a tree.
 POINTABLE_AT_A_TREE = {
     "check-citation-resolves.py": (),
+    "check-cited-designs.py": ("--root",),
     "check-staged-inverse.py": ("--repo",),
     "check-retry-bounds.py": ("--root",),
     "check_unbound_reads.py": ("--root",),
@@ -246,6 +247,18 @@ def _refusal_reason(out: str) -> str:
 #: Reads a working tree and names it, but cannot be run in this suite. Classified rather
 #: than dropped, because "not run" is the kind of exemption that widens silently.
 NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE = {
+    "check-cited-designs.py": (
+        "its verdict is about the host's home, not about the tree it is given: pointed at a "
+        "checkout it answers whether the designs that checkout's templates cite exist under "
+        "`~/.emrg/designs/`, so on a machine that has never run EMRG it answers NOT "
+        "MEASURABLE and on a machine that does run EMRG it answers about that machine's "
+        "documents (rc 1 on this host 2026-11-18, where the cited compaction blueprint is "
+        "absent). A bare run in this suite would therefore measure whichever machine the job "
+        "landed on rather than the rule. It reads a working tree (`--root`, default its own "
+        "checkout) and names it before the verdict, and that naming IS verified rather than "
+        "classified: `tests/test_cited_designs.py` runs it against `tmp_path` trees and homes "
+        "it creates, pinning the tree line and all three exit codes"
+    ),
     "check-node-test-count.py": (
         "needs the Node runners to compare their totals; the pytest job has no "
         "node_modules, so running it here would measure the environment, not the rule"
