@@ -3448,6 +3448,89 @@ def test_list_agents_ordered_by_latest_session_activity(tmp_path, monkeypatch):
     assert none_proj["latest_session_at"] == ""
 
 
+# ── list_all_sessions: the register is the subject, not one directory (issue #2978) ──
+#
+# The GUI's search overlay could only ask `list_sessions`, which takes one `cwd`, so it
+# answered with one agent's sessions: measured when the issue was filed, 43 registered
+# agents holding 80 sessions, of which the overlay reached 12 — the agent holding 23 of
+# them contributed none. These two arms are the property that fixes it (the count is the
+# agents' total and each row names its own agent) and the one that keeps a single broken
+# tree from silencing the rest.
+
+
+def _write_session(agent_dir, sid: str, created_at: str = "2026-11-01T00:00:00") -> None:
+    d = agent_dir / ".emrg" / "sessions" / sid
+    d.mkdir(parents=True)
+    (d / "meta.json").write_text(
+        json.dumps({"session_id": sid, "created_at": created_at, "cwd": str(agent_dir)}),
+        encoding="utf-8",
+    )
+
+
+def test_list_all_sessions_covers_every_registered_agent(tmp_path):
+    """One frame carries every agent's sessions, each row naming its agent and directory.
+
+    Two agents holding sessions plus a third holding none is the whole question: a
+    listing built for one directory answers `2` here and reads as complete, so the
+    subject has to be a register whose members each hold some.
+    """
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    gamma = tmp_path / "gamma"
+    for p in (alpha, beta, gamma):
+        p.mkdir()
+    for sid in ("a1", "a2"):
+        _write_session(alpha, sid)
+    for sid in ("b1", "b2", "b3"):
+        _write_session(beta, sid)
+
+    server, _ = _server_with_agents(tmp_path, [
+        {"name": "alpha", "path": str(alpha)},
+        {"name": "beta", "path": str(beta)},
+        {"name": "gamma", "path": str(gamma)},
+    ])
+    writer = _FakeWriter()
+    asyncio.run(server._handle_list_all_sessions(writer))
+
+    replies = _decode_frames(writer)
+    assert len(replies) == 1 and replies[0]["type"] == "all_sessions", replies
+    rows = replies[0]["sessions"]
+    assert len(rows) == 5, f"the two agents hold five sessions between them: {rows}"
+    assert {r["session_id"] for r in rows} == {"a1", "a2", "b1", "b2", "b3"}
+    assert {r["agent"] for r in rows} == {"alpha", "beta"}, (
+        f"every row names the agent it belongs to: {rows}"
+    )
+    assert {r["cwd"] for r in rows} == {str(alpha), str(beta)}, (
+        f"and the directory that agent lives in, so the row can open under it: {rows}"
+    )
+
+
+def test_one_unreadable_agent_does_not_silence_the_listing(tmp_path):
+    """An agent whose sessions path is not a directory costs its own rows, nothing more."""
+    good = tmp_path / "good"
+    broken = tmp_path / "broken"
+    for p in (good, broken):
+        p.mkdir()
+    _write_session(good, "g1")
+    # `sessions` exists and is not a directory: `iterdir` raises, and that raise is
+    # this agent's silence rather than the whole answer's.
+    (broken / ".emrg").mkdir()
+    (broken / ".emrg" / "sessions").write_text("not a directory", encoding="utf-8")
+
+    server, _ = _server_with_agents(tmp_path, [
+        {"name": "broken", "path": str(broken)},
+        {"name": "good", "path": str(good)},
+    ])
+    writer = _FakeWriter()
+    asyncio.run(server._handle_list_all_sessions(writer))
+
+    replies = _decode_frames(writer)
+    assert len(replies) == 1 and replies[0]["type"] == "all_sessions", replies
+    rows = replies[0]["sessions"]
+    assert [r["session_id"] for r in rows] == ["g1"], rows
+    assert rows[0]["agent"] == "good", rows
+
+
 # ── rant 2026-08-19T08:05:21：固定端口 bind 排斥 = 唯一单 daemon 准入 ──
 def test_serve_refuses_duplicate_when_fixed_port_bound(tmp_path):
     """serve() must exit when another LIVE daemon owns the fixed port.

@@ -122,6 +122,9 @@ function isSessionId(id) {
 // G93：命令类型 → 响应帧类型映射（daemon 协议，daemon.py _process_message）
 const RESPONSE_TYPES = {
   list_sessions: "sessions_list",
+  // issue #2978: every registered agent's sessions in one frame (`all_sessions`) -- the
+  // search overlay asks once instead of once per agent, and no `cwd` narrows it.
+  list_all_sessions: "all_sessions",
   list_models: "models_list",
   list_agents: "agents_list",
   list_history: "history_list",

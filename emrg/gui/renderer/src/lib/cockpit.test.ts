@@ -13,12 +13,14 @@ import {
   formatRound,
   formatTokens,
   groupSize,
+  mergeSessionRows,
   persistColumnWidth,
   resizedWidth,
   searchSessions,
   sessionHits,
   sortByName,
   storedColumnWidth,
+  type SessionGroups,
   type SessionHit,
 } from "./cockpit";
 import type { OpenSessionEntry, SessionInfo } from "./sidebar";
@@ -211,6 +213,62 @@ describe("sessionHits / searchSessions", () => {
     const g = searchSessions([hit({ sid: "x", at: 0 })], "", Date.now());
     expect(g.earlier.map((h) => h.sid)).toEqual(["x"]);
     expect(g.today).toHaveLength(0);
+  });
+});
+
+/* ── Two listings, one set of rows (issue #2978) ──────────── */
+
+/** Every sid in a grouping, whichever group it landed in. */
+function sids(g: SessionGroups): string[] {
+  return [...g.open, ...g.today, ...g.earlier].map((h) => h.sid);
+}
+
+describe("mergeSessionRows — the register's listing joins the active agent's", () => {
+  const anHourAgo = new Date(Date.now() - HOUR).toISOString();
+  const twoHoursAgo = new Date(Date.now() - 2 * HOUR).toISOString();
+
+  // What the app state holds: the active agent's own listing. It is the copy that
+  // predates the whole-register listing, so it names no agent and no directory.
+  const activeAgent: SessionInfo[] = [
+    { session_id: "s1", title: "本 agent 的", updated_at: anHourAgo },
+  ];
+  // What the daemon answers for every registered agent: the same s1 again, plus two
+  // sessions no other source names.
+  const everyAgent: SessionInfo[] = [
+    { session_id: "s1", title: "本 agent 的", agent: "emrg", cwd: "/p/emrg", updated_at: anHourAgo },
+    { session_id: "s2", title: "别人的", agent: "aitokenpool", cwd: "/p/atp", updated_at: twoHoursAgo },
+    { session_id: "s3", title: "第三个", agent: "mem", cwd: "/p/mem", updated_at: twoHoursAgo },
+  ];
+
+  it("同一会话只留一行，且留下的是带 agent 名与目录的那一份", () => {
+    const merged = mergeSessionRows(activeAgent, everyAgent);
+    expect(merged.map((s) => s.session_id).sort()).toEqual(["s1", "s2", "s3"]);
+    const s1 = merged.find((s) => s.session_id === "s1");
+    expect(s1?.agent).toBe("emrg");
+    expect(s1?.cwd).toBe("/p/emrg");
+  });
+
+  it("只在别的 agent 名下的会话也在，且每行都带 agent 名", () => {
+    const hits = sessionHits([], mergeSessionRows(activeAgent, everyAgent));
+    expect(hits).toHaveLength(3);
+    expect(hits.map((h) => h.agent)).toEqual(["emrg", "aitokenpool", "mem"]);
+  });
+
+  it("只在 agent 名里出现的关键词命中它；标题与会话 id 各自也命中", () => {
+    const hits = sessionHits([], mergeSessionRows(activeAgent, everyAgent));
+    const now = Date.now();
+    // 这个关键词不出现在任何标题或会话 id 里，只有 agent 名带着它。
+    expect(sids(searchSessions(hits, "aitokenpool", now))).toEqual(["s2"]);
+    expect(sids(searchSessions(hits, "第三个", now))).toEqual(["s3"]);
+    expect(sids(searchSessions(hits, "s3", now))).toEqual(["s3"]);
+    expect(groupSize(searchSessions(hits, "", now))).toBe(3);
+  });
+
+  it("空输入与残缺输入都不造出一行假会话", () => {
+    expect(mergeSessionRows([], [])).toEqual([]);
+    // 没有 session_id 的行不是会话：留着它就成了点不开的一行。
+    const odd = [{ title: "无名" } as unknown as SessionInfo];
+    expect(mergeSessionRows(odd, [])).toEqual([]);
   });
 });
 
