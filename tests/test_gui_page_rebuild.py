@@ -88,10 +88,16 @@ def _shipped_sheets() -> set[Path]:
     the tree, and only a comparison against what is on disk can name that. `dist/` and
     `node_modules/` are excluded because they are produced rather than written.
     """
+    root = RENDERER.parent
     shipped: set[Path] = set()
-    for path in RENDERER.parent.rglob("*.css"):
-        parts = set(path.parts)
-        if "node_modules" in parts or "dist" in parts:
+    for path in root.rglob("*.css"):
+        # The skip is decided on the path **relative to the root it was walked from**: a walk
+        # rooted at an absolute path yields absolute paths, so the absolute path's parts would
+        # make the machine's own ancestor directory names decide, and a checkout under a
+        # directory called `node_modules` would silence the whole sweep. Same rule, and the
+        # same reason, as `tests/test_walk_skips_read_their_root.py`.
+        relative = path.relative_to(root)
+        if "node_modules" in relative.parts or "dist" in relative.parts:
             continue
         shipped.add(path.resolve())
     return shipped
