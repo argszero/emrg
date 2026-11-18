@@ -1,6 +1,3 @@
-import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 /**
@@ -33,18 +30,39 @@ import { describe, expect, it } from "vitest";
  * would need this matcher revisited.
  */
 
-const RENDERER = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+/**
+ * Read through Vite, never through `node:fs`: the renderer typechecks with
+ * `types: ["vite/client", "@testing-library/jest-dom"]` and carries no `@types/node`,
+ * so a `node:` import reddens `npm run typecheck` on a clean `npm ci` while passing on
+ * a host whose `emrg/gui` happens to hoist it. `tests/test_renderer_node_types.py`
+ * keeps that dependency from coming back.
+ */
+const RAW = import.meta.glob(["../*.css", "../../css/*.css"], {
+  query: "?raw",
+  import: "default",
+  eager: true,
+}) as Record<string, string>;
 
 /** The sheets `src/main.tsx` loads, in its order (a later sheet wins a tie). */
 const SHEETS = [
-  "css/tokens.css",
-  "css/base.css",
-  "css/components.css",
-  "css/layout.css",
-  "css/animations.css",
-  "src/shell.css",
-  "src/cockpit.css",
-].map((rel) => ({ rel, css: readFileSync(resolve(RENDERER, rel), "utf8") }));
+  { key: "../../css/tokens.css", rel: "css/tokens.css" },
+  { key: "../../css/base.css", rel: "css/base.css" },
+  { key: "../../css/components.css", rel: "css/components.css" },
+  { key: "../../css/layout.css", rel: "css/layout.css" },
+  { key: "../../css/animations.css", rel: "css/animations.css" },
+  { key: "../shell.css", rel: "src/shell.css" },
+  { key: "../cockpit.css", rel: "src/cockpit.css" },
+].map(({ key, rel }) => {
+  const css = RAW[key];
+  // A sheet the glob did not read would drop out of the cascade in silence, and every
+  // assertion below would then be made about fewer sheets than the app loads.
+  if (typeof css !== "string") {
+    throw new Error(
+      `${rel} was not read — the glob found: ${Object.keys(RAW).sort().join(", ")}`,
+    );
+  }
+  return { rel, css };
+});
 
 interface Declaration {
   selector: string;
