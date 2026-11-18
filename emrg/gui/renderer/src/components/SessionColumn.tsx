@@ -54,7 +54,12 @@ export function SessionColumn({
     <div className="session-col" data-testid="session-column">
       <div className="session-col-head">
         <span className="session-col-count" data-testid="session-col-count">
-          {t("sessions.openCount", { n: entries.length })}
+          {/* The word and the number are two spans because they are two colours in
+              the prototype: the count is the reading, the label is only its subject. */}
+          <span className="session-col-count-label">{t("sessions.openCountLabel")}</span>{" "}
+          <span className="session-col-count-n" data-testid="session-col-count-n">
+            {entries.length}
+          </span>
         </span>
         <span className="session-col-actions">
           <button

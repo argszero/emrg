@@ -100,11 +100,13 @@ describe("词典完整性守卫（防漂移）", () => {
   // 组件一起删 → 476 + 7 - 1 - 12 = 469（issue #2969）。
   // 2026-11-18 issue #2980：工具组摘要的四种缺省各一个键（有时间+最新一行 / 只有时间 /
   // 只有最新一行 / 都没有）→ 469 + 3 = 472。
-  it("zh/en 各 472 个 key 且完全对齐", () => {
+  // 2026-11-18 issue #2986：图标轨的提示与连接点 3 个、会话计数的标签 1 个、设置页五个
+  // 分区名 5 个、沙箱与权限两段 3 个、快捷键三行 3 个 → 472 + 14 = 486。
+  it("zh/en 各 486 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(472);
-    expect(enKeys.length).toBe(472);
+    expect(zhKeys.length).toBe(486);
+    expect(enKeys.length).toBe(486);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);

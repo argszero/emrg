@@ -76,29 +76,42 @@ afterEach(() => {
 });
 
 describe("SettingsPanel", () => {
-  it("renders panel with five tabs, model tab active by default", async () => {
+  it("renders the five sections the prototype names, in that order, model active first", async () => {
     setup();
     expect(screen.getByTestId("panel-settings")).toBeTruthy();
-    for (const id of ["model", "github", "appearance", "language", "about"]) {
-      expect(screen.getByTestId(`settings-tab-${id}`)).toBeTruthy();
-    }
-    // model body visible, others hidden
+    // The order is the prototype's, and it is asserted as a sequence rather than as a
+    // set: five right names in the wrong order is still not the prototype.
+    const nav = screen.getByTestId("settings-tabs");
+    const ids = Array.from(nav.querySelectorAll("[data-settings-tab]")).map((el) =>
+      el.getAttribute("data-settings-tab"),
+    );
+    expect(ids).toEqual(["model", "sandbox", "appearance", "shortcuts", "about"]);
     expect(screen.getByTestId("settings-body-model")).toBeTruthy();
-    expect(screen.queryByTestId("settings-body-github")).toBeNull();
     expect(screen.queryByTestId("settings-body-about")).toBeNull();
+    // The two tabs the prototype does not have are gone, not hidden.
+    expect(screen.queryByTestId("settings-tab-github")).toBeNull();
+    expect(screen.queryByTestId("settings-tab-language")).toBeNull();
   });
 
-  it("switches tabs", async () => {
+  it("switches sections, and the dropped tabs' content is still reachable", async () => {
     setup();
     await screen.findByTestId("settings-body-model");
-    fireEvent.click(screen.getByTestId("settings-tab-github"));
-    expect(screen.getByTestId("settings-body-github")).toBeTruthy();
-    fireEvent.click(screen.getByTestId("settings-tab-language"));
-    expect(screen.getByTestId("settings-body-language")).toBeTruthy();
-    fireEvent.click(screen.getByTestId("settings-tab-appearance"));
-    expect(screen.getByTestId("settings-body-appearance")).toBeTruthy();
+    // GitHub's connection UI now lives under about
     fireEvent.click(screen.getByTestId("settings-tab-about"));
     expect(screen.getByTestId("settings-body-about")).toBeTruthy();
+    expect(screen.getByTestId("settings-body-github")).toBeTruthy();
+    // the language selector now lives under appearance
+    fireEvent.click(screen.getByTestId("settings-tab-appearance"));
+    expect(screen.getByTestId("settings-body-appearance")).toBeTruthy();
+    expect(screen.getByTestId("settings-body-language")).toBeTruthy();
+    // custom task types now live under models and API
+    fireEvent.click(screen.getByTestId("settings-tab-model"));
+    expect(screen.getByTestId("settings-body-templates")).toBeTruthy();
+    // the two new sections exist and render
+    fireEvent.click(screen.getByTestId("settings-tab-sandbox"));
+    expect(screen.getByTestId("settings-body-sandbox")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("settings-tab-shortcuts"));
+    expect(screen.getByTestId("settings-body-shortcuts")).toBeTruthy();
     expect(screen.queryByTestId("settings-body-model")).toBeNull();
   });
 
@@ -211,7 +224,7 @@ describe("SettingsPanel", () => {
 
   it("shows github status and connects/disconnects", async () => {
     const { calls } = setup();
-    fireEvent.click(screen.getByTestId("settings-tab-github"));
+    fireEvent.click(screen.getByTestId("settings-tab-about"));
     await waitFor(() =>
       expect(screen.getByTestId("github-status").textContent).toContain("argszero"),
     );
@@ -245,7 +258,7 @@ describe("SettingsPanel", () => {
       githubStatus: vi.fn().mockResolvedValue({ authenticated: false, user: null }),
     });
 
-    fireEvent.click(screen.getByTestId("settings-tab-github"));
+    fireEvent.click(screen.getByTestId("settings-tab-about"));
     fireEvent.click(screen.getByTestId("github-device-btn"));
 
     await waitFor(() => expect(githubConnectWeb).toHaveBeenCalledTimes(1));
@@ -277,7 +290,7 @@ describe("SettingsPanel", () => {
       .mockResolvedValue({ ok: true, code: "WXYZ-9876", url: "https://github.com/login/device" });
     setup({ githubStatus, githubConnectWeb });
 
-    fireEvent.click(screen.getByTestId("settings-tab-github"));
+    fireEvent.click(screen.getByTestId("settings-tab-about"));
     fireEvent.click(screen.getByTestId("github-device-btn"));
     await waitFor(() => expect(screen.getByTestId("github-device-code")).toBeTruthy());
 
@@ -300,7 +313,7 @@ describe("SettingsPanel", () => {
       githubStatus: vi.fn().mockResolvedValue({ authenticated: false, user: null }),
     });
 
-    fireEvent.click(screen.getByTestId("settings-tab-github"));
+    fireEvent.click(screen.getByTestId("settings-tab-about"));
     fireEvent.click(screen.getByTestId("github-device-btn"));
 
     await waitFor(() =>
@@ -337,8 +350,8 @@ describe("SettingsPanel", () => {
   it("sets locale from language tab and persists via saveSettings", async () => {
     const { calls } = setup();
     const spy = vi.spyOn(i18n, "setLocale").mockImplementation((l): i18n.Locale => (l === "" ? "zh" : l));
-    await screen.findByTestId("settings-tab-language");
-    fireEvent.click(screen.getByTestId("settings-tab-language"));
+    await screen.findByTestId("settings-tab-appearance");
+    fireEvent.click(screen.getByTestId("settings-tab-appearance"));
     fireEvent.click(screen.getByTestId("lang-zh"));
     expect(spy).toHaveBeenCalledWith("zh");
     await waitFor(() => {
@@ -453,8 +466,8 @@ describe("SettingsPanel", () => {
     ];
     const listMock = vi.fn().mockResolvedValue(tpls);
     setup({ taskTemplateList: listMock });
-    await screen.findByTestId("settings-tab-templates");
-    fireEvent.click(screen.getByTestId("settings-tab-templates"));
+    await screen.findByTestId("settings-tab-model");
+    fireEvent.click(screen.getByTestId("settings-tab-model"));
     await waitFor(() => expect(listMock).toHaveBeenCalledTimes(1));
     const rows = screen.getAllByTestId("template-row");
     expect(rows.length).toBe(2);
@@ -470,8 +483,8 @@ describe("SettingsPanel", () => {
 
   it("shows the empty state when no templates exist", async () => {
     setup({ taskTemplateList: vi.fn().mockResolvedValue([]) });
-    await screen.findByTestId("settings-tab-templates");
-    fireEvent.click(screen.getByTestId("settings-tab-templates"));
+    await screen.findByTestId("settings-tab-model");
+    fireEvent.click(screen.getByTestId("settings-tab-model"));
     await waitFor(() => expect(screen.getByTestId("template-empty")).toBeTruthy());
   });
 
@@ -483,8 +496,8 @@ describe("SettingsPanel", () => {
       taskTemplateCreate: createMock,
       taskTemplateUpdate: vi.fn().mockResolvedValue({}),
     });
-    await screen.findByTestId("settings-tab-templates");
-    fireEvent.click(screen.getByTestId("settings-tab-templates"));
+    await screen.findByTestId("settings-tab-model");
+    fireEvent.click(screen.getByTestId("settings-tab-model"));
     await waitFor(() => screen.getByTestId("add-template-btn"));
     fireEvent.click(screen.getByTestId("add-template-btn"));
     expect(screen.getByTestId("template-form")).toBeTruthy();
@@ -500,8 +513,8 @@ describe("SettingsPanel", () => {
     const listMock = vi.fn().mockResolvedValue([]);
     const createMock = vi.fn().mockResolvedValue({});
     setup({ taskTemplateList: listMock, taskTemplateCreate: createMock });
-    await screen.findByTestId("settings-tab-templates");
-    fireEvent.click(screen.getByTestId("settings-tab-templates"));
+    await screen.findByTestId("settings-tab-model");
+    fireEvent.click(screen.getByTestId("settings-tab-model"));
     await waitFor(() => screen.getByTestId("add-template-btn"));
     fireEvent.click(screen.getByTestId("add-template-btn"));
     fireEvent.click(screen.getByTestId("template-form-save"));
@@ -515,8 +528,8 @@ describe("SettingsPanel", () => {
     ]);
     const deleteMock = vi.fn().mockResolvedValue({});
     setup({ taskTemplateList: listMock, taskTemplateDelete: deleteMock });
-    await screen.findByTestId("settings-tab-templates");
-    fireEvent.click(screen.getByTestId("settings-tab-templates"));
+    await screen.findByTestId("settings-tab-model");
+    fireEvent.click(screen.getByTestId("settings-tab-model"));
     await waitFor(() => screen.getByTestId("template-delete-my-type"));
     fireEvent.click(screen.getByTestId("template-delete-my-type"));
     // confirm dialog appears; confirm it
@@ -534,8 +547,8 @@ describe("SettingsPanel", () => {
       ]),
       taskTemplateDelete: vi.fn().mockRejectedValue(new Error("referenced by 2 tasks")),
     });
-    await screen.findByTestId("settings-tab-templates");
-    fireEvent.click(screen.getByTestId("settings-tab-templates"));
+    await screen.findByTestId("settings-tab-model");
+    fireEvent.click(screen.getByTestId("settings-tab-model"));
     await waitFor(() => screen.getByTestId("template-delete-journal"));
     fireEvent.click(screen.getByTestId("template-delete-journal"));
     await waitFor(() => screen.getByTestId("confirm-ok"));
