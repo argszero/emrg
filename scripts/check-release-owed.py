@@ -51,11 +51,11 @@ Exit codes, the family's contract:
        Reporting the second as the first, measured 2026-11-18 (`cyc20261118-102744`), sent a
        reader to `git tag -a v0.3.59` on a tree whose newest release was `v0.3.60`.
     2  not measurable: no version declaration could be read, the repository could not be
-       read at all (no `git`, not a work tree), or **this checkout's tag list may be
-       stale** -- the remote carries the version the tree declares, so the question was
-       never put to this checkout and neither answer follows from it. Never 0 -- a guard
-       that passes because it could not read its subject is the defect this one exists to
-       catch.
+       read at all (no `git`, not a work tree), or **this checkout's tag list understates
+       the repository** -- either the declared version is not in it, or that name is in it
+       on a different object from the repository's -- so the question was never put to this
+       checkout and neither answer follows from it. Never 0 -- a guard that passes because
+       it could not read its subject is the defect this one exists to catch.
 
 An empty tag list is a measurement **of the checkout**, and the checkout is not the
 repository. The two came apart on 2026-11-18 (`cyc20261118-113027`): this checkout's newest
@@ -64,8 +64,21 @@ assets, so `git tag --list` answered "nothing carries the declaration" about a v
 host had. Worse than the wrong verdict was the remedy: it printed `git tag -a v0.3.59` and a
 push, and the first of those fails because the tag exists. A local tag list can only ever
 **understate** the repository -- it is missing tags, never holding ones the remote lacks --
-so the single state it cannot separate is "never tagged" from "not fetched". The remote is
-asked to separate them, and only there: every deliberate state changes, because a stale list
+and it understates it in **two** shapes, which take different sentences because only one of
+them has a tag for a fetch to fill in:
+
+* **the checkout holds no tag of that name.** The list is missing one the repository has, and
+  `git fetch --tags origin` fills it in.
+* **the checkout holds the name on a different object** -- its own copy is a `commit` where
+  the repository's is a `tag`. Nothing is missing there, so "it is missing v<version>" is
+  false about a tag the reader can see, and the fetch cannot clear it: measured 2026-11-18
+  (issue #2971), git answers `would clobber existing tag` with rc 1 and leaves the local
+  object exactly where it was, so a reader who ran it and read again got the identical
+  verdict with no way to tell nothing had happened. The local object goes first:
+  `git tag -d v<version> && git fetch --tags origin`.
+
+The remote is asked which of the two it is, and asked only there: every other deliberate
+state is settled by the checkout's own tags, because a list that understates the repository
 cannot manufacture an `OK`, a "behind", or a lightweight near miss.
 
 Usage:
@@ -312,8 +325,34 @@ def _already_published_reading(detail: str) -> str:
     )
 
 
-def _stale_list_reading(declared: str, local_reading: str, detail: str) -> str:
-    """The verdict for a checkout whose tag list is missing a tag the remote has."""
+def _stale_list_reading(
+    declared: str, local_reading: str, detail: str, local_carrier: str | None = None
+) -> str:
+    """The verdict for a checkout whose tag list disagrees with the remote about a name.
+
+    Two states reach this, and only one of them is a **missing** tag:
+
+    * the checkout holds no tag of that name at all (`local_carrier is None`), so its list
+      is missing one the repository has and fetching is what fills it in;
+    * the checkout holds the name as a **lightweight** tag, while the repository's object
+      under it is annotated. Nothing is missing there: the local tag is a different object,
+      so no list carrying it can answer the question, and a fetch leaves an existing tag of
+      that name exactly where it was -- measured 2026-11-18, `git fetch --tags origin`
+      answers `! [rejected] ... (would clobber existing tag)` with rc 1 and the local object
+      does not move. Printing the fetch there was the remedy that cannot clear the state,
+      which is what issue #2971 was opened for.
+    """
+    if local_carrier is not None:
+        return (
+            f"NOT MEASURABLE FROM THIS CHECKOUT: {local_reading}, but {detail}. This checkout "
+            f"does hold v{declared}, as a {local_carrier} tag: a different object from the one "
+            f"the repository carries under that name, so neither `a release is owed` nor "
+            f"`nothing is owed` follows from a tag list that holds the wrong one. A fetch does "
+            f"not replace a tag the checkout already has -- `git fetch --tags origin` answers "
+            f"`would clobber existing tag` and leaves it where it was -- so remove the local "
+            f"object first: `git tag -d v{declared} && git fetch --tags origin`, then read "
+            f"this again."
+        )
     return (
         f"NOT MEASURABLE FROM THIS CHECKOUT: {local_reading}, but {detail}. This checkout's "
         f"tag list is stale -- it is missing v{declared}, so the question whether a release "
@@ -471,7 +510,10 @@ def check(root: Path) -> int:
         if state == "present":
             print(
                 _stale_list_reading(
-                    declared, "no tag in this checkout would publish a release", detail
+                    declared,
+                    "no tag in this checkout would publish a release",
+                    detail,
+                    "lightweight" if f"v{declared}" in lightweight else None,
                 )
             )
             return 2
@@ -561,7 +603,14 @@ def check(root: Path) -> int:
     # lightweight near miss -- so the network is paid for here and nowhere else.
     state, detail = remote_tag_state(root, declared)
     if state == "present":
-        print(_stale_list_reading(declared, f"the newest tag in it is {newest}", detail))
+        print(
+            _stale_list_reading(
+                declared,
+                f"the newest tag in it is {newest}",
+                detail,
+                "lightweight" if f"v{declared}" in lightweight else None,
+            )
+        )
         return 2
     if state == "lightweight":
         # The same question the empty-list branch asks, on the path where this checkout has

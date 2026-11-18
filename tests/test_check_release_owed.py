@@ -418,6 +418,76 @@ def test_an_empty_local_list_with_the_tag_on_the_remote_is_stale(
     assert rc == 2, out
     assert "NOT MEASURABLE" in out, out
     assert "A RELEASE IS OWED" not in out, out
+    # Nothing of that name is held here, so "missing" is the true word and the fetch fills
+    # the gap -- and the sentence that says otherwise has no business appearing.
+    assert "missing v0.3.59" in out, f"no tag of that name is held, so it is missing:\n{out}"
+    assert "git tag -d" not in out, f"there is no local tag here to delete:\n{out}"
+
+
+def test_a_local_lightweight_tag_of_the_same_name_is_held_not_missing(
+    tmp_path, capsys, monkeypatch
+):
+    """The checkout holds the name; it holds the wrong object under it.
+
+    Measured 2026-11-18 in a checkout whose `v0.3.60` was a lightweight tag while the
+    repository's was annotated (`git cat-file -t` answered `commit`; the API answered
+    `object.type=tag`). The guard said the list "is missing v0.3.60" -- about a tag the
+    reader could see -- and printed `git fetch --tags origin`, which git answers
+    `! [rejected] ... (would clobber existing tag)` with rc 1, the local object left exactly
+    where it was. So the printed cure was not soft, it was a no-op on the state it named.
+    """
+    mod = _load()
+    root = _repo(tmp_path / "light-local", "0.3.59", [], lightweight=["v0.3.59"])
+    _remote(
+        monkeypatch,
+        mod,
+        "present",
+        "the remote carries refs/tags/v0.3.59 as an annotated tag",
+    )
+
+    rc, out = _run(mod, root, capsys)
+
+    assert rc == 2, f"two different objects of one name have answered nothing:\n{out}"
+    assert "NOT MEASURABLE" in out, out
+    assert "as a lightweight tag" in out, (
+        f"the kind of the local object is the discriminator here:\n{out}")
+    assert "missing v0.3.59" not in out, (
+        f"that tag is in the list the reader is looking at:\n{out}")
+    assert "git tag -d v0.3.59" in out, (
+        f"the remedy must be able to move the local object, and a fetch cannot:\n{out}")
+
+
+def test_the_held_name_is_reported_on_the_owed_path_too(tmp_path, capsys, monkeypatch):
+    """The same rule at the other call site: an older annotated tag beside the held name.
+
+    A checkout can stop short *and* hold the declared name as the wrong object -- the two
+    shapes are independent, and a fix that reached only the empty-list branch would leave
+    this one printing a fetch for a tag that is already there.
+    """
+    mod = _load()
+    root = _repo(
+        tmp_path / "light-local-beside-older",
+        "0.3.59",
+        ["v0.3.58"],
+        commits_after_tag=1,
+        lightweight=["v0.3.59"],
+    )
+    _remote(
+        monkeypatch,
+        mod,
+        "present",
+        "the remote carries refs/tags/v0.3.59 as an annotated tag",
+    )
+
+    rc, out = _run(mod, root, capsys)
+
+    assert rc == 2, out
+    assert "NOT MEASURABLE" in out, out
+    assert "as a lightweight tag" in out, out
+    assert "missing v0.3.59" not in out, out
+    assert "git tag -d v0.3.59" in out, out
+    assert "A RELEASE IS OWED" not in out, (
+        f"both lists carry the name, so neither answer follows:\n{out}")
 
 
 def test_a_settled_tree_never_asks_the_remote(tmp_path, capsys, monkeypatch):
