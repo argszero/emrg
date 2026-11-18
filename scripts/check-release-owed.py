@@ -27,6 +27,11 @@ later. A tag that does not parse as three dotted numbers is counted and reported
 sorted in as though it were one -- otherwise an unrelated tag named `latest` would
 silently become "the newest release".
 
+Only a tag **that can trigger a build** counts as a release: `build-release.yml` fires on
+`tags: ["v*"]`, so a tag spelled `0.3.59` publishes nothing however version-shaped it looks.
+Such a tag is reported by name as a near miss rather than accepted, because accepting it
+answers `nothing is owed` for work that reached no host.
+
 It is a **screen for a host, not a CI gate.** On an unreleased master it is red by
 design, so wiring it into CI would make the release cadence a permanently failing check
 and teach its readers to ignore it. Its role is the one `bump-version.py --check` and
@@ -72,9 +77,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 VERSION_SOURCE = Path("emrg") / "__init__.py"
 _DECLARATION = re.compile(r'^__version__\s*=\s*"([^"]+)"', re.MULTILINE)
 
-#: A release tag: three dotted numbers, optional `v`. Deliberately narrow -- the
-#: version shape `scripts/bump-version.py` rewrites and `check-release-tag.py` accepts.
+#: The version shape a tag may carry: three dotted numbers, optional `v`.
 _TAG = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+
+#: The shape that actually **triggers a release**: `build-release.yml` fires on
+#: `tags: ["v*"]` and nothing else. A tag spelled `0.3.59` never builds, never publishes and
+#: never reaches a host -- so it cannot be what "carries" a version, however much it looks
+#: like one. Measured 2026-11-18 (`cyc20261118-104130`): a tree declaring `0.3.59` whose only
+#: tag was `0.3.59` answered `nothing is owed`, which is the exact false clean this tool
+#: exists to prevent -- the work had shipped to nobody and the guard said it had.
+_RELEASE_TAG = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
 
 class Unmeasurable(Exception):
@@ -142,25 +154,36 @@ def _require_a_work_tree_of_its_own(root: Path) -> None:
         )
 
 
-def tags(root: Path) -> tuple[list[tuple[tuple[int, int, int], str]], list[str]]:
-    """Every release-shaped tag, newest last, plus the names that did not parse.
+def tags(root: Path) -> tuple[list[tuple[tuple[int, int, int], str]], list[str], list[str]]:
+    """Every **release** tag, newest last, plus two buckets of names that are not one.
+
+    A tag counts as a release only when it matches `_RELEASE_TAG`, because
+    `build-release.yml` triggers on `tags: ["v*"]` and nothing else: a `v`-less tag builds
+    nothing, so treating it as "carrying" the version would answer `nothing is owed` for a
+    tree whose work reached no host. The two buckets are kept apart because the remedies
+    differ - a version-shaped tag missing its `v` is a near miss worth naming exactly, while
+    an unrelated tag (`latest`) is only noise.
 
     Sorted by numeric parts, because string order puts `v0.3.9` after `v0.3.10`.
     """
     _require_a_work_tree_of_its_own(root)
     text = _git(root, "tag", "--list")
     parsed: list[tuple[tuple[int, int, int], str]] = []
+    vless: list[str] = []
     skipped: list[str] = []
     for name in (line.strip() for line in text.splitlines()):
         if not name:
             continue
-        match = _TAG.match(name)
-        if match is None:
-            skipped.append(name)
+        release = _RELEASE_TAG.match(name)
+        if release is not None:
+            parsed.append((tuple(int(part) for part in release.groups()), name))
             continue
-        parsed.append((tuple(int(part) for part in match.groups()), name))
+        if _TAG.match(name) is not None:
+            vless.append(name)
+            continue
+        skipped.append(name)
     parsed.sort()
-    return parsed, skipped
+    return parsed, vless, skipped
 
 
 def check(root: Path) -> int:
@@ -168,7 +191,7 @@ def check(root: Path) -> int:
     print(f"tree: {root}")
     try:
         declared = declared_version(root)
-        parsed, skipped = tags(root)
+        parsed, vless, skipped = tags(root)
     except Unmeasurable as exc:
         print(f"not measurable: {exc}")
         return 2
@@ -186,17 +209,32 @@ def check(root: Path) -> int:
         return 2
 
     skipped_note = f", {len(skipped)} tag(s) not version-shaped and not compared" if skipped else ""
+    vless_note = (
+        f", {len(vless)} version-shaped tag(s) with no `v` and therefore no build: "
+        f"{', '.join(sorted(vless))}"
+        if vless
+        else ""
+    )
     if not parsed:
-        print(f"tags: none version-shaped{skipped_note}")
+        print(f"tags: none that would trigger a build{vless_note}{skipped_note}")
+        carried = (
+            f" -- the version-shaped tag(s) {', '.join(sorted(vless))} carry it, but "
+            f"`build-release.yml` triggers on `v*` only, so a tag spelled without the `v` "
+            f"builds nothing and publishes nothing"
+            if vless
+            else ""
+        )
         print(
-            f"A RELEASE IS OWED: the tree declares {declared} and no tag carries it -- "
-            f"the tag list was read and is empty of version tags, so nothing has been "
-            f"published for this tree"
+            f"A RELEASE IS OWED: the tree declares {declared} and no tag that triggers a "
+            f"build carries it{carried}"
         )
         return 1
 
     newest = parsed[-1][1]
-    print(f"tags: {len(parsed)} version-shaped, newest {newest}{skipped_note}")
+    print(
+        f"tags: {len(parsed)} that would trigger a build, newest {newest}"
+        f"{vless_note}{skipped_note}"
+    )
 
     declared_parts = tuple(int(part) for part in declared_match.groups())
     newest_parts = parsed[-1][0]

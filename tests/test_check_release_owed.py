@@ -65,6 +65,38 @@ def _run(mod, root: Path, capsys) -> tuple[int, str]:
     return rc, captured.out
 
 
+def test_a_tag_without_the_v_publishes_nothing_so_a_release_is_still_owed(tmp_path, capsys):
+    """`build-release.yml` triggers on `tags: ["v*"]`, so a `v`-less tag is not a release.
+
+    Measured 2026-11-18 (`cyc20261118-104130`) on exactly this fixture: the guard answered
+    **rc 0, "nothing is owed"** for a tree declaring `0.3.59` whose only tag was `0.3.59`.
+    That tag builds nothing and publishes nothing, so the work had shipped to nobody while
+    the guard - whose whole purpose is catching that - reported it as shipped. The tag passes
+    the version regex but must not count as a release.
+    """
+    mod = _load()
+    root = _repo(tmp_path / "vless", "0.3.59", ["0.3.59"])
+
+    rc, out = _run(mod, root, capsys)
+
+    assert rc == 1, f"a tag that triggers no build cannot satisfy the declaration:\n{out}"
+    assert "A RELEASE IS OWED" in out, out
+    assert "0.3.59" in out, out
+    assert "no `v`" in out, (
+        f"the near miss has to be named, or the reader cannot tell it from no tag at all:\n{out}")
+
+
+def test_a_v_prefixed_tag_of_the_same_version_does_satisfy_it(tmp_path, capsys):
+    """The other direction, so the fix above cannot be "always report owed"."""
+    mod = _load()
+    root = _repo(tmp_path / "vfull", "0.3.59", ["v0.3.59"])
+
+    rc, out = _run(mod, root, capsys)
+
+    assert rc == 0, out
+    assert "nothing is owed" in out, out
+
+
 def test_a_tree_older_than_the_newest_tag_is_behind_not_owed(tmp_path, capsys):
     """A checkout behind the release must not be told to cut one.
 
