@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import cssSource from "../cockpit.css?raw";
 import componentsSource from "../../css/components.css?raw";
+import layoutSource from "../../css/layout.css?raw";
 import {
   BODY_MIN,
   LEFT_COLUMN_DEFAULT,
@@ -370,6 +371,9 @@ describe("图标轨与设置页的数值就是原型的数值（issue #2986）",
     expect(item).toContain("width: 40px");
     expect(item).toContain("height: 40px");
     expect(item).toContain("border-radius: 11px");
+    // 40×40 只有在按钮不长大的前提下才是 40×40：`width`/`height` 管的是弹性盒算完之后
+    // 的盒子，一条 `flex: 1` 就能让它们作废（实测 40 → 119，五个图标散满整根轨）。
+    expect(item).toContain("flex: none");
     const icon = block(".rail-item svg");
     expect(icon).toContain("width: 19px");
     expect(icon).toContain("stroke-width: 1.65");
@@ -389,6 +393,47 @@ describe("图标轨与设置页的数值就是原型的数值（issue #2986）",
     expect(tip).toContain("z-index: 40");
     expect(tip).toContain("white-space: nowrap");
     expect(tip).toContain("opacity: 0");
+  });
+
+  it("样式表真的读到了（空串会让下面每一条断言都白白通过）", () => {
+    // `?raw` 在 `css: false` 下把样式表读成空串（`vite.config.ts` 为此把 css 打开），
+    // 而「没有某条规则」这句话在一个不剩的样式表上永远成立。
+    expect(layoutSource.length).toBeGreaterThan(1000);
+    expect(layoutSource).toContain(".workspace-view");
+  });
+
+  it("layout.css 不留没有页面在用的选择器（旧规则会按类名命中下一个同名元素）", () => {
+    // 样式表之间没有命名空间。`.side-nav-item { flex: 1 }` 在导航搬进 60px 图标轨之后
+    // 仍然按类名命中新按钮，把五个 40×40 的盒子拉成 119px 高，图标于是散满整根轨。
+    // 所以规则不是「删掉看得见的那一条」，而是：这里声明的每个名字，都必须真有一个
+    // 页面在穿它。
+    //
+    // 源码走打包器读，不走 `node:fs`：渲染层只声明了 `vite/client` 与 jest-dom，
+    // `node:` 导入会让 `npm run typecheck` 在干净安装上红（`tests/test_renderer_node_types.py` 钉着）。
+    const sources = import.meta.glob(["../**/*.ts", "../**/*.tsx"], {
+      query: "?raw",
+      import: "default",
+      eager: true,
+    }) as Record<string, string>;
+    const shipped = Object.entries(sources).filter(([file]) => !/\.test\.tsx?$/.test(file));
+    // 先读名字：空列表会让下面那句 vacuously 通过
+    expect(shipped.length).toBeGreaterThan(20);
+    // 注释不是穿着者：`.session-header` 只活在一句注释里，把它算进来就等于替一条
+    // 没人用的规则作证。
+    const bare = (text: string) =>
+      text
+        .replace(/\/\*[\s\S]*?\*\//g, " ")
+        .replace(/^\s*\/\/.*$/gm, " ")
+        .replace(/\s\/\/[^\n]*/g, " ");
+    const worn = shipped.map(([, text]) => bare(text)).join("\n");
+    const declared = [
+      ...new Set([...bare(layoutSource).matchAll(/[.#]([A-Za-z][\w-]*)/g)].map((m) => m[1])),
+    ];
+    expect(declared.length).toBeGreaterThan(10);
+    const orphans = declared.filter(
+      (name) => !new RegExp(`(^|[^\\w-])${name}([^\\w-]|$)`).test(worn),
+    );
+    expect(orphans).toEqual([]);
   });
 
   it("设置页左导航 190px 定宽、纵向排列、项间距 1px", () => {

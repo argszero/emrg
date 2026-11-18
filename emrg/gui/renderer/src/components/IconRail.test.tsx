@@ -90,6 +90,21 @@ describe("图标轨的结构（issue #2986）", () => {
     expect(fifthAt).toBeLessThan(spacerAt);
   });
 
+  it("轨上没有任何旧侧栏的类名（旧规则的 flex: 1 会把按钮拉长）", () => {
+    setup();
+    const rail = railEl();
+    expect(rail.className).toBe("icon-rail");
+    const pages = Array.from(rail.querySelectorAll<HTMLElement>("[data-view]"));
+    expect(pages).toHaveLength(5);
+    for (const page of pages) {
+      // 允许的只有自己的两个：盒子类与选中态。多出来的一个类就是别人的规则能进来的门，
+      // 而那条规则不需要写在这里，它已经在这个仓库里了。
+      expect([...page.classList].filter((c) => c !== "rail-item" && c !== "active")).toEqual([]);
+    }
+    expect(document.querySelector(".side-nav")).toBeNull();
+    expect(document.querySelector(".side-nav-item")).toBeNull();
+  });
+
   it("底部有主题切换按钮与 daemon 连接点，且用自绘气泡而不是浏览器原生 title", () => {
     setup();
     const rail = railEl();
