@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { Shell } from "./Shell";
@@ -1091,6 +1091,63 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
     await waitFor(() =>
       expect(screen.getByTestId("band-elapsed").textContent).toMatch(/\[\d+:\d\d\]/),
     );
+  });
+
+  it("侧栏那一行也有计时与运行点，且从快照时刻起算（issue #2982 清单 3、验收 2）", async () => {
+    // 上面那条读的是**状态带**（`band-elapsed`）；这条 rant 说的是**侧栏那一行**。
+    // 两个面读同一份 `turnStartBySid`，但没有任何测试读过行——于是「行上显示计时与
+    // 运行点」从来没有被守过：删掉 Shell 传给 `<SessionColumn>` 的 `turnStartBySid`，
+    // 上面那条仍然全绿，而人在侧栏上看到的是一条看着空闲的会话。
+    //
+    // 断言的是**已经跑过多久**，不是「有个字符串」：分钟数 ≥ 5 才说明基准是 daemon
+    // 给的时刻（305 秒前）。从 00:00 起算会得到 [0:0x]，这个下界正是它与它的区分器。
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(screen.getByTestId("composer-input")).toBeInTheDocument());
+    m.emit({
+      type: "command_result",
+      data: {
+        type: "resume_result",
+        session_id: "s1",
+        meta: { turn: { running: true, started_at: Math.floor(Date.now() / 1000) - 305 } },
+      },
+      sid: "s1",
+    });
+
+    const row = () => {
+      const el = screen.getAllByTestId("open-session-item").find((r) => r.dataset.sid === "s1");
+      expect(el).toBeTruthy();
+      return el as HTMLElement;
+    };
+    await waitFor(() => expect(within(row()).getByTestId("open-session-timer")).toBeInTheDocument());
+    expect(within(row()).getByTestId("open-session-run-dot")).toBeInTheDocument();
+    const shown = within(row()).getByTestId("open-session-timer").textContent ?? "";
+    const mins = Number(shown.match(/^\[(\d+):\d\d\]$/)?.[1]);
+    expect(Number.isFinite(mins)).toBe(true);
+    expect(mins).toBeGreaterThanOrEqual(5);
+  });
+
+  it("快照说没有轮在跑 → 侧栏那一行的计时与运行点都不留下（issue #2982 清单 6）", async () => {
+    // 同一行的另一半：上一条连接说这一轮在跑，这条快照说没有。行上不能停着上一轮的
+    // 时刻——那会让人以为会话还在跑，而停止按钮点下去什么也不会发生。
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(screen.getByTestId("composer-input")).toBeInTheDocument());
+    m.emit({ type: "turn_start", data: { started_at: Math.floor(Date.now() / 1000) - 305 }, sid: "s1" });
+    await waitFor(() => expect(screen.getByTestId("open-session-timer")).toBeInTheDocument());
+    expect(screen.getByTestId("open-session-run-dot")).toBeInTheDocument();
+
+    m.emit({
+      type: "command_result",
+      data: { type: "resume_result", session_id: "s1", meta: { turn: { running: false, started_at: null } } },
+      sid: "s1",
+    });
+    await waitFor(() => expect(screen.queryByTestId("open-session-timer")).toBeNull());
+    expect(screen.queryByTestId("open-session-run-dot")).toBeNull();
   });
 
   it("停止按钮跟着会话走，而不是跟着本端发没发过请求（rant 2026-10-29T14:21:57）", async () => {
