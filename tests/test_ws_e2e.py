@@ -2123,6 +2123,13 @@ class TestWSQueueInjection:
                 cwd = Path(tmp)
                 server, _, cleanup = await _boot_server(cwd)
                 try:
+                    # s_iso1 stays busy until this test releases it. A fixed
+                    # sleep made "still busy" a timing hope: a stall on a loaded
+                    # runner ate the window, the third task found the session
+                    # idle, and task_queued never came — the Windows leg of
+                    # build-release 44323342358 failed exactly there.
+                    busy_gate = asyncio.Event()
+
                     async def chat_stream(messages, tools=None):
                         user_texts = [m.get("content") for m in messages
                                       if m.get("role") == "user"]
@@ -2132,7 +2139,7 @@ class TestWSQueueInjection:
                             return
                         yield {"content": "iso1-start", "tool_calls": None,
                                "finish_reason": None, "usage": None}
-                        await asyncio.sleep(1.2)
+                        await busy_gate.wait()
                         yield {"content": "iso1-done", "tool_calls": None,
                                "finish_reason": "stop", "usage": None}
                     server.llm.chat_stream = chat_stream
@@ -2142,7 +2149,12 @@ class TestWSQueueInjection:
                         # A busy on s_iso1
                         await ws_a.send(json.dumps(
                             self._task("s_iso1", "t-iso-a", "iso1 long", cwd), ensure_ascii=False))
-                        await asyncio.sleep(0.2)
+                        # Busy is a frame, not a duration: the turn's own
+                        # turn_start proves the session's lock is held
+                        # (daemon.py sets _session_busy before creating it).
+                        await _recv_until(
+                            ws_a, lambda f: f.get("type") == "turn_start",
+                            what="turn_start A")
                         # B on s_iso2 → NOT busy → immediate streaming, no task_queued
                         await ws_b.send(json.dumps(
                             self._task("s_iso2", "t-iso-b2", "iso2 fast", cwd), ensure_ascii=False))
@@ -2163,6 +2175,7 @@ class TestWSQueueInjection:
                             ws_b, lambda f: f.get("type") == "task_queued", what="task_queued")
                         assert fq.get("session_id") == "s_iso1"
                     finally:
+                        busy_gate.set()  # release the held turn on every exit path
                         await ws_a.close()
                         await ws_b.close()
                 finally:
