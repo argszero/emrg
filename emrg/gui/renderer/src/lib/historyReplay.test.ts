@@ -180,7 +180,7 @@ describe("replayHistoryRecords is equivalent to the live stream", () => {
     expect(kinds).toEqual(["user", "assistant", "tool-group", "assistant", "tool-row", "assistant"]);
     const group = replay.getEntries(SID)[2] as { group: { rows: unknown[]; summary: { count: number } | null } };
     expect(group.group.rows).toHaveLength(2);
-    expect(group.group.summary).toEqual({ count: 2, totalElapsed: 0 });
+    expect(group.group.summary).toEqual({ count: 2, totalElapsed: 0, timed: false });
   });
 
   it("carries each tool row's intent out of tool_calls[].function.arguments", () => {
@@ -622,7 +622,7 @@ describe("#2980：回放把记录里的实测耗时交给行与合并组", () =>
     const group = store.getEntries(SID).find((e) => e.kind === "tool-group") as {
       group: { summary: { count: number; totalElapsed: number } | null };
     };
-    expect(group.group.summary).toEqual({ count: 2, totalElapsed: 3.75 });
+    expect(group.group.summary).toEqual({ count: 2, totalElapsed: 3.75, timed: true });
   });
 
   it("旧记录（本没有这个字段）不写 0：行上仍旧没有耗时", () => {

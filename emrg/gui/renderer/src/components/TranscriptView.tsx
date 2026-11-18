@@ -416,6 +416,41 @@ function AssistantSegmentView({
  *  实现已提为共用组件 MarkdownText（rant 2026-09-30T09:06:16 / #1763：Rant 详情同路径）。 */
 
 /** 工具友好状态行（进行中 → 完成/失败，默认折叠，点开展示原始输出） */
+/** 一行工具在**折叠形态**下的文字：批次标签 + 工具名 + 状态短语 + intent。
+ *
+ * 组摘要里的 `{latest}` 用的就是这个函数（#2980）：宿主在一条摘要里读到的最后一行，与
+ * 他点开后看到的那一行必须是同一句话。另造一套措辞就会是同一个事实的两个说法。 */
+export function toolRowText(row: ToolRow, t: TranslateFn): string {
+  const phrases = toolPhrases(row.toolName, t);
+  const label =
+    row.status === "running"
+      ? phrases.doing
+      : row.status === "done"
+        ? phrases.done
+        : t("tool.failText");
+  return `${row.callLabel ?? ""}${row.toolName} ${label}${row.intent ? ` ${row.intent}` : ""}`;
+}
+
+/** 组摘要的一句话：四种缺省各有自己的键。
+ *
+ * `timed` 为假（重放的老记录一行都没量过耗时）时不出现时间、也不出现 `0.0s`；`latest`
+ * 为空时整个括号不出现，而不是留一对空括号——两者都是宿主在屏幕上看出来的东西（#2980）。 */
+export function summaryLine(group: ToolGroup, latest: string, t: TranslateFn): string {
+  const summary = group.summary;
+  if (!summary) return "";
+  const count = summary.count;
+  if (!summary.timed) {
+    return latest
+      ? t("chat.toolGroupSummaryNoTime", { count, latest })
+      : t("chat.toolGroupSummaryCountOnly", { count });
+  }
+  const time = summary.totalElapsed.toFixed(1) + "s";
+  return latest
+    ? t("chat.toolGroupSummary", { count, time, latest })
+    : t("chat.toolGroupSummaryNoLatest", { count, time });
+}
+
+/** 工具行：折叠 = 名称 + intent，展开 = 名称 / 输入 / 输出三段（#1787）。 */
 function ToolRowView({
   row,
   t,
@@ -507,6 +542,9 @@ function ToolGroupView({
   store: TranscriptStore;
   sid: string | null;
 }) {
+  const latestRow = group.rows.length ? group.rows[group.rows.length - 1] : undefined;
+  const summaryText = summaryLine(group, latestRow ? toolRowText(latestRow, t) : "", t);
+
   return (
     <div className={`tool-group ${group.collapsed ? "collapsed" : ""}`}>
       <div
@@ -514,14 +552,7 @@ function ToolGroupView({
         onClick={() => store.toggleGroup(sid, entryIndex)}
       >
         <span className="tool-group-chev">⌄</span>
-        <span className="tool-group-summary">
-          {group.summary
-            ? t("chat.toolGroupSummary", {
-                count: group.summary.count,
-                time: group.summary.totalElapsed.toFixed(1) + "s",
-              })
-            : ""}
-        </span>
+        <span className="tool-group-summary">{summaryText}</span>
       </div>
       <div className="tool-group-rows">
         {group.rows.map((row) => (
