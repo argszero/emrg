@@ -151,7 +151,11 @@ describe("WorkspaceView", () => {
     // 编辑/删除
     await userEvent.click(screen.getAllByTitle("编辑")[0]);
     expect(onEdit).toHaveBeenCalledWith(tasks[0]);
+    // 删除要问一次再答一次（issue #2959）：第一次点击把按钮变成问题，第二次才真删。
+    // 以前一点就弹确认框，框压在列表上看不见是哪一行。
     await userEvent.click(screen.getAllByTitle("删除")[0]);
+    expect(onDelete).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByTestId("row-delete-confirm"));
     expect(onDelete).toHaveBeenCalledWith(tasks[0]);
   });
 

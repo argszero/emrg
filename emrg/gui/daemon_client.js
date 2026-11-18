@@ -1155,6 +1155,16 @@ class DaemonClient {
       this._emit(frame.type, frame);
       return;
     }
+    if (frame.type === "turn_progress") {
+      // Issue #2959: the daemon broadcasts one of these at the top of every round of
+      // a turn — the round number and the turn's cumulative tokens. The renderer's
+      // status band is its only reader (`daemonBridge.ts`, `case "turn_progress"`),
+      // and that handler is unreachable without this line: this layer forwards by
+      // *named* type, so an unknown frame falls to the log at the bottom and reaches
+      // no window. Same seam, same failure as `turn_start` had before 2026-09-30.
+      this._emit(frame.type, frame);
+      return;
+    }
     if (frame.type === "user_message") {
       // 新消息落盘的回执（rant 2026-10-17T10:03:08）：daemon 在写用户记录的同一处
       // `_broadcast` 它，带 `request_id` 与 `timestamp` —— 那一刻只有 daemon 知道，

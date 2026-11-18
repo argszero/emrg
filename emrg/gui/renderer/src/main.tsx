@@ -11,6 +11,10 @@ import "../css/components.css";
 import "../css/layout.css";
 import "../css/animations.css";
 import "./shell.css";
+// The cockpit's own layer (issue #2959): the status band, the icon rail, the drag
+// surfaces and the density step. After shell.css, because it describes the same
+// elements and must win where the two disagree.
+import "./cockpit.css";
 
 const rootEl = document.getElementById("root");
 if (!rootEl) {

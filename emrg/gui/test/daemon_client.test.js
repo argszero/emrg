@@ -824,6 +824,29 @@ test("rant 2026-09-30T09:47:11：turn_start/turn_end 广播转发（GUI 会话�
   assert.deepStrictEqual(warned.filter((m) => m.includes("unknown frame")), []);
 });
 
+test("issue #2959：turn_progress 帧转发（状态带的轮次与 token 读数）", async () => {
+  // 与 turn_start 同一个形状的缝：daemon 在每一轮开头广播它，渲染层的
+  // `case "turn_progress"` 是唯一读者，而这一层按**点名**的类型转发 —— 不点名就落进
+  // 兜底，只记一行日志、不发事件。状态带于是永远显示 «—»，可 daemon 明明每一轮
+  // 都说了。守卫放在断掉的这道缝上，所以假 logger 的 warn 是断言的一半。
+  const warned = [];
+  const client = new DaemonClient({ logger: { info: () => {}, warn: (m) => warned.push(m) } });
+  await connectClient(client);
+  const seen = [];
+  client.onEvent((type, data) => seen.push([type, data]));
+
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  send({ type: "turn_progress", session_id: "s1", request_id: "r1", round: 2, tokens: 1843 });
+
+  // ① 按原名转发 —— 渲染层 switch 的就是这个名字
+  assert.deepStrictEqual(seen.map(([t]) => t), ["turn_progress"]);
+  // ② 负载原样带过去：轮次与 token 由 daemon 算，中间层不二次解释
+  assert.strictEqual(seen[0][1].round, 2);
+  assert.strictEqual(seen[0][1].tokens, 1843);
+  // ③ 不再落入兜底
+  assert.deepStrictEqual(warned.filter((m) => m.includes("unknown frame")), []);
+});
+
 test("rant 2026-10-09T09:43:39：sandbox_roots 帧转发（GUI 的额外可写根，含拒绝帧）", async () => {
   // 与 turn_start 同一个形状的缝：daemon 广播、渲染层有 case、中间层把它丢进兜底。
   // 这里多一层理由：拒绝也是这**同一个** type（daemon 对三种 op、两条路径都回

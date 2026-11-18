@@ -436,6 +436,31 @@ def update_rant(
     return False, f"rant not found: {timestamp}"
 
 
+def delete_rant(rants_log: Path, timestamp: str) -> tuple[bool, str]:
+    """Remove one rant from the ledger, identified by its timestamp.
+
+    This is **not** a status transition: the state machine has no "gone" state, and
+    nothing in the lifecycle deletes a row. It exists because the GUI's rant panel
+    offers the same delete every other row carries (issue #2959 item 7: "all three
+    kinds of row can be deleted"), and the alternative — a button with nothing behind
+    it — is a control that looks alive and does nothing.
+
+    A caller gets ``(False, ...)`` when no row carries that timestamp: a deletion that
+    matched nothing is reported rather than reported as success, because the two
+    readings differ and only one of them means the row is gone.
+
+    The rewrite goes through :func:`_write_rants`, so this stays a second *caller* of
+    the single writer rather than a second writer — the format, the ordering and the
+    kind guard are the ones that file already owns.
+    """
+    rants = _read_rants(rants_log)
+    kept = [r for r in rants if r.get("timestamp") != timestamp]
+    if len(kept) == len(rants):
+        return False, f"rant not found: {timestamp}"
+    _write_rants(rants_log, kept)
+    return True, f"deleted rant {timestamp}"
+
+
 def cleanup_rants(rants_log: Path, keep: int = 10) -> int:
     """Prune old completed rants, keeping all pending/in_progress plus the
     ``keep`` most recent completed (by completed timestamp, fallback

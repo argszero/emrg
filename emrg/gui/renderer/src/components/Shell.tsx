@@ -10,7 +10,26 @@ import { TaskFormDialog, type TaskFormPayload } from "./TaskFormDialog";
 import { RantDialog } from "./RantDialog";
 import type { AgentRec, RantRec, TaskRec } from "../lib/workspaceView";
 import type { SessionRow } from "../lib/openSession";
-import { Sidebar, type SidebarViewId } from "./Sidebar";
+import { Sidebar } from "./Sidebar";
+import { IconRail } from "./IconRail";
+import { StatusBand } from "./StatusBand";
+import { SearchOverlay } from "./SearchOverlay";
+import { ResizeHandle } from "./ResizeHandle";
+import {
+  HANDLE_WIDTH,
+  LEFT_COLUMN_DEFAULT,
+  LEFT_COLUMN_MIN,
+  LS_LEFT_WIDTH,
+  RAIL_WIDTH,
+  RIGHT_COLUMN_DEFAULT,
+  RIGHT_COLUMN_MIN,
+  clampWidth,
+  columnBounds,
+  persistColumnWidth,
+  sessionHits,
+  storedColumnWidth,
+  type SidebarViewId,
+} from "../lib/cockpit";
 import { ResultPanel } from "./ResultPanel";
 import { WorkspaceView, type WorkspaceViewId } from "./WorkspaceView";
 import { TranscriptView } from "./TranscriptView";
@@ -77,6 +96,8 @@ interface WorkspaceBridge {
   taskDelete(p: { name: string }): Promise<unknown>;
   taskTemplateList(): Promise<{ name: string }[]>;
   sendRant(p: { message: string; agent?: string }): Promise<{ ok?: boolean; count?: number }>;
+  /** 删除一条 rant（issue #2959 item 7）——`ok: false` 表示账本里没有这一行 */
+  deleteRant?(p: { timestamp: string }): Promise<{ ok?: boolean; notice?: string }>;
   /**
    * 升级横幅重启（rant 2026-09-01T20:09:41）：调 emrg:restartDaemon —— 完整 stop
    * 链（TUI→daemon，--skip-gui 跳过 GUI 防自杀）→ GUI 自己 relaunch → 新 GUI
@@ -118,6 +139,22 @@ export function Shell() {
   const appState = useSnapshotStore(bridge.store);
   const [activeSid, setActiveSid] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<"sessions" | WorkspaceViewId>("sessions");
+  // ── The cockpit's four pieces of shell state (issue #2959) ──
+  //
+  // Column widths and what is open live here rather than in the components they size:
+  // a column that unmounts takes its own state with it, so a width held inside the
+  // sidebar would reset every time the host hid and showed it. The width is written
+  // inline (never in a stylesheet), which is what makes a drag able to move it, and it
+  // is remembered under one key per column so closing one never forgets the other.
+  const [leftWidth, setLeftWidth] = useState(() => storedColumnWidth(LS_LEFT_WIDTH, LEFT_COLUMN_DEFAULT));
+  const [leftOpen, setLeftOpen] = useState(true);
+  const [rightOpen, setRightOpen] = useState(true);
+  const [searchOpen, setSearchOpen] = useState(false);
+  // The window width is read once and then tracked: the left column's ceiling is what
+  // the window leaves the body, so it has to be a live number, not a constant.
+  const [windowWidth, setWindowWidth] = useState(() =>
+    typeof window === "undefined" ? 1440 : window.innerWidth,
+  );
   const dialogHost = useRef<DialogHostHandle>(null);
   // `/rewind` picked a message and that message's text goes back into the composer
   // (issue #2384). A request, not a controlled value: the input's live content belongs
@@ -164,16 +201,22 @@ export function Shell() {
     const iv = setInterval(() => setSidebarTick((t) => t + 1), 1000);
     return () => clearInterval(iv);
   }, [hasRunningSessions]);
+
+  // The window is what a column's ceiling is measured against (issue #2959 item 4), so
+  // a resized window has to move that ceiling rather than leave a stale one behind.
+  useEffect(() => {
+    const onResize = () => setWindowWidth(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
   const activeSessionEntry = appState.openSessions.find((o) => o.sid === activeSid);
   const activeKnown = appState.sessions.find((s) => s.session_id === activeSid);
   const activeTitle = activeSessionEntry?.title || activeKnown?.title || t("app.unnamed");
   const activeAgent = activeSessionEntry?.projectName || "";
   const activeMsgCount = (activeKnown as { message_count?: number } | undefined)?.message_count ?? 0;
-  const elapsed =
-    activeTurnStart === undefined
-      ? 0
-      : Math.max(0, Math.floor(Date.now() / 1000 - activeTurnStart / 1000));
-  const mmss = `${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(elapsed % 60).padStart(2, "0")}`;
+  // The turn's elapsed time is no longer formatted here: the status band does it from
+  // `startedAtMs` (`formatElapsed`, the same reader the sidebar's stopwatch uses), so
+  // the shell keeps no second copy of that arithmetic to drift from it.
 
   // open_sessions 广播到达且尚无激活会话 → 自动选第一个（vanilla 同语义）
   useEffect(() => {
@@ -301,26 +344,24 @@ export function Shell() {
     }
   }
 
-  function deleteAgent(p: AgentRec) {
-    dispatch({
-      type: "open-confirm",
-      payload: {
-        title: t("deleteAgent.title"),
-        message: t("deleteAgent.body", { name: String(p.name || p.path || "") }),
-        okText: "dlg.delete",
-        danger: true,
-        onOk: async () => {
-          const b = wsBridge();
-          if (!b?.removeAgent) return;
-          try {
-            await b.removeAgent({ name: p.name || "", path: p.path || "" });
-            await loadAgents();
-          } catch (e) {
-            transcript.addSystemMessage(t("deleteAgent.failed", { msg: (e as Error)?.message ?? String(e) }), activeSid);
-          }
-        },
-      },
-    });
+  /**
+   * Remove an agent — no confirmation dialog, because the row already asked.
+   *
+   * Issue #2959 item 7 moved the question onto the row itself (`WorkspaceView`'s
+   * `deleteControl`): the first click turns the button into "delete?", the second
+   * answers it. Keeping a modal on top of that would ask twice for one deletion, and
+   * the modal is the worse of the two askings — it covers the list, so the host can no
+   * longer see which row they are answering about.
+   */
+  async function deleteAgent(p: AgentRec) {
+    const b = wsBridge();
+    if (!b?.removeAgent) return;
+    try {
+      await b.removeAgent({ name: p.name || "", path: p.path || "" });
+      await loadAgents();
+    } catch (e) {
+      transcript.addSystemMessage(t("deleteAgent.failed", { msg: (e as Error)?.message ?? String(e) }), activeSid);
+    }
   }
 
   async function selectProjectSession(p: AgentRec, sid: string) {
@@ -417,27 +458,17 @@ export function Shell() {
     }
   }
 
-  function deleteTask(task: TaskRec) {
-    dispatch({
-      type: "open-confirm",
-      payload: {
-        title: t("settings.taskDelete"),
-        message: t("settings.taskDeleteConfirm", { name: String(task.name || "") }),
-        okText: "dlg.delete",
-        danger: true,
-        onOk: async () => {
-          const b = wsBridge();
-          if (!b?.taskDelete || !task.name) return;
-          try {
-            await b.taskDelete({ name: task.name });
-            transcript.addSystemMessage(t("settings.taskDeleted"), activeSid);
-            await loadTasks();
-          } catch (e) {
-            transcript.addSystemMessage(t("app.tasksFailed", { msg: (e as Error)?.message ?? String(e) }), activeSid);
-          }
-        },
-      },
-    });
+  /** Same rule as `deleteAgent`: the row asked, so this only answers. */
+  async function deleteTask(task: TaskRec) {
+    const b = wsBridge();
+    if (!b?.taskDelete || !task.name) return;
+    try {
+      await b.taskDelete({ name: task.name });
+      transcript.addSystemMessage(t("settings.taskDeleted"), activeSid);
+      await loadTasks();
+    } catch (e) {
+      transcript.addSystemMessage(t("app.tasksFailed", { msg: (e as Error)?.message ?? String(e) }), activeSid);
+    }
   }
 
   async function submitRant(payload: { message: string; agent: string }) {
@@ -452,6 +483,34 @@ export function Shell() {
     }
   }
 
+  /**
+   * Remove a rant row (issue #2959 item 7).
+   *
+   * The daemon owns the ledger, so this is a request rather than an edit: it reports
+   * `ok: false` when no row carried that timestamp, and the panel is reloaded from the
+   * daemon either way. Reloading on refusal matters — a list that keeps a row the
+   * ledger no longer has is a list that will lie until the next refresh.
+   */
+  async function deleteRant(r: RantRec) {
+    const b = wsBridge();
+    if (!b?.deleteRant || !r.timestamp) return;
+    try {
+      const res = await b.deleteRant({ timestamp: String(r.timestamp) });
+      if (res?.ok === false) {
+        transcript.addSystemMessage(
+          t("rants.deleteFailed", { msg: res.notice || "" }),
+          activeSid,
+        );
+      }
+    } catch (e) {
+      transcript.addSystemMessage(
+        t("rants.deleteFailed", { msg: (e as Error)?.message ?? String(e) }),
+        activeSid,
+      );
+    }
+    await loadRants();
+  }
+
   /** 打开 Rant 对话框：vanilla openRantForm 语义 —— 显式 listAgents 填充项目下拉 */
   async function newRant() {
     if (agents.length === 0) await loadAgents();
@@ -460,6 +519,34 @@ export function Shell() {
 
   const busy = activeSid ? (appState.busyBySid[activeSid] ?? false) : false;
   const disconnected = activeSid ? (appState.disconnectedBySid[activeSid] ?? false) : false;
+
+  // ── The status band's two daemon readings: the running round, and the spend ──
+  //
+  // Both come from `turn_progress`, the frame the daemon broadcasts at the top of every
+  // round. Neither is derived here: a client that counted rounds, or added up usage it
+  // happened to see, would answer with its own arithmetic the moment a stream restarts
+  // or another window watches the same turn. `null` is "not reported", which the band
+  // renders as `—` rather than as round 1 or as zero tokens.
+  const round = activeSid ? (appState.roundBySid[activeSid] ?? null) : null;
+  const turnTokens = activeSid ? (appState.turnTokensBySid[activeSid] ?? null) : null;
+
+  /** What the search overlay can reach: the open sessions plus the daemon's listing. */
+  const searchHits = useMemo(
+    () => sessionHits(appState.openSessions, appState.sessions),
+    [appState.openSessions, appState.sessions],
+  );
+
+  /** The left column's bounds for this window, and the width it renders at today. */
+  const leftReserved =
+    RAIL_WIDTH + HANDLE_WIDTH + (rightOpen ? RIGHT_COLUMN_DEFAULT + HANDLE_WIDTH : 0);
+  const leftBounds = columnBounds(windowWidth, leftReserved, LEFT_COLUMN_MIN);
+  const effectiveLeftWidth = clampWidth(leftWidth, leftBounds);
+
+  /** Remember a column width and the drag that produced it, in one place each. */
+  function resizeLeft(px: number) {
+    setLeftWidth(px);
+    persistColumnWidth(LS_LEFT_WIDTH, px);
+  }
 
   /** 工作区视图切换（vanilla app.js switchView 语义）：
    *  点当前面板 → toggle 回会话视图；点其他面板 → 切换；点 sessions → 回会话视图 */
@@ -471,6 +558,23 @@ export function Shell() {
       return;
     }
     setActiveView((cur) => (cur === view ? "sessions" : view));
+  }
+
+  /**
+   * A session picked in the search overlay.
+   *
+   * Two cases, and the difference is not cosmetic: a session already open in this
+   * client is just a change of focus, while one the daemon merely listed has to be
+   * resumed — `switch_session` is what makes the daemon adopt it, so its cwd and its
+   * history arrive with it. Picking the second kind with the first kind's path leaves
+   * a window pointed at a session the server never opened.
+   */
+  async function pickSession(sid: string): Promise<void> {
+    if (appState.openSessions.some((o) => o.sid === sid)) {
+      selectSession(sid);
+      return;
+    }
+    await selectProjectSession({}, sid);
   }
 
   /** 选择会话：切换 sid + 回会话视图（vanilla switchSession → activeView="sessions"） */
@@ -765,48 +869,78 @@ export function Shell() {
           </button>
         </div>
       ) : null}
-      <header className="react-shell-header">
-        <span className="react-shell-brand">✦ EMRG</span>
-        {activeSid ? (
-          <span className="react-shell-session" data-testid="session-info" title={activeSid}>
-            {activeTitle} ({activeSid})
-            {activeAgent ? ` · ${activeAgent}` : ""}
-            {" · "}
-            {t("app.msgCount", { count: activeMsgCount })}
-            {activeTurnStart !== undefined ? ` [${mmss}]` : ""}
-          </span>
-        ) : null}
-        <span className="react-shell-conn" data-testid="conn-status" title={t("sidebar.statusTitle")}>
-          <span className={`conn-dot ${appState.connected ? "green" : "gray"}`} />
-          {appState.connected ? appState.model : t("copy.disconnected")}
-          {appState.connected && appState.vision !== null ? (
-            // 生效的图片能力，与 TUI 状态栏的 `[model img|no-img]` 对齐（rant
-            // 2026-09-17T16:53:02）：读的是 daemon 报的 live 值，所以改 config.toml
-            // 里的条目声明不会假装移动它 —— 只有 daemon 真的移动了才变。
-            <span
-              className={`react-shell-vision ${appState.vision ? "on" : "off"}`}
-              data-testid="conn-vision"
-              title={t("app.visionTitle")}
-            >
-              {appState.vision ? t("app.visionOn") : t("app.visionOff")}
+      <StatusBand
+        running={busy}
+        round={round}
+        startedAtMs={activeTurnStart}
+        tokens={turnTokens}
+        connected={appState.connected}
+        model={appState.model}
+        leftOpen={leftOpen}
+        rightOpen={rightOpen}
+        onToggleLeft={() => setLeftOpen((v) => !v)}
+        onToggleRight={() => setRightOpen((v) => !v)}
+        onSearch={() => setSearchOpen(true)}
+        onNew={() => dialogHost.current?.openNewSession()}
+        sessionInfo={
+          activeSid ? (
+            <span className="react-shell-session" data-testid="session-info" title={activeSid}>
+              {activeTitle} ({activeSid})
+              {activeAgent ? ` · ${activeAgent}` : ""}
+              {" · "}
+              {t("app.msgCount", { count: activeMsgCount })}
             </span>
-          ) : null}
-        </span>
-      </header>
+          ) : null
+        }
+        conn={
+          <span className="react-shell-conn" data-testid="conn-status" title={t("sidebar.statusTitle")}>
+            <span className={`conn-dot ${appState.connected ? "green" : "gray"}`} />
+            {appState.connected ? appState.model : t("copy.disconnected")}
+            {appState.connected && appState.vision !== null ? (
+              // 生效的图片能力，与 TUI 状态栏的 `[model img|no-img]` 对齐（rant
+              // 2026-09-17T16:53:02）：读的是 daemon 报的 live 值，所以改 config.toml
+              // 里的条目声明不会假装移动它 —— 只有 daemon 真的移动了才变。
+              <span
+                className={`react-shell-vision ${appState.vision ? "on" : "off"}`}
+                data-testid="conn-vision"
+                title={t("app.visionTitle")}
+              >
+                {appState.vision ? t("app.visionOn") : t("app.visionOff")}
+              </span>
+            ) : null}
+          </span>
+        }
+      />
       <div className="react-shell-body">
-        <aside className="react-shell-sidebar" data-testid="react-shell-sidebar">
-          <Sidebar
-            openSessions={appState.openSessions}
-            knownSessions={appState.sessions}
-            activeSid={activeSid}
-            activeView={activeView}
-            turnStartBySid={appState.turnStartBySid}
-            onSelect={selectSession}
-            onSwitchView={switchView}
-            onNewChat={() => dialogHost.current?.openNewSession()}
-            onOpenChat={() => dialogHost.current?.openSessions()}
-          />
-        </aside>
+        <IconRail activeView={activeView} onSwitchView={switchView} />
+        {leftOpen ? (
+          <>
+            <aside
+              className="react-shell-sidebar"
+              data-testid="react-shell-sidebar"
+              style={{ width: effectiveLeftWidth, flex: "none" }}
+            >
+              <Sidebar
+                openSessions={appState.openSessions}
+                knownSessions={appState.sessions}
+                activeSid={activeSid}
+                turnStartBySid={appState.turnStartBySid}
+                onSelect={selectSession}
+              />
+            </aside>
+            {/* The right column keeps the handle it already had (`ResultPanel` owns its
+                own width and collapse, persisted under its own keys); this one is the
+                left column's, and it is a sibling of the column rather than a child so
+                a 6px strip is never inside the thing it resizes. */}
+            <ResizeHandle
+              side="left"
+              width={effectiveLeftWidth}
+              bounds={leftBounds}
+              onResize={resizeLeft}
+              onReset={() => resizeLeft(LEFT_COLUMN_DEFAULT)}
+            />
+          </>
+        ) : null}
         <main className="react-shell-main" data-testid="react-shell-main">
           {isPanelView ? (
             <>
@@ -829,12 +963,13 @@ export function Shell() {
                 onViewAgentSessions={(p) => void loadProjectSessions(p)}
                 onSelectAgentSession={(p, sid) => void selectProjectSession(p, sid)}
                 onAddAgent={() => void addProject()}
-                onDeleteAgent={deleteAgent}
+                onDeleteAgent={(p) => void deleteAgent(p)}
                 onTriggerTask={(task) => void triggerTask(task)}
                 onOpenSessionTask={(task) => void openTaskSession(task)}
                 onEditTask={(task) => void openTaskForm(task)}
-                onDeleteTask={(task) => deleteTask(task)}
+                onDeleteTask={(task) => void deleteTask(task)}
                 onNewRant={() => void newRant()}
+                onDeleteRant={(r) => void deleteRant(r)}
                 renderer={mdRenderer}
               />
             </>
@@ -885,7 +1020,31 @@ export function Shell() {
             </>
           )}
         </main>
-        {!isPanelView && <ResultPanel sid={activeSid} workspaceRoot="" />}
+        {!isPanelView && rightOpen && (
+          <ResultPanel
+            sid={activeSid}
+            workspaceRoot=""
+            // The same rule the left column gets (item 4): what the window leaves the
+            // body, never a share of the window.
+            maxWidth={columnBounds(
+              windowWidth,
+              RAIL_WIDTH + HANDLE_WIDTH + (leftOpen ? effectiveLeftWidth + HANDLE_WIDTH : 0),
+              RIGHT_COLUMN_MIN,
+            ).max}
+          />
+        )}
+        {/* The history browser (item 6): the sessions the left column no longer lists.
+            It sits above the dialogs because it is a reading surface, not a question —
+            picking a row switches sessions and closes it. */}
+        <SearchOverlay
+          open={searchOpen}
+          hits={searchHits}
+          onClose={() => setSearchOpen(false)}
+          onPick={(sid) => {
+            setSearchOpen(false);
+            void pickSession(sid);
+          }}
+        />
         <DialogHost
           ref={dialogHost}
           sid={activeSid}

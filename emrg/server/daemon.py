@@ -174,7 +174,7 @@ from emrg.tools.submit_rant_tool import SubmitRantTool
 from emrg.tools.subagent_tool import SubagentTool
 from emrg.skills.loader import load_skills, load_skills_with_shadows
 from emrg.skills.registry import ensure_catalog_file, load_catalog_skills, skill_is_managed
-from emrg.server.rants import append_rant, list_rants
+from emrg.server.rants import append_rant, delete_rant, list_rants
 from emrg.server.scheduler import (
     MIN_INTERVAL,
     TaskScheduler,
@@ -3350,6 +3350,30 @@ class EmrgServer:
                 logger.exception("list_rants: failed to read %s", self._rants_log)
                 await self._send(ws, {"type": "rants_list", "rants": [], "error": str(e)})
 
+        elif msg_type == "delete_rant":
+            # Removing a row from the ledger (issue #2959 item 7). The GUI's rant panel
+            # offers the same in-row confirmation its agent and task rows do, so the
+            # operation has to exist here — a client-side filter would hide the row
+            # until the next refresh and then show it again.
+            #
+            # `ok` is the store's own answer, not "the call returned": a timestamp that
+            # matched no row comes back as `ok: false` with the notice, so a client can
+            # say so instead of pretending the row went away.
+            timestamp = str(msg.get("timestamp", "") or "").strip()
+            if not timestamp:
+                await self._send(ws, {"type": "rant_deleted", "ok": False,
+                                      "notice": "missing timestamp"})
+            else:
+                try:
+                    ok, notice = delete_rant(self._rants_log, timestamp)
+                except OSError as e:
+                    logger.exception("delete_rant: failed to rewrite %s", self._rants_log)
+                    ok, notice = False, str(e)
+                if ok:
+                    logger.info("rant deleted: %s", timestamp)
+                await self._send(ws, {"type": "rant_deleted", "ok": ok,
+                                      "notice": notice, "timestamp": timestamp})
+
         elif msg_type == "list_skills":
             # The session's own skills *and* the declarations a name collision displaced
             # (issue #2569, criterion 2). This is the one reader both clients share: the
@@ -4627,6 +4651,12 @@ class EmrgServer:
         # tool set for it.
         force_ask = False
         round_num = 1
+        # Issue #2959: this turn's cumulative token count. The GUI's status band
+        # reports what the turn has spent, and a client that kept its own total
+        # would be a second ledger — one that drifts the moment a round is retried,
+        # a stream restarts, or another client watches the same turn. This one is
+        # written where the provider's usage is already read, and nowhere else.
+        turn_tokens = 0
         # Bound before the loop, not only at the end of each round: the
         # round-budget guard at the top of the loop reflects on `full_content`
         # and can be reached before any round has run (a `max_tool_rounds`
@@ -4708,6 +4738,20 @@ class EmrgServer:
 
             logger.debug("tool loop round %d: %d messages, %d tools",
                          round_num, len(messages), len(tools_openai))
+
+            # Issue #2959: one frame per round, carrying the round number and the
+            # turn's cumulative tokens. It is sent at the round's *start*, so the
+            # band's counter moves when a round begins rather than when one ends —
+            # a client watching a slow round sees that it is on round 4, not that it
+            # is still on round 3. `tokens` is the total of the rounds already
+            # finished; the round now starting has no usage yet.
+            await self._broadcast(session.session_id, {
+                "type": "turn_progress",
+                "session_id": session.session_id,
+                "request_id": req.id,
+                "round": round_num,
+                "tokens": turn_tokens,
+            })
 
             # Auto-compact: if token count exceeds threshold, compact before this round
             if self.llm.config.auto_compact_threshold > 0.0:
@@ -4991,6 +5035,10 @@ class EmrgServer:
             # round emits exactly one anchor-bias-heartbeat with an explicit
             # state (anchored=true / anchored=false + reason) so a skipped
             # round is a labeled observation, not an absence.
+            # Issue #2959: fold this round's real usage into the turn's total before
+            # the anchor refresh below reads the same dict. `turn_progress` next round
+            # reports it; nothing else writes this counter.
+            turn_tokens += self._counted_tokens(final_usage)
             self._refresh_usage_anchor(
                 session, final_usage, request_messages, tools_openai
             )
@@ -5445,6 +5493,28 @@ class EmrgServer:
             return ""
         pct = round(hit / prompt * 100)
         return f", cache {pct}%"
+
+    @staticmethod
+    def _counted_tokens(usage: dict | None) -> int:
+        """Tokens one round spent, as the provider reported them.
+
+        `prompt_tokens + completion_tokens` — the two counts every OpenAI-compatible
+        endpoint reports. A missing or non-numeric field counts as 0 rather than
+        raising: an endpoint that reports only one of them is still a measurement,
+        and a turn's total must not turn into a guess because one round was odd.
+
+        This is the quantity the status band shows (issue #2959). It is **not** money:
+        no price is configured anywhere the client can read, so a currency figure
+        would be invented rather than derived.
+        """
+        if not usage:
+            return 0
+        total = 0
+        for key in ("prompt_tokens", "completion_tokens"):
+            value = usage.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+                total += int(value)
+        return total
 
     # ── Token estimation helpers ──────────────────────────────
 

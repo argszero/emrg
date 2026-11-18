@@ -564,18 +564,33 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     await waitFor(() => expect(screen.getByTestId("rename-dialog")).toBeInTheDocument());
   });
 
-  it("sidebar new-chat button opens the new-session dialog", async () => {
+  // The two entry points moved out of the sidebar when it became the open-sessions
+  // list (issue #2959): "new" is the band's `+`, and the history browser that used to
+  // be the open-chat dialog is now the search overlay.
+  it("status band「+」opens the new-session dialog", async () => {
     render(wrapper(<Shell />));
-    await waitFor(() => expect(screen.getByTestId("new-chat-btn")).toBeInTheDocument());
-    fireEvent.click(screen.getByTestId("new-chat-btn"));
+    await waitFor(() => expect(screen.getByTestId("band-new")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("band-new"));
     await waitFor(() => expect(screen.getByTestId("new-session-dialog")).toBeInTheDocument());
   });
 
-  it("sidebar open-chat button opens the open-session dialog", async () => {
+  it("status band search opens the overlay and a hit switches session", async () => {
+    const m = mockEmrg();
     render(wrapper(<Shell />));
-    await waitFor(() => expect(screen.getByTestId("open-chat-btn")).toBeInTheDocument());
-    fireEvent.click(screen.getByTestId("open-chat-btn"));
-    await waitFor(() => expect(screen.getByTestId("open-session-dialog")).toBeInTheDocument());
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    // s2 is known to the daemon but not open, so the overlay is the only way to reach
+    // it — which is exactly what the open-sessions column stopped offering.
+    m.emit(sessionsFrame([{ session_id: "s1", title: "Alpha" }, { session_id: "s2", title: "Beta" }]));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(1));
+    fireEvent.click(screen.getByTestId("band-search"));
+    await waitFor(() => expect(screen.getByTestId("search-overlay")).toBeInTheDocument());
+    fireEvent.change(screen.getByTestId("search-input"), { target: { value: "beta" } });
+    const hit = await screen.findByTestId("search-hit");
+    expect(hit).toHaveAttribute("data-sid", "s2");
+    fireEvent.click(hit);
+    await waitFor(() => expect(screen.queryByTestId("search-overlay")).not.toBeInTheDocument());
+    expect(m.switchSession).toHaveBeenCalledWith({ sessionId: "s2" });
   });
 
   it("/clear with an active session calls clearSession and shows the cleared message", async () => {
@@ -888,9 +903,12 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
     fireEvent.click(screen.getByTestId("nav-tasks"));
     await waitFor(() => expect(screen.getByTestId("task-row")).toBeInTheDocument());
+    // A delete is asked and answered on the row itself (issue #2959 item 7): the first
+    // click turns the button into the question, the second answers it, and no dialog
+    // opens over the list the host is reading.
     fireEvent.click(screen.getByTitle("Delete"));
-    await waitFor(() => expect(screen.getByTestId("confirm-dialog")).toBeInTheDocument());
-    fireEvent.click(screen.getByTestId("confirm-ok"));
+    expect(m.taskDelete).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("row-delete-confirm"));
     await waitFor(() => expect(m.taskDelete).toHaveBeenCalledWith({ name: "evo" }));
     await waitFor(() => expect(m.listTasks).toHaveBeenCalledTimes(2));
   });
@@ -984,7 +1002,7 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
       sid: "s1",
     });
     await waitFor(() =>
-      expect(screen.getByTestId("session-info").textContent).toMatch(/\[05:\d\d\]/),
+      expect(screen.getByTestId("band-elapsed").textContent).toMatch(/\[\d+:\d\d\]/),
     );
   });
 
@@ -1017,14 +1035,14 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
     m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
     await waitFor(() => expect(screen.getByTestId("composer-input")).toBeInTheDocument());
     m.emit({ type: "turn_start", data: { started_at: Math.floor(Date.now() / 1000) - 305 }, sid: "s1" });
-    await waitFor(() => expect(screen.getByTestId("session-info").textContent).toMatch(/\[05:\d\d\]/));
+    await waitFor(() => expect(screen.getByTestId("band-elapsed").textContent).toMatch(/\[\d+:\d\d\]/));
     m.emit({
       type: "command_result",
       data: { type: "resume_result", session_id: "s1", meta: { turn: { running: false, started_at: null } } },
       sid: "s1",
     });
     await waitFor(() =>
-      expect(screen.getByTestId("session-info").textContent).not.toMatch(/\[\d\d:\d\d\]/),
+      expect(screen.getByTestId("band-elapsed").textContent).not.toMatch(/\[\d\d:\d\d\]/),
     );
   });
 
@@ -1038,10 +1056,10 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
     m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
     await waitFor(() => expect(screen.getByTestId("composer-input")).toBeInTheDocument());
     m.emit({ type: "turn_start", data: { started_at: Math.floor(Date.now() / 1000) - 305 }, sid: "s1" });
-    await waitFor(() => expect(screen.getByTestId("session-info").textContent).toMatch(/\[05:\d\d\]/));
+    await waitFor(() => expect(screen.getByTestId("band-elapsed").textContent).toMatch(/\[\d+:\d\d\]/));
     m.emit({ type: "turn_end", data: {}, sid: "s1" });
     await waitFor(() =>
-      expect(screen.getByTestId("session-info").textContent).not.toMatch(/\[\d\d:\d\d\]/),
+      expect(screen.getByTestId("band-elapsed").textContent).not.toMatch(/\[\d\d:\d\d\]/),
     );
   });
 
