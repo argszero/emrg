@@ -459,6 +459,15 @@ export interface DaemonBridgeDeps {
   onEvent: (cb: (evt: DaemonEventFrame) => void) => () => void;
   emrg: {
     sendMessage(p: SendMessagePayload): Promise<{ requestId?: string }>;
+    /**
+     * Close one open session (preload.closeSession；未接线时为 undefined）。
+     *
+     * Closing keeps the session's data on disk — it drops the connection, the open
+     * entry and the content rendered for it. That is what makes reopening the same
+     * session a replay of the daemon's history rather than a resume of whatever this
+     * window still held in memory (rant 2026-11-18T18:41:06, item 8).
+     */
+    closeSession?(p: { sessionId: string }): Promise<{ ok?: boolean; closed?: boolean }>;
     init?(): Promise<InitResult>;
     /** 回答 daemon 的提权提问（preload.respondApproval；未接线时为 undefined） */
     respondApproval?(p: {
@@ -525,6 +534,15 @@ export interface DaemonBridge {
   setSandbox(sid: string | null, mode: string): Promise<boolean>;
   /** 会话的额外可写根：add / remove / list（daemon 裁定并回帧，客户端不自己记） */
   setSandboxRoots(sid: string | null, op: "add" | "remove" | "list", path?: string): Promise<boolean>;
+  /**
+   * Close one open session, keeping its data on disk.
+   *
+   * Answers false when there is nothing to ask with (no session, or a build whose
+   * preload predates this API) and when the main process refuses — the caller must
+   * not clear the window on a close that did not happen, because that would drop
+   * content the session still owns.
+   */
+  closeSession(sid: string | null): Promise<boolean>;
   /**
    * Read one session's input history from the daemon, and store it (issue #2349,
    * part 2/2).
@@ -1171,6 +1189,26 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
   }
 
   /**
+   * Close one open session (item 8 of rant 2026-11-18T18:41:06).
+   *
+   * One channel and one answer: the main process owns what closing *is* — disconnect,
+   * drop the open entry, keep the disk data — and this returns whether that happened.
+   * The renderer clears what it rendered only on `true`, through its own call site,
+   * because this layer holds no transcript.
+   */
+  async function closeSession(sid: string | null): Promise<boolean> {
+    if (!sid) return false;
+    const sender = emrg.closeSession;
+    if (typeof sender !== "function") return false;
+    try {
+      await sender({ sessionId: sid });
+    } catch {
+      return false;
+    }
+    return true;
+  }
+
+  /**
    * Ask the daemon to add, remove or list this session's extra writable roots.
    *
    * Nothing is written to the store here, and that is the same point
@@ -1274,6 +1312,7 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
     respondApproval,
     setSandbox,
     setSandboxRoots,
+    closeSession,
     listInputHistory,
     notePromptSubmitted,
   };

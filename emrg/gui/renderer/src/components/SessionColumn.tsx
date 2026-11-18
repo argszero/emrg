@@ -28,6 +28,14 @@ export interface SessionColumnProps {
   knownSessions?: SessionInfo[];
   activeSid?: string | null;
   onSelect?: (sid: string) => void;
+  /**
+   * 关闭这条会话（保留磁盘数据）。
+   *
+   * 不传就不渲染关闭控件：关闭能力由调用方决定，这一层不自己猜后台有没有这条通道。
+   * 控件是行内**另一个**按钮而不是行按钮的一部分 —— 嵌套按钮在 HTML 里不合法，
+   * 而把行改成 div 会让每一处按 `open-session-item` 读行的断言改变语义。
+   */
+  onClose?: (sid: string) => void;
   onSearch?: () => void;
   onNew?: () => void;
   /** 可注入的标题格式化函数（测试用；默认 sessionLabel） */
@@ -41,6 +49,7 @@ export function SessionColumn({
   knownSessions = [],
   activeSid = null,
   onSelect,
+  onClose,
   onSearch,
   onNew,
   labelFn = sessionLabel,
@@ -96,22 +105,38 @@ export function SessionColumn({
           const active = isActive(entry.sid, activeSid);
           const timer = formatElapsed(turnStartBySid[entry.sid], nowMs);
           return (
-            <button
-              type="button"
-              key={entry.sid}
-              className={`session-row${active ? " active" : ""}`}
-              data-sid={entry.sid}
-              data-testid="open-session-item"
-              onClick={() => onSelect && onSelect(entry.sid)}
-            >
-              {timer ? <span className="session-run-dot" data-testid="open-session-run-dot" /> : null}
-              <span className="session-label">{label}</span>
-              {timer ? (
-                <span className="session-stopwatch" data-testid="open-session-timer">
-                  {timer}
-                </span>
+            <div className="session-row-wrap" key={entry.sid}>
+              <button
+                type="button"
+                className={`session-row${active ? " active" : ""}`}
+                data-sid={entry.sid}
+                data-testid="open-session-item"
+                onClick={() => onSelect && onSelect(entry.sid)}
+              >
+                {timer ? <span className="session-run-dot" data-testid="open-session-run-dot" /> : null}
+                <span className="session-label">{label}</span>
+                {timer ? (
+                  <span className="session-stopwatch" data-testid="open-session-timer">
+                    {timer}
+                  </span>
+                ) : null}
+              </button>
+              {onClose ? (
+                <button
+                  type="button"
+                  className="session-row-close"
+                  data-sid={entry.sid}
+                  data-testid="close-open-session"
+                  title={t("app.closeSession")}
+                  aria-label={t("app.closeSession")}
+                  onClick={() => onClose(entry.sid)}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M6 6l12 12M18 6L6 18" />
+                  </svg>
+                </button>
               ) : null}
-            </button>
+            </div>
           );
         })}
       </nav>

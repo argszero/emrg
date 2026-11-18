@@ -101,6 +101,13 @@ interface WorkspaceBridge {
   listTasks(): Promise<TaskRec[]>;
   listRants(p: { status?: string }): Promise<RantRec[]>;
   switchSession(p: { sessionId: string; projectPath?: string }): Promise<unknown>;
+  /**
+   * 关掉一条打开的会话（`emrg:closeSession`；磁盘数据保留）。
+   *
+   * 可选：这条消息比某些已装客户端新，未接线时 Shell 退回「什么都不做」而不是清屏 ——
+   * 清掉一份还归那条会话所有的内容，等于凭空丢掉它。
+   */
+  closeSession?(p: { sessionId: string }): Promise<unknown>;
   pickAgentDir(): Promise<{ path?: string } | null>;
   registerAgent(p: { path: string }): Promise<{ ok?: boolean; path?: string }>;
   removeAgent(p: { name: string; path?: string }): Promise<{ ok?: boolean; error?: string; protected?: boolean }>;
@@ -727,6 +734,36 @@ export function Shell() {
     void loadHistory(sid);
   }
 
+  /**
+   * 关闭一条打开的会话：断开它的连接、清掉为它渲染的内容，**磁盘上的数据保留**
+   * （rant 2026-11-18T18:41:06 清单 8）。
+   *
+   * 三件事必须一起做，少一件就落回这条 rant 报的那类「看着有会话、页面却是空的」：
+   * 主进程断开并移出列表、这里清掉渲染内容、**把「已加载」标记一并删掉**。
+   * 第三条最容易漏 —— 只清内容不删标记，之后重开这条会话时 `loadHistory` 会因为
+   * 它还在集合里直接返回，历史一条都回放不出来，而页面看起来就像那条会话本来就是空的。
+   *
+   * 关闭失败时什么都不清：主进程说没关掉，内容就还是那条会话的，清掉等于凭空丢内容。
+   * 主进程的拒绝是抛出来的（非法 session id），所以这里的失败就是那次 `catch`。
+   */
+  async function closeOpenSession(sid: string): Promise<void> {
+    const b = wsBridge();
+    if (!b?.closeSession) return;
+    try {
+      await b.closeSession({ sessionId: sid });
+    } catch {
+      return;
+    }
+    transcript.clear(sid);
+    // 「已加载」标记和分页游标一起丢掉，与 `reloadHistory` 清的是同一对：留下游标，
+    // 重开时第一页会从旧游标往前取，最新那些记录一页都不在里面。
+    historyLoadedRef.current.delete(sid);
+    historyPagesRef.current.delete(sid);
+    // 关掉的若是当前会话，交给 `reportedSid === null` 那条规则去挑下一条仍然有效的，
+    // 而不是在这里自己按列表顺序选 —— 那正是清单 2 禁止的写法。
+    if (activeSid === sid) setActiveSid(null);
+  }
+
   // ── 历史按需加载（rant 2026-09-01T20:19:40：GUI 打开会话不显示历史——链路从未接线）──
   // 切会话加载最近一页（limit 50），滚动到顶加载更早一页；游标是绝对 record_index
   // （daemon before_index），不再是「距最新的 offset」（rant 2026-09-20T18:58:44：offset
@@ -1039,6 +1076,7 @@ export function Shell() {
                 activeSid={activeSid}
                 turnStartBySid={appState.turnStartBySid}
                 onSelect={selectSession}
+                onClose={(sid) => void closeOpenSession(sid)}
                 onSearch={() => setSearchOpen(true)}
                 onNew={() => dialogHost.current?.openNewSession()}
               />

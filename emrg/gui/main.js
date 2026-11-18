@@ -435,6 +435,11 @@ vision = false
         if (asked) sessionCwd = asked;
         conn = await openSession(sessionId, sessionCwd, { resume: false });
       }
+      // One line per operation, each naming its session (rant 2026-11-18T18:41:06,
+      // item 10): switching already logged its own, and these five were silent, so a
+      // record of what happened to which session could not be reconstructed from the
+      // log at all.
+      logger.info(`[gui:send] sid=${sessionId} chars=${text.length} images=${Array.isArray(images) ? images.length : 0}`);
       markSessionActive(sessionId); // P4：发送 = 会话活动 → lastActive + 持久化
       let rid;
       try {
@@ -501,7 +506,7 @@ vision = false
       const filename = `${safeLabel}_${h}.${ext}`;
       const finalPath = path.join(imagesDir, filename);
       if (!fs.existsSync(finalPath)) fs.writeFileSync(finalPath, buf); // 同名去重
-      logger.info(`[gui:saveImage] ${filename} (${buf.length} bytes)`);
+      logger.info(`[gui:saveImage] sid=${sessionId} ${filename} (${buf.length} bytes)`);
       return { path: finalPath, mime: `image/${mm[1].toLowerCase()}` };
     });
 
@@ -538,7 +543,7 @@ vision = false
       const filename = ext ? `${stem}_${h}.${ext}` : `${stem}_${h}`;
       const finalPath = path.join(filesDir, filename);
       if (!fs.existsSync(finalPath)) fs.writeFileSync(finalPath, buf);
-      logger.info(`[gui:saveFile] ${filename} (${buf.length} bytes)`);
+      logger.info(`[gui:saveFile] sid=${sessionId} ${filename} (${buf.length} bytes)`);
       return { path: finalPath };
     });
 
@@ -693,6 +698,7 @@ vision = false
     ipcMain.handle("emrg:deleteSession", async (_e, { sessionId }) => {
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
       await requireConn().sendCommandAndWait("delete_session", { session_id: sessionId, cwd: resolveSessionCwd(sessionId) || DEFAULT_CWD }, 5000);
+      logger.info(`[gui:delete] sid=${sessionId}`); // item 10
       connManager?.close(sessionId); // P2：删除会话 → 关闭该会话连接（若打开）
       openSessions.delete(sessionId); // P4：删除（删数据）→ 一并移出打开会话簿记
       schedulePersistGuiState();
@@ -705,6 +711,7 @@ vision = false
       const clean = String(title || "").trim().slice(0, 80); // 截断超长标题
       if (!clean) throw new Error("empty title");
       const frame = await requireConn().sendCommandAndWait("rename_session", { session_id: sessionId, cwd: resolveSessionCwd(sessionId) || DEFAULT_CWD, title: clean }, 5000);
+      logger.info(`[gui:rename] sid=${sessionId} title=${frame.title || clean}`); // item 10
       // 跨项目会话重命名成功后立即同步侧边栏标题（rant 12:01:44）
       const v = openSessions.get(sessionId);
       if (v) {
@@ -1588,6 +1595,7 @@ vision = false
   // 关闭会话（保留磁盘数据）：断连 + 移除 + 持久化。P4 slice 2 侧边栏"关闭"入口用。
   async function closeSession(sid) {
     const entry = openSessions.get(sid);
+    logger.info(`[gui:close] sid=${sid} was_open=${!!entry}`); // item 10：关闭留一行带 sid 的日志
     connManager?.close(sid); // 主动关闭（_intentionalClose 抑制断线横幅）
     openSessions.delete(sid);
     schedulePersistGuiState();

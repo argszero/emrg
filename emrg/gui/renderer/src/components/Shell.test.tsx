@@ -51,6 +51,9 @@ function mockEmrg() {
   const setSandboxRoots = vi.fn().mockResolvedValue({ ok: true });
   const triggerTask = vi.fn().mockResolvedValue({ ok: true });
   const switchSession = vi.fn().mockResolvedValue({ ok: true });
+  // Rant 2026-11-18T18:41:06 item 8: closing an open session is a channel of its own —
+  // the main process disconnects it and keeps the data on disk.
+  const closeSession = vi.fn().mockResolvedValue({ ok: true });
   // Rant 2026-10-29T14:21:57: the stop button must reach the daemon for a turn this
   // client did not start, so the bridge it calls has to exist here.
   const cancel = vi.fn().mockResolvedValue({ ok: true });
@@ -79,6 +82,7 @@ function mockEmrg() {
     setSandboxRoots,
     triggerTask,
     switchSession,
+    closeSession,
     cancel,
   };
   return {
@@ -104,6 +108,7 @@ function mockEmrg() {
     setSandboxRoots,
     triggerTask,
     switchSession,
+    closeSession,
     cancel,
     emit: (evt: DaemonEventFrame) => listeners.forEach((cb) => cb(evt)),
   };
@@ -1282,5 +1287,96 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
     // s2 的列表仍是它自己的：↑ 得到 "second"，不是 "typed in s1"。
     pressInComposer("ArrowUp");
     await waitFor(() => expect(composerText()).toBe("second"));
+  });
+
+  /**
+   * 关闭一条打开的会话，是**三条**路一起走（rant 2026-11-18T18:41:06 清单 8）：
+   * 告诉主进程（它负责断连并把这条移出打开列表）、清掉这条会话已渲染的内容、
+   * 把这份内容仍然有效的前提（「已加载」标记与分页游标）一并作废。
+   *
+   * 少走第一条，界面看着关掉了而后台连接还在；少走第二、三条，页面就落回这条 rant
+   * 报的那类形状 —— 看着有会话，内容却是空的，因为重开时 `loadHistory` 认为不用再读。
+   */
+  it("点击关闭：告诉主进程这条会话要关，并清掉它渲染的内容", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }, { sid: "s2", title: "Beta" }], "s1"));
+    await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(2));
+    m.emit(deltaFrame("s1", "content-one"));
+    await waitFor(() => expect(screen.getByText("content-one")).toBeInTheDocument());
+
+    const close = screen.getAllByTestId("close-open-session").find((el) => el.dataset.sid === "s1");
+    expect(close).toBeTruthy();
+    fireEvent.click(close as HTMLElement);
+
+    await waitFor(() => expect(m.closeSession).toHaveBeenCalledWith({ sessionId: "s1" }));
+    // 点的是 s1，就只是 s1：一条关闭不能顺手动到别的会话。
+    expect(m.closeSession).toHaveBeenCalledTimes(1);
+    // 内容归那条会话所有：它被关掉了，就不该再挂在这个窗口里。
+    await waitFor(() => expect(screen.queryByText("content-one")).not.toBeInTheDocument());
+  });
+
+  /**
+   * 「关闭后再打开」必须重新走磁盘历史，而不是沿用窗口里还记着的「这条已加载」
+   * （rant 2026-11-18T18:41:06 清单 8 后半）。
+   *
+   * 这条断言只有删掉那句标记才红：留着它，重开时 `loadHistory` 直接返回，历史一条
+   * 都不回放，而页面看起来就像这条会话本来就是空的 —— 正是这条 rant 的形状。
+   */
+  it("关掉再打开同一条会话时，历史重新从 daemon 读一遍", async () => {
+    const m = mockEmrg();
+    // 关的那一帧 IPC 先不落定：主进程的广播（这条已移出打开列表、当前会话为空）在它之前
+    // 到达，这正是生产的顺序 —— 这里照抄，否则量到的是另一种时序。
+    let releaseClose: () => void = () => {};
+    m.closeSession.mockImplementation(() => new Promise<void>((r) => { releaseClose = () => r(); }));
+    let reopened = false;
+    m.listHistory.mockImplementation(() =>
+      Promise.resolve(
+        reopened
+          ? { messages: [{ record_index: 0, kind: "message", role: "user", content: "from disk" }], hasMore: false }
+          : { messages: [], hasMore: false },
+      ),
+    );
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }], "s1"));
+    await waitFor(() => expect(m.listHistory).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByTestId("close-open-session"));
+    await waitFor(() => expect(m.closeSession).toHaveBeenCalledWith({ sessionId: "s1" }));
+    // 主进程关闭后广播：打开列表里没有它了，当前会话也没有了。
+    m.emit(openSessionsFrame([], null));
+    await waitFor(() => expect(screen.queryByTestId("open-session-item")).toBeNull());
+
+    reopened = true;
+    await act(async () => {
+      releaseClose();
+    });
+    // 再打开同一条：历史必须重新问 daemon 一遍。留着「已加载」标记的话，
+    // `loadHistory` 在这一行直接返回，历史一条都不回放 —— 页面看着就像它本来是空的。
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }], "s1"));
+    await waitFor(() => expect(m.listHistory).toHaveBeenCalledTimes(2));
+    // 读回来的是磁盘上那份，不是窗口里残留的那份。
+    await waitFor(() => expect(screen.getByText("from disk")).toBeInTheDocument());
+  });
+
+  /**
+   * 主进程拒绝关闭时，窗口里什么都不清：内容仍归那条会话所有，清掉等于凭空丢内容。
+   * 一个「关不掉也照清」的实现会把这条路走成上次一次丢一次。
+   */
+  it("关闭被主进程拒绝时，内容原样留着", async () => {
+    const m = mockEmrg();
+    m.closeSession.mockRejectedValueOnce(new Error("refused"));
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }], "s1"));
+    await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(1));
+    m.emit(deltaFrame("s1", "content-one"));
+    await waitFor(() => expect(screen.getByText("content-one")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId("close-open-session"));
+    await waitFor(() => expect(m.closeSession).toHaveBeenCalledTimes(1));
+    expect(screen.getByText("content-one")).toBeInTheDocument();
   });
 });
