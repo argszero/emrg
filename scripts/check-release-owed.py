@@ -35,8 +35,12 @@ and teach its readers to ignore it. Its role is the one `bump-version.py --check
 Exit codes, the family's contract:
 
     0  nothing is owed: the declared version is the newest tag's version
-    1  a release is owed: the tree declares a version no tag carries -- both versions
-       and the commit count between them are printed
+    1  the declared version is not the newest tag's version, and **which way** decides the
+       remedy: *newer* means a release is owed (both versions and the commit count are
+       printed), *older* means this checkout is behind a release that already exists and
+       must not be tagged -- publishing an older version would put it ahead of a newer one.
+       Reporting the second as the first, measured 2026-11-18 (`cyc20261118-102744`), sent a
+       reader to `git tag -a v0.3.59` on a tree whose newest release was `v0.3.60`.
     2  not measurable: no version declaration could be read, or the repository could
        not be read at all (no `git`, not a work tree). Never 0 -- a guard that passes
        because it could not read its subject is the defect this one exists to catch.
@@ -194,9 +198,27 @@ def check(root: Path) -> int:
     newest = parsed[-1][1]
     print(f"tags: {len(parsed)} version-shaped, newest {newest}{skipped_note}")
 
+    declared_parts = tuple(int(part) for part in declared_match.groups())
+    newest_parts = parsed[-1][0]
+
     if declared == newest.lstrip("v"):
         print(f"OK: nothing is owed - the tree declares {declared} and {newest} carries it")
         return 0
+
+    if declared_parts < newest_parts:
+        # The tree is OLDER than the newest tag: a checkout behind the release, or a branch
+        # cut before it. Nothing merged unreleased, and the remedy is not a tag - tagging an
+        # older version would publish it as the latest, ahead of a newer one that already
+        # exists. Keep telling this apart from "owed": reporting it as owed sends a reader to
+        # cut a release of a version that is already superseded.
+        print(
+            f"THIS CHECKOUT IS BEHIND: the tree declares {declared} and the newest tag is "
+            f"{newest}, so nothing here is waiting to be published -- the tree predates a "
+            f"release that already exists. Update the checkout to {newest} (or to master) "
+            f"before reading its release state; do NOT tag {declared}, because that would "
+            f"publish an older version as the newest release, ahead of {newest}."
+        )
+        return 1
 
     try:
         count_text = _git(root, "rev-list", "--count", f"{newest}..HEAD").strip()

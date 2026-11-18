@@ -65,6 +65,46 @@ def _run(mod, root: Path, capsys) -> tuple[int, str]:
     return rc, captured.out
 
 
+def test_a_tree_older_than_the_newest_tag_is_behind_not_owed(tmp_path, capsys):
+    """A checkout behind the release must not be told to cut one.
+
+    Measured 2026-11-18 (`cyc20261118-102744`) on a fixture built exactly like this: a tree
+    declaring `0.3.59` whose newest tag is `v0.3.60` was reported as `A RELEASE IS OWED ...
+    1 commit(s) on HEAD are not in v0.3.60, so that work has merged` with the remedy
+    `git tag -a v0.3.59` - three false statements in one verdict, because nothing had merged
+    unreleased and that tag would publish an **older** version ahead of `v0.3.60`.
+
+    The direction of the difference is the whole answer, so it is asserted both ways: the
+    message must say the checkout is behind, must not offer the tag remedy, and the newer
+    case must still say a release is owed.
+    """
+    mod = _load()
+    root = tmp_path / "behind"
+    root.mkdir()
+    _git(root, "init")
+    (root / "emrg").mkdir()
+    decl = root / "emrg" / "__init__.py"
+    decl.write_text('__version__ = "0.3.60"\n', encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-m", "release 0.3.60")
+    _git(root, "tag", "v0.3.60")
+    # The declaration moves backwards on top of that release: a stale checkout's shape.
+    decl.write_text('__version__ = "0.3.59"\n', encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-m", "an older declaration on top")
+
+    rc, out = _run(mod, root, capsys)
+
+    assert rc == 1, out
+    assert "BEHIND" in out, f"the verdict has to name the state it found: {out}"
+    assert "A RELEASE IS OWED" not in out, (
+        f"nothing merged unreleased here, so 'owed' is the wrong verdict: {out}")
+    assert f"tag -a v0.3.59" not in out, (
+        f"the remedy must not invite tagging an older version over v0.3.60: {out}")
+    assert "v0.3.60" in out and "0.3.59" in out, (
+        f"both versions are the evidence for the direction: {out}")
+
+
 def test_the_tree_it_read_is_named_before_the_verdict(tmp_path, capsys):
     """The family's rule: a tree-reading guard names the tree it read, first.
 
