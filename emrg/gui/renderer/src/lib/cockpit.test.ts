@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import cssSource from "../cockpit.css?raw";
+import componentsSource from "../../css/components.css?raw";
 import {
   BODY_MIN,
   LEFT_COLUMN_DEFAULT,
@@ -333,13 +334,14 @@ describe("图标轨与设置页的数值就是原型的数值（issue #2986）",
   // 这些数值是宿主一眼能看出「不是同一个东西」的地方，所以它们必须被钉住，而不能只写在
   // 注释里。读的是样式表本身：`?raw` 拿的是文件文本，不经过 CSS 管线，也不会被 jsdom 的
   // 「不算布局」变成空话，前提是下面第一条先证明读到的不是空串。
-  function block(selector: string): string {
-    const at = cssSource.indexOf(`\n${selector} {`);
+  function blockIn(source: string, selector: string): string {
+    const at = source.indexOf(`\n${selector} {`);
     expect(at, `${selector} 在样式表里找不到`).toBeGreaterThan(-1);
-    const start = cssSource.indexOf("{", at) + 1;
-    const end = cssSource.indexOf("}", start);
-    return cssSource.slice(start, end);
+    const start = source.indexOf("{", at) + 1;
+    const end = source.indexOf("}", start);
+    return source.slice(start, end);
   }
+  const block = (selector: string) => blockIn(cssSource, selector);
 
   it("样式表真的读到了（空串会让下面每一条断言都白白通过）", () => {
     expect(cssSource.length).toBeGreaterThan(2000);
@@ -394,5 +396,29 @@ describe("图标轨与设置页的数值就是原型的数值（issue #2986）",
     expect(nav).toContain("width: 190px");
     expect(nav).toContain("flex-direction: column");
     expect(nav).toContain("gap: 1px");
+  });
+
+  it("agent 列表分栏：每列最小 460px、间距 22px，而且是行不是卡片墙", () => {
+    const grid = block(".agent-grid");
+    expect(grid).toContain("repeat(auto-fill, minmax(460px, 1fr))");
+    expect(grid).toContain("gap: 22px");
+    // 「不是卡片」不能只靠类名还在不在来判：类还在，边框必须透明，否则一眼又变回卡片墙。
+    expect(block(".agent-card")).toContain("border: 1px solid transparent");
+  });
+
+  it("会话栏头部高 30px，底部一条分隔线", () => {
+    const head = block(".session-col-head");
+    expect(head).toContain("height: 30px");
+    expect(head).toContain("border-bottom: 1px solid var(--border)");
+  });
+
+  it("Rant 表头与每一行同一套六列：92 / 64 / 58 / 106 / 1fr / 50px", () => {
+    // 这两条规则在另一份样式表里（components.css），所以先证明读到的不是空串：
+    // 一份读成空串的样式表会让下面每一条断言都白白通过。
+    expect(componentsSource.length).toBeGreaterThan(2000);
+    const six = "grid-template-columns: 92px 64px 58px 106px 1fr 50px";
+    // 表头与行必须同一套列宽：只有一处对，列名就会和内容错位，而错位正是这张表要修的东西。
+    expect(blockIn(componentsSource, ".rant-head")).toContain(six);
+    expect(blockIn(componentsSource, ".rant-row")).toContain(six);
   });
 });
