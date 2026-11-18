@@ -32,7 +32,7 @@ function mockEmrg() {
     current_version: "0.2.81",
     sessions: [{ session_id: "s1", title: "hello" }],
     open_sessions: [{ sid: "s1", projectName: "p" }],
-    active_sid: "s1",
+    activeSid: "s1",
   });
   const setSandbox = vi.fn().mockResolvedValue(undefined);
   const respondApproval = vi.fn().mockResolvedValue({ ok: true });
@@ -108,6 +108,88 @@ describe("DaemonBridgeProvider (Batch 5 slice 2)", () => {
     await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
     m.emit({ type: "open_sessions", data: { openSessions: [{ sid: "s1", projectName: "p" }] }, sid: null });
     await waitFor(() => expect(openSessions).toBe(1));
+  });
+
+  /**
+   * The backend's current session has to reach the renderer, or the screen and the
+   * backend drift apart: the host clicks a row, the backend stays on the other
+   * session, and every later "act on the current session" lands on the wrong one.
+   *
+   * Both carriers are asserted, because the same fact travelled under two names —
+   * `active_sid` in the init response, `activeSid` in the `open_sessions` broadcast,
+   * the `emrg:getOpenSessions` return and `gui_state.json`. A reader looking for the
+   * odd one out finds a field no writer sends and adopts nothing, silently.
+   */
+  it("init 的 activeSid 进入 store（后台当前会话被渲染层采用）", async () => {
+    const m = mockEmrg();
+    let reported: string | null | undefined;
+    function Probe() {
+      const { bridge } = useDaemonBridge();
+      const appState = useSnapshotStore(bridge.store);
+      reported = appState.reportedSid;
+      return <div />;
+    }
+    render(wrapper(<Probe />));
+    await waitFor(() => expect(m.init).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(reported).toBe("s1"));
+  });
+
+  it("open_sessions 广播携带 activeSid 时采用它（与 init 同一个字段名）", async () => {
+    const m = mockEmrg();
+    let reported: string | null | undefined;
+    function Probe() {
+      const { bridge } = useDaemonBridge();
+      const appState = useSnapshotStore(bridge.store);
+      reported = appState.reportedSid;
+      return <div />;
+    }
+    render(wrapper(<Probe />));
+    await waitFor(() => expect(reported).toBe("s1"));
+    m.emit({
+      type: "open_sessions",
+      data: { openSessions: [{ sid: "s2", projectName: "p" }], activeSid: "s2" },
+      sid: null,
+    });
+    await waitFor(() => expect(reported).toBe("s2"));
+  });
+
+  /**
+   * Three states, not two: a frame that says nothing about the current session must
+   * leave the last answer standing, while a frame carrying `null` reports "there is
+   * none" — the session it had was just closed. Reading the first as the second is
+   * how a renderer switches the host away from a session nothing disowned.
+   */
+  it("广播不带 activeSid 时保留上一次的答案，带 null 时如实报告没有当前会话", async () => {
+    const m = mockEmrg();
+    let reported: string | null | undefined;
+    let count = 0;
+    function Probe() {
+      const { bridge } = useDaemonBridge();
+      const appState = useSnapshotStore(bridge.store);
+      reported = appState.reportedSid;
+      count = appState.openSessions.length;
+      return <div />;
+    }
+    render(wrapper(<Probe />));
+    await waitFor(() => expect(reported).toBe("s1"));
+
+    // 缺字段：先证明这一帧真的被处理了（列表变了），再说当前会话没动 ——
+    // 否则「仍然是 s1」也可能只是帧没到。
+    m.emit({
+      type: "open_sessions",
+      data: { openSessions: [{ sid: "s1", projectName: "p" }, { sid: "s3", projectName: "q" }] },
+      sid: null,
+    });
+    await waitFor(() => expect(count).toBe(2));
+    expect(reported).toBe("s1");
+
+    m.emit({
+      type: "open_sessions",
+      data: { openSessions: [{ sid: "s3", projectName: "q" }], activeSid: null },
+      sid: null,
+    });
+    await waitFor(() => expect(count).toBe(1));
+    await waitFor(() => expect(reported).toBeNull());
   });
 
   it("挂载时调用 window.emrg.init() 并把结果融合进 bridge store（connected/会话/model）", async () => {

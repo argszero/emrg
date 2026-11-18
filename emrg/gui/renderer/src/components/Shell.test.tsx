@@ -117,8 +117,20 @@ function wrapper(children: ReactNode) {
   );
 }
 
-function openSessionsFrame(entries: { sid: string; title?: string }[]): DaemonEventFrame {
-  return { type: "open_sessions", data: { openSessions: entries } };
+/**
+ * `activeSid` is optional on the frame and the omission means something: the main
+ * process always sends it, while a backend that predates the field sends the list
+ * alone. Passing nothing keeps the frame in that older shape, so the tests that
+ * predate this field keep measuring what they measured.
+ */
+function openSessionsFrame(
+  entries: { sid: string; title?: string }[],
+  activeSid?: string | null,
+): DaemonEventFrame {
+  return {
+    type: "open_sessions",
+    data: activeSid === undefined ? { openSessions: entries } : { openSessions: entries, activeSid },
+  };
 }
 
 function sessionsFrame(sessions: { session_id: string; title?: string }[]): DaemonEventFrame {
@@ -232,6 +244,40 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     await waitFor(() => expect(screen.getByText("content-two")).toBeInTheDocument());
     expect(screen.queryByText("content-one")).not.toBeInTheDocument();
     expect((screen.getAllByTestId("open-session-item").find((el) => el.dataset.sid === "s2"))?.className).toContain("active");
+  });
+
+  /**
+   * The screen shows the session the backend says is current, not the one that
+   * happens to sit first in the list (rant 2026-11-18T18:41:06).
+   *
+   * The list is ordered by last activity, so its first row is a guess at the
+   * backend's current session and a wrong one whenever the host has clicked around:
+   * after a reload the window would show B while the backend still had A, and every
+   * later "act on the current session" landed on the wrong session.
+   */
+  it("采用后台报告的当前会话，而不是列表里的第一条", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    // 「Beta」在列表里排第二，后台说当前会话是它。
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }, { sid: "s2", title: "Beta" }], "s2"));
+    await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(2));
+    const item = (sid: string) => screen.getAllByTestId("open-session-item").find((el) => el.dataset.sid === sid);
+    await waitFor(() => expect(item("s2")?.className).toContain("active"));
+    expect(item("s1")?.className).not.toContain("active");
+  });
+
+  it("点击会话条目时告诉后台（switchSession），不只换屏幕", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }, { sid: "s2", title: "Beta" }]));
+    await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(2));
+    const s2 = screen.getAllByTestId("open-session-item").find((el) => el.dataset.sid === "s2");
+    expect(s2).toBeTruthy();
+    fireEvent.click(s2 as HTMLElement);
+    // 后台跟着换 —— 只有屏幕换了的话，之后所有「以当前会话为准」的操作仍落在 s1 上。
+    await waitFor(() => expect(m.switchSession).toHaveBeenCalledWith({ sessionId: "s2" }));
   });
 
   it("#2351：rewind_result 让 Shell 从落盘历史重建该会话，而不是删掉手里最后 N 行", async () => {
