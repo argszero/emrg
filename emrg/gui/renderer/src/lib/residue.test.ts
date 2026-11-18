@@ -34,23 +34,15 @@ const SHIPPED = Object.entries(SOURCES)
   .filter(([path]) => !/\.test\.tsx?$/.test(path))
   .sort(([a], [b]) => a.localeCompare(b));
 
-/** The strings the old left column and the old right panel are made of. */
-const RESIDUE = [
-  // ── the old session column's grouping ──
-  "conv-group-label",
-  "open-sessions-label",
-  "sidebar-head",
-  "sidebar.openSessions",
-  // ── the old results panel's tab names and its empty state ──
-  "result-tab-artifacts",
-  "result-tab-files",
-  "resultTabs",
-  "No artifacts yet",
-  "还没有产物",
-  "Artifacts",
-  "result.tabArtifacts",
-  "result.empty",
-];
+/**
+ * The strings the old left column and the old right panel are made of.
+ *
+ * The list lives in a JSON file so that `scripts/check-residue.mjs` — the half that
+ * reads the built bundle instead of the sources — reads the same one. A `.ts` file
+ * would not do: the glob below matches every `*.ts`, so a TypeScript list would be
+ * scanned as a source and each needle would report a hit against its own definition.
+ */
+import RESIDUE from "./residue-needles.json";
 
 describe("the old page's fingerprints", () => {
   it("源代码里一处都不剩", () => {

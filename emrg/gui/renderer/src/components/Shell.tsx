@@ -80,7 +80,7 @@ import { replayHistoryRecords, replayHistoryRecordsPrepend, type HistoryRecord }
  * - activeView 状态（"sessions" | agents | tasks | rants | settings），vanilla
  *   app.js switchView 语义：点当前面板再点一次 → toggle 回会话视图；点其他面板 →
  *   切换；点 💬 → 回会话视图；
- * - 面板视图激活时隐藏会话 chrome（transcript/composer/result-panel —— vanilla
+ * - 面板视图激活时隐藏会话 chrome（transcript/composer/检查栏 —— vanilla
  *   setWorkspaceChrome("panel")），sessions 视图显示完整会话区；
  * - Sidebar nav rail（#side-nav）高亮当前视图 + onSwitchView 接线；
  * - WorkspaceView 数据接线：面板激活加载 listAgents/listTasks/listRants，项目会话子视图

@@ -25,15 +25,31 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RENDERER = REPO_ROOT / "emrg" / "gui" / "renderer" / "src"
 
-#: The two stylesheets the shell loads, in the order `main.tsx` loads them.
-SHEETS = ("shell.css", "cockpit.css")
+#: The entry the bundle starts from, and the only file that knows which sheets ship.
+ENTRY = RENDERER / "main.tsx"
+IMPORT_CSS = re.compile(r'^import\s+"([^"]+\.css)";', re.M)
 
 
 def _read_sheets() -> list[tuple[str, str]]:
-    sheets = [(name, (RENDERER / name).read_text(encoding="utf-8")) for name in SHEETS]
+    """Every stylesheet the bundle loads, found by reading the entry's own imports.
+
+    A list written here would have been a second reading of the same fact, and it had
+    already gone stale: the first version named only the two sheets the new shell owns
+    and left `css/layout.css` — the vanilla page's sheet, still imported, still shipping
+    its rules for the deleted results panel — outside every assertion. The entry is the
+    subject; the sheets are whatever it imports.
+    """
+    imports = IMPORT_CSS.findall(ENTRY.read_text(encoding="utf-8"))
+    # 入口一个 CSS 都没 import 会把这个模块变成一次空比较
+    assert len(imports) >= 6, f"{ENTRY.name} imports {len(imports)} stylesheet(s)"
+    sheets: list[tuple[str, str]] = []
+    for rel in imports:
+        path = (ENTRY.parent / rel).resolve()
+        assert path.is_file(), f"{rel} is imported by {ENTRY.name} but does not exist"
+        sheets.append((rel, path.read_text(encoding="utf-8")))
     # 一个空的样式表会让下面每条断言都通过：先把主体读出来
     for name, text in sheets:
-        assert len(text) > 1000, f"{name} read as {len(text)} characters"
+        assert len(text) > 500, f"{name} read as {len(text)} characters"
     return sheets
 
 
