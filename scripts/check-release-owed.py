@@ -48,13 +48,23 @@ Exit codes, the family's contract:
        must not be tagged -- publishing an older version would put it ahead of a newer one.
        Reporting the second as the first, measured 2026-11-18 (`cyc20261118-102744`), sent a
        reader to `git tag -a v0.3.59` on a tree whose newest release was `v0.3.60`.
-    2  not measurable: no version declaration could be read, or the repository could
-       not be read at all (no `git`, not a work tree). Never 0 -- a guard that passes
-       because it could not read its subject is the defect this one exists to catch.
+    2  not measurable: no version declaration could be read, the repository could not be
+       read at all (no `git`, not a work tree), or **this checkout's tag list may be
+       stale** -- the remote carries the version the tree declares, so the question was
+       never put to this checkout and neither answer follows from it. Never 0 -- a guard
+       that passes because it could not read its subject is the defect this one exists to
+       catch.
 
-An empty tag list is a **measurement**, not an unmeasured one: `git tag --list` answered,
-and the answer is that nothing carries the declaration. So that case is exit 1, where a
-repository that cannot be read at all is exit 2.
+An empty tag list is a measurement **of the checkout**, and the checkout is not the
+repository. The two came apart on 2026-11-18 (`cyc20261118-113027`): this checkout's newest
+tag was `v0.3.58` while the remote already carried `v0.3.59`, published as Latest with 11
+assets, so `git tag --list` answered "nothing carries the declaration" about a version every
+host had. Worse than the wrong verdict was the remedy: it printed `git tag -a v0.3.59` and a
+push, and the first of those fails because the tag exists. A local tag list can only ever
+**understate** the repository -- it is missing tags, never holding ones the remote lacks --
+so the single state it cannot separate is "never tagged" from "not fetched". The remote is
+asked to separate them, and only there: every deliberate state changes, because a stale list
+cannot manufacture an `OK`, a "behind", or a lightweight near miss.
 
 Usage:
 
@@ -65,6 +75,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -135,6 +146,110 @@ def _git(root: Path, *args: str) -> str:
         detail = (proc.stderr or proc.stdout or "").strip()
         raise Unmeasurable(f"`git {' '.join(args)}` failed in {root}: {detail}")
     return proc.stdout
+
+
+#: Where one version's refs are asked for on the remote. `matching-refs` matches a prefix, so
+#: the answer can hold neighbours (`v0.3.59-rc1` for `v0.3.59`); the ref is compared whole.
+_REMOTE_REF_PATH = "git/matching-refs/tags/v"
+
+#: The remote spellings this host actually uses. `https://github.com/o/r(.git)`,
+#: `git@github.com:o/r.git` and `ssh://git@github.com/o/r.git` all name the same repository,
+#: and a remote that names none of them (a local path, another host) is not one this guard
+#: can ask.
+_REMOTE_URL = re.compile(
+    r"^(?:https?://(?:[^@/]+@)?github\.com/|ssh://git@github\.com/|git@github\.com:)"
+    r"(?P<repo>[^/]+/[^/]+?)(?:\.git)?/?$"
+)
+
+
+def _remote_of(root: Path) -> str | None:
+    """The `owner/repo` that `origin` names, or `None` when it names no GitHub repository.
+
+    `None` is not a failure and is not the same as "the remote carries nothing": a
+    repository with no remote has no second tag list to be stale against, so its own tags
+    are the whole truth about it. That is the shape every fixture in
+    `tests/test_check_release_owed.py` builds, and it has to keep answering as it did.
+    """
+    try:
+        url = _git(root, "remote", "get-url", "origin").strip()
+    except Unmeasurable:
+        return None
+    match = _REMOTE_URL.match(url)
+    return match.group("repo") if match else None
+
+
+def remote_tag_state(root: Path, version: str) -> tuple[str, str]:
+    """Does the repository's **remote** already carry `v<version>` as a release tag?
+
+    The local tag list cannot separate "this version was never tagged" from "this checkout
+    has not fetched the tag", and only the remote can. Returns `(state, detail)`:
+
+    * `present` -- an **annotated** `v<version>` is there, so a local list that lacks it is
+      stale and this checkout has not answered the question;
+    * `lightweight` -- it is there but `verify-tag` would stop the run, so it publishes
+      nothing and a release is still owed;
+    * `absent` -- the remote answered and does not carry it, which is the state the tool
+      exists for;
+    * `unknown` -- the remote could not be asked at all (no remote, no `gh`, no network).
+      The caller keeps its local verdict and says so, because a screen that stops working
+      offline would be replaced by a reader's memory of it.
+    """
+    repo = _remote_of(root)
+    if repo is None:
+        return "unknown", (
+            "this checkout's `origin` names no GitHub repository, so there is no remote tag "
+            "list to compare its tags against"
+        )
+    try:
+        proc = subprocess.run(
+            ["gh", "api", f"repos/{repo}/{_REMOTE_REF_PATH}{version}"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError as exc:
+        return "unknown", f"`gh` could not be run to ask {repo} for its tags: {exc}"
+    if proc.returncode != 0:
+        lines = (proc.stderr or proc.stdout or "").strip().splitlines()
+        reason = lines[-1] if lines else "gh answered nothing"
+        return "unknown", f"the tags of {repo} could not be read from the remote: {reason}"
+    try:
+        refs = json.loads(proc.stdout or "[]")
+    except ValueError:
+        return "unknown", f"{repo}'s answer to the tag question was not JSON"
+    wanted = f"refs/tags/v{version}"
+    for ref in refs if isinstance(refs, list) else []:
+        if not isinstance(ref, dict) or ref.get("ref") != wanted:
+            continue
+        kind = (ref.get("object") or {}).get("type")
+        if kind == "tag":
+            return "present", f"the remote of {repo} carries {wanted} as an annotated tag"
+        return "lightweight", (
+            f"the remote of {repo} carries {wanted} as a {kind or 'non-tag'} object, which "
+            f"`verify-tag` rejects"
+        )
+    return "absent", f"the remote of {repo} answered and carries no {wanted}"
+
+
+def _stale_list_reading(declared: str, local_reading: str, detail: str) -> str:
+    """The verdict for a checkout whose tag list is missing a tag the remote has."""
+    return (
+        f"NOT MEASURABLE FROM THIS CHECKOUT: {local_reading}, but {detail}. This checkout's "
+        f"tag list is stale -- it is missing v{declared}, so the question whether a release "
+        f"is owed was never put to the repository. Refresh the tags with "
+        f"`git fetch --tags origin` and read this again: neither `a release is owed` nor "
+        f"`nothing is owed` follows from a tag list that cannot see the tag it is asking about."
+    )
+
+
+def _print_remote_note(state: str, detail: str) -> None:
+    """Say what the remote added to a verdict the checkout's own tags already reached."""
+    if state == "lightweight":
+        print(f"note: {detail}, so it publishes nothing either -- a release is still owed.")
+    elif state == "unknown":
+        print(f"note: {detail}, so the verdict above is this checkout's tag list alone.")
 
 
 def _require_a_work_tree_of_its_own(root: Path) -> None:
@@ -258,6 +373,16 @@ def check(root: Path) -> int:
     )
     if not parsed:
         print(f"tags: none that would publish a release{light_note}{vless_note}{skipped_note}")
+        # A checkout that has fetched nothing looks exactly like a repository that never
+        # tagged, so the remote answers before this branch speaks.
+        state, detail = remote_tag_state(root, declared)
+        if state == "present":
+            print(
+                _stale_list_reading(
+                    declared, "no tag in this checkout would publish a release", detail
+                )
+            )
+            return 2
         causes = []
         if vless:
             causes.append(
@@ -276,6 +401,7 @@ def check(root: Path) -> int:
             f"A RELEASE IS OWED: the tree declares {declared} and no tag that publishes a "
             f"release carries it{carried}"
         )
+        _print_remote_note(state, detail)
         return 1
 
     newest = parsed[-1][1]
@@ -318,6 +444,13 @@ def check(root: Path) -> int:
         if count is not None
         else f"the commit count between {newest} and HEAD could not be read"
     )
+    # The one claim a stale list can turn false. Every other verdict above is the checkout's
+    # own tags, and a list missing tags cannot manufacture an `OK`, a "behind", or a
+    # lightweight near miss -- so the network is paid for here and nowhere else.
+    state, detail = remote_tag_state(root, declared)
+    if state == "present":
+        print(_stale_list_reading(declared, f"the newest tag in it is {newest}", detail))
+        return 2
     print(
         f"A RELEASE IS OWED: the tree declares {declared} and the newest tag is {newest} "
         f"-- {reach}, so that work has merged and reaches no host until it is published. "
@@ -326,6 +459,7 @@ def check(root: Path) -> int:
         f"only trigger of build-release.yml). Run `scripts/check-release-tag.py v{declared}` "
         f"first, and `scripts/check-release-published.py v{declared}` afterwards."
     )
+    _print_remote_note(state, detail)
     return 1
 
 
