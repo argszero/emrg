@@ -443,6 +443,77 @@ test("P2 open 失败: resume 报错（会话已删）→ 连接关闭不泄漏 +
   assert.strictEqual(manager.get("sess-gone"), null, "failed open must not be registered");
 });
 
+test("#2982 打开一条正在跑的会话：快照经打开钩子送到渲染层（全链路，不手塞帧）", async () => {
+  // 这条用例走的是真实的路：`open()` 建连接 → `resume_session` → daemon 回带 `meta`
+  // 的快照 → 钩子把它交给渲染层的那一份。手工往渲染层塞一帧证明不了任何东西——
+  // 缺的正是「谁把它送过去」这一环（`main.js` 的桥在 resume **之后**才挂，所以回执
+  // 到达时没有监听者）。
+  const logs = [];
+  const manager = new ConnManager({
+    logger: { info: (m) => logs.push(String(m)), warn: () => {}, error: () => {} },
+  });
+  const sink = []; // 渲染层收到的东西（代替 main.js 的 webContents.send）
+  manager.onOpen((sid, conn, projectPath, snapshot) => {
+    conn.onEvent((type, data) => sink.push({ type, data, sid }));
+    if (snapshot && snapshot.type === "resume_result") sink.push({ type: "command_result", data: snapshot, sid });
+  });
+
+  const meta = {
+    turn: { running: true, started_at: 1756785600.5 },
+    sandbox: "read-only",
+    sandbox_roots: ["/tmp/a"],
+    sandbox_grants: [{ kind: "dir", target: "/tmp/a", source: "session" }],
+  };
+
+  const p = manager.open("sess-run", "/proj/a");
+  const bootWs = await waitForWs();
+  await driveAuth(bootWs);
+  await new Promise((r) => setTimeout(r, 10));
+  const sessionWs = await waitForWs(() => currentMockWs !== bootWs);
+  await driveAuth(sessionWs);
+  const deadline = Date.now() + 2000;
+  while (sessionWs.sent.length < 2 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5));
+  assert.strictEqual(JSON.parse(sessionWs.sent.at(-1)).type, "resume_session");
+  sessionWs.emit("message", Buffer.from(JSON.stringify({ type: "resume_result", session_id: "sess-run", meta })));
+  await p;
+
+  // ① 恰好一帧到渲染层，且带的就是 daemon 的那份快照（四项都在，不是只落地一半）
+  const forwarded = sink.filter((e) => e.type === "command_result");
+  assert.strictEqual(forwarded.length, 1, "打开会话只该送一帧快照");
+  assert.strictEqual(forwarded[0].sid, "sess-run");
+  assert.deepStrictEqual(forwarded[0].data.meta, meta);
+  // ② 对账日志：在跑与否 + 开始时刻，一行可读，不必去解析被截断的 JSON
+  assert.ok(
+    logs.some((m) => m.includes("resume snapshot") && m.includes("running=true") && m.includes("started_at=1756785600.5")),
+    `a line naming running and started_at is required, got: ${logs.filter((m) => m.includes("resume")).join(" | ")}`,
+  );
+});
+
+test("#2982 快照说没在跑：同样送出去（渲染层据此清掉计时与忙标记）", async () => {
+  // 反面同样是一次投递：不送，渲染层就无从知道「这条会话已经不在跑了」，只能一直
+  // 显示上一条连接留下的时刻（rant 清单第 6 项）。
+  const manager = new ConnManager({ logger: { info: () => {}, warn: () => {}, error: () => {} } });
+  const sink = [];
+  manager.onOpen((sid, conn, projectPath, snapshot) => {
+    if (snapshot && snapshot.type === "resume_result") sink.push({ type: "command_result", data: snapshot, sid });
+  });
+
+  const meta = { turn: { running: false, started_at: null } };
+  const p = manager.open("sess-idle", "/proj/b");
+  const bootWs = await waitForWs();
+  await driveAuth(bootWs);
+  await new Promise((r) => setTimeout(r, 10));
+  const sessionWs = await waitForWs(() => currentMockWs !== bootWs);
+  await driveAuth(sessionWs);
+  const deadline = Date.now() + 2000;
+  while (sessionWs.sent.length < 2 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5));
+  sessionWs.emit("message", Buffer.from(JSON.stringify({ type: "resume_result", session_id: "sess-idle", meta })));
+  await p;
+
+  assert.strictEqual(sink.filter((e) => e.type === "command_result").length, 1);
+  assert.deepStrictEqual(sink[0].data.meta.turn, { running: false, started_at: null });
+});
+
 test("P2 onOpen 钩子: 新会话连接建立时触发（含 recoverAll 重开路径）", async () => {
   const manager = new ConnManager({  });
   const opened = [];

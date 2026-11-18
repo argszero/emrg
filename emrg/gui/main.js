@@ -1388,7 +1388,7 @@ vision = false
     if (connManager) return connManager;
     connManager = new ConnManager({ logger, isPackaged: app.isPackaged });
     // 每个新会话连接建立时挂 renderer 事件桥（附带 sid；含 recoverAll 重开路径）
-    connManager.onOpen((sid, conn, projectPath) => {
+    connManager.onOpen((sid, conn, projectPath, resumeSnapshot) => {
       conn.onEvent((type, data) => {
         // P4：消息活动刷新该会话 lastActive（激活/发送/done 更新，写盘防抖 1s）
         if (type === "done" || type === "message_delta") touchOpenSession(sid, projectPath);
@@ -1398,6 +1398,16 @@ vision = false
           win.webContents.send("emrg:event", { type, data, sid });
         }
       });
+      // 打开会话时 daemon 的那份快照（issue #2982）。上面的桥是**现在**才挂上的，
+      // 而快照在本次 `resume_session` 的回执里就已经到了——那一刻没有任何监听者，
+      // 只挂着等它会被投进一个空集合。所以显式送一次，形状与桥送出去的每一帧相同
+      // （`command_result`），渲染层读的就是它：轮的运行与否与开始时刻、沙箱档位、
+      // 额外可写根、授权面全在这一帧的 `meta` 里。房间里有桥时别再送第二遍：同一个
+      // 回执既被等待者取走、又进入事件流，是 `daemon_client` 那一半的事（它只在确有
+      // 监听者时才发得出去，而这里正是没有监听者的那条路）。
+      if (resumeSnapshot && resumeSnapshot.type === "resume_result" && win && !win.isDestroyed()) {
+        win.webContents.send("emrg:event", { type: "command_result", data: resumeSnapshot, sid });
+      }
     });
     // daemon 重启恢复完成后刷新 UI 状态（对齐旧 G41 重连成功块）
     connManager.onRecovered(async () => {
