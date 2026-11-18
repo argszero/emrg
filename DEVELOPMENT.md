@@ -256,6 +256,7 @@ from "could not measure" — exit `2` is never a pass. Run them from the reposit
 |---|---|
 | `uv run --no-sync python3 scripts/check-batching-share.py` | how many calls one round carries, and whether a lone one says what it is waiting for |
 | `uv run --no-sync python3 scripts/check-citation-resolves.py` | does a test citation name the node id pytest would actually collect |
+| `uv run --no-sync python3 scripts/check-cited-designs.py` | does every design document the shipped prompts cite exist on this machine |
 | `uv run --no-sync python3 scripts/check-cycle-record.py` | did a cycle's record land where it belongs, and which block did it displace |
 | `uv run --no-sync python3 scripts/check-extra-prompt-rotation.py` | which task `extra_prompt` blocks moved since the rotation table classified them |
 | `uv run --no-sync python3 scripts/check-gui-package-refs.py` | is every path electron-builder resolves for the GUI actually there |
