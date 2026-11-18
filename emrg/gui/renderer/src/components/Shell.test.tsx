@@ -26,6 +26,8 @@ function mockEmrg() {
   const clearSession = vi.fn().mockResolvedValue({ ok: true });
   const compactSession = vi.fn().mockResolvedValue({ ok: true });
   const listAgents = vi.fn().mockResolvedValue([{ name: "emrg", path: "/p/emrg" }]);
+  // issue #2978：搜索浮层问「全部 agent 的全部会话」——一次请求，无参数
+  const listAllSessions = vi.fn().mockResolvedValue({ sessions: [] });
   const listTasks = vi.fn().mockResolvedValue([{ name: "evo", type: "evolution", enabled: true, session_id: "evo", agent_path: "/p/emrg" }]);
   const listRants = vi.fn().mockResolvedValue([{ timestamp: "2026-08-26T12:00:00+08:00", agent: "emrg", status: "pending", message: "x" }]);
   const listMemories = vi.fn().mockResolvedValue([]);
@@ -58,6 +60,7 @@ function mockEmrg() {
     clearSession,
     compactSession,
     listAgents,
+    listAllSessions,
     listTasks,
     listRants,
     listMemories,
@@ -84,6 +87,7 @@ function mockEmrg() {
     sendMessage,
     clearSession,
     listAgents,
+    listAllSessions,
     listTasks,
     listRants,
     listHistory,
@@ -591,6 +595,42 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     fireEvent.click(hit);
     await waitFor(() => expect(screen.queryByTestId("search-overlay")).not.toBeInTheDocument());
     expect(m.switchSession).toHaveBeenCalledWith({ sessionId: "s2" });
+  });
+
+  // issue #2978：浮层的历史面是**全部** agent 的会话，且每行按它自己的 agent 打开。
+  // 这不只是「多一个来源」：以前只有 appState.sessions —— 当前 agent 那一份，于是别的
+  // agent 的会话在框里根本不存在，宿主只能自己记住哪些 agent 搜得到。
+  it("search overlay reaches every agent's sessions, and opens a row under its own agent", async () => {
+    const m = mockEmrg();
+    m.listAllSessions.mockResolvedValue({
+      sessions: [
+        { session_id: "s1", title: "Alpha", agent: "emrg", cwd: "/p/emrg", updated_at: new Date().toISOString() },
+        { session_id: "s2", title: "别人的", agent: "aitokenpool", cwd: "/p/atp", updated_at: new Date().toISOString() },
+      ],
+    });
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    // 当前 agent 只认得 s1 —— s2 只存在于「全部 agent」那一次请求里。
+    m.emit(sessionsFrame([{ session_id: "s1", title: "Alpha" }]));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(1));
+
+    fireEvent.click(screen.getByTestId("band-search"));
+    await waitFor(() => expect(screen.getByTestId("search-overlay")).toBeInTheDocument());
+    // 一次请求够到全部 agent：不是每个 agent 各问一次。
+    await waitFor(() => expect(m.listAllSessions).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByTestId("search-count")).toHaveTextContent("2"));
+
+    // 只出现在 agent 名里的关键词，也能命中属于那个 agent 的会话。
+    fireEvent.change(screen.getByTestId("search-input"), { target: { value: "aitokenpool" } });
+    const hit = await screen.findByTestId("search-hit");
+    expect(hit).toHaveAttribute("data-sid", "s2");
+    fireEvent.click(hit);
+
+    // 关键的一半：开在它自己的 agent 下，而不是当前激活的那一个。
+    await waitFor(() =>
+      expect(m.switchSession).toHaveBeenCalledWith({ sessionId: "s2", projectPath: "/p/atp" }),
+    );
   });
 
   it("/clear with an active session calls clearSession and shows the cleared message", async () => {

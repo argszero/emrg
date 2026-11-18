@@ -58,6 +58,8 @@ const EXPECTED_INVOKE_METHODS = [
   "listSkills",
   "listAgents",
   "listAgentSessions",
+  // issue #2978：搜索浮层问「全部 agent 的全部会话」，一次请求，无参数
+  "listAllSessions",
   "registerAgent",
   "removeAgent",
   "listTasks",

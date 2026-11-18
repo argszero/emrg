@@ -57,6 +57,8 @@ const api = {
   listSkills: (p) => ipcRenderer.invoke("emrg:listSkills", p),
   listAgents: () => ipcRenderer.invoke("emrg:listAgents"),
   listAgentSessions: (payload) => ipcRenderer.invoke("emrg:listAgentSessions", payload),
+  // issue #2978：搜索浮层的历史面 —— 全部 agent 的全部会话，一次请求，无参数
+  listAllSessions: () => ipcRenderer.invoke("emrg:listAllSessions"),
   registerAgent: (payload) => ipcRenderer.invoke("emrg:registerAgent", payload),
   removeAgent: (payload) => ipcRenderer.invoke("emrg:removeAgent", payload),
   listTasks: () => ipcRenderer.invoke("emrg:listTasks"),
