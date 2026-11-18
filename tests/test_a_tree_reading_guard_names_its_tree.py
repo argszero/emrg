@@ -189,6 +189,7 @@ POINTABLE_AT_A_TREE = {
     "check-undefined-names.py": ("--root",),
     "check-workflows.py": ("--root",),
     "check-gui-package-refs.py": ("--root",),
+    "check-release-owed.py": ("--root",),
 }
 
 #: Guards that advertise `--root` in their own `--help` and are deliberately **not** in the
@@ -303,6 +304,17 @@ NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE = {
         "`tests/test_check_release_prompt.py` drives it against products built under "
         "`tmp_path` and pins the `tree:` line and each exit code (0 identical / 1 a "
         "product carries a different text / 2 nothing could be read)"
+    ),
+    "check-release-owed.py": (
+        "answers rc **1** on any checkout that owes a release, which is correct rather than "
+        "a defect - master stands in exactly that state between a version bump merging and "
+        "its tag being cut, so the bare loop's rc-0 requirement would turn every such "
+        "interval into a failing suite, which is also why this guard is a host-side screen "
+        "and not a CI gate. It reads a working tree (`--root`, default `REPO_ROOT`) and "
+        "names it on the first line before the verdict, and that naming IS verified rather "
+        "than classified: `tests/test_check_release_owed.py` builds `tmp_path` repositories "
+        "and pins the `tree:` line and each exit code (0 nothing owed / 1 a release is owed "
+        "/ 2 no declaration or no repository)"
     ),
 }
 

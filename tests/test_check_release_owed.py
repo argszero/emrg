@@ -65,6 +65,44 @@ def _run(mod, root: Path, capsys) -> tuple[int, str]:
     return rc, captured.out
 
 
+def test_the_tree_it_read_is_named_before_the_verdict(tmp_path, capsys):
+    """The family's rule: a tree-reading guard names the tree it read, first.
+
+    This is the assertion the classification in
+    `tests/test_a_tree_reading_guard_names_its_tree.py` leans on when it puts this guard in
+    the *names-its-tree-but-is-not-run-here* bucket instead of the bare loop - a claim about
+    the naming that has to be a measurement rather than a promise.
+    """
+    mod = _load()
+    root = _repo(tmp_path / "named", "0.3.59", ["v0.3.58"])
+
+    rc, out = _run(mod, root, capsys)
+
+    assert rc == 1, out
+    assert out.splitlines()[0] == f"tree: {root}", (
+        f"the first line is the reading's subject, and it must be the tree that was read: "
+        f"{out.splitlines()[:2]}")
+
+
+def test_a_pointable_guard_refuses_a_tree_it_cannot_read(tmp_path, capsys):
+    """An empty directory and an absent path both answer rc 2 with a reason, never 0.
+
+    The same two shapes the family's empty-tree leg puts to every pointable guard: a tree it
+    read no file from is not "measured and clean".
+    """
+    mod = _load()
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    absent = tmp_path / "not-there"
+
+    for target in (empty, absent):
+        rc, out = _run(mod, target, capsys)
+        assert rc == 2, f"{target}: rc={rc} is 'measured' for a tree no file was read from:\n{out}"
+        assert "not measurable" in out, f"{target}: the code has to carry a reason:\n{out}"
+        assert "OK:" not in out and "A RELEASE IS OWED" not in out, (
+            f"{target}: it printed a verdict as well as refusing:\n{out}")
+
+
 def test_a_declared_version_with_no_tag_owes_a_release(tmp_path, capsys):
     """The whole point: 0.3.59 declared, v0.3.58 the newest tag, commits in between."""
     mod = _load()
