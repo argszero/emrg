@@ -794,6 +794,62 @@ def test_the_blocker_rule_has_all_three_cases_and_keeps_the_forbidden_list_above
         )
 
 
+# --- the stuck-round outside route: a general method the template did not carry ----------------
+#
+# Measured 2026-11-18 (cycle cyc20261118-222012). Of the 25 task `extra_prompt` blocks this
+# installation renders, 20 carried the same general method for the moment the blocker rule's
+# third case names: with no way past found, put the question to an assistant other than the one
+# running the round and read the reply as a proposal. The template had no counterpart — its only
+# mention of a browser is the logged-in platform page — so a round reading the template alone had
+# one route out of a stuck competition while an installation that patched it had two. The rule
+# now lives in the blocker rule; these assertions keep it there, and keep it inside the rule that
+# puts the hard constraints out of a bypass's reach.
+
+
+def test_a_stuck_round_may_look_outside_for_a_method_but_never_past_the_gate():
+    """Both directions: the route exists, and it stays subordinate to the gate.
+
+    Absence is the failure this pins — without it a round that has run out of the ways it
+    knows can only ask the host. Subordination is the other half: an outside proposal must not
+    become the licence the Forbidden list exists to refuse.
+    """
+    text = PROMPT.read_text(encoding="utf-8")
+    parts = text.split("**The blocker rule**", 1)
+    assert len(parts) == 2, "the blocker rule is gone, so the third case has no home"
+    rule = parts[1].split("\n### ", 1)[0]
+
+    assert "looked for outside it" in rule, (
+        "the blocker rule no longer names a route out of 'no way past is found' other than the "
+        "host question, which is the gap this rule closes"
+    )
+    assert "proposed method" in rule and "never as an answer" in rule, (
+        "the reply must be read as a proposal; read as an answer it would be submitted unverified"
+    )
+    # The two conditions, each pinned to the words that carry it.
+    assert "the rules are read first" in rule, (
+        "a competition's own rules may forbid outside help — reading them first is what keeps "
+        "the request legal, and it is the order that makes the next assertion reachable"
+    )
+    assert "`blocked` item for the host" in rule, (
+        "a competition that forbids outside help must fall back to the host, never to a bypass"
+    )
+    assert "testable against the competition's own data and a known baseline" in rule, (
+        "without a test the proposal cannot earn an attempt, so it enters the round unchecked"
+    )
+    for not_evidence in ("submitted as given", "quoted as evidence", "counted as a score"):
+        assert not_evidence in rule, (
+            f"'{not_evidence}' is missing: an outside proposal must not become evidence or a score"
+        )
+    # Placement, not presence alone: the route sits above the paragraph that takes the hard
+    # constraints out of a bypass's reach, so that paragraph still governs the route.
+    assert rule.index("looked for outside it") < rule.index(
+        "The Forbidden list is not a blocker to be bypassed"
+    ), (
+        "the outside route must be stated above the Forbidden-list paragraph, or it reads as "
+        "reaching the constraints that paragraph refuses"
+    )
+
+
 # --- §0.0: the cadence rule the host asked to be written *in this file* --------------------------
 #
 # Measured 2026-10-07 (cycle cyc20261007-130240). The host asked, by name, for the
