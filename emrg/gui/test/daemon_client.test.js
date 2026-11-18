@@ -764,6 +764,43 @@ test("帧分类（G21+G58）：各帧事件分发正确", async () => {
   assert.strictEqual(cmd.length, 3);
 });
 
+test("#2982：有人 await 时 resume_result 仍然到达渲染层（等待者与渲染层都要）", async () => {
+  // 一次真实的「打开一个已经在跑的会话」：`conn-manager` 先 await `resume_session`，
+  // daemon 回带 `meta.turn` 快照的 `resume_result`，主进程再把它转给渲染层。这一帧
+  // 被 `_resolvePending` 认领之后还必须照发：认领只说明等待者拿到了，不说明渲染层
+  // 用不着。此前认领直接 return，于是 daemon 的轮开始时刻（计时器的唯一来源，中途
+  // 打开的会话没有 `turn_start` 可听）只留在主进程一行日志里，GUI 的计时器起不来、
+  // 格子里也不显示「正在运行」——同一帧的去向取决于此刻是否恰好有人在 await。
+  const client = new DaemonClient();
+  await connectClient(client);
+  const seen = [];
+  client.onEvent((type, data) => seen.push([type, data]));
+
+  const meta = { turn: { running: true, started_at: 1756785600.5 } };
+  const pending = client.sendCommandAndWait("resume_session", { session_id: "s1", cwd: tmpHome }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  currentMockWs.emit("message", Buffer.from(JSON.stringify({ type: "resume_result", session_id: "s1", meta })));
+
+  // ① 等待者仍然拿到这一帧——补发不是改嫁
+  const resolved = await pending;
+  assert.strictEqual(resolved.type, "resume_result");
+  assert.deepStrictEqual(resolved.meta, meta);
+
+  // ② 渲染层也拿到：命令结果事件、原样的 type 与快照
+  const cmd = seen.filter(([t]) => t === "command_result");
+  assert.strictEqual(cmd.length, 1, "一帧只转发一次");
+  assert.strictEqual(cmd[0][1].type, "resume_result");
+  assert.deepStrictEqual(cmd[0][1].meta.turn, meta.turn);
+
+  // ③ 反面：名单外的类型不顺手转发。`rewind_result` 由 `main.js` 自己补发，
+  //    这里再发一遍就是渲染两遍。
+  const p2 = client.sendCommandAndWait("rewind_session", { session_id: "s1", cwd: tmpHome, record_index: 0 }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  currentMockWs.emit("message", Buffer.from(JSON.stringify({ type: "rewind_result", session_id: "s1", ok: true })));
+  await p2;
+  assert.strictEqual(seen.filter(([t]) => t === "command_result").length, 1, "名单外的类型不得被转发");
+});
+
 test("#2351：rewind_result 帧转发（另一个客户端改写本会话历史时的重载信号）", async () => {
   // 同一个缝（`_classify` 兜底只记日志、不发事件），但两头都要看：daemon 现在把
   // `rewind_result` 广播给订阅该会话的每个连接，改写的是同一份 `history.jsonl`——
