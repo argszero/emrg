@@ -36,11 +36,22 @@ def _git(root: Path, *args: str) -> None:
     assert proc.returncode == 0, f"git {' '.join(args)} failed: {proc.stderr}"
 
 
-def _repo(root: Path, declared: str | None, tags: list[str], *, commits_after_tag: int = 0) -> Path:
+def _repo(
+    root: Path,
+    declared: str | None,
+    tags: list[str],
+    *,
+    commits_after_tag: int = 0,
+    lightweight: list[str] | None = None,
+) -> Path:
     """A repository whose tree declares `declared` and carries `tags`.
 
-    `commits_after_tag` adds that many further commits on top, so the "how many commits
-    are not in the release" reading has something to count.
+    `tags` are created **annotated**, because that is what a release tag is: the workflow's
+    `verify-tag` job rejects a lightweight tag, so a fixture building lightweight ones would
+    be testing a shape that publishes nothing. `commits_after_tag` adds that many further
+    commits on top, so the "how many commits are not in the release" reading has something
+    to count. `lightweight` names tags to create the other way, for the test that asks what
+    the guard does with them.
     """
     root.mkdir(parents=True, exist_ok=True)
     _git(root, "init")
@@ -50,6 +61,8 @@ def _repo(root: Path, declared: str | None, tags: list[str], *, commits_after_ta
     _git(root, "add", "-A")
     _git(root, "commit", "-m", "first")
     for tag in tags:
+        _git(root, "tag", "-a", tag, "-m", f"emrg {tag}")
+    for tag in lightweight or []:
         _git(root, "tag", tag)
     for index in range(commits_after_tag):
         (root / "note.txt").write_text(f"{index}\n", encoding="utf-8")
@@ -63,6 +76,38 @@ def _run(mod, root: Path, capsys) -> tuple[int, str]:
     rc = mod.check(root)
     captured = capsys.readouterr()
     return rc, captured.out
+
+
+def test_a_lightweight_tag_publishes_nothing_so_a_release_is_still_owed(tmp_path, capsys):
+    """`verify-tag` rejects a lightweight tag, so it cannot carry a version.
+
+    Measured 2026-11-18 (`cyc20261118-105553`): on a tree declaring `0.3.59` whose tag was a
+    **lightweight** `v0.3.59`, the guard answered `rc 0, nothing is owed` - while
+    `git cat-file -t` says `commit`, and `build-release.yml`'s `verify-tag` job exits 1
+    unless the object type is `tag`, so the run stops before any platform builds. This
+    repository has shipped one such tag (`v0.2.97`), produced by the bare
+    `git tag v<x.y.z>` that `tests/test_release_tag_form.py` records.
+    """
+    mod = _load()
+    root = _repo(tmp_path / "light", "0.3.59", [], lightweight=["v0.3.59"])
+
+    rc, out = _run(mod, root, capsys)
+
+    assert rc == 1, f"a lightweight tag publishes nothing, so a release is still owed:\n{out}"
+    assert "A RELEASE IS OWED" in out, out
+    assert "lightweight" in out, (
+        f"the near miss has to be named, and by the word that says why it failed:\n{out}")
+
+
+def test_an_annotated_tag_of_the_same_version_does_satisfy_it(tmp_path, capsys):
+    """The other direction, so the fix above cannot be "always report owed"."""
+    mod = _load()
+    root = _repo(tmp_path / "annotated", "0.3.59", ["v0.3.59"])
+
+    rc, out = _run(mod, root, capsys)
+
+    assert rc == 0, out
+    assert "nothing is owed" in out, out
 
 
 def test_a_tag_without_the_v_publishes_nothing_so_a_release_is_still_owed(tmp_path, capsys):
@@ -119,7 +164,7 @@ def test_a_tree_older_than_the_newest_tag_is_behind_not_owed(tmp_path, capsys):
     decl.write_text('__version__ = "0.3.60"\n', encoding="utf-8")
     _git(root, "add", "-A")
     _git(root, "commit", "-m", "release 0.3.60")
-    _git(root, "tag", "v0.3.60")
+    _git(root, "tag", "-a", "v0.3.60", "-m", "emrg v0.3.60")
     # The declaration moves backwards on top of that release: a stale checkout's shape.
     decl.write_text('__version__ = "0.3.59"\n', encoding="utf-8")
     _git(root, "add", "-A")

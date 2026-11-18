@@ -27,10 +27,12 @@ later. A tag that does not parse as three dotted numbers is counted and reported
 sorted in as though it were one -- otherwise an unrelated tag named `latest` would
 silently become "the newest release".
 
-Only a tag **that can trigger a build** counts as a release: `build-release.yml` fires on
-`tags: ["v*"]`, so a tag spelled `0.3.59` publishes nothing however version-shaped it looks.
-Such a tag is reported by name as a near miss rather than accepted, because accepting it
-answers `nothing is owed` for work that reached no host.
+Only a tag **that can publish a release** counts: `build-release.yml` fires on
+`tags: ["v*"]`, and its `verify-tag` job rejects a lightweight tag before any platform
+builds, so neither a `v`-less name nor a lightweight tag can carry a version. Each is
+reported by name as a near miss rather than accepted, because accepting either answers
+`nothing is owed` for work that reached no host -- and both shapes have happened here
+(`v0.2.97` went out lightweight).
 
 It is a **screen for a host, not a CI gate.** On an unreleased master it is red by
 design, so wiring it into CI would make the release cadence a permanently failing check
@@ -154,36 +156,69 @@ def _require_a_work_tree_of_its_own(root: Path) -> None:
         )
 
 
-def tags(root: Path) -> tuple[list[tuple[tuple[int, int, int], str]], list[str], list[str]]:
-    """Every **release** tag, newest last, plus two buckets of names that are not one.
+def tags(root: Path) -> tuple[list[tuple[tuple[int, int, int], str]], list[str], list[str], list[str]]:
+    """Every **release** tag, newest last, plus three buckets of names that are not one.
 
-    A tag counts as a release only when it matches `_RELEASE_TAG`, because
-    `build-release.yml` triggers on `tags: ["v*"]` and nothing else: a `v`-less tag builds
-    nothing, so treating it as "carrying" the version would answer `nothing is owed` for a
-    tree whose work reached no host. The two buckets are kept apart because the remedies
-    differ - a version-shaped tag missing its `v` is a near miss worth naming exactly, while
-    an unrelated tag (`latest`) is only noise.
+    A tag carries a version only when all three hold:
 
-    Sorted by numeric parts, because string order puts `v0.3.9` after `v0.3.10`.
+    * it matches `_RELEASE_TAG` - `build-release.yml` triggers on `tags: ["v*"]` and nothing
+      else, so a `v`-less tag builds nothing;
+    * it is **annotated**. The workflow's `verify-tag` job reads `object.type` from the API
+      and exits 1 unless it is `tag`, so a lightweight tag stops the run before any platform
+      builds and no release is published. This repository has already shipped one: `v0.2.97`
+      was lightweight while every release since `v0.2.94` is annotated, and the instruction
+      that produced it was the bare `git tag v<x.y.z>` (`tests/test_release_tag_form.py`
+      records the measurement). `%(objecttype)` answers the same question locally;
+    * therefore neither `v`-less nor lightweight can be what "carries" a version, and
+      counting either would answer `nothing is owed` for work that reached no host.
+
+    The buckets are kept apart because the remedies differ: a version-shaped tag missing its
+    `v`, a version-shaped tag that is lightweight, and an unrelated name (`latest`) which is
+    only noise.
+
+    Sorted by numeric parts, because string order puts `v0.3.9` after `v0.3.10`. One
+    `for-each-ref` call answers both name and type, rather than N `cat-file` calls.
     """
     _require_a_work_tree_of_its_own(root)
-    text = _git(root, "tag", "--list")
+    text = _git(root, "for-each-ref", "refs/tags", "--format=%(refname:short)%09%(objecttype)")
+    annotated: set[str] = set()
+    for line in text.splitlines():
+        parts = line.rstrip("\r\n").split("\t")
+        if len(parts) == 2 and parts[1] == "tag":
+            annotated.add(parts[0])
+    names = [line.rstrip("\r\n").split("\t")[0] for line in text.splitlines() if line.strip()]
+
     parsed: list[tuple[tuple[int, int, int], str]] = []
+    lightweight: list[str] = []
     vless: list[str] = []
     skipped: list[str] = []
-    for name in (line.strip() for line in text.splitlines()):
-        if not name:
-            continue
+    for name in names:
         release = _RELEASE_TAG.match(name)
         if release is not None:
-            parsed.append((tuple(int(part) for part in release.groups()), name))
+            if name in annotated:
+                parsed.append((tuple(int(part) for part in release.groups()), name))
+            else:
+                lightweight.append(name)
             continue
         if _TAG.match(name) is not None:
             vless.append(name)
             continue
         skipped.append(name)
     parsed.sort()
-    return parsed, vless, skipped
+    return parsed, lightweight, vless, skipped
+
+
+def _name_list(names: list[str], limit: int = 5) -> str:
+    """A few names, then a count -- because this checkout has 79 lightweight tags.
+
+    Measured 2026-11-18 (`cyc20261118-105553`) on this repository: naming all 79 pushed the
+    `A RELEASE IS OWED` line off the visible width, hiding the only actionable sentence
+    behind a list nobody reads to the end. The count is the fact; the names are examples.
+    """
+    ordered = sorted(names)
+    if len(ordered) <= limit:
+        return ", ".join(ordered)
+    return f"{', '.join(ordered[:limit])} and {len(ordered) - limit} more"
 
 
 def check(root: Path) -> int:
@@ -191,7 +226,7 @@ def check(root: Path) -> int:
     print(f"tree: {root}")
     try:
         declared = declared_version(root)
-        parsed, vless, skipped = tags(root)
+        parsed, lightweight, vless, skipped = tags(root)
     except Unmeasurable as exc:
         print(f"not measurable: {exc}")
         return 2
@@ -211,29 +246,42 @@ def check(root: Path) -> int:
     skipped_note = f", {len(skipped)} tag(s) not version-shaped and not compared" if skipped else ""
     vless_note = (
         f", {len(vless)} version-shaped tag(s) with no `v` and therefore no build: "
-        f"{', '.join(sorted(vless))}"
+        f"{_name_list(vless)}"
         if vless
         else ""
     )
+    light_note = (
+        f", {len(lightweight)} lightweight tag(s) that verify-tag rejects and so publish "
+        f"nothing: {_name_list(lightweight)}"
+        if lightweight
+        else ""
+    )
     if not parsed:
-        print(f"tags: none that would trigger a build{vless_note}{skipped_note}")
-        carried = (
-            f" -- the version-shaped tag(s) {', '.join(sorted(vless))} carry it, but "
-            f"`build-release.yml` triggers on `v*` only, so a tag spelled without the `v` "
-            f"builds nothing and publishes nothing"
-            if vless
-            else ""
-        )
+        print(f"tags: none that would publish a release{light_note}{vless_note}{skipped_note}")
+        causes = []
+        if vless:
+            causes.append(
+                f"the version-shaped tag(s) {_name_list(vless)} carry it, but "
+                f"`build-release.yml` triggers on `v*` only, so a tag spelled without the `v` "
+                f"builds nothing and publishes nothing"
+            )
+        if lightweight:
+            causes.append(
+                f"the tag(s) {_name_list(lightweight)} carry it, but they are "
+                f"lightweight and `verify-tag` requires an annotated tag, so the run stops "
+                f"before any platform builds"
+            )
+        carried = (" -- " + "; and ".join(causes)) if causes else ""
         print(
-            f"A RELEASE IS OWED: the tree declares {declared} and no tag that triggers a "
-            f"build carries it{carried}"
+            f"A RELEASE IS OWED: the tree declares {declared} and no tag that publishes a "
+            f"release carries it{carried}"
         )
         return 1
 
     newest = parsed[-1][1]
     print(
-        f"tags: {len(parsed)} that would trigger a build, newest {newest}"
-        f"{vless_note}{skipped_note}"
+        f"tags: {len(parsed)} that would publish a release, newest {newest}"
+        f"{light_note}{vless_note}{skipped_note}"
     )
 
     declared_parts = tuple(int(part) for part in declared_match.groups())
