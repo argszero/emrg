@@ -889,4 +889,85 @@ describe("消息时刻的三个来源", () => {
     expect(stampOf(transcript, "s1", "user")).toBeUndefined();
     expect(stampOf(transcript, "s1", "assistant")).toBeUndefined();
   });
+
+});
+
+describe("多会话并行：每条更新只进它自己的窗口（rant 2026-11-18T18:41:06 / issue #2985）", () => {
+  // 这组用例钉的是「并行」本身。实现已经是对的（#977 起按帧携带的 sid 键控），但原先
+  // 只有单帧隔离的一条用例，钉不住两条会话同时在跑：改「当前会话」最省事的两种写法
+  // ——切走就只订阅当前那条、切走就把内容清掉——都能让旧用例全绿。
+
+  it("两条会话同时流式、更新交替到达 → 各自窗口只装自己的内容，条数各自对", () => {
+    const { emit, transcript } = setup();
+    // A 三条、B 五条，交替到达（真实情况里帧就是交错进来的）
+    for (let i = 0; i < 5; i += 1) {
+      if (i < 3) {
+        emit({ type: "message_delta", data: { chunks: [{ request_id: `a${i}`, content: `A-${i}` }] }, sid: "s1" });
+      }
+      emit({ type: "message_delta", data: { chunks: [{ request_id: `b${i}`, content: `B-${i}` }] }, sid: "s2" });
+    }
+
+    const a = entriesText(transcript, "s1").filter((x) => x.startsWith("a:"));
+    const b = entriesText(transcript, "s2").filter((x) => x.startsWith("a:"));
+    expect(a).toHaveLength(3);
+    expect(b).toHaveLength(5);
+    // 自己的都在，别人的一条都没有
+    expect(a.join("|")).toContain("A-0");
+    expect(a.join("|")).toContain("A-2");
+    expect(a.join("|")).not.toContain("B-");
+    expect(b.join("|")).toContain("B-4");
+    expect(b.join("|")).not.toContain("A-");
+  });
+
+  it("切走不丢：当前会话是 s2 时，s1 的更新照常进 s1 的窗口", () => {
+    const { emit, bridge, transcript } = setup();
+    bridge.store.update((s) => ({ ...s, sessionId: "s2" }));
+    emit({ type: "message_delta", data: { chunks: [{ request_id: "a1", content: "离开期间的一段" }] }, sid: "s1" });
+    expect(entriesText(transcript, "s1").join("|")).toContain("离开期间的一段");
+    // 而它没有因为「不是当前会话」被塞进当前那条
+    expect(entriesText(transcript, "s2")).toEqual([]);
+  });
+
+  it("切走再切回：条数正确、最后一条文本正确、不是空的", () => {
+    const { emit, bridge, transcript } = setup();
+    bridge.store.update((s) => ({ ...s, sessionId: "s1" }));
+    emit({ type: "message_delta", data: { chunks: [{ request_id: "a1", content: "第一条" }] }, sid: "s1" });
+
+    // 切到 s2，s1 在后台又长了两条
+    bridge.store.update((s) => ({ ...s, sessionId: "s2" }));
+    emit({ type: "message_delta", data: { chunks: [{ request_id: "a2", content: "第二条" }] }, sid: "s1" });
+    emit({ type: "message_delta", data: { chunks: [{ request_id: "a3", content: "第三条" }] }, sid: "s1" });
+
+    // 切回 s1
+    bridge.store.update((s) => ({ ...s, sessionId: "s1" }));
+    const back = entriesText(transcript, "s1").filter((x) => x.startsWith("a:"));
+    expect(back).toHaveLength(3);
+    expect(back[back.length - 1]).toBe("a:第三条");
+  });
+
+  it("忙与回合状态按会话各存一份：切走不丢，done 只收敛它自己那条", () => {
+    const { emit, bridge } = setup();
+    bridge.store.update((s) => ({ ...s, busyBySid: { s1: true, s2: true }, sessionId: "s2" }));
+    emit({ type: "done", data: { request_id: "a1" }, sid: "s1" });
+    expect(bridge.store.get().busyBySid.s1).toBe(false);
+    // 另一条还在跑：它的忙不能跟着被收敛
+    expect(bridge.store.get().busyBySid.s2).toBe(true);
+  });
+
+  it("帧按自己携带的 sid 落地，与当前会话是哪条无关（变异：一律落到当前会话即红）", () => {
+    const { emit, bridge, transcript } = setup();
+    bridge.store.update((s) => ({ ...s, sessionId: "s1" }));
+    emit({ type: "message_delta", data: { chunks: [{ request_id: "z1", content: "属于 s2 的" }] }, sid: "s2" });
+    expect(entriesText(transcript, "s1")).toEqual([]);
+    expect(entriesText(transcript, "s2").join("|")).toContain("属于 s2 的");
+  });
+
+  it("关闭会话只清掉它自己的窗口，别的一条不动", () => {
+    const { emit, transcript } = setup();
+    emit({ type: "message_delta", data: { chunks: [{ request_id: "a1", content: "s1 的" }] }, sid: "s1" });
+    emit({ type: "message_delta", data: { chunks: [{ request_id: "b1", content: "s2 的" }] }, sid: "s2" });
+    transcript.clear("s1");
+    expect(entriesText(transcript, "s1")).toEqual([]);
+    expect(entriesText(transcript, "s2").join("|")).toContain("s2 的");
+  });
 });
