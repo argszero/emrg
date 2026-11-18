@@ -156,7 +156,7 @@ TUI 内：`Esc` 中断流式输出，`Ctrl+C` / `exit` 退出（配置与 GUI �
 | `/rewind` | 回退对话到历史某个节点 |
 | `/trigger` | 触发演化任务——交互式选择器（任务管理在 GUI 设置 → 定时任务） |
 | `/task-session` | 打开某个定时任务自己的会话——交互式选择器 |
-| `/skills` | 列出已加载技能；`/skills available\|install\|update` |
+| `/skills` | 列出已加载技能；`/skills available\|install\|update`——[如何编写技能](docs/skills.md) |
 | `/version` | 显示 EMRG 版本和实例信息 |
 | `Esc` | 中断正在运行的响应 |
 | `Ctrl+C` / `exit` | 退出 |
