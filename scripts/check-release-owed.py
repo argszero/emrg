@@ -41,7 +41,9 @@ and teach its readers to ignore it. Its role is the one `bump-version.py --check
 
 Exit codes, the family's contract:
 
-    0  nothing is owed: the declared version is the newest tag's version
+    0  nothing is owed: the declared version is the newest tag's version -- or its only
+       carrier is a lightweight tag that **already published** a release, which is the same
+       answer by a different route (see `published_release`);
     1  the declared version is not the newest tag's version, and **which way** decides the
        remedy: *newer* means a release is owed (both versions and the commit count are
        printed), *older* means this checkout is behind a release that already exists and
@@ -233,6 +235,83 @@ def remote_tag_state(root: Path, version: str) -> tuple[str, str]:
     return "absent", f"the remote of {repo} answered and carries no {wanted}"
 
 
+#: Where one version's release object is asked for on the remote. A tag can exist with no
+#: release at all, and a release can exist as a draft: only the repository separates them.
+_REMOTE_RELEASE_PATH = "releases/tags/v"
+
+
+def published_release(root: Path, version: str) -> tuple[str, str]:
+    """Did `v<version>` already reach hosts as a published release?
+
+    The question a lightweight tag cannot answer by itself. `verify-tag` is younger than most
+    of the tags it would reject, so "lightweight" says what a push of it would do **today**
+    and nothing about whether it already published. Measured 2026-11-18
+    (`cyc20261118-151657`) on `8a4b40d2`: of this repository's 79 lightweight version-shaped
+    tags, **79 have a published release** and none a draft. Re-tagging one of those would
+    publish the same version twice, so the two states are separated rather than assumed.
+
+    Returns `(state, detail)`:
+
+    * `published` -- a non-draft release exists, so hosts received that version;
+    * `draft` -- a release object exists but is a draft, so no host has received it;
+    * `absent` -- the repository answered and carries no release for that tag;
+    * `unknown` -- it could not be asked: no remote, no `gh`, no network, an answer that is
+      not a release object, or a reply that is neither a release nor a 404. The caller keeps
+      its local verdict, because a screen that stops working offline gets replaced by a
+      reader's memory of it.
+    """
+    repo = _remote_of(root)
+    if repo is None:
+        return "unknown", "this checkout's `origin` names no GitHub repository"
+    try:
+        proc = subprocess.run(
+            ["gh", "api", f"repos/{repo}/{_REMOTE_RELEASE_PATH}{version}"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError as exc:
+        return "unknown", f"`gh` could not be run to ask {repo} about v{version}: {exc}"
+    if proc.returncode != 0:
+        lines = (proc.stderr or proc.stdout or "").strip().splitlines()
+        reason = lines[-1] if lines else "gh answered nothing"
+        # A 404 is the one non-zero answer that is a measurement rather than a failure: the
+        # repository was asked and carries no release for that tag.
+        if "404" in reason or "Not Found" in reason:
+            return "absent", f"{repo} carries no release for v{version}"
+        return "unknown", f"{repo} could not be asked about v{version}: {reason}"
+    try:
+        body = json.loads(proc.stdout or "{}")
+    except ValueError:
+        return "unknown", f"{repo}'s answer about v{version} was not JSON"
+    if not isinstance(body, dict):
+        return "unknown", f"{repo}'s answer about v{version} was not a release object"
+    name = body.get("tag_name") or f"v{version}"
+    assets = body.get("assets")
+    count = len(assets) if isinstance(assets, list) else 0
+    if body.get("draft") is True:
+        return "draft", (
+            f"{name} exists as a DRAFT release with {count} asset(s), so no host received it"
+        )
+    return "published", f"{name} is a published release with {count} asset(s)"
+
+
+def _already_published_reading(detail: str) -> str:
+    """The verdict for a version whose only carrier is a lightweight tag that published.
+
+    One sentence, used by both paths that can reach it, so the two cannot drift apart: the
+    empty-list branch (the tag is in this checkout) and the owed branch (the tag is on the
+    remote and this checkout has not fetched it).
+    """
+    return (
+        f"OK: nothing is owed - {detail}. Its tag is lightweight, which `verify-tag` would "
+        f"reject today, so it must not be pushed again: the version it carries has already "
+        f"reached hosts. Cut the next release with `git tag -a v<next> -m \"emrg v<next>\"`."
+    )
+
+
 def _stale_list_reading(declared: str, local_reading: str, detail: str) -> str:
     """The verdict for a checkout whose tag list is missing a tag the remote has."""
     return (
@@ -247,7 +326,7 @@ def _stale_list_reading(declared: str, local_reading: str, detail: str) -> str:
 def _print_remote_note(state: str, detail: str) -> None:
     """Say what the remote added to a verdict the checkout's own tags already reached."""
     if state == "lightweight":
-        print(f"note: {detail}, so it publishes nothing either -- a release is still owed.")
+        print(f"note: {detail}, so a push of it today would publish nothing.")
     elif state == "unknown":
         print(f"note: {detail}, so the verdict above is this checkout's tag list alone.")
 
@@ -279,13 +358,23 @@ def tags(root: Path) -> tuple[list[tuple[tuple[int, int, int], str]], list[str],
     * it matches `_RELEASE_TAG` - `build-release.yml` triggers on `tags: ["v*"]` and nothing
       else, so a `v`-less tag builds nothing;
     * it is **annotated**. The workflow's `verify-tag` job reads `object.type` from the API
-      and exits 1 unless it is `tag`, so a lightweight tag stops the run before any platform
-      builds and no release is published. This repository has already shipped one: `v0.2.97`
-      was lightweight while every release since `v0.2.94` is annotated, and the instruction
-      that produced it was the bare `git tag v<x.y.z>` (`tests/test_release_tag_form.py`
-      records the measurement). `%(objecttype)` answers the same question locally;
-    * therefore neither `v`-less nor lightweight can be what "carries" a version, and
-      counting either would answer `nothing is owed` for work that reached no host.
+      and exits 1 unless it is `tag`, so a lightweight tag pushed **today** stops the run
+      before any platform builds and no release is published. This repository has already
+      shipped one such failure: `v0.2.97` was lightweight while every release since `v0.2.94`
+      is annotated, and the instruction that produced it was the bare `git tag v<x.y.z>`
+      (`tests/test_release_tag_form.py` records the measurement). `%(objecttype)` answers
+      the same question locally;
+    * therefore a `v`-less tag can never be what "carries" a version. A **lightweight** tag
+      cannot be dismissed the same way, and this guarded against exactly that mistake:
+      `verify-tag` is younger than most of the tags it would reject, so "lightweight" says
+      what a push of it would do today and nothing about whether it already published.
+      Measured 2026-11-18 (`cyc20261118-151657`) on `8a4b40d2`: this repository carries 79
+      lightweight version-shaped tags, and **79 of 79 have a published release**, none a
+      draft -- `v0.2.0`, the first of them, published six assets on 2026-08-04. So a
+      lightweight tag that already published is a version that DID reach hosts, and calling
+      it "owed" would send a reader to publish the same release twice. The repository is
+      asked which case it is (`published_release`), and only where a lightweight tag is the
+      declared version's carrier.
 
     The buckets are kept apart because the remedies differ: a version-shaped tag missing its
     `v`, a version-shaped tag that is lightweight, and an unrelated name (`latest`) which is
@@ -365,9 +454,12 @@ def check(root: Path) -> int:
         if vless
         else ""
     )
+    # "would reject a push of one today", not "publish nothing": `verify-tag` is younger
+    # than these tags, and all 79 of this repository's lightweight tags did publish. The
+    # forward rule is the one this file measured, so it is the one it states.
     light_note = (
-        f", {len(lightweight)} lightweight tag(s) that verify-tag rejects and so publish "
-        f"nothing: {_name_list(lightweight)}"
+        f", {len(lightweight)} lightweight tag(s), which `verify-tag` would reject so a push "
+        f"of one publishes nothing today: {_name_list(lightweight)}"
         if lightweight
         else ""
     )
@@ -384,6 +476,18 @@ def check(root: Path) -> int:
             )
             return 2
         causes = []
+        # A lightweight tag is not automatically a tag that reached nobody: `verify-tag` is
+        # younger than the tags it would reject, and every lightweight tag this repository
+        # has ever had published a release (79 of 79, measured on `8a4b40d2`). The two
+        # states have opposite remedies -- re-tagging one that already published puts the
+        # same version out twice -- so the repository is asked which one this is, and only
+        # when a lightweight tag is the declared version's carrier.
+        released = released_detail = ""
+        if state == "lightweight" or f"v{declared}" in lightweight:
+            released, released_detail = published_release(root, declared)
+            if released == "published":
+                print(_already_published_reading(released_detail))
+                return 0
         if vless:
             causes.append(
                 f"the version-shaped tag(s) {_name_list(vless)} carry it, but "
@@ -391,11 +495,19 @@ def check(root: Path) -> int:
                 f"builds nothing and publishes nothing"
             )
         if lightweight:
-            causes.append(
-                f"the tag(s) {_name_list(lightweight)} carry it, but they are "
-                f"lightweight and `verify-tag` requires an annotated tag, so the run stops "
-                f"before any platform builds"
+            why = (
+                f"the tag(s) {_name_list(lightweight)} carry it, but they are lightweight, "
+                f"which `verify-tag` rejects, so a push of one publishes nothing today; "
+                f"publish it with an annotated tag: "
+                f"`git tag -a v{declared} -m \"emrg v{declared}\"`"
             )
+            if released == "absent":
+                why += f" -- and {released_detail}"
+            elif released == "draft":
+                why += f" -- and {released_detail}"
+            elif released == "unknown":
+                why += f", and whether one already published could not be asked: {released_detail}"
+            causes.append(why)
         carried = (" -- " + "; and ".join(causes)) if causes else ""
         print(
             f"A RELEASE IS OWED: the tree declares {declared} and no tag that publishes a "
@@ -451,6 +563,14 @@ def check(root: Path) -> int:
     if state == "present":
         print(_stale_list_reading(declared, f"the newest tag in it is {newest}", detail))
         return 2
+    if state == "lightweight":
+        # The same question the empty-list branch asks, on the path where this checkout has
+        # no tag for the declared version at all: the remote's lightweight tag may have
+        # published before `verify-tag` existed, and only the repository knows which.
+        released, released_detail = published_release(root, declared)
+        if released == "published":
+            print(_already_published_reading(released_detail))
+            return 0
     print(
         f"A RELEASE IS OWED: the tree declares {declared} and the newest tag is {newest} "
         f"-- {reach}, so that work has merged and reaches no host until it is published. "
