@@ -51,11 +51,11 @@ Exit codes, the family's contract:
        Reporting the second as the first, measured 2026-11-18 (`cyc20261118-102744`), sent a
        reader to `git tag -a v0.3.59` on a tree whose newest release was `v0.3.60`.
     2  not measurable: no version declaration could be read, the repository could not be
-       read at all (no `git`, not a work tree), or **this checkout's tag list may be
-       stale** -- the remote carries the version the tree declares, so the question was
-       never put to this checkout and neither answer follows from it. Never 0 -- a guard
-       that passes because it could not read its subject is the defect this one exists to
-       catch.
+       read at all (no `git`, not a work tree), or **this checkout's tag list understates the
+       repository** -- either it lacks the declared version or it holds that name as a
+       different object from the repository's, so the question was never put to this
+       checkout and neither answer follows from it. Never 0 -- a guard that passes because
+       it could not read its subject is the defect this one exists to catch.
 
 An empty tag list is a measurement **of the checkout**, and the checkout is not the
 repository. The two came apart on 2026-11-18 (`cyc20261118-113027`): this checkout's newest
@@ -63,9 +63,16 @@ tag was `v0.3.58` while the remote already carried `v0.3.59`, published as Lates
 assets, so `git tag --list` answered "nothing carries the declaration" about a version every
 host had. Worse than the wrong verdict was the remedy: it printed `git tag -a v0.3.59` and a
 push, and the first of those fails because the tag exists. A local tag list can only ever
-**understate** the repository -- it is missing tags, never holding ones the remote lacks --
-so the single state it cannot separate is "never tagged" from "not fetched". The remote is
-asked to separate them, and only there: every deliberate state changes, because a stale list
+**understate** the repository -- it is missing tags, never holding ones the remote lacks.
+
+That understating has two shapes, and they need different sentences. A checkout that holds
+**no tag of that name** has not fetched it, and fetching is the cure. A checkout that holds
+the name as a **different object** -- its own copy is a `commit` where the repository's is a
+`tag` -- is missing nothing, and no fetch replaces it: `git fetch` leaves an existing tag of
+that name in place, so the reader has to delete their copy before the list can be trusted.
+Both answer `rc 2`, because neither list answers whether a release is owed; only the
+explanation and the remedy differ (measured 2026-11-18, issue #2971). The remote is asked
+here and nowhere else: every deliberate state changes, because a list that understates
 cannot manufacture an `OK`, a "behind", or a lightweight near miss.
 
 Usage:
@@ -178,6 +185,22 @@ def _remote_of(root: Path) -> str | None:
         return None
     match = _REMOTE_URL.match(url)
     return match.group("repo") if match else None
+
+
+def _has_tag(root: Path, version: str) -> bool:
+    """Whether this checkout holds a tag named `v<version>`, of any object type.
+
+    The question `remote_tag_state`'s `present` answer cannot settle, and the one that decides
+    which of two messages is true: a checkout that holds the name as a `commit` is not missing
+    anything, while a checkout that holds nothing by that name is. `git rev-parse --verify`
+    answers for a name of any type and exits non-zero when there is none, so an unborn or odd
+    object is a `False` rather than an exception.
+    """
+    proc = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/tags/v{version}"],
+        cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    return proc.returncode == 0
 
 
 def remote_tag_state(root: Path, version: str) -> tuple[str, str]:
@@ -320,6 +343,25 @@ def _stale_list_reading(declared: str, local_reading: str, detail: str) -> str:
         f"is owed was never put to the repository. Refresh the tags with "
         f"`git fetch --tags origin` and read this again: neither `a release is owed` nor "
         f"`nothing is owed` follows from a tag list that cannot see the tag it is asking about."
+    )
+
+
+def _held_lightweight_reading(declared: str, local_kind: str, detail: str) -> str:
+    """The verdict for a checkout that **does** hold the name, as an object that cannot publish.
+
+    The other half of the same state `_stale_list_reading` answers, and a different fact: this
+    checkout holds `v<declared>`, but its copy is a `commit` where the repository's is a `tag`, so
+    the name is not missing and fetching again changes nothing -- `git fetch` does not replace a
+    tag that already exists. The blocker is the local object, and the message has to say so or the
+    reader is sent after a file they already have.
+    """
+    return (
+        f"NOT MEASURABLE FROM THIS CHECKOUT: this checkout holds v{declared} as a {local_kind} "
+        f"object, while {detail} -- the same name on two different objects, so this checkout's "
+        f"tag is not the repository's tag and neither list answers whether a release is owed. "
+        f"The local one has to go before the list can be trusted: "
+        f"`git tag -d v{declared} && git fetch --tags origin` replaces it with the repository's. "
+        f"(`git fetch` alone does not: it leaves an existing tag of that name in place.)"
     )
 
 
@@ -466,14 +508,22 @@ def check(root: Path) -> int:
     if not parsed:
         print(f"tags: none that would publish a release{light_note}{vless_note}{skipped_note}")
         # A checkout that has fetched nothing looks exactly like a repository that never
-        # tagged, so the remote answers before this branch speaks.
+        # tagged, so the remote answers before this branch speaks. And a checkout that *holds*
+        # the name as a lightweight tag is a third state again: the fetch is not its remedy,
+        # because a fetch never replaces a tag that already exists under that name.
         state, detail = remote_tag_state(root, declared)
         if state == "present":
-            print(
-                _stale_list_reading(
-                    declared, "no tag in this checkout would publish a release", detail
+            held_kind = _git(root, "cat-file", "-t", f"v{declared}").strip() if _has_tag(
+                root, declared
+            ) else ""
+            if held_kind:
+                print(_held_lightweight_reading(declared, held_kind, detail))
+            else:
+                print(
+                    _stale_list_reading(
+                        declared, "no tag in this checkout would publish a release", detail
+                    )
                 )
-            )
             return 2
         causes = []
         # A lightweight tag is not automatically a tag that reached nobody: `verify-tag` is
@@ -561,7 +611,13 @@ def check(root: Path) -> int:
     # lightweight near miss -- so the network is paid for here and nowhere else.
     state, detail = remote_tag_state(root, declared)
     if state == "present":
-        print(_stale_list_reading(declared, f"the newest tag in it is {newest}", detail))
+        held_kind = _git(root, "cat-file", "-t", f"v{declared}").strip() if _has_tag(
+            root, declared
+        ) else ""
+        if held_kind:
+            print(_held_lightweight_reading(declared, held_kind, detail))
+        else:
+            print(_stale_list_reading(declared, f"the newest tag in it is {newest}", detail))
         return 2
     if state == "lightweight":
         # The same question the empty-list branch asks, on the path where this checkout has

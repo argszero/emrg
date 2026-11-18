@@ -350,6 +350,67 @@ def test_a_stale_tag_list_is_not_a_release_owed(tmp_path, capsys, monkeypatch):
         f"this exact sentence on a published release is the fault being fixed:\n{out}")
 
 
+def test_a_tag_held_as_a_lightweight_object_is_not_called_missing(
+    tmp_path, capsys, monkeypatch
+):
+    """The checkout *has* the name; what it lacks is a copy of the repository's object.
+
+    Measured 2026-11-18 on master `f6e291d7` in a checkout whose `v0.3.60` is a lightweight
+    tag while the repository's is annotated: the guard answered "This checkout's tag list is
+    stale -- it is missing v0.3.60 ... Refresh the tags with `git fetch --tags origin`". Both
+    halves are wrong there. The name is not missing -- `git tag --list v0.3.60` prints it --
+    and a fetch of tags never replaces a tag that already exists under that name, so the
+    printed cure leaves the state exactly as it was. The reader is sent after a file they
+    already have.
+
+    The verdict stays `rc 2`: the two lists disagree about the name, so neither answer follows
+    from them. Only the explanation and the remedy were wrong.
+    """
+    mod = _load()
+    root = _repo(tmp_path / "held", "0.3.60", [], lightweight=["v0.3.60"])
+    _remote(
+        monkeypatch, mod, "present",
+        "the remote of argszero/emrg carries refs/tags/v0.3.60 as an annotated tag",
+    )
+
+    rc, out = _run(mod, root, capsys)
+
+    assert rc == 2, f"the two lists disagree, so neither answer follows:\n{out}"
+    assert "NOT MEASURABLE" in out, out
+    assert "missing v0.3.60" not in out, (
+        f"this checkout holds v0.3.60 -- calling it missing sends the reader after a file "
+        f"they already have:\n{out}")
+    assert "git tag -d v0.3.60" in out, (
+        f"the cure has to remove the local object that blocks the list:\n{out}")
+    assert "does not" in out and "fetch" in out, (
+        f"and it has to say why a bare fetch is not the cure:\n{out}")
+
+
+def test_a_checkout_holding_no_tag_of_that_name_still_reads_as_missing(
+    tmp_path, capsys, monkeypatch
+):
+    """The other direction, so the correction is not made by widening one sentence.
+
+    Same declared version, same remote answer -- and this checkout holds nothing named
+    `v0.3.60` at all. Here "it is missing" is true and the fetch is the right cure, so the
+    message must keep both.
+    """
+    mod = _load()
+    root = _repo(tmp_path / "absent-name", "0.3.60", ["v0.3.59"])
+    _remote(
+        monkeypatch, mod, "present",
+        "the remote of argszero/emrg carries refs/tags/v0.3.60 as an annotated tag",
+    )
+
+    rc, out = _run(mod, root, capsys)
+
+    assert rc == 2, out
+    assert "missing v0.3.60" in out, f"nothing here holds that name:\n{out}"
+    assert "git fetch --tags origin" in out, f"and the fetch is the cure:\n{out}"
+    assert "git tag -d" not in out, (
+        f"there is no local tag to delete, so offering that command would be a fiction:\n{out}")
+
+
 def test_a_version_the_remote_does_not_carry_is_still_owed(tmp_path, capsys, monkeypatch):
     """The case the tool exists for, and the fix must not soften it.
 
