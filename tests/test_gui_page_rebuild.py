@@ -14,7 +14,10 @@ What is pinned:
   left a fifth of a 1920px window empty on each side;
 * the classes the deleted left column and right panel were drawn with are gone from the
   stylesheets as well as from the components — a rule is not unmounted when its element
-  is, and a leftover class is the old page still shipping.
+  is, and a leftover class is the old page still shipping;
+* the sheets the entry imports **are** the sheets the renderer carries — every one of
+  them, in both directions, because a set that is only floored lets a stylesheet leave
+  it without a word.
 """
 
 from __future__ import annotations
@@ -63,6 +66,37 @@ def _unreadable_css_imports(text: str) -> list[str]:
     return missed
 
 
+def _css_naming_lines(text: str) -> list[str]:
+    """Entry lines that name a stylesheet in an `import`, in any spelling at all.
+
+    Deliberately looser than `IMPORT_CSS`: this is the **independent** count the matcher is
+    compared against, so it must not repeat the matcher's own assumptions. A line counts if
+    it starts an `import` and mentions a `.css`.
+    """
+    return [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip().startswith("import") and ".css" in line
+    ]
+
+
+def _shipped_sheets() -> set[Path]:
+    """Every stylesheet the renderer carries, as resolved paths; build output excluded.
+
+    The subject of this guard is the renderer's stylesheets, not the entry's import list.
+    The import list is how the bundle reaches them; a sheet that leaves it still ships in
+    the tree, and only a comparison against what is on disk can name that. `dist/` and
+    `node_modules/` are excluded because they are produced rather than written.
+    """
+    shipped: set[Path] = set()
+    for path in RENDERER.parent.rglob("*.css"):
+        parts = set(path.parts)
+        if "node_modules" in parts or "dist" in parts:
+            continue
+        shipped.add(path.resolve())
+    return shipped
+
+
 def _read_sheets() -> list[tuple[str, str]]:
     """Every stylesheet the bundle loads, found by reading the entry's own imports.
 
@@ -71,6 +105,12 @@ def _read_sheets() -> list[tuple[str, str]]:
     and left `css/layout.css` — the vanilla page's sheet, still imported, still shipping
     its rules for the deleted results panel — outside every assertion. The entry is the
     subject; the sheets are whatever it imports.
+
+    The set is held to the stylesheets the renderer carries, in **both** directions, and
+    not by a floor: with seven imports and a floor of six, one import could be deleted and
+    a deleted class written into the now-unscanned sheet while every assertion here stayed
+    green (measured 2026-11-18 on head `5b0f0be4`). A sheet the entry no longer imports is
+    named, and so is an import the renderer does not carry.
     """
     entry_text = ENTRY.read_text(encoding="utf-8")
     unreadable = _unreadable_css_imports(entry_text)
@@ -80,12 +120,34 @@ def _read_sheets() -> list[tuple[str, str]]:
     )
     imports = _css_imports(entry_text)
     # 入口一个 CSS 都没 import 会把这个模块变成一次空比较
-    assert len(imports) >= 6, f"{ENTRY.name} imports {len(imports)} stylesheet(s)"
-    sheets: list[tuple[str, str]] = []
-    for rel in imports:
-        path = (ENTRY.parent / rel).resolve()
+    # One fact, two readings: the matcher scans the whole text, the refusal checks line by
+    # line, and a matcher that loses `re.M` still matches every single line while `findall`
+    # over the whole entry anchors once and comes up short. The counts are compared here
+    # because the refusal alone cannot see that shape.
+    naming = _css_naming_lines(entry_text)
+    assert len(imports) == len(naming), (
+        f"{ENTRY.name} names a stylesheet on {len(naming)} line(s) but the matcher read "
+        f"{len(imports)}, so at least one sheet is outside the set:\n  " + "\n  ".join(naming)
+    )
+    assert imports, f"{ENTRY.name} imports no stylesheet at all"
+    paths = [(rel, (ENTRY.parent / rel).resolve()) for rel in imports]
+    for rel, path in paths:
         assert path.is_file(), f"{rel} is imported by {ENTRY.name} but does not exist"
-        sheets.append((rel, path.read_text(encoding="utf-8")))
+    imported = {path for _, path in paths}
+    shipped = _shipped_sheets()
+    unimported = sorted(shipped - imported)
+    assert unimported == [], (
+        "the renderer carries a stylesheet that nothing imports, so no assertion below "
+        "would scan it:\n  " + "\n  ".join(str(p) for p in unimported)
+    )
+    foreign = sorted(imported - shipped)
+    assert foreign == [], (
+        f"{ENTRY.name} imports a stylesheet the renderer does not carry:\n  "
+        + "\n  ".join(str(p) for p in foreign)
+    )
+    sheets: list[tuple[str, str]] = [
+        (rel, path.read_text(encoding="utf-8")) for rel, path in paths
+    ]
     # 一个空的样式表会让下面每条断言都通过：先把主体读出来
     for name, text in sheets:
         assert len(text) > 500, f"{name} read as {len(text)} characters"
@@ -181,3 +243,78 @@ def test_read_sheets_refuses_an_entry_it_cannot_read(tmp_path, monkeypatch) -> N
         _read_sheets()
     assert "cannot read" in str(refused.value)
     assert "../css/late.css" in str(refused.value)
+
+
+def test_a_stylesheet_the_entry_no_longer_imports_is_named(tmp_path, monkeypatch) -> None:
+    """Membership, not a floor: a sheet still on disk but no longer imported is an escape.
+
+    Measured on head `5b0f0be4`: deleting the `layout.css` import left six imports against a
+    floor of six, and writing `artifact-row` into that sheet left all six tests green. The
+    floor could not see the drop; this comparison names it.
+    """
+    module = sys.modules[__name__]
+    renderer = tmp_path / "renderer"
+    (renderer / "css").mkdir(parents=True, exist_ok=True)
+    (renderer / "src").mkdir(exist_ok=True)
+    for name in ("a.css", "b.css"):
+        (renderer / "css" / name).write_text("x" * 600, encoding="utf-8")
+    entry = renderer / "src" / "main.tsx"
+    entry.write_text('import "../css/a.css";\n', encoding="utf-8")
+    monkeypatch.setattr(module, "RENDERER", renderer / "src")
+    monkeypatch.setattr(module, "ENTRY", entry)
+
+    with pytest.raises(AssertionError) as refused:
+        _read_sheets()
+    assert "nothing imports" in str(refused.value)
+    assert "b.css" in str(refused.value)
+
+
+def test_a_matcher_that_reads_fewer_lines_than_name_a_sheet_is_caught(
+    tmp_path, monkeypatch
+) -> None:
+    """The two readings are compared, so a matcher that under-reads cannot pass unnoticed.
+
+    `_unreadable_css_imports` matches line by line, while the set comes from `findall` over
+    the whole text. Drop `re.M` from the matcher and the two separate: `^` still matches at
+    the start of each individual line, so the refusal stays empty, while `findall` over the
+    whole entry anchors once and comes up short. Only the count comparison notices.
+    """
+    module = sys.modules[__name__]
+    renderer = tmp_path / "renderer"
+    (renderer / "css").mkdir(parents=True, exist_ok=True)
+    (renderer / "src").mkdir(exist_ok=True)
+    for name in ("a.css", "b.css"):
+        (renderer / "css" / name).write_text("x" * 600, encoding="utf-8")
+    entry = renderer / "src" / "main.tsx"
+    entry.write_text('import "../css/a.css";\nimport "../css/b.css";\n', encoding="utf-8")
+    monkeypatch.setattr(module, "RENDERER", renderer / "src")
+    monkeypatch.setattr(module, "ENTRY", entry)
+    # The same matcher without re.M: right per line, short over the whole entry.
+    monkeypatch.setattr(
+        module,
+        "IMPORT_CSS",
+        re.compile(r"""^\s*import\s+(?:"([^"]+\.css)"|'([^']+\.css)');?\s*$"""),
+    )
+    text = entry.read_text(encoding="utf-8")
+    assert _unreadable_css_imports(text) == [], "per line, both imports still read"
+    assert len(_css_imports(text)) < len(_css_naming_lines(text)), (
+        "over the whole text the matcher must fall short of the lines that name a sheet, "
+        f"else there is nothing here to notice: {len(_css_imports(text))} vs "
+        f"{len(_css_naming_lines(text))}"
+    )
+
+    with pytest.raises(AssertionError) as refused:
+        _read_sheets()
+    assert "the matcher read" in str(refused.value)
+    assert "b.css" in str(refused.value)
+
+
+def test_the_renderer_carries_no_stylesheet_the_entry_does_not_import() -> None:
+    """The live tree: the imported set and the sheets on disk are the same set, both ways."""
+    imported = {
+        (ENTRY.parent / rel).resolve() for rel in _css_imports(ENTRY.read_text(encoding="utf-8"))
+    }
+    shipped = _shipped_sheets()
+    assert shipped - imported == set(), sorted(str(p) for p in shipped - imported)
+    assert imported - shipped == set(), sorted(str(p) for p in imported - shipped)
+    assert len(shipped) == 7, sorted(p.name for p in shipped)
