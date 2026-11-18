@@ -4,7 +4,9 @@ import { FileTree, type FileTreeProps } from "./FileTree";
 import {
   addArtifact,
   closeFileTab,
+  DEFAULT_WIDTH,
   detectLang,
+  MIN_WIDTH,
   isFileTabId,
   isHtmlPath,
   isImagePath,
@@ -53,6 +55,12 @@ export interface ResultPanelProps {
   openFile?: OpenFile;
   /** 测试可注入 i18n 文案 */
   t?: (key: string) => string;
+  /**
+   * 这一栏能长到多宽（issue #2959 item 4）。由 Shell 按窗口算出：窗口减去图标栏、
+   * 左栏、两条 6px 拖拽带与正文下限。缺省时退回本组件的旧算法，因为它们不同——
+   * 旧算法是窗口的 45%，那是「窗口的一半」，不是「正文还剩多少」。
+   */
+  maxWidth?: number;
 }
 
 const defaultT = (key: string): string => {
@@ -81,12 +89,16 @@ export function ResultPanel({
   readFile = noopRead,
   openFile = noopOpen,
   t = defaultT,
+  maxWidth,
 }: ResultPanelProps) {
   const { t: ctxT } = useI18n();
   const tr = (k: string) => t(k) === k && ctxT(k) !== k ? ctxT(k) : t(k);
   const [tabState, setTabState] = useState<PanelTabState>({ tabs: [], active: "artifacts" });
   const [artifactList, setArtifactList] = useState<ArtifactRec[]>(artifacts);
   const [width, setWidth] = useState<number>(() => storedWidth());
+  // `maxWidth` 的旧算法只在没人算出边界时使用（独立使用本组件的场景）
+  const ceilingOf = (fallbackWindow: number) =>
+    Math.max(MIN_WIDTH, maxWidth ?? Math.max(MIN_WIDTH, fallbackWindow * 0.45));
   const [collapsed, setCollapsed] = useState<boolean>(() => storedCollapsed());
 
   // 产物外部注入变化 → 合并登记（tool_finished 事件流）
@@ -121,26 +133,35 @@ export function ResultPanel({
 
   function onResizeStart(e: React.MouseEvent) {
     e.preventDefault();
+    // 拖拽期间指针离开这条 6px 也要保持 col-resize，并且不选字（issue #2959 item 4）
+    document.body.classList.add("col-resizing");
     const startX = e.clientX;
     const startWidth = width;
     // Track the dragged width in a local var so mouseup persists the final
     // value, not the render-time `width` the closure captured (review #1006:
     // pre-drag width was being saved on mouseup, snapping back on reload).
     let currentWidth = startWidth;
+    const ceiling = ceilingOf(window.innerWidth || 1200);
     const onMove = (ev: MouseEvent) => {
-      const w = Math.max(240, startWidth - (ev.clientX - startX));
-      const vw = (window.innerWidth || 1200) * 0.45;
-      const cw = Math.min(w, Math.max(240, vw));
+      const w = startWidth - (ev.clientX - startX);
+      const cw = Math.min(Math.max(MIN_WIDTH, w), ceiling);
       currentWidth = cw;
       setWidth(cw);
     };
     const onUp = () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
+      document.body.classList.remove("col-resizing");
       persistWidth(currentWidth);
     };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
+  }
+
+  /** 双击恢复默认宽度（与左栏的拖拽带同一个手势） */
+  function resetWidth() {
+    setWidth(DEFAULT_WIDTH);
+    persistWidth(DEFAULT_WIDTH);
   }
 
   const activeTabInfo = tabState.tabs.find((tb) => tb.path === (isFileTabId(activeTab) ? activeTab.slice(5) : ""));
@@ -255,7 +276,17 @@ export function ResultPanel({
         </>
       )}
 
-      <div className="result-resizer" data-testid="result-resizer" onMouseDown={onResizeStart} />
+      <div
+        className="result-resizer"
+        data-testid="result-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        onMouseDown={onResizeStart}
+        onDoubleClick={(e) => {
+          e.preventDefault();
+          resetWidth();
+        }}
+      />
     </div>
   );
 }

@@ -73,6 +73,8 @@ const api = {
   taskTemplateDelete: (payload) => ipcRenderer.invoke("emrg:taskTemplateDelete", payload),
   sendRant: (payload) => ipcRenderer.invoke("emrg:sendRant", payload),
   listRants: (payload) => ipcRenderer.invoke("emrg:listRants", payload),
+  // issue #2959 item 7: rant 面板的行内删除（与 agent / task 行同一个确认手势）
+  deleteRant: (payload) => ipcRenderer.invoke("emrg:deleteRant", payload),
   evolutionSummary: (payload) => ipcRenderer.invoke("emrg:evolutionSummary", payload),
   githubStatus: () => ipcRenderer.invoke("emrg:githubStatus"),
   githubConnect: (payload) => ipcRenderer.invoke("emrg:githubConnect", payload),

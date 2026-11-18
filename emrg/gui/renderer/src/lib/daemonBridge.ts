@@ -120,6 +120,27 @@ export interface DaemonAppState {
   /** 每会话 turn 开始时刻（epoch ms；rant 2026-09-02T10:36:26 daemon turn_start 权威广播） */
   turnStartBySid: Record<string, number>;
   /**
+   * Which round of the current turn each session is on, as the daemon reported it
+   * (issue #2959).
+   *
+   * Written only by `turn_progress` — the frame the daemon broadcasts at the top of
+   * every round — so the status band's counter is a reading of the daemon's loop, not
+   * a client's count of the frames it happened to receive. An absent key means no
+   * round has been reported for this turn, which the band renders as `—` rather than
+   * as round 1: a turn that has not started a round has not started one.
+   */
+  roundBySid: Record<string, number>;
+  /**
+   * Cumulative tokens this turn has spent, per the same frame (issue #2959).
+   *
+   * The daemon adds them up from the provider's own `usage` (`daemon._counted_tokens`)
+   * because a client cannot: a compaction, a retried round or another client's turn
+   * all move the total where only the loop can see it. Absent = not reported, which is
+   * not zero — a turn with no usage reported yet and a turn that spent nothing are
+   * different claims, and only the first one is what an absent key means.
+   */
+  turnTokensBySid: Record<string, number>;
+  /**
    * How many rewinds of each session this client has been told about (#2351).
    *
    * A rewind rewrites the session's persisted history, so every client showing that
@@ -374,6 +395,8 @@ export function createDaemonAppStore(): SnapshotStore<DaemonAppState> {
     openSessions: [],
     busyBySid: {},
     turnStartBySid: {},
+    roundBySid: {},
+    turnTokensBySid: {},
     rewoundBySid: {},
     disconnectedBySid: {},
     sandboxBySid: {},
@@ -795,15 +818,41 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
       case "turn_start": {
         // Rant 2026-09-02T10:36:26：daemon 权威 turn 开始（含后台演化/其他客户端
         // turn）——记 start 时刻并置 busy；计时基准与 TUI 同一来源。
+        //
+        // issue #2959：新一轮也是状态带那两个读数的起点。`turn_progress` 只写不清
+        // （理由在该 case 里），所以上一轮的数字会一直挂到本轮第一帧为止——那一瞬间
+        // 把上一轮的花费读成这一轮的，是这套读数唯一能骗人的窗口。这里连同 busy
+        // 一起清掉，两个读数于是和「这一轮开始了」同时归零。
         const startedAt = (data as { started_at?: number }).started_at;
         const k = KEY(sid);
         if (typeof startedAt === "number" && startedAt > 0) {
+          const { [k]: _dropRound, ...roundsRest } = store.get().roundBySid;
+          const { [k]: _dropTokens, ...tokensRest } = store.get().turnTokensBySid;
           store.update((s) => ({
             ...s,
             busyBySid: { ...s.busyBySid, [k]: true },
             turnStartBySid: { ...s.turnStartBySid, [k]: startedAt * 1000 },
+            roundBySid: roundsRest,
+            turnTokensBySid: tokensRest,
           }));
         }
+        break;
+      }
+      case "turn_progress": {
+        // Issue #2959：daemon 在每一轮开头广播的读数——第几轮 + 本轮累计 token。
+        // 只写不清：turn 结束时这两个数字是这一轮的结论，抹掉它只会让状态带在
+        // `turn_end` 到下一轮之间闪回 «—»；`turn_start` 才是新 turn 的起点，由它
+        // 重置（见上面的 `case "turn_start"`）。
+        const p = data as { round?: number; tokens?: number };
+        const k = KEY(sid);
+        const next: Partial<DaemonAppState> = {};
+        if (typeof p.round === "number" && Number.isFinite(p.round) && p.round > 0) {
+          next.roundBySid = { ...store.get().roundBySid, [k]: Math.floor(p.round) };
+        }
+        if (typeof p.tokens === "number" && Number.isFinite(p.tokens) && p.tokens >= 0) {
+          next.turnTokensBySid = { ...store.get().turnTokensBySid, [k]: p.tokens };
+        }
+        if (Object.keys(next).length > 0) store.update((s) => ({ ...s, ...next }));
         break;
       }
       case "turn_end": {

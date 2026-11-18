@@ -94,11 +94,13 @@ describe("词典完整性守卫（防漂移）", () => {
   // linkDialogTitle）随它们一起删除，附件入口新增 3 个 → 465 - 15 + 3 = 453。
   // 2026-11-17 issue #2924：打开会话对话框两步各加一个搜索框，新增
   // searchAgents / searchSessions / noMatches 3 个键 → 453 + 3 = 456。
-  it("zh/en 各 456 个 key 且完全对齐", () => {
+  // 2026-11-18 issue #2959：驾驶舱外壳（状态带 / 图标栏 / 会话搜索 / 面板搜索与
+  // 行内删除确认）新增 19 个键 → 456 + 19 = 475；rant 行删除的失败提示再加 1 个 → 476。
+  it("zh/en 各 476 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(456);
-    expect(enKeys.length).toBe(456);
+    expect(zhKeys.length).toBe(476);
+    expect(enKeys.length).toBe(476);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);

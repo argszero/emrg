@@ -1,0 +1,529 @@
+/* cockpit.css — the agent-cockpit shell (issue #2959).
+ *
+ * Loaded after shell.css so it wins where the two describe the same element. It holds
+ * four things the layout needs and nothing else: the 44px status band, the 60px rail,
+ * the drag surfaces between columns, and the overlay/list density the contract asks
+ * for. Column *widths* are not here — they are live numbers the shell writes inline,
+ * because a width a stylesheet owns is a width a drag cannot move.
+ */
+
+/* ── Density (item 10) ────────────────────────────────────────
+ * One step smaller than the chat-app shell, scoped to the cockpit so the vanilla
+ * stylesheets keep their own scale. Both the body and the composer read `--fs-body`,
+ * so the step is taken once, here, instead of in every rule. */
+.react-shell {
+  --fs-body: 14px;
+  --fs-secondary: 12px;
+  --lh-body: 1.55;
+}
+
+.react-shell .msg-body,
+.react-shell .composer textarea,
+.react-shell .composer-input {
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+}
+
+/* ── Status band (item 1) ───────────────────────────────────── */
+.status-band {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px 0 14px;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  font-size: var(--fs-secondary);
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.band-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.band-state i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-3);
+  display: inline-block;
+}
+
+.band-state.running i {
+  background: var(--accent);
+  animation: band-breathe 1.8s var(--ease) infinite;
+}
+
+@keyframes band-breathe {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 var(--accent-soft);
+  }
+  50% {
+    opacity: 0.55;
+    box-shadow: 0 0 0 4px var(--accent-soft);
+  }
+}
+
+.band-sep {
+  width: 1px;
+  height: 14px;
+  background: var(--border);
+  flex: none;
+}
+
+.band-item {
+  color: var(--text-2);
+}
+
+.band-item b,
+.band-mono {
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.band-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.band-conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-right: 6px;
+  font-size: var(--fs-aux);
+}
+
+.band-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.band-btn:hover {
+  background: var(--bg-soft);
+  color: var(--text-1);
+}
+
+.band-btn.on {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.band-btn svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* ── Icon rail (item 2) ─────────────────────────────────────── */
+.icon-rail {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 0 10px;
+  box-sizing: border-box;
+  border-right: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.rail-mark {
+  font-size: 15px;
+  color: var(--accent);
+  margin-bottom: 6px;
+  user-select: none;
+}
+
+.rail-spacer {
+  flex: 1;
+}
+
+.rail-item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.rail-item:hover {
+  background: var(--bg-soft);
+  color: var(--text-1);
+}
+
+.rail-item.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.rail-item svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* ── Column drag surfaces (item 4) ──────────────────────────── */
+.col-handle {
+  flex: none;
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+  z-index: 4;
+}
+
+.col-handle::after {
+  content: "";
+  position: absolute;
+  inset: 0 2px;
+  background: transparent;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.col-handle:hover::after,
+.col-handle.dragging::after {
+  background: var(--accent-soft);
+}
+
+/* The right column's own drag surface (`ResultPanel`'s `.result-resizer`). It existed
+ * as an element with no rule at all — a zero-width strip nothing could hit — so item
+ * 4's second handle is this rule rather than a second element on the same edge. */
+.result-resizer {
+  flex: none;
+  width: 6px;
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+  z-index: 4;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.result-resizer:hover,
+body.col-resizing .result-resizer {
+  background: var(--accent-soft);
+}
+
+/* A drag in flight owns the cursor everywhere, and nothing is selectable until it ends. */
+body.col-resizing,
+body.col-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+/* ── Left column: open sessions only (item 5) ───────────────── */
+.session-list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.session-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding: 0 10px;
+  border: none;
+  background: transparent;
+  color: var(--text-1);
+  font-size: var(--fs-secondary);
+  text-align: left;
+  cursor: pointer;
+  /* The rows are 26px, so the label must never wrap and change the height. */
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.session-row:hover {
+  background: var(--bg-soft);
+}
+
+.session-row.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.session-row .session-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A running session breathes, and its stopwatch is the daemon's own elapsed count. */
+.session-run-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--accent);
+  animation: band-breathe 1.8s var(--ease) infinite;
+}
+
+.session-stopwatch {
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-small);
+  color: var(--accent);
+  flex: none;
+}
+
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px 4px;
+  font-size: var(--fs-small);
+  color: var(--text-3);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* ── Search overlay (item 6) ────────────────────────────────── */
+.search-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 90px;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.search-card {
+  width: min(560px, calc(100vw - 48px));
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+.search-input {
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-1);
+  font-size: var(--fs-body);
+  padding: 12px 14px;
+  outline: none;
+  font-family: inherit;
+}
+
+.search-count {
+  position: absolute;
+  right: 24px;
+  top: 102px;
+  font-size: var(--fs-small);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.search-groups {
+  overflow-y: auto;
+  padding: 6px 0 10px;
+}
+
+.search-group-label {
+  padding: 8px 14px 2px;
+  font-size: var(--fs-small);
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.search-hit {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  padding: 5px 14px;
+  border: none;
+  background: transparent;
+  color: var(--text-1);
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.search-hit:hover {
+  background: var(--bg-soft);
+}
+
+.search-hit-title {
+  font-size: var(--fs-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-hit-meta {
+  font-size: var(--fs-small);
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-empty {
+  padding: 18px 14px;
+  color: var(--text-3);
+  font-size: var(--fs-secondary);
+}
+
+/* ── The three wide pages (item 7) ──────────────────────────── */
+.panel-search-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.panel-search {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+  color: var(--text-1);
+  font-size: var(--fs-secondary);
+  font-family: inherit;
+  outline: none;
+}
+
+.panel-search:focus {
+  border-color: var(--accent);
+}
+
+.panel-hits {
+  flex: none;
+  font-size: var(--fs-small);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Reflow (item 9): more columns when the window is wide, fewer when it is narrow.
+ * `auto-fill` plus a floor is the whole rule — a running agent is not floated up. */
+.agent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 6px;
+}
+
+.agent-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+  min-width: 0;
+}
+
+.agent-card .agent-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-secondary);
+}
+
+.agent-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: none;
+}
+
+/* Delete, confirmed in place (item 7): the second click lands on the same row. */
+.row-confirm {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.row-confirm-btn.danger {
+  color: var(--red);
+  border-color: var(--red);
+}
+
+/* The delete control on a rant row: outside the row's click-to-expand area, so asking
+ * "delete?" never also opens the rant the question is about. */
+.rant-col-actions {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ── Rant detail (item 8) ───────────────────────────────────── */
+.rant-detail-scroll {
+  max-height: 320px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+/* ── Upgrade banner (item 11) ───────────────────────────────────
+ * Moved out of its absolute pill and into the top of the body: it is a fact about the
+ * window, not a floating notification, and it must not cover the transcript it sits
+ * above. The `#upgrade-banner` id is kept so the existing tests and the vanilla
+ * stylesheet's other properties still find it. */
+#upgrade-banner {
+  position: relative;
+  top: auto;
+  left: auto;
+  transform: none;
+  max-width: none;
+  margin: 8px 16px 0;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  white-space: normal;
+  flex: none;
+}

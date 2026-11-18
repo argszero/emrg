@@ -72,6 +72,8 @@ const EXPECTED_INVOKE_METHODS = [
   "taskTemplateDelete",
   "sendRant",
   "listRants",
+  // issue #2959 item 7：rant 面板的行内删除（daemon 是账本唯一写入者，main 只转发）
+  "deleteRant",
   "evolutionSummary",
   "githubStatus",
   "githubConnect",
@@ -132,7 +134,7 @@ function parseApiBlock(block) {
 
 const api = parseApiBlock(extractApiBlock());
 
-test("window.emrg exposes the full contract (65 invoke + onEvent)", () => {
+test("window.emrg exposes the full contract (66 invoke + onEvent)", () => {
   // 60 invoke 方法全部存在（防误删/改名）
   for (const name of EXPECTED_INVOKE_METHODS) {
     assert.ok(api.invoke.has(name), `缺少 invoke 方法 ${name}`);

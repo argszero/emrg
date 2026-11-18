@@ -203,6 +203,34 @@ describe("createDaemonBridge", () => {
     expect(st.turnStartBySid["s1"]).toBe(1756785600500);
   });
 
+  it("issue #2959：turn_progress → 状态带的轮次与 token 读数（daemon 的循环，不是客户端的算术）", () => {
+    // 状态带的两个数字来自 daemon 每一轮开头的那一帧。这里钉四件事：缺席不是零、
+    // 帧按会话隔离、非数字字段不写、以及新一轮从零开始——最后一条是这套读数唯一
+    // 能骗人的窗口（上一轮的花费被读成本轮的）。
+    const { emit, bridge } = setup();
+    // ① 没报过就是没有：状态带据此渲染 «—»，而不是第 1 轮、0 token
+    expect(bridge.store.get().roundBySid["s1"]).toBeUndefined();
+    expect(bridge.store.get().turnTokensBySid["s1"]).toBeUndefined();
+
+    emit({ type: "turn_progress", data: { round: 1, tokens: 0 }, sid: "s1" });
+    emit({ type: "turn_progress", data: { round: 3, tokens: 4210 }, sid: "s1" });
+    const st = bridge.store.get();
+    expect(st.roundBySid["s1"]).toBe(3);
+    expect(st.turnTokensBySid["s1"]).toBe(4210);
+    // ② 帧是会话级的：s2 没收到就没有读数
+    expect(st.roundBySid["s2"]).toBeUndefined();
+
+    // ③ 一个形状不对的帧不得把计数抹成 NaN
+    emit({ type: "turn_progress", data: { round: "4", tokens: null }, sid: "s1" });
+    expect(bridge.store.get().roundBySid["s1"]).toBe(3);
+    expect(bridge.store.get().turnTokensBySid["s1"]).toBe(4210);
+
+    // ④ 新一轮开始 → 旧的两个数字归零
+    emit({ type: "turn_start", data: { started_at: 1756785600.5 }, sid: "s1" });
+    expect(bridge.store.get().roundBySid["s1"]).toBeUndefined();
+    expect(bridge.store.get().turnTokensBySid["s1"]).toBeUndefined();
+  });
+
   it("turn_end → 清 busy + turnStartBySid（幂等，与 done 重复不炸）", () => {
     const { emit, bridge } = setup();
     emit({ type: "turn_start", data: { started_at: 1756785600.5 }, sid: "s1" });

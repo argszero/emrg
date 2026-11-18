@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useI18n } from "../lib/i18n";
 import type { MarkdownRenderer } from "../lib/markdown";
+import { countLabel, filterByName, sortByName } from "../lib/cockpit";
 import { MarkdownText } from "./MarkdownText";
 import { SettingsPanel } from "./SettingsPanel";
 import { sessionRowView, type SessionRow } from "../lib/openSession";
@@ -21,14 +22,25 @@ import {
 } from "../lib/workspaceView";
 
 /**
- * WorkspaceView — Batch 3: 工作区面板（项目 / 任务 / Rant / 设置 视图切换）。
- * 从 vanilla `js/dialogs.js` 的列表区（renderProjectList / renderTaskList /
- * renderRantList）迁移为 React 组件（设计文档 §5 Batch 3 项 3）。
+ * WorkspaceView — the three wide pages (issue #2959 item 7).
  *
- * - 数据注入（不直接碰 daemon/IPC，Batch 5 接线）；类名与 vanilla CSS 一致
- *   （.workspace-view/.task-list/.task-row/.task-badge/.rant-head/.rant-col-*），Batch 5 复用
- * - 设置面板仅渲染 tab 壳（Batch 4 对话框迁移时填充）
- * - 项目/任务/Rant 数据经 props 注入；操作经回调上抛（onSelectSession / onTriggerTask / …）
+ * What changed from the read-only lists it used to be:
+ *
+ * - each page carries a search box with a `hits / total` count beside it, because a
+ *   list you can only scroll is a list you cannot find anything in;
+ * - agents and tasks are ordered by name, so the same installation reads the same way
+ *   twice — a *running* agent is not floated to the top, a dot marks it (item 9);
+ * - the agent list reflows into more columns on a wide window and fewer on a narrow
+ *   one, which is `grid-template-columns: repeat(auto-fill, …)`'s whole job;
+ * - a delete is confirmed **inside the row**: the first click turns the button into
+ *   the question, the second answers it, and nothing opens a window over the list the
+ *   host is reading.
+ *
+ * Rants are the exception on deletion, and it is deliberate: the daemon exposes no
+ * operation that removes a rant, and the ledger file has exactly one writer
+ * (`emrg/server/rants.py`). A GUI button with nothing behind it would be a control
+ * that looks alive and does nothing, which is the defect class this cockpit exists to
+ * remove — so the row offers none until the daemon can answer one.
  */
 export type WorkspaceViewId = "agents" | "tasks" | "rants" | "settings";
 
@@ -56,6 +68,8 @@ export interface WorkspaceViewProps {
   /** 任务面板「打开会话」（vanilla #924：switchSession 到任务所属会话，无 session_id 时按钮禁用） */
   onOpenSessionTask?: (task: TaskRec) => void;
   onNewRant?: () => void;
+  /** 删除一条 rant（issue #2959 item 7：三种行同样可删，确认在行内） */
+  onDeleteRant?: (rant: RantRec) => void;
   /**
    * markdown 渲染器（Shell 注入 createProdMarkdownRenderer，与 TranscriptView 同一实例）。
    * 缺省 ⇒ Rant 详情退回纯文本（vanilla else 分支语义），不白屏、不抛错。
@@ -90,12 +104,20 @@ export function WorkspaceView({
   onDeleteTask,
   onOpenSessionTask,
   onNewRant,
+  onDeleteRant,
   renderer,
 }: WorkspaceViewProps) {
   const { t } = useI18n();
   const [rantFilter, setRantFilter] = useState<RantFilter>("");
   const [expandedRant, setExpandedRant] = useState<string | null>(null);
   const [sessionsProject, setSessionsProject] = useState<AgentRec | null>(null);
+  // One query per page, so searching agents and then switching to tasks does not carry
+  // a filter the host cannot see. A single shared box would hide that state change.
+  const [agentQuery, setAgentQuery] = useState("");
+  const [taskQuery, setTaskQuery] = useState("");
+  const [rantQuery, setRantQuery] = useState("");
+  /** The row whose delete button is asking, `${kind}:${name}` — never a dialog. */
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   // 任务面板激活时每秒 tick → 倒计时/运行时长实时更新（vanilla taskPollTimer 行为；
   // 评审 #1008：静态快照导致运行时长恒 0s）
   const [, setTick] = useState(0);
@@ -106,15 +128,85 @@ export function WorkspaceView({
   }, [activeView]);
 
   const evolveAgents = useMemo(() => buildEvolveAgents(tasks), [tasks]);
+  /** Agents a running task belongs to — the green dot's only input (item 9). */
+  const runningAgents = useMemo(() => {
+    const s = new Set<string>();
+    for (const task of tasks) {
+      if (task.running) s.add(String(task.config?.agent || task.agent || ""));
+    }
+    return s;
+  }, [tasks]);
+  const agentRows = useMemo(
+    () => filterByName(sortByName(agents), agentQuery),
+    [agents, agentQuery],
+  );
+  const taskRows = useMemo(
+    () => filterByName(sortByName(tasks), taskQuery),
+    [tasks, taskQuery],
+  );
   const filteredRants = useMemo(
     () => (rantFilter ? rants.filter((r) => (r.status || "pending") === rantFilter) : rants),
     [rants, rantFilter],
+  );
+  // A rant has no `name`, so its searchable text is spelled out: the time it was filed,
+  // who it was filed against, and what it says. Searching a field the row does not have
+  // would answer zero for every query and look like a working box.
+  const rantRows = useMemo(
+    () =>
+      filterByName(
+        filteredRants,
+        rantQuery,
+        (r) => `${r.timestamp ?? ""} ${r.agent ?? ""} ${r.message ?? ""} ${r.progress ?? ""}`,
+      ),
+    [filteredRants, rantQuery],
   );
 
   function switchView(v: WorkspaceViewId) {
     // 离开项目会话子视图 → 重置回项目列表
     if (v !== "agents" && sessionsProject) setSessionsProject(null);
     onSwitch?.(v);
+  }
+
+  /** First click asks, second click answers — on the same row. */
+  function deleteControl(key: string, label: string, onConfirm: () => void) {
+    if (pendingDelete === key) {
+      return (
+        <span className="row-confirm" data-testid="row-confirm">
+          <button
+            type="button"
+            className="model-action-btn danger row-confirm-btn"
+            data-testid="row-delete-confirm"
+            title={label}
+            onClick={() => {
+              setPendingDelete(null);
+              onConfirm();
+            }}
+          >
+            {t("panels.deleteConfirm")}
+          </button>
+          <button
+            type="button"
+            className="model-action-btn"
+            data-testid="row-delete-cancel"
+            title={t("panels.cancel")}
+            onClick={() => setPendingDelete(null)}
+          >
+            {t("panels.cancel")}
+          </button>
+        </span>
+      );
+    }
+    return (
+      <button
+        type="button"
+        className="model-action-btn danger"
+        data-testid="row-delete"
+        title={label}
+        onClick={() => setPendingDelete(key)}
+      >
+        {label}
+      </button>
+    );
   }
 
   return (
@@ -133,16 +225,32 @@ export function WorkspaceView({
                 onSelect={(sid) => onSelectAgentSession?.(sessionsProject, sid)}
               />
             ) : (
-              <AgentList
-                agents={agents}
-                evolveAgents={evolveAgents}
-                t={t}
-                onViewSessions={(p) => {
-                  setSessionsProject(p);
-                  onViewAgentSessions?.(p);
-                }}
-                onDelete={onDeleteAgent}
-              />
+              <>
+                <SearchRow
+                  testId="agents"
+                  value={agentQuery}
+                  onChange={setAgentQuery}
+                  hits={agentRows.length}
+                  total={agents.length}
+                />
+                <AgentList
+                  agents={agentRows}
+                  evolveAgents={evolveAgents}
+                  runningAgents={runningAgents}
+                  t={t}
+                  onViewSessions={(p) => {
+                    setSessionsProject(p);
+                    onViewAgentSessions?.(p);
+                  }}
+                  renderDelete={(p) =>
+                    onDeleteAgent
+                      ? deleteControl(`agent:${p.name || p.path || ""}`, t("deleteAgent.delete"), () =>
+                          onDeleteAgent(p),
+                        )
+                      : null
+                  }
+                />
+              </>
             )}
             <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
               <button
@@ -163,13 +271,26 @@ export function WorkspaceView({
           <div className="workspace-view-body">
             <h2 className="workspace-view-title">{t("tasks.title")}</h2>
             <div className="hint" style={{ marginBottom: 6 }}>{t("settings.tasksHint")}</div>
+            <SearchRow
+              testId="tasks"
+              value={taskQuery}
+              onChange={setTaskQuery}
+              hits={taskRows.length}
+              total={tasks.length}
+            />
             <TaskList
-              tasks={tasks}
+              tasks={taskRows}
               t={t}
               onTrigger={onTriggerTask}
               onOpenSession={onOpenSessionTask}
               onEdit={onEditTask}
-              onDelete={onDeleteTask}
+              renderDelete={(task) =>
+                onDeleteTask
+                  ? deleteControl(`task:${task.name || ""}`, t("settings.taskDelete"), () =>
+                      onDeleteTask(task),
+                    )
+                  : null
+              }
             />
             <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
               <button type="button" className="btn btn-ghost" style={{ flex: 1 }} onClick={() => onEditTask?.({} as TaskRec)}>
@@ -197,6 +318,13 @@ export function WorkspaceView({
                 </button>
               ))}
             </div>
+            <SearchRow
+              testId="rants"
+              value={rantQuery}
+              onChange={setRantQuery}
+              hits={rantRows.length}
+              total={filteredRants.length}
+            />
             <div className="rant-head">
               <span className="rant-col-time">{t("rants.colTime")}</span>
               <span className="rant-col-agent">{t("rants.colAgent")}</span>
@@ -205,12 +333,19 @@ export function WorkspaceView({
               <span className="rant-col-content">{t("rants.colContent")}</span>
             </div>
             <RantList
-              rants={filteredRants}
+              rants={rantRows}
               filter={rantFilter}
               t={t}
               renderer={renderer}
               expanded={expandedRant}
               onToggle={(key) => setExpandedRant(expandedRant === key ? null : key)}
+              renderDelete={(r) =>
+                onDeleteRant
+                  ? deleteControl(`rant:${String(r.timestamp ?? "")}`, t("dlg.delete"), () =>
+                      onDeleteRant(r),
+                    )
+                  : null
+              }
             />
             <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
               <button type="button" className="btn btn-ghost" style={{ flex: 1 }} onClick={onNewRant}>
@@ -228,32 +363,69 @@ export function WorkspaceView({
   );
 }
 
+/* ── 搜索行（item 7：搜索框 + hits/total） ───────────────── */
+
+function SearchRow({
+  testId,
+  value,
+  onChange,
+  hits,
+  total,
+}: {
+  testId: string;
+  value: string;
+  onChange: (v: string) => void;
+  hits: number;
+  total: number;
+}) {
+  const { t } = useI18n();
+  return (
+    <div className="panel-search-row">
+      <input
+        className="panel-search"
+        data-testid={`${testId}-search`}
+        placeholder={t("panels.searchPlaceholder")}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <span className="panel-hits" data-testid={`${testId}-hits`}>
+        {countLabel(hits, total)}
+      </span>
+    </div>
+  );
+}
+
 /* ── 项目列表 ────────────────────────────────────────────── */
 
 function AgentList({
   agents,
   evolveAgents,
+  runningAgents,
   t,
   onViewSessions,
-  onDelete,
+  renderDelete,
 }: {
   agents: AgentRec[];
   evolveAgents: Set<string>;
+  runningAgents: Set<string>;
   t: (k: string, v?: Record<string, unknown>) => string;
   onViewSessions: (p: AgentRec) => void;
-  onDelete?: (p: AgentRec) => void;
+  renderDelete: (p: AgentRec) => React.ReactNode;
 }) {
   if (!agents.length) {
     return <div className="task-empty" data-testid="agents-empty">{t("agents.empty")}</div>;
   }
   return (
-    <div className="task-list" data-testid="agent-list">
+    <div className="task-list agent-grid" data-testid="agent-list">
       {agents.map((p) => {
         const name = p.name || p.path || "?";
         const hint = projectHint(p, t);
         return (
-          <div className="task-row" key={name} data-testid="agent-row">
-            <span className="task-name">{name}</span>
+          <div className="agent-card" key={name} data-testid="agent-row">
+            {runningAgents.has(name) ? (
+              <span className="agent-dot" data-testid="agent-running-dot" title={t("tasks.running")} />
+            ) : null}
+            <span className="agent-name" title={p.path || name}>{name}</span>
             {evolveAgents.has(name) && (
               <span className="task-badge" data-testid="agent-evolve-badge">⚡ {t("agents.autoEvolve")}</span>
             )}
@@ -267,16 +439,7 @@ function AgentList({
               >
                 {t("agents.viewSessions")}
               </button>
-              {onDelete && (
-                <button
-                  type="button"
-                  className="model-action-btn danger"
-                  title={t("deleteAgent.delete")}
-                  onClick={() => onDelete(p)}
-                >
-                  {t("deleteAgent.delete")}
-                </button>
-              )}
+              {renderDelete(p)}
             </span>
           </div>
         );
@@ -346,14 +509,14 @@ function TaskList({
   onTrigger,
   onOpenSession,
   onEdit,
-  onDelete,
+  renderDelete,
 }: {
   tasks: TaskRec[];
   t: (k: string, v?: Record<string, unknown>) => string;
   onTrigger?: (task: TaskRec) => void;
   onOpenSession?: (task: TaskRec) => void;
   onEdit?: (task: TaskRec) => void;
-  onDelete?: (task: TaskRec) => void;
+  renderDelete: (task: TaskRec) => React.ReactNode;
 }) {
   if (!tasks.length) {
     return <div className="task-empty" data-testid="tasks-empty">{t("settings.taskEmpty")}</div>;
@@ -413,11 +576,7 @@ function TaskList({
                   {t("settings.taskEdit")}
                 </button>
               )}
-              {onDelete && (
-                <button type="button" className="model-action-btn danger" title={t("settings.taskDelete")} onClick={() => onDelete(task)}>
-                  {t("settings.taskDelete")}
-                </button>
-              )}
+              {renderDelete(task)}
             </span>
           </div>
         );
@@ -435,6 +594,7 @@ function RantList({
   renderer,
   expanded,
   onToggle,
+  renderDelete,
 }: {
   rants: RantRec[];
   filter: RantFilter;
@@ -442,6 +602,7 @@ function RantList({
   renderer?: MarkdownRenderer;
   expanded: string | null;
   onToggle: (key: string) => void;
+  renderDelete: (rant: RantRec) => React.ReactNode;
 }) {
   if (!rants.length) {
     return (
@@ -470,32 +631,40 @@ function RantList({
               <span className={`task-badge ${st.badgeCls}`} data-testid="rant-status-badge">{st.text}</span>
               <span className="rant-col-progress">{r.progress ? String(r.progress) : "—"}</span>
               <span className="rant-col-content">{firstLine}</span>
+              {/* The delete control sits inside the row that toggles the detail, so its
+                  clicks must not also expand the row — otherwise asking "delete?" would
+                  open the rant the question is about. */}
+              <span className="rant-col-actions" onClick={(e) => e.stopPropagation()}>
+                {renderDelete(r)}
+              </span>
             </div>
             {isExpanded && (
               <div className="rant-detail" style={{ padding: "6px 8px", borderTop: "1px solid var(--border)", fontSize: "var(--fs-secondary)" }}>
                 <div className="rant-meta">{ts} · {r.agent || "—"} · {st.text}</div>
-                <div className="rant-section">
-                  <div className="rant-section-label">{t("rants.colContent")}</div>
-                  {/* markdown 渲染（rant 2026-09-30T09:06:16 / #1763）：preprocessRantMarkdown 的
-                      #### 层次必须经渲染器才成立；无渲染器时退回纯文本（vanilla else 分支）。 */}
-                  <div className="msg-body rant-md" data-testid="rant-content">
-                    {renderer ? (
-                      <MarkdownText
-                        text={preprocessRantMarkdown(r.message)}
-                        md={renderer}
-                        stripMark={false}
-                        className="rant-md-html"
-                        plainClassName="rant-md-plain"
-                      />
-                    ) : (
-                      preprocessRantMarkdown(r.message)
-                    )}
+                {/* Markdown, then a box that scrolls rather than growing the page
+                    (item 8): a long rant used to push everything below it off screen. */}
+                <div className="rant-detail-scroll" data-testid="rant-detail-scroll">
+                  <div className="rant-section">
+                    <div className="rant-section-label">{t("rants.colContent")}</div>
+                    <div className="msg-body rant-md" data-testid="rant-content">
+                      {renderer ? (
+                        <MarkdownText
+                          text={preprocessRantMarkdown(r.message)}
+                          md={renderer}
+                          stripMark={false}
+                          className="rant-md-html"
+                          plainClassName="rant-md-plain"
+                        />
+                      ) : (
+                        preprocessRantMarkdown(r.message)
+                      )}
+                    </div>
                   </div>
-                </div>
-                <div className="rant-section">
-                  <div className="rant-section-label">{t("rants.colProgress")}</div>
-                  <div className="rant-progress" data-testid="rant-progress">
-                    {r.progress ? String(r.progress) : t("rants.noProgress")}
+                  <div className="rant-section">
+                    <div className="rant-section-label">{t("rants.colProgress")}</div>
+                    <div className="rant-progress" data-testid="rant-progress">
+                      {r.progress ? String(r.progress) : t("rants.noProgress")}
+                    </div>
                   </div>
                 </div>
               </div>

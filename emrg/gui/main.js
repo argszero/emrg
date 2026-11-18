@@ -1086,6 +1086,21 @@ vision = false
       return frame.rants || [];
     });
 
+    ipcMain.handle("emrg:deleteRant", async (_e, { timestamp } = {}) => {
+      // issue #2959 item 7：rant 行删除。daemon 是账本的唯一写入者，这里只转发时间戳
+      // 并回报它的判定——`ok: false`（没有这一行）必须传回渲染层，否则界面会把一次
+      // 什么都没删的点击显示成已删除。
+      if (typeof timestamp !== "string" || !timestamp.trim()) {
+        throw new Error("invalid rant timestamp");
+      }
+      const frame = await requireConn().sendCommandAndWait(
+        "delete_rant",
+        { timestamp: timestamp.trim() },
+        5000,
+      );
+      return { ok: frame.ok === true, notice: frame.notice || "" };
+    });
+
     ipcMain.handle("emrg:sendRant", async (_e, { message, agent = "" } = {}) => {
       // GUI / 指令 P4：/rant — 提交反馈到演化系统（daemon rant 协议，字段序与 rants.jsonl 一致）
       if (typeof message !== "string" || !message.trim()) throw new Error("invalid rant message");
