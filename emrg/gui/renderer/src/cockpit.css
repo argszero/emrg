@@ -225,23 +225,9 @@
   background: var(--accent-soft);
 }
 
-/* The right column's own drag surface (`ResultPanel`'s `.result-resizer`). It existed
- * as an element with no rule at all — a zero-width strip nothing could hit — so item
- * 4's second handle is this rule rather than a second element on the same edge. */
-.result-resizer {
-  flex: none;
-  width: 6px;
-  cursor: col-resize;
-  background: transparent;
-  position: relative;
-  z-index: 4;
-  transition: background var(--dur-fast) var(--ease);
-}
-
-.result-resizer:hover,
-body.col-resizing .result-resizer {
-  background: var(--accent-soft);
-}
+/* Both columns use `.col-handle` (issue #2969): the right column's drag surface used to
+ * be the results panel's own element, which made the panel the owner of the edge
+ * instead of the skeleton. One surface, two sides, one rule. */
 
 /* A drag in flight owns the cursor everywhere, and nothing is selectable until it ends. */
 body.col-resizing,
@@ -308,15 +294,193 @@ body.col-resizing * {
   flex: none;
 }
 
-.sidebar-head {
+/* The session column's header: one row, `Open N` and the two ways in (issue #2969).
+ * No section label — there is one section, and a label above a single list is the
+ * two-level grouping this column used to have. */
+.session-col {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.session-col-head {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 10px 4px;
+  height: 30px;
+  padding: 0 8px 0 10px;
+  flex: none;
+  border-bottom: 1px solid var(--border);
+}
+
+.session-col-count {
+  flex: 1;
   font-size: var(--fs-small);
   color: var(--text-3);
   letter-spacing: 0.04em;
   text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-col-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.session-col-btn {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  padding: 0;
+}
+
+.session-col-btn:hover {
+  background: var(--bg-soft);
+  color: var(--text-1);
+}
+
+.session-col-btn svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* ── The inspector column (item: three tabs) ────────────────── */
+.inspector {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  background: var(--bg-panel);
+}
+
+.inspector-tabbar {
+  display: flex;
+  align-items: stretch;
+  height: 30px;
+  flex: none;
+  border-bottom: 1px solid var(--border);
+}
+
+.inspector-tab {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--text-3);
+  font-size: var(--fs-small);
+  cursor: pointer;
+  padding: 0 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-bottom: 2px solid transparent;
+}
+
+.inspector-tab:hover {
+  color: var(--text-1);
+}
+
+.inspector-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.inspector-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.inspector-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.inspector-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 22px;
+  padding: 0 10px;
+  font-size: var(--fs-small);
+  color: var(--text-1);
+}
+
+.inspector-row-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inspector-row-meta {
+  flex: none;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.inspector-empty {
+  margin: 6px 10px;
+  font-size: var(--fs-small);
+  color: var(--text-3);
+}
+
+.inspector-memory {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.inspector-door {
+  margin: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-soft);
+  color: var(--text-1);
+  font-size: var(--fs-small);
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.inspector-door:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* The model lives here now that the band carries only what moves (issue #2969). */
+.conn-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--fs-small);
+  color: var(--text-3);
+  max-width: 200px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.conn-chip .conn-vision {
+  font-size: var(--fs-small);
+  color: var(--text-3);
 }
 
 /* ── Search overlay (item 6) ────────────────────────────────── */

@@ -95,12 +95,14 @@ describe("词典完整性守卫（防漂移）", () => {
   // 2026-11-17 issue #2924：打开会话对话框两步各加一个搜索框，新增
   // searchAgents / searchSessions / noMatches 3 个键 → 453 + 3 = 456。
   // 2026-11-18 issue #2959：驾驶舱外壳（状态带 / 图标栏 / 会话搜索 / 面板搜索与
-  // 行内删除确认）新增 19 个键 → 456 + 19 = 475；rant 行删除的失败提示再加 1 个 → 476。
-  it("zh/en 各 476 个 key 且完全对齐", () => {
+  // 行内删除确认）新增 19 个键 → 456 + 19 = 475；rant 行删除的失败提示再加 1 个 → 476；
+  // 检查栏三个 tab 与其空态 +7；旧「打开的会话」分组标签 -1；旧结果面板的 result.* 12 个随
+  // 组件一起删 → 476 + 7 - 1 - 12 = 469（issue #2969）。
+  it("zh/en 各 469 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(476);
-    expect(enKeys.length).toBe(476);
+    expect(zhKeys.length).toBe(469);
+    expect(enKeys.length).toBe(469);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);

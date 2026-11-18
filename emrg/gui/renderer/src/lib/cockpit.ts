@@ -29,19 +29,23 @@ export const RAIL_WIDTH = 60;
 /** A resize handle is 6px of drag surface between two columns. */
 export const HANDLE_WIDTH = 6;
 
-export const LEFT_COLUMN_DEFAULT = 264;
+/** The session column's written width, and the narrowest it may be dragged. */
+export const LEFT_COLUMN_DEFAULT = 218;
 export const LEFT_COLUMN_MIN = 180;
-export const RIGHT_COLUMN_DEFAULT = 280;
-export const RIGHT_COLUMN_MIN = 240;
+/** The inspector column's written width, and the narrowest it may be dragged. */
+export const RIGHT_COLUMN_DEFAULT = 262;
+export const RIGHT_COLUMN_MIN = 220;
 
 /**
- * What the body may never be squeezed below.
+ * What the body may never be squeezed below: nothing.
  *
- * A window narrower than this cannot hold rail + body + handles, and the answer is
- * `clampWidth`'s: the side column keeps its minimum and the body scrolls, because a
- * body that is 0px wide hides the thing the window exists to show.
+ * The two columns are the host's to size, and a drag to the window's edge is a
+ * legitimate thing to want (issue #2969). The floor that keeps them retrievable is
+ * each column's own minimum, not a reservation taken out of the body: a body reduced
+ * to nothing is a state the host can drag back out of, and a body that silently refuses
+ * to shrink leaves a drag that does nothing for no stated reason.
  */
-export const BODY_MIN = 320;
+export const BODY_MIN = 0;
 
 /** Width persistence keys. One per column, so closing one never forgets the other. */
 export const LS_LEFT_WIDTH = "emrg.cockpit.leftWidth";

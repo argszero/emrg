@@ -590,24 +590,19 @@ def test_a_bare_render_guesses_no_dialect():
 # ── the renderer's half (the cross-language boundary) ────────────────────
 
 
-def test_the_renderer_knows_every_dialect():
+def test_the_renderer_keeps_every_dialects_phrases():
     """Textual, and honestly so: TypeScript cannot import the Python roster.
 
-    Two things are checked, both of which were real defects of this phase: the
-    renderer's own name list carries every dialect, and each dialect has its
+    What is checked here is the half that still has a subject: each dialect has its
     translated phrases in *both* locales — a missing phrase renders the raw key
-    (``tool.pwsh.doing``) in the tool card, which is what a Windows host would
-    have seen.
+    (``tool.pwsh.doing``) in the tool card, which is what a Windows host would have
+    seen. The other half, the renderer's own declarative copy of this roster, died with
+    the module that held it (issue #2969): its only reader was the results panel, so a
+    second roster would now be a copy kept in step by hand for nobody. The Python
+    roster is the only one, and it is the one the daemon gates on.
     """
-    result_panel = (REPO_ROOT / "emrg/gui/renderer/src/lib/resultPanel.ts").read_text(
-        encoding="utf-8"
-    )
     i18n = (REPO_ROOT / "emrg/gui/renderer/src/lib/i18n-dicts.ts").read_text(encoding="utf-8")
-    roster_line = next(
-        line for line in result_panel.splitlines() if line.startswith("export const SHELL_TOOL_NAMES")
-    )
     for name in sorted(SHELL_TOOL_NAMES):
-        assert f'"{name}"' in roster_line, f"the renderer's roster is missing {name}"
         for suffix in ("doing", "done"):
             key = f'"tool.{name}.{suffix}"'
             assert i18n.count(key) == 2, (
@@ -616,11 +611,27 @@ def test_the_renderer_knows_every_dialect():
 
 
 def test_the_renderer_does_not_hardcode_one_dialect():
-    """The path extractor reads the roster; a literal is how pwsh lost its paths."""
-    result_panel = (REPO_ROOT / "emrg/gui/renderer/src/lib/resultPanel.ts").read_text(
-        encoding="utf-8"
+    """A literal naming one dialect is how pwsh lost its paths.
+
+    It used to pin one module's path extractor, which read the roster. That module is
+    gone (issue #2969), and the property is wider than it was: any component may branch
+    on a tool name, so the assertion runs over every renderer source instead of the one
+    file that once held the defect.
+    """
+    renderer = REPO_ROOT / "emrg/gui/renderer/src"
+    sources = sorted(
+        p for p in renderer.rglob("*")
+        if p.suffix in (".ts", ".tsx") and ".test." not in p.name
     )
-    assert 'toolName === "bash"' not in result_panel
+    # 一个空集合会让这条断言什么都放过，那不是一次测量
+    assert len(sources) > 20, f"only {len(sources)} renderer sources found"
+    offenders = [
+        str(p.relative_to(REPO_ROOT))
+        for p in sources
+        if '=== "bash"' in p.read_text(encoding="utf-8")
+        or '!== "bash"' in p.read_text(encoding="utf-8")
+    ]
+    assert offenders == [], f"a single dialect is hardcoded in {offenders}"
 
 
 # ── the twins agree ──────────────────────────────────────────────────────
