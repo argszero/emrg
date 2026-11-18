@@ -442,3 +442,138 @@ def test_a_settled_tree_never_asks_the_remote(tmp_path, capsys, monkeypatch):
 
     assert rc == 0, out
     assert "nothing is owed" in out, out
+
+
+def _release(monkeypatch, mod, state: str, detail: str = "the repository answered") -> None:
+    """Pin what the repository says about a published release, without the network."""
+    monkeypatch.setattr(mod, "published_release", lambda root, version: (state, detail))
+
+
+class _Answer:
+    """What `subprocess.run` returns, in the three fields `published_release` reads."""
+
+    def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_a_lightweight_tag_that_already_published_owes_nothing(tmp_path, capsys, monkeypatch):
+    """The state this repository is actually in, 79 times over.
+
+    Measured 2026-11-18 (`cyc20261118-151657`) on `8a4b40d2`: every one of this checkout's
+    79 lightweight version-shaped tags has a published release, because `verify-tag` is
+    younger than they are. A guard that reads "lightweight" as "reached nobody" therefore
+    told a reader to re-cut a release that hosts already have, which publishes the same
+    version twice. The tag is still not one to push again -- the answer says so.
+    """
+    mod = _load()
+    root = _repo(tmp_path / "light-published", "0.3.59", [], lightweight=["v0.3.59"])
+    _remote(monkeypatch, mod, "lightweight", "the remote carries refs/tags/v0.3.59 as a commit")
+    _release(monkeypatch, mod, "published", "v0.3.59 is a published release with 11 asset(s)")
+
+    rc, out = _run(mod, root, capsys)
+
+    assert rc == 0, f"a version that already published is not owed again:\n{out}"
+    assert "nothing is owed" in out, out
+    assert "11 asset(s)" in out, f"the reading it rests on has to be visible:\n{out}"
+    assert "must not be pushed again" in out, f"the remedy is what not to do:\n{out}"
+
+
+def test_a_lightweight_tag_with_no_release_still_owes_it(tmp_path, capsys, monkeypatch):
+    """The other direction, and the one `verify-tag` was added for: no release, still owed."""
+    mod = _load()
+    root = _repo(tmp_path / "light-unpublished", "0.3.59", [], lightweight=["v0.3.59"])
+    _remote(monkeypatch, mod, "lightweight", "the remote carries refs/tags/v0.3.59 as a commit")
+    _release(monkeypatch, mod, "absent", "argszero/emrg carries no release for v0.3.59")
+
+    rc, out = _run(mod, root, capsys)
+
+    assert rc == 1, f"a lightweight tag with no release carries the version to nobody:\n{out}"
+    assert "A RELEASE IS OWED" in out, out
+    assert "no release for v0.3.59" in out, f"the absent release is the measurement:\n{out}"
+    assert "annotated" in out or "`git tag -a" in out, f"the cure is an annotated tag:\n{out}"
+
+
+def test_a_draft_release_has_not_reached_hosts(tmp_path, capsys, monkeypatch):
+    """A draft is a release object that no host has downloaded, so the work is still owed."""
+    mod = _load()
+    root = _repo(tmp_path / "light-draft", "0.3.59", [], lightweight=["v0.3.59"])
+    _remote(monkeypatch, mod, "lightweight", "the remote carries refs/tags/v0.3.59 as a commit")
+    _release(
+        monkeypatch, mod, "draft", "v0.3.59 exists as a DRAFT release with 3 asset(s)"
+    )
+
+    rc, out = _run(mod, root, capsys)
+
+    assert rc == 1, out
+    assert "A RELEASE IS OWED" in out, out
+    assert "DRAFT" in out, f"a draft is named as why it does not count:\n{out}"
+
+
+def test_the_lightweight_count_does_not_claim_they_published_nothing(tmp_path, capsys):
+    """The sentence this file shipped, and the correction.
+
+    It read "79 lightweight tag(s) that verify-tag rejects and so publish nothing", which was
+    false 79 times out of 79. `verify-tag` governs a push made **now**, so that is what the
+    line says; the past is not a fact this file measured per tag and must not be asserted.
+    """
+    mod = _load()
+    root = _repo(tmp_path / "count", "0.3.59", ["v0.3.58"], lightweight=["v0.3.57"])
+
+    rc, out = _run(mod, root, capsys)
+
+    assert "publishes nothing today" in out, f"the forward rule is the one stated:\n{out}"
+    assert "so publish nothing" not in out, (
+        f"the past tense claim was measured false for every lightweight tag this repository "
+        f"has, so it must not be printed:\n{out}"
+    )
+
+
+def test_published_release_reads_the_repository_both_ways(tmp_path, monkeypatch):
+    """The lookup itself, driven at its own seam, one shape at a time.
+
+    Stubbing `published_release` in the tests above keeps them about the verdict; this one
+    keeps the verdict's *evidence* from being a fiction, by exercising the four answers the
+    repository can give. A reading that only ever returned one of them would satisfy the
+    tests above while meaning nothing.
+    """
+    mod = _load()
+    root = tmp_path / "asks"
+    root.mkdir()
+    monkeypatch.setattr(mod, "_remote_of", lambda r: "argszero/emrg")
+
+    cases = {
+        "published": (
+            _Answer(0, '{"tag_name": "v0.3.60", "draft": false, "assets": [{}, {}, {}]}'),
+            "published",
+        ),
+        "draft": (
+            _Answer(0, '{"tag_name": "v0.3.60", "draft": true, "assets": [{}]}'),
+            "draft",
+        ),
+        "absent": (_Answer(1, "", "gh: Not Found (HTTP 404)"), "absent"),
+        "refused": (_Answer(1, "", "gh: API rate limit exceeded (HTTP 403)"), "unknown"),
+        "not json": (_Answer(0, "<html>not a release</html>"), "unknown"),
+    }
+    for name, (answer, expected) in cases.items():
+        monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: answer)
+        state, detail = mod.published_release(root, "0.3.60")
+        assert state == expected, f"{name}: expected {expected}, got {state} ({detail})"
+        assert detail, f"{name}: a reading with no detail cannot be acted on"
+
+
+def test_a_repository_that_cannot_be_asked_leaves_the_verdict_alone(
+    tmp_path, capsys, monkeypatch
+):
+    """No remote means no answer, and the local verdict stands rather than becoming a pass."""
+    mod = _load()
+    root = _repo(tmp_path / "light-offline", "0.3.59", [], lightweight=["v0.3.59"])
+    _remote(monkeypatch, mod, "lightweight", "the remote carries refs/tags/v0.3.59 as a commit")
+    _release(monkeypatch, mod, "unknown", "this checkout's `origin` names no GitHub repository")
+
+    rc, out = _run(mod, root, capsys)
+
+    assert rc == 1, f"an unaskable repository must not turn into `nothing is owed`:\n{out}"
+    assert "A RELEASE IS OWED" in out, out
+    assert "could not be asked" in out, out
