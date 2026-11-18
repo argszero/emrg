@@ -436,6 +436,59 @@ body.col-resizing * {
   text-overflow: ellipsis;
 }
 
+/* The row and its close affordance are two buttons side by side, never one nested in
+ * the other: a button inside a button is invalid HTML, and turning the row into a div
+ * would change what every `open-session-item` assertion means. The wrapper therefore
+ * owns the row's height, so adding the × cannot change the list's rhythm. */
+.session-row-wrap {
+  display: flex;
+  align-items: center;
+  height: 26px;
+}
+
+.session-row-wrap .session-row {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Out of sight until the row is hovered or the button is focused: this column is a
+ * list of sessions first, and a wall of × marks on every row is not what it is for.
+ * Touch and keyboard still reach it, through focus and through the button being
+ * focusable without being visible. */
+.session-row-close {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  opacity: 0;
+}
+
+.session-row-close svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.session-row-wrap:hover .session-row-close,
+.session-row-close:focus-visible {
+  opacity: 1;
+}
+
+.session-row-close:hover {
+  background: var(--bg-1);
+  color: var(--text-1);
+}
+
 /* A running session breathes, and its stopwatch is the daemon's own elapsed count. */
 .session-run-dot {
   width: 6px;
