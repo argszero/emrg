@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from "react";
 import { useI18n } from "../lib/i18n";
 import { useSnapshotStore } from "../hooks/useSnapshotStore";
 import { useDaemonBridge } from "./DaemonBridgeProvider";
@@ -10,7 +10,7 @@ import { TaskFormDialog, type TaskFormPayload } from "./TaskFormDialog";
 import { RantDialog } from "./RantDialog";
 import type { AgentRec, RantRec, TaskRec } from "../lib/workspaceView";
 import type { SessionRow } from "../lib/openSession";
-import { Sidebar } from "./Sidebar";
+import { SessionColumn } from "./SessionColumn";
 import { IconRail } from "./IconRail";
 import { StatusBand } from "./StatusBand";
 import { SearchOverlay } from "./SearchOverlay";
@@ -20,6 +20,7 @@ import {
   LEFT_COLUMN_DEFAULT,
   LEFT_COLUMN_MIN,
   LS_LEFT_WIDTH,
+  LS_RIGHT_WIDTH,
   RAIL_WIDTH,
   RIGHT_COLUMN_DEFAULT,
   RIGHT_COLUMN_MIN,
@@ -30,7 +31,8 @@ import {
   storedColumnWidth,
   type SidebarViewId,
 } from "../lib/cockpit";
-import { ResultPanel } from "./ResultPanel";
+import { InspectorPanel } from "./InspectorPanel";
+import { turnActions, turnFiles } from "../lib/inspector";
 import { WorkspaceView, type WorkspaceViewId } from "./WorkspaceView";
 import { TranscriptView } from "./TranscriptView";
 import { Composer, type CommandRouting } from "./Composer";
@@ -47,7 +49,16 @@ import {
 import { replayHistoryRecords, replayHistoryRecordsPrepend, type HistoryRecord } from "../lib/historyReplay";
 
 /**
- * Shell — React 布局（Batch 0 骨架 + Batch 3 Sidebar/ResultPanel/WorkspaceView
+ * Shell — the page's five sections (issue #2969).
+ *
+ * 横向五段：IconRail(60) → 会话栏(218) → 拖拉把手(6) → 正文(flex:1, min-width:0) →
+ * 拖拉把手(6) → 检查栏(262)。两栏的宽度与开合都住在这里：一个会卸载的组件记不住
+ * 自己的宽度，而拖动之所以能移动宽度，正是因为宽度写在行内而不是样式表里。
+ *
+ * 旧的 Sidebar（分组 + 历史列表）与旧的 ResultPanel（自带 resizer / 产物 tab /
+ * 英文空态）没有兼容层，整块删除；新做的东西只挂在这套骨架上。
+ *
+ * 早期 Batch 备注（Sidebar/ResultPanel 的接线）：
  * + Batch 5 slice 3 核心聊天回路接线 + slice 4 对话框路由）。
  *
  * Batch 5 slice 3：把 daemon 实时数据接到聊天回路——
@@ -147,6 +158,7 @@ export function Shell() {
   // inline (never in a stylesheet), which is what makes a drag able to move it, and it
   // is remembered under one key per column so closing one never forgets the other.
   const [leftWidth, setLeftWidth] = useState(() => storedColumnWidth(LS_LEFT_WIDTH, LEFT_COLUMN_DEFAULT));
+  const [rightWidth, setRightWidth] = useState(() => storedColumnWidth(LS_RIGHT_WIDTH, RIGHT_COLUMN_DEFAULT));
   const [leftOpen, setLeftOpen] = useState(true);
   const [rightOpen, setRightOpen] = useState(true);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -530,6 +542,19 @@ export function Shell() {
   const round = activeSid ? (appState.roundBySid[activeSid] ?? null) : null;
   const turnTokens = activeSid ? (appState.turnTokensBySid[activeSid] ?? null) : null;
 
+  /**
+   * What the inspector's first two tabs read: this turn's tool calls and the files they
+   * named. Both come from the transcript, not from a counter kept beside it — the tool
+   * rows are already the record, and a second tally would drift from the one on screen.
+   */
+  const transcriptVersion = useSyncExternalStore(transcript.subscribe, transcript.getStructureVersion);
+  const turnEntries = useMemo(() => {
+    void transcriptVersion;
+    return activeSid ? transcript.getEntries(activeSid) : [];
+  }, [transcript, activeSid, transcriptVersion]);
+  const inspectorActions = useMemo(() => turnActions(turnEntries), [turnEntries]);
+  const inspectorFiles = useMemo(() => turnFiles(turnEntries), [turnEntries]);
+
   /** What the search overlay can reach: the open sessions plus the daemon's listing. */
   const searchHits = useMemo(
     () => sessionHits(appState.openSessions, appState.sessions),
@@ -538,14 +563,30 @@ export function Shell() {
 
   /** The left column's bounds for this window, and the width it renders at today. */
   const leftReserved =
-    RAIL_WIDTH + HANDLE_WIDTH + (rightOpen ? RIGHT_COLUMN_DEFAULT + HANDLE_WIDTH : 0);
+    RAIL_WIDTH + HANDLE_WIDTH + (rightOpen ? rightWidth + HANDLE_WIDTH : 0);
   const leftBounds = columnBounds(windowWidth, leftReserved, LEFT_COLUMN_MIN);
   const effectiveLeftWidth = clampWidth(leftWidth, leftBounds);
+
+  /**
+   * The inspector column's bounds, the same rule as the session column's: what the
+   * window leaves once the rail, both handles and the session column are taken. The
+   * body reserves nothing (issue #2969) — a column may be dragged to the window's own
+   * edge, and the only floor is the column's own minimum, which keeps it retrievable.
+   */
+  const rightReserved =
+    RAIL_WIDTH + HANDLE_WIDTH + (leftOpen ? effectiveLeftWidth + HANDLE_WIDTH : 0);
+  const rightBounds = columnBounds(windowWidth, rightReserved, RIGHT_COLUMN_MIN);
+  const effectiveRightWidth = clampWidth(rightWidth, rightBounds);
 
   /** Remember a column width and the drag that produced it, in one place each. */
   function resizeLeft(px: number) {
     setLeftWidth(px);
     persistColumnWidth(LS_LEFT_WIDTH, px);
+  }
+
+  function resizeRight(px: number) {
+    setRightWidth(px);
+    persistColumnWidth(LS_RIGHT_WIDTH, px);
   }
 
   /** 工作区视图切换（vanilla app.js switchView 语义）：
@@ -874,64 +915,34 @@ export function Shell() {
         round={round}
         startedAtMs={activeTurnStart}
         tokens={turnTokens}
-        connected={appState.connected}
-        model={appState.model}
         leftOpen={leftOpen}
         rightOpen={rightOpen}
         onToggleLeft={() => setLeftOpen((v) => !v)}
         onToggleRight={() => setRightOpen((v) => !v)}
         onSearch={() => setSearchOpen(true)}
         onNew={() => dialogHost.current?.openNewSession()}
-        sessionInfo={
-          activeSid ? (
-            <span className="react-shell-session" data-testid="session-info" title={activeSid}>
-              {activeTitle} ({activeSid})
-              {activeAgent ? ` · ${activeAgent}` : ""}
-              {" · "}
-              {t("app.msgCount", { count: activeMsgCount })}
-            </span>
-          ) : null
-        }
-        conn={
-          <span className="react-shell-conn" data-testid="conn-status" title={t("sidebar.statusTitle")}>
-            <span className={`conn-dot ${appState.connected ? "green" : "gray"}`} />
-            {appState.connected ? appState.model : t("copy.disconnected")}
-            {appState.connected && appState.vision !== null ? (
-              // 生效的图片能力，与 TUI 状态栏的 `[model img|no-img]` 对齐（rant
-              // 2026-09-17T16:53:02）：读的是 daemon 报的 live 值，所以改 config.toml
-              // 里的条目声明不会假装移动它 —— 只有 daemon 真的移动了才变。
-              <span
-                className={`react-shell-vision ${appState.vision ? "on" : "off"}`}
-                data-testid="conn-vision"
-                title={t("app.visionTitle")}
-              >
-                {appState.vision ? t("app.visionOn") : t("app.visionOff")}
-              </span>
-            ) : null}
-          </span>
-        }
       />
       <div className="react-shell-body">
         <IconRail activeView={activeView} onSwitchView={switchView} />
         {leftOpen ? (
           <>
             <aside
-              className="react-shell-sidebar"
-              data-testid="react-shell-sidebar"
+              className="react-shell-session"
+              data-testid="session-column-aside"
               style={{ width: effectiveLeftWidth, flex: "none" }}
             >
-              <Sidebar
+              <SessionColumn
                 openSessions={appState.openSessions}
                 knownSessions={appState.sessions}
                 activeSid={activeSid}
                 turnStartBySid={appState.turnStartBySid}
                 onSelect={selectSession}
+                onSearch={() => setSearchOpen(true)}
+                onNew={() => dialogHost.current?.openNewSession()}
               />
             </aside>
-            {/* The right column keeps the handle it already had (`ResultPanel` owns its
-                own width and collapse, persisted under its own keys); this one is the
-                left column's, and it is a sibling of the column rather than a child so
-                a 6px strip is never inside the thing it resizes. */}
+            {/* Both handles are siblings of the columns they resize, never children: a
+                6px strip inside the thing it sizes cannot be hit once that thing is 0. */}
             <ResizeHandle
               side="left"
               width={effectiveLeftWidth}
@@ -1016,23 +1027,51 @@ export function Shell() {
                 // /rewind 的选中结果（issue #2384）：文本由 DialogHost 交上来，这里只
                 // 负责给它一个新 id——同一个 id 只应用一次，宿主之后打的字不会被盖掉。
                 insertRequest={composerInsert}
+                // The band carries only what moves; the model and the connection do
+                // not, so they live where the model is switched — the composer's chip
+                // row (issue #2969). Same readings as before, one row lower.
+                modelChip={
+                  <span className="conn-chip" data-testid="conn-status" title={t("sidebar.statusTitle")}>
+                    <span className={`conn-dot ${appState.connected ? "green" : "gray"}`} />
+                    {appState.connected ? appState.model : t("copy.disconnected")}
+                    {appState.connected && appState.vision !== null ? (
+                      <span
+                        className={`conn-vision ${appState.vision ? "on" : "off"}`}
+                        data-testid="conn-vision"
+                        title={t("app.visionTitle")}
+                      >
+                        {appState.vision ? t("app.visionOn") : t("app.visionOff")}
+                      </span>
+                    ) : null}
+                  </span>
+                }
               />
             </>
           )}
         </main>
-        {!isPanelView && rightOpen && (
-          <ResultPanel
-            sid={activeSid}
-            workspaceRoot=""
-            // The same rule the left column gets (item 4): what the window leaves the
-            // body, never a share of the window.
-            maxWidth={columnBounds(
-              windowWidth,
-              RAIL_WIDTH + HANDLE_WIDTH + (leftOpen ? effectiveLeftWidth + HANDLE_WIDTH : 0),
-              RIGHT_COLUMN_MIN,
-            ).max}
-          />
-        )}
+        {rightOpen ? (
+          <>
+            <ResizeHandle
+              side="right"
+              width={effectiveRightWidth}
+              bounds={rightBounds}
+              onResize={resizeRight}
+              onReset={() => resizeRight(RIGHT_COLUMN_DEFAULT)}
+            />
+            <aside
+              className="react-shell-inspector"
+              data-testid="inspector-aside"
+              style={{ width: effectiveRightWidth, flex: "none" }}
+            >
+              <InspectorPanel
+                sid={activeSid}
+                actions={inspectorActions}
+                files={inspectorFiles}
+                onOpenMemory={() => dialogHost.current?.openMemory()}
+              />
+            </aside>
+          </>
+        ) : null}
         {/* The history browser (item 6): the sessions the left column no longer lists.
             It sits above the dialogs because it is a reading surface, not a question —
             picking a row switches sessions and closes it. */}

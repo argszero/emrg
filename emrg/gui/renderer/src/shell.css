@@ -44,9 +44,8 @@
   padding: 0;
 }
 
-/* ── 横向三栏主容器（对齐 vanilla layout.css #app 的 flex 横向 + 侧/主/结果三栏） ──
-   Batch 5 用类名 react-shell-* 而非 vanilla ID（#app/#sidebar/#result-panel），
-   layout.css 的 ID 选择器对类名不生效，故在此补齐等价布局（rant 2026-08-27T13:16:33）。 */
+/* ── 横向五段主容器（issue #2969）：图标轨 / 会话栏 / 正文 / 检查栏，
+   两条 6px 的拖拉把手分别夹在会话栏与正文之间、正文与检查栏之间。 ── */
 .react-shell-body {
   display: flex;
   flex: 1;
@@ -54,47 +53,23 @@
   overflow: hidden;
 }
 
-.react-shell-sidebar {
-  width: 264px;
-  min-width: 220px;
+.react-shell-session {
   display: flex;
   flex-direction: column;
-  /* rant 2026-08-28T13:31:55：v0.2.82 (#1040) 加的 overflow-y:auto 是滚动链条缺失
-     的兜底（.react-sidebar 无高度 → #open-sessions 的 max-height:40% 无法解析）。
-     与 vanilla #sidebar（无 overflow）对齐：scroll 交给 .react-sidebar
-     （flex:1 + min-height:0，使 #open-sessions max-height:40% 生效）自身滚动。
-     去掉后侧边栏不再是 scroll 容器——消除 .conv-item hover 过渡的合成层闪烁根因之一。 */
+  /* 滚动交给栏里的 .session-list（flex:1 + min-height:0），这一栏本身不是滚动容器：
+     一个既当滚动容器又当列的格子，悬浮过渡会带上合成层闪烁。 */
   border-right: 1px solid var(--border);
   background: var(--bg-panel);
 }
 
-/* 侧边栏内容列：flex 撑满 → #open-sessions 的 max-height:40% + overflow-y:auto 生效
-   （对齐 vanilla #sidebar 的 #conv-list/#open-sessions 自滚动，无整栏滚动） */
-.react-shell-sidebar .react-sidebar {
+/* 检查栏外框（issue #2969）：宽度与开合归 Shell，这里只管列的排列。 */
+.react-shell-inspector {
   display: flex;
   flex-direction: column;
-  flex: 1;
   min-height: 0;
-}
-
-/* 结果面板右栏（对齐 vanilla #result-panel 280px；ResultPanel.tsx 已是 className=result-panel） */
-.result-panel {
-  width: 280px;
-  min-width: 240px;
-  display: flex;
-  flex-direction: column;
   border-left: 1px solid var(--border);
   background: var(--bg-panel);
   overflow: hidden;
-  transition: width 0.2s cubic-bezier(.2,.8,.3,1), min-width 0.2s cubic-bezier(.2,.8,.3,1);
-}
-.result-panel.collapsed {
-  width: 40px;
-  min-width: 40px;
-  border-left: 1px solid var(--border);
-}
-.result-panel.dragging {
-  transition: none;
 }
 
 /* Batch 5 slice 3：聊天回路布局（transcript 滚动区 + composer 贴底） */
@@ -176,34 +151,8 @@
   font-size: 13px;
 }
 
-/* Batch 5 slice 5：侧边导航 rail（vanilla layout.css .side-nav 对等） */
-.react-shell-sidebar .side-nav {
-  display: flex;
-  gap: 4px;
-  padding: 0 12px 10px;
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 8px;
-}
-.react-shell-sidebar .side-nav-item {
-  flex: 1;
-  min-height: 30px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-2);
-  font-size: 15px;
-  line-height: 1;
-  cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
-}
-.react-shell-sidebar .side-nav-item:hover {
-  background: var(--bg-soft);
-  color: var(--text-1);
-}
-.react-shell-sidebar .side-nav-item.active {
-  background: var(--accent-soft);
-  color: var(--accent);
-}
+/* The rail is its own 60px column now (cockpit.css .icon-rail, issue #2959); the rules
+ * that styled it as a row inside the sidebar died with that layout. */
 
 /* Batch 5 slice 5：工作区面板（vanilla .workspace-view 对等；React 仅渲染激活面板） */
 .react-shell-main .workspace {

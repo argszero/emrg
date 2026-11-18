@@ -191,7 +191,7 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     render(wrapper(<Shell />));
     await waitFor(() => expect(screen.getByTestId("transcript-view")).toBeInTheDocument());
     expect(screen.getByTestId("composer")).toBeInTheDocument();
-    expect(screen.getByTestId("react-shell-sidebar")).toBeInTheDocument();
+    expect(screen.getByTestId("session-column-aside")).toBeInTheDocument();
     // 无 emrg → 连接状态点灰色（未连接）
     expect(screen.getByTestId("conn-status").querySelector(".conn-dot")?.className).toContain("gray");
   });
@@ -623,7 +623,6 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     // 面板视图隐藏会话 chrome（vanilla setWorkspaceChrome("panel")）
     expect(screen.queryByTestId("transcript-view")).not.toBeInTheDocument();
     expect(screen.queryByTestId("composer")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("result-panel")).not.toBeInTheDocument();
   });
 
   it("点击当前激活面板 → toggle 回会话视图（vanilla 语义）", async () => {
@@ -965,7 +964,7 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
     delete (window as unknown as { emrg?: unknown }).emrg;
   });
 
-  it("header 显示会话信息：title (sid) · agent · N msgs（对齐 TUI 状态栏）", async () => {
+  it("状态带里没有会话标题、模型、消息条数（issue #2969）", async () => {
     const m = mockEmrg();
     render(wrapper(<Shell />));
     await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
@@ -979,11 +978,13 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
         ],
       },
     });
-    await waitFor(() => expect(screen.getByTestId("session-info")).toBeInTheDocument());
-    const info = screen.getByTestId("session-info");
-    expect(info.textContent).toContain("Alpha");
-    expect(info.textContent).toContain("(s1)");
-    expect(info.textContent).toContain("5 msgs");
+    await waitFor(() => expect(screen.getByTestId("status-band")).toBeInTheDocument());
+    const band = screen.getByTestId("status-band");
+    // 一次会话已经选中、daemon 也报了标题与条数：状态带仍然一个字都不提它们
+    expect(band.textContent).not.toContain("Alpha");
+    expect(band.textContent).not.toContain("s1");
+    expect(band.textContent).not.toMatch(/\bmsgs\b/);
+    expect(band.textContent).not.toContain("deepseek");
   });
 
   it("中途打开一个已在跑的会话：计时从 daemon 的快照时刻起算（rant 2026-09-27T18:41:52 requirement 2）", async () => {

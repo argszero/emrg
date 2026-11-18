@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { parseInput } from "../lib/commands";
 import {
   CMD_MENU_CLOSED,
@@ -188,6 +188,12 @@ export interface ComposerProps {
    * 一次性的插入做成受控值，会让每个按键都变成一次覆盖。同 `id` 只应用一次。
    */
   insertRequest?: { id: number; text: string } | null;
+  /**
+   * 模型与连接状态（issue #2969）：状态带只放在变的东西，不动的信息移到这里——
+   * 输入框上方那一行 chip 是原型的「模型在输入框底部切换」。节点由 Shell 组装，
+   * 输入框不解释它是什么。
+   */
+  modelChip?: ReactNode;
 }
 
 /** 输入框的高度上限：超过它就内滚（CSS 与这里读的是同一个数） */
@@ -262,6 +268,7 @@ export function Composer({
   inputHistory = null,
   onPromptSent,
   onManageSandboxRoots,
+  modelChip,
   insertRequest = null,
 }: ComposerProps) {
   const { t } = useI18n();
@@ -953,6 +960,7 @@ export function Composer({
               : t("composer.rootsShortCount", { n: String(sandboxRoots.length) })}
           </button>
         ) : null}
+        {modelChip}
       </div>
       <div className="composer-card">
         <textarea

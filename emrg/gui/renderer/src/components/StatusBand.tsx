@@ -1,4 +1,3 @@
-import type { ReactNode } from "react";
 import { useI18n } from "../lib/i18n";
 import { formatElapsed } from "../lib/sidebar";
 import { STATUS_BAND_HEIGHT, formatRound, formatTokens } from "../lib/cockpit";
@@ -6,14 +5,15 @@ import { STATUS_BAND_HEIGHT, formatRound, formatTokens } from "../lib/cockpit";
 /**
  * StatusBand — the 44px row that replaces the application header (issue #2959 item 1).
  *
- * It carries **only what moves**: whether a turn is running, which round it is on, how
- * long it has been running, and how many tokens it has spent so far. Everything that
- * does not move (the session's title, the model, the connection) still rides here
- * rather than in a second header, because the point of the rebuild is that one row
- * holds the always-on facts and the body gets the rest of the window.
+ * It carries **only what moves** (issue #2969): whether a turn is running, which round
+ * it is on, how long it has been running, and how many tokens it has spent so far.
+ * Four readings, and that is the whole row's left side. What does not move — the
+ * session's title, its id, the model, the message count — is not here: the title is in
+ * the window's title bar already, the model switches at the composer, and a second
+ * place for a fact turns a status row into a header by accretion.
  *
- * The two buttons at the right end open and close the side columns. Search and `+`
- * live here too (item 6): they act on sessions wherever the host happens to be.
+ * The right end is exactly four buttons: search, `+`, toggle the session column,
+ * toggle the inspector. Nothing else is appended to this row.
  */
 export interface StatusBandProps {
   running: boolean;
@@ -23,12 +23,6 @@ export interface StatusBandProps {
   startedAtMs?: number;
   /** Cumulative tokens for this turn; `null` = not reported (not zero). */
   tokens: number | null;
-  /** The session line the shell already renders (title/sid/agent/message count). */
-  sessionInfo?: ReactNode;
-  /** The connection badge (model, dot, image capability) — the shell's own markup. */
-  conn?: ReactNode;
-  connected: boolean;
-  model?: string;
   leftOpen: boolean;
   rightOpen: boolean;
   onToggleLeft: () => void;
@@ -44,10 +38,6 @@ export function StatusBand({
   round,
   startedAtMs,
   tokens,
-  sessionInfo,
-  conn,
-  connected,
-  model,
   leftOpen,
   rightOpen,
   onToggleLeft,
@@ -83,14 +73,7 @@ export function StatusBand({
       <span className="band-item" data-testid="band-spend" title={t("band.spendTitle")}>
         {t("band.spend", { n: formatTokens(tokens) })}
       </span>
-      {sessionInfo ? (
-        <>
-          <span className="band-sep" />
-          {sessionInfo}
-        </>
-      ) : null}
       <span className="band-right">
-        {conn}
         <button
           type="button"
           className="band-btn"

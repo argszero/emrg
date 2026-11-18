@@ -27,8 +27,6 @@ function setup(props: Partial<Parameters<typeof StatusBand>[0]> = {}) {
         running={false}
         round={null}
         tokens={null}
-        connected
-        model="deepseek-v3"
         leftOpen
         rightOpen
         {...handlers}
@@ -75,13 +73,17 @@ describe("StatusBand", () => {
     expect(screen.getByTestId("band-elapsed")).toHaveTextContent("—");
   });
 
-  it("会话信息与连接状态作为插槽渲染（会话名/模型仍在状态带里）", () => {
-    setup({
-      sessionInfo: <span data-testid="slot-session">Alpha (s1)</span>,
-      conn: <span data-testid="slot-conn">deepseek-v3</span>,
-    });
-    expect(screen.getByTestId("slot-session")).toBeInTheDocument();
-    expect(screen.getByTestId("slot-conn")).toBeInTheDocument();
+  it("只有四项读数与四个按钮：会话标题、模型、消息条数都不在这行里（issue #2969）", () => {
+    setup({ running: true, round: 2, tokens: 3400, startedAtMs: Date.now() - 65_000 });
+    const band = screen.getByTestId("status-band");
+    // 四个变的读数……
+    expect(band.querySelectorAll(".band-state, .band-item")).toHaveLength(4);
+    // ……四个按钮，一个不多
+    expect(band.querySelectorAll("button")).toHaveLength(4);
+    // 一个不动的值出现在这一行，就是把状态带变回了顶栏：这三样是宿主点名移出的
+    for (const gone of ["session-info", "conn-status", "conn-vision"]) {
+      expect(screen.queryByTestId(gone)).not.toBeInTheDocument();
+    }
   });
 
   it("四个按钮：搜索 / 新对话 / 两个栏开关，各自回自己的回调", () => {
