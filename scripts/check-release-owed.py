@@ -68,6 +68,14 @@ so the single state it cannot separate is "never tagged" from "not fetched". The
 asked to separate them, and only there: every deliberate state changes, because a stale list
 cannot manufacture an `OK`, a "behind", or a lightweight near miss.
 
+A third shape was reported the same day (issue #2971): the checkout **holds** the name, as a
+lightweight tag where the repository's object is annotated. Nothing is missing there, so "it
+is missing v<version>" was false about a tag the reader could see, and the fetch it printed
+could not even run -- git refuses it as `would clobber existing tag` (rc 1) and leaves the
+local object untouched, so a reader who ran it and read again got the identical verdict with
+no way to tell nothing had happened. The two states now carry different sentences, because
+only one of them has a missing tag for a fetch to fill in.
+
 Usage:
 
     uv run --no-sync python3 scripts/check-release-owed.py
@@ -312,8 +320,34 @@ def _already_published_reading(detail: str) -> str:
     )
 
 
-def _stale_list_reading(declared: str, local_reading: str, detail: str) -> str:
-    """The verdict for a checkout whose tag list is missing a tag the remote has."""
+def _stale_list_reading(
+    declared: str, local_reading: str, detail: str, local_carrier: str | None = None
+) -> str:
+    """The verdict for a checkout whose tag list disagrees with the remote about a name.
+
+    Two states reach this, and only one of them is a **missing** tag:
+
+    * the checkout holds no tag of that name at all (`local_carrier is None`), so its list
+      is missing one the repository has and fetching is what fills it in;
+    * the checkout holds the name as a **lightweight** tag, while the repository's object
+      under it is annotated. Nothing is missing there: the local tag is a different object,
+      so no list carrying it can answer the question, and a fetch leaves an existing tag of
+      that name exactly where it was -- measured 2026-11-18, `git fetch --tags origin`
+      answers `! [rejected] ... (would clobber existing tag)` with rc 1 and the local object
+      does not move. Printing the fetch there was the remedy that cannot clear the state,
+      which is what issue #2971 was opened for.
+    """
+    if local_carrier is not None:
+        return (
+            f"NOT MEASURABLE FROM THIS CHECKOUT: {local_reading}, but {detail}. This checkout "
+            f"does hold v{declared}, as a {local_carrier} tag: a different object from the one "
+            f"the repository carries under that name, so neither `a release is owed` nor "
+            f"`nothing is owed` follows from a tag list that holds the wrong one. A fetch does "
+            f"not replace a tag the checkout already has -- `git fetch --tags origin` answers "
+            f"`would clobber existing tag` and leaves it where it was -- so remove the local "
+            f"object first: `git tag -d v{declared} && git fetch --tags origin`, then read "
+            f"this again."
+        )
     return (
         f"NOT MEASURABLE FROM THIS CHECKOUT: {local_reading}, but {detail}. This checkout's "
         f"tag list is stale -- it is missing v{declared}, so the question whether a release "
@@ -471,7 +505,10 @@ def check(root: Path) -> int:
         if state == "present":
             print(
                 _stale_list_reading(
-                    declared, "no tag in this checkout would publish a release", detail
+                    declared,
+                    "no tag in this checkout would publish a release",
+                    detail,
+                    "lightweight" if f"v{declared}" in lightweight else None,
                 )
             )
             return 2
@@ -561,7 +598,14 @@ def check(root: Path) -> int:
     # lightweight near miss -- so the network is paid for here and nowhere else.
     state, detail = remote_tag_state(root, declared)
     if state == "present":
-        print(_stale_list_reading(declared, f"the newest tag in it is {newest}", detail))
+        print(
+            _stale_list_reading(
+                declared,
+                f"the newest tag in it is {newest}",
+                detail,
+                "lightweight" if f"v{declared}" in lightweight else None,
+            )
+        )
         return 2
     if state == "lightweight":
         # The same question the empty-list branch asks, on the path where this checkout has
