@@ -127,7 +127,9 @@ button.history-load-bar:active {
 
 /* Markdown 内容排版 */
 .msg-body p {
-  margin: 0 0 0.6em;
+  /* #2980：段落间距改成固定 11px（原型 `.mtext p+p{margin-top:11px}`），
+     不再随字号缩放的 0.6em。 */
+  margin: 0 0 11px;
 }
 .msg-body p:last-child {
   margin-bottom: 0;
@@ -137,21 +139,22 @@ button.history-load-bar:active {
   font-weight: 600;
   line-height: 1.4;
 }
-.msg-body h1 { font-size: 1.35em; }
-.msg-body h2 { font-size: 1.2em; }
-.msg-body h3 { font-size: 1.1em; }
+/* #2980：标题不再各上一档，与正文同字号，只靠字重区分（原型 .mtext）。 */
+.msg-body h1, .msg-body h2, .msg-body h3 { font-size: 1em; }
 .msg-body ul, .msg-body ol {
   margin: 0.4em 0;
   padding-left: 1.5em;
 }
 .msg-body li {
-  margin: 0.2em 0;
+  /* #2980：列表项间距 4px（原型 `.mtext li{margin-top:4px}`）。 */
+  margin: 4px 0;
 }
 .msg-body code {
   background: var(--bg-soft);
   border-radius: 4px;
   padding: 0.1em 0.35em;
-  font-size: 0.88em;
+  /* #2980：行内 code 固定 12px（原型 `.mtext code{font-size:12px}`）。 */
+  font-size: 12px;
 }
 .msg-body pre {
   background: var(--bg-soft);
@@ -216,7 +219,8 @@ button.history-load-bar:active {
 .msg-body table {
   border-collapse: collapse;
   margin: 0.5em 0;
-  font-size: 0.92em;
+  /* #2980：表格固定 12px（原型把这张表的每一档都定死）。 */
+  font-size: 12px;
 }
 .msg-body th, .msg-body td {
   border: 1px solid var(--border);
@@ -385,6 +389,14 @@ pre.tool-detail-body {
 .tool-group-bar .tool-group-chev {
   font-size: 10px;
   transition: transform var(--dur-med) var(--ease);
+}
+/* #2980：摘要现在带着最后一行工具的正文（批次标签 + 工具名 + 状态短语 + intent），一行装
+   不下就省略号收尾，不换行——bar 的高度是列表密度的一部分，换行会让它随内容长高。 */
+.tool-group-bar .tool-group-summary {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .tool-group.collapsed .tool-group-rows {
   display: none;

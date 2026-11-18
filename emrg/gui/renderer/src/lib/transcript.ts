@@ -63,8 +63,11 @@ export interface ToolGroup {
    * 时候**——这是本改动的第二个可见后果，摘要会在运行中就出现。
    */
   barHidden: boolean;
-  /** ≥2 行 → 摘要（数量 + 总耗时），不再要求全部完成；否则 null */
-  summary: { count: number; totalElapsed: number } | null;
+  /**
+   * ≥2 行 → 摘要（数量 + 耗时），不再要求全部完成；否则 null。
+   * `timed` = 至少一行量过耗时（#2980）：重放的老记录一行都没有，摘要这时不得显示 0.0s。
+   */
+  summary: { count: number; totalElapsed: number; timed: boolean } | null;
 }
 
 /** 助手消息文本段（同 rid 流式分段：段被工具封存后新 delta 开新段） */
@@ -326,8 +329,15 @@ export function formatToolArguments(value: unknown): string {
  */
 function updateToolGroup(group: ToolGroup): void {
   if (group.rows.length >= 2) {
-    const total = group.rows.reduce((acc, r) => acc + (r.elapsed ?? 0), 0);
-    group.summary = { count: group.rows.length, totalElapsed: total };
+    // #2980：只对**量过**耗时的行求和。一行都没有（重放的老记录）时 `timed` 为 false，
+    // 渲染层据此选一句不含时间的文案——而不是拿 0 去显示成 `0.0s`。
+    const timedRows = group.rows.filter((r) => r.elapsed !== undefined);
+    const total = timedRows.reduce((acc, r) => acc + (r.elapsed ?? 0), 0);
+    group.summary = {
+      count: group.rows.length,
+      totalElapsed: total,
+      timed: timedRows.length > 0,
+    };
     group.barHidden = false;
   } else {
     // 组内仅 1 行 → 还没有可折叠的东西，bar 不显示
@@ -574,7 +584,10 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
       if (last && last.kind === "tool-row" && last.row.status !== "running") {
         const group: ToolGroup = {
           rows: [last.row, row],
-          collapsed: false,
+          // #2980：新组默认**收起**。此前写死 `false`，于是跑过十几个工具的会话就是十几行
+          // 竖在屏幕上；宿主要先看见「几次调用、多久、最后一条是什么」，要细节时再点开。
+          // 收起状态此后仍然只由点击改变（rant 2026-10-17T19:23:08），边界不翻转。
+          collapsed: true,
           barHidden: true,
           summary: null,
         };

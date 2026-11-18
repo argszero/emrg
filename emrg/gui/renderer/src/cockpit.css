@@ -17,7 +17,28 @@
   --lh-body: 1.55;
 }
 
-.react-shell .msg-body,
+/* ── Conversation type (#2980) ────────────────────────────────
+ * The chat area takes one more step than the shell, and the numbers are the
+ * prototype's (`~/.emrg/designs/emrg-gui-redesign/index.html`: `.muser` 13.5/1.62,
+ * `.mtext` 13.5/1.72). Before this the user bubble carried no declaration of its own
+ * and inherited the document body's 15px/1.7, so the host's own message rendered a
+ * size larger than the reply to it, and each heading sat a step above the body it
+ * leads. Headings are told apart by weight alone; the code and table steps are fixed
+ * lengths because the prototype fixes them, not shares of a body that moves. */
+.react-shell .msg.user {
+  font-size: 13.5px;
+  line-height: 1.62;
+}
+
+.react-shell .msg-body {
+  font-size: 13.5px;
+  line-height: 1.72;
+}
+
+/* 标题、表格、code、段落与列表的档位在 `css/components.css` 里就地改过（旧值不留），
+   这里只定对话区自己的字号与行高——同一个值只有一个主人。 */
+
+/* The composer keeps the shell's step: the conversation area is what moved. */
 .react-shell .composer textarea,
 .react-shell .composer-input {
   font-size: var(--fs-body);

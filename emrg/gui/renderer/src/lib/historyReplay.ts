@@ -52,6 +52,8 @@ export interface HistoryToolResultRecord {
   tool_name?: string;
   content?: string;
   error?: boolean;
+  /** 实测耗时（秒，#2980）。这条记录写在 daemon 开始计时之前时没有这个键。 */
+  elapsed?: number;
 }
 
 export type HistoryRecord = HistoryMessageRecord | HistoryToolResultRecord | HistorySummaryRecord;
@@ -88,7 +90,7 @@ export interface ReplaySink {
     sid?: string | null,
   ): void;
   handleToolEnd(
-    data: { tool_call_id: string; tool_name?: string; content?: string; error?: unknown },
+    data: { tool_call_id: string; tool_name?: string; content?: string; error?: unknown; elapsed?: number },
     sid?: string | null,
   ): void;
   /**
@@ -236,6 +238,9 @@ export function replayHistoryRecords(
               tool_name: res.tool_name || name,
               content: res.content ?? "",
               error: res.error ?? false,
+              // #2980：记录里量过的耗时原样交给 store —— 回放与实时写的是同一条行，
+              // 少这一个字段，重开会话的每一行和每一个合并组摘要就都读成 0。
+              elapsed: res.elapsed,
             },
             sid,
           );
@@ -253,6 +258,7 @@ export function replayHistoryRecords(
           tool_name: r.tool_name ?? "",
           content: r.content ?? "",
           error: r.error ?? false,
+          elapsed: r.elapsed,
         },
         sid,
       );

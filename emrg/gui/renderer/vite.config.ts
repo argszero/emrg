@@ -23,6 +23,9 @@ export default defineConfig({
   test: {
     globals: true, // @testing-library/react 依赖全局 afterEach 做容器自动清理
     environment: "jsdom",
+    // CSS 必须由 Vite 真正处理：`?raw` 在 `css: false`（默认）下把每个样式表读成空串，
+    // 于是任何「读真实样式表」的用例都会空转通过。
+    css: true,
     setupFiles: ["../test/setup.ts"],
     include: ["**/*.test.{ts,tsx}"],
   },
