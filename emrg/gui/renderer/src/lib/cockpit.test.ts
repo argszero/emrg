@@ -1,9 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import cssSource from "../cockpit.css?raw";
 import {
   BODY_MIN,
   LEFT_COLUMN_DEFAULT,
   LEFT_COLUMN_MIN,
   LS_LEFT_WIDTH,
+  RAIL_WIDTH,
   RIGHT_COLUMN_DEFAULT,
   clampWidth,
   columnBounds,
@@ -324,5 +326,73 @@ describe("findBodyWidthCaps", () => {
       }
     }
     expect(offenders).toEqual([]);
+  });
+});
+
+describe("图标轨与设置页的数值就是原型的数值（issue #2986）", () => {
+  // 这些数值是宿主一眼能看出「不是同一个东西」的地方，所以它们必须被钉住，而不能只写在
+  // 注释里。读的是样式表本身：`?raw` 拿的是文件文本，不经过 CSS 管线，也不会被 jsdom 的
+  // 「不算布局」变成空话，前提是下面第一条先证明读到的不是空串。
+  function block(selector: string): string {
+    const at = cssSource.indexOf(`\n${selector} {`);
+    expect(at, `${selector} 在样式表里找不到`).toBeGreaterThan(-1);
+    const start = cssSource.indexOf("{", at) + 1;
+    const end = cssSource.indexOf("}", start);
+    return cssSource.slice(start, end);
+  }
+
+  it("样式表真的读到了（空串会让下面每一条断言都白白通过）", () => {
+    expect(cssSource.length).toBeGreaterThan(2000);
+    expect(cssSource).toContain(".icon-rail");
+  });
+
+  it("图标轨 60px 宽、内边距 14px 0 12px、列间距 4px", () => {
+    // 宽度不是样式表声明的，是常量经 style 注入的（IconRail.tsx `style={{ width: RAIL_WIDTH }}`），
+    // 所以这里钉常量、那里钉它真的落到元素上——两个载体各有一条，缺一条那一条就没人管。
+    expect(RAIL_WIDTH).toBe(60);
+    const rail = block(".icon-rail");
+    expect(rail).toContain("padding: 14px 0 12px");
+    expect(rail).toContain("gap: 4px");
+    expect(rail).toContain("flex-direction: column");
+  });
+
+  it("标识 32×32、圆角 9px、底部外距 14px", () => {
+    const mark = block(".rail-mark");
+    expect(mark).toContain("width: 32px");
+    expect(mark).toContain("margin-bottom: 14px");
+    expect(block(".rail-mark svg")).toContain("border-radius: 9px");
+  });
+
+  it("按钮 40×40、圆角 11px；图标 19×19、线宽 1.65", () => {
+    const item = block(".rail-item");
+    expect(item).toContain("width: 40px");
+    expect(item).toContain("height: 40px");
+    expect(item).toContain("border-radius: 11px");
+    const icon = block(".rail-item svg");
+    expect(icon).toContain("width: 19px");
+    expect(icon).toContain("stroke-width: 1.65");
+    expect(icon).toContain("fill: none");
+  });
+
+  it("选中态左外侧有 3px 宽、18px 高的竖条", () => {
+    const bar = block(".rail-item.active::before");
+    expect(bar).toContain("width: 3px");
+    expect(bar).toContain("height: 18px");
+    expect(bar).toContain("left: -7px");
+  });
+
+  it("提示气泡是自绘的：距按钮右边缘 8px、层级 40、不换行", () => {
+    const tip = block(".rail-tip");
+    expect(tip).toContain("calc(100% + 8px)");
+    expect(tip).toContain("z-index: 40");
+    expect(tip).toContain("white-space: nowrap");
+    expect(tip).toContain("opacity: 0");
+  });
+
+  it("设置页左导航 190px 定宽、纵向排列、项间距 1px", () => {
+    const nav = block(".settings-nav");
+    expect(nav).toContain("width: 190px");
+    expect(nav).toContain("flex-direction: column");
+    expect(nav).toContain("gap: 1px");
   });
 });

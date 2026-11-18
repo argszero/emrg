@@ -165,24 +165,37 @@
   stroke-linejoin: round;
 }
 
-/* ── Icon rail (item 2) ─────────────────────────────────────── */
+/* ── Icon rail (issue #2986) ─────────────────────────────────
+ * Every number below is the prototype's. They were guessed once — 38px buttons,
+ * 18px icons at 1.6, 10px radius, 8px top padding — and a guessed rail does not
+ * read as the same product as a specified one: four values each off by a step is
+ * what "close but not the same" looks like. */
 .icon-rail {
   flex: none;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 4px;
-  padding: 8px 0 10px;
+  padding: 14px 0 12px;
   box-sizing: border-box;
   border-right: 1px solid var(--border);
   background: var(--bg-panel);
 }
 
+/* The repository's own icon. It is an <svg>, never a character: a character scales
+ * with the font, changes shape with the family, and names nothing. */
 .rail-mark {
-  font-size: 15px;
-  color: var(--accent);
-  margin-bottom: 6px;
-  user-select: none;
+  width: 32px;
+  height: 32px;
+  margin-bottom: 14px;
+  flex: none;
+}
+
+.rail-mark svg {
+  display: block;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
 }
 
 .rail-spacer {
@@ -190,18 +203,18 @@
 }
 
 .rail-item {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 38px;
-  height: 38px;
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
   padding: 0;
-  border: 1px solid transparent;
-  border-radius: 10px;
+  border: none;
+  border-radius: 11px;
   background: transparent;
-  color: var(--text-2);
+  color: var(--text-3);
   cursor: pointer;
-  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+  transition: background 0.13s var(--ease), color 0.13s var(--ease);
 }
 
 .rail-item:hover {
@@ -214,14 +227,139 @@
   color: var(--accent);
 }
 
-.rail-item svg {
-  width: 18px;
+/* The selected page is marked by a bar *outside* the button's left edge, not only by
+ * its fill: against the panel background the soft accent alone is a shy difference,
+ * and the bar is the reading that survives a colour-blind eye. */
+.rail-item.active::before {
+  content: "";
+  position: absolute;
+  left: -7px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
   height: 18px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent);
+}
+
+.rail-item svg {
+  width: 19px;
+  height: 19px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.6;
+  stroke-width: 1.65;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+/* The tooltip is drawn. The browser's own `title` is painted by the window manager:
+ * it cannot be offset from the button, it cannot fade in, and it ignores the rail's
+ * z-order — so on a 60px rail it covers the icon it is naming. */
+.rail-tip {
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 40;
+  padding: 6px 9px;
+  border-radius: 6px;
+  background: var(--text-1);
+  color: var(--bg-panel);
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s var(--ease);
+}
+
+.rail-item:hover .rail-tip,
+.rail-item:focus-visible .rail-tip {
+  opacity: 1;
+}
+
+/* Theme toggle and daemon dot sit after the spacer, under the five pages. */
+.rail-theme,
+.rail-conn {
+  flex: none;
+}
+
+.rail-conn {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+}
+
+.rail-conn-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+
+.rail-conn.on .rail-conn-dot {
+  background: var(--accent);
+}
+
+/* ── Settings page navigation (issue #2986) ──────────────────
+ * A 190px column of sections on the left, the section's content filling the rest.
+ * The page used to put its six tabs in a wrapping row above the content, which made
+ * every section start at a different height and made "appearance" look like a filter
+ * over the model form rather than a page of its own. */
+.settings-shell {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.settings-nav {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 190px;
+  padding: 26px 12px;
+  box-sizing: border-box;
+  border-right: 1px solid var(--border);
+}
+
+.settings-nav-item {
+  text-align: left;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background 0.13s var(--ease), color 0.13s var(--ease);
+}
+
+.settings-nav-item:hover {
+  background: var(--bg-soft);
+}
+
+.settings-nav-item.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 550;
+}
+
+.settings-content {
+  flex: 1;
+  min-width: 0;
+  padding: 26px 40px 40px;
+  overflow-y: auto;
+}
+
+/* The settings page is the one page whose body must not scroll as a whole: the
+ * navigation stays put while a section scrolls. */
+.workspace-view[data-view="settings"] .workspace-view-body {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
 }
 
 /* ── Column drag surfaces (item 4) ──────────────────────────── */
@@ -337,13 +475,23 @@ body.col-resizing * {
 
 .session-col-count {
   flex: 1;
-  font-size: var(--fs-small);
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
   color: var(--text-3);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* The number is a second colour and a step of its own: it is the reading the eye
+ * wants from this row, and the label beside it is only what the number is about. */
+.session-col-count-n {
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
 }
 
 .session-col-actions {
@@ -376,7 +524,7 @@ body.col-resizing * {
   height: 14px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.7;
+  stroke-width: 2;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
@@ -610,53 +758,70 @@ body.col-resizing * {
 
 .panel-search {
   flex: 1;
-  min-width: 0;
-  padding: 5px 10px;
+  min-width: 240px;
+  height: 30px;
+  padding: 0 10px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: 8px;
   background: var(--bg-panel);
   color: var(--text-1);
-  font-size: var(--fs-secondary);
+  font-size: 12.5px;
   font-family: inherit;
   outline: none;
 }
 
 .panel-search:focus {
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .panel-hits {
   flex: none;
-  font-size: var(--fs-small);
+  font-size: 10.5px;
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
 
 /* Reflow (item 9): more columns when the window is wide, fewer when it is narrow.
  * `auto-fill` plus a floor is the whole rule — a running agent is not floated up. */
+/* 460px a column and 22px between them: the prototype fits two or three agents where
+ * the card wall fitted one and a half. `auto-fill` is what makes the count follow the
+ * window; `1fr` is what stops a wide window from leaving a ragged last column. */
 .agent-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 6px;
+  grid-template-columns: repeat(auto-fill, minmax(460px, 1fr));
+  gap: 22px;
+  align-content: start;
 }
 
+/* A row, not a card. A border around every agent turned a list you can scan into a
+ * wall of tiles, and a wall costs three rows of screen for every two the prototype
+ * shows. The border is still there at 1px — transparent until the row is hovered. */
 .agent-card {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-panel);
+  height: 23px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
   min-width: 0;
 }
 
+.agent-card:hover {
+  background: var(--bg-soft);
+  border-color: var(--border);
+}
+
 .agent-card .agent-name {
-  flex: 1;
+  flex: none;
+  max-width: 190px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: var(--fs-secondary);
+  font-size: 12.5px;
+  font-weight: 560;
 }
 
 .agent-dot {
