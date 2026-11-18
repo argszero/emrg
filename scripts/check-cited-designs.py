@@ -2,11 +2,17 @@
 """Does every design document the shipped prompts cite exist on this machine?
 
 Measured on this host 2026-11-18 (issue #2984): `emrg/server/evolution_prompt.md` cites
-five paths under the host's home, and four of them are there. The fifth --
+five paths under the host's home, and one of them --
 `~/.emrg/designs/memory-index-compaction-design.md` -- is the document the index-hygiene
 rule calls the authoritative statement of what compaction is, what counts as done and what
-must never be done. `~/.emrg/designs/` is not a directory on this machine, so the rule a
-cycle is told to follow cannot be read, and nothing said so.
+must never be done. On this machine that document is present and has been since
+2026-09-25, so nothing was absent here. What went wrong was the reading: a directory that
+could not be listed was reported as a directory that is not there, which is the one answer
+this script must never print for a file it did not manage to look at. Had the document
+really been missing, nothing in the repository would have noticed -- no test may depend on
+a host-side file, so its absence moves no test -- which is why this reading is asked at
+home, and why exit code 2 exists: "I could not look" and "it is not there" are different
+answers, and only the second one is a fault.
 
 Why this cannot be a test of the design's existence
 ---------------------------------------------------
