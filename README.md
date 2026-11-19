@@ -20,6 +20,13 @@
   <b>🇬🇧 English</b> | <a href="README.cn.md">🇨🇳 中文</a>
 </p>
 
+<p align="center">
+  <a href="https://app.args.fun/emrg"><b>Website</b></a> ·
+  <a href="https://app.args.fun/emrg/loop">How a rant ships</a> ·
+  <a href="https://app.args.fun/emrg/tools">Tools</a> ·
+  <a href="https://app.args.fun/emrg/compare">Compare</a>
+</p>
+
 ---
 
 **What if your coding assistant got better every time you used it?**
