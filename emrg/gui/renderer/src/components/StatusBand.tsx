@@ -15,8 +15,9 @@ import type { UsageWindowReading } from "../lib/daemonBridge";
  * the window's title bar already, the model switches at the composer, and a second
  * place for a fact turns a status row into a header by accretion.
  *
- * The right end is exactly four buttons: search, `+`, toggle the session column,
- * toggle the inspector. Nothing else is appended to this row.
+ * The right end is exactly the two pane toggles — the session column and the inspector.
+ * Search and new-session are not here: the session column's own header carries them, and
+ * a second entry point for one action reads as a second feature (issue #3028).
  */
 export interface StatusBandProps {
   running: boolean;
@@ -36,8 +37,6 @@ export interface StatusBandProps {
   rightOpen: boolean;
   onToggleLeft: () => void;
   onToggleRight: () => void;
-  onSearch: () => void;
-  onNew: () => void;
   /** Injected clock: the shell re-renders once a second while a turn is running. */
   nowMs?: number;
 }
@@ -51,8 +50,6 @@ export function StatusBand({
   rightOpen,
   onToggleLeft,
   onToggleRight,
-  onSearch,
-  onNew,
   nowMs,
 }: StatusBandProps) {
   const { t } = useI18n();
@@ -87,29 +84,6 @@ export function StatusBand({
         })}
       </span>
       <span className="band-right">
-        <button
-          type="button"
-          className="band-btn"
-          data-testid="band-search"
-          title={t("band.searchTitle")}
-          onClick={onSearch}
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="11" cy="11" r="7" />
-            <path d="M20 20l-4.2-4.2" />
-          </svg>
-        </button>
-        <button
-          type="button"
-          className="band-btn"
-          data-testid="band-new"
-          title={t("sidebar.newChatTitle")}
-          onClick={onNew}
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M12 5v14M5 12h14" />
-          </svg>
-        </button>
         <button
           type="button"
           className={`band-btn band-toggle${leftOpen ? " on" : ""}`}

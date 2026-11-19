@@ -22,8 +22,6 @@ function setup(props: Partial<Parameters<typeof StatusBand>[0]> = {}) {
   const handlers = {
     onToggleLeft: vi.fn(),
     onToggleRight: vi.fn(),
-    onSearch: vi.fn(),
-    onNew: vi.fn(),
   };
   render(
     <I18nProvider lang="en">
@@ -86,8 +84,6 @@ describe("StatusBand", () => {
           rightOpen
           onToggleLeft={vi.fn()}
           onToggleRight={vi.fn()}
-          onSearch={vi.fn()}
-          onNew={vi.fn()}
         />
       </I18nProvider>,
     );
@@ -112,7 +108,7 @@ describe("StatusBand", () => {
     expect(screen.getByTestId("band-elapsed")).toHaveTextContent("—");
   });
 
-  it("只有四项读数与四个按钮：会话标题、模型、消息条数都不在这行里（issue #2969）", () => {
+  it("只有四项读数与两个栏开关：会话标题、模型、消息条数都不在这行里（issue #2969）", () => {
     setup({
       running: true,
       round: 2,
@@ -122,22 +118,21 @@ describe("StatusBand", () => {
     const band = screen.getByTestId("status-band");
     // 四个变的读数……
     expect(band.querySelectorAll(".band-state, .band-item")).toHaveLength(4);
-    // ……四个按钮，一个不多
-    expect(band.querySelectorAll("button")).toHaveLength(4);
+    // ……两个按钮，一个不多：搜索与新建会话的入口在会话栏（issue #3028）
+    expect(band.querySelectorAll("button")).toHaveLength(2);
     // 一个不动的值出现在这一行，就是把状态带变回了顶栏：这三样是宿主点名移出的
     for (const gone of ["session-info", "conn-status", "conn-vision"]) {
       expect(screen.queryByTestId(gone)).not.toBeInTheDocument();
     }
   });
 
-  it("四个按钮：搜索 / 新对话 / 两个栏开关，各自回自己的回调", () => {
+  it("两个按钮：两个栏开关，各自回自己的回调；搜索与新建不在状态带上（issue #3028）", () => {
     const h = setup({ leftOpen: true, rightOpen: false });
-    fireEvent.click(screen.getByTestId("band-search"));
-    fireEvent.click(screen.getByTestId("band-new"));
     fireEvent.click(screen.getByTestId("band-toggle-left"));
     fireEvent.click(screen.getByTestId("band-toggle-right"));
-    expect(h.onSearch).toHaveBeenCalledTimes(1);
-    expect(h.onNew).toHaveBeenCalledTimes(1);
+    // 一个动作只留一个入口：这两个在会话栏表头，状态带上删掉而不是藏起来
+    expect(screen.queryByTestId("band-search")).toBeNull();
+    expect(screen.queryByTestId("band-new")).toBeNull();
     expect(h.onToggleLeft).toHaveBeenCalledTimes(1);
     expect(h.onToggleRight).toHaveBeenCalledTimes(1);
     // 开着的栏按钮带 .on，关着的不带——一眼能看出哪一栏在屏幕上

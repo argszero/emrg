@@ -17,6 +17,7 @@ import { createSnapshotStore, type SnapshotStore } from "./snapshot-store";
 import type { TranscriptStore, DeltaChunk, DoneData, ToolStartData, ToolEndData } from "./transcript";
 import type { OpenSessionEntry } from "./sidebar";
 import type { ImageAttach } from "./composer";
+import type { TreeEntry } from "./fileTree";
 
 /* ── 事件帧（与 main.js 广播契约一致：{ type, data, sid }） ── */
 
@@ -548,6 +549,22 @@ export interface DaemonBridgeDeps {
      * (issue #2349, part 2/2).
      */
     listInputHistory?(p: { sessionId: string }): Promise<{ entries?: unknown[]; hasMore?: boolean }>;
+    /**
+     * List one directory level (preload.listFiles；未接线时为 undefined）。
+     *
+     * The daemon owns the reading — `list_files` answers directories first, sorted by
+     * name, dotfiles included, with a `truncated` flag and a readable error — so the
+     * inspector's trees ask rather than walking anything themselves (issue #3026).
+     */
+    listFiles?(p: { path: string }): Promise<{ entries?: unknown[]; truncated?: boolean }>;
+    /**
+     * The two roots the inspector's trees hang from (preload.sessionRoots；未接线时为
+     * undefined）。Only the main process can answer: it holds the open-session ledger,
+     * the global session index and the daemon's own `resolve_session_cwd`.
+     */
+    sessionRoots?(p: {
+      sessionId: string;
+    }): Promise<{ agentRoot?: string | null; sessionRoot?: string | null }>;
   };
   transcript: TranscriptStore;
   t?: TranslateFn;
@@ -630,6 +647,25 @@ export interface DaemonBridge {
    *   file already holds.
    */
   notePromptSubmitted(sid: string | null, text: string): void;
+  /**
+   * List one directory level for the inspector's trees (issue #3026).
+   *
+   * Answers `null` — not an empty listing — when this build has no channel for it, so
+   * the tree can say "this build cannot list directories" instead of drawing an empty
+   * directory it never read. A *read* failure still throws: the daemon's message is the
+   * reason the host needs ("path not found: …"), and swallowing it would turn a real
+   * answer into the same blank as the unsupported case.
+   */
+  listDir(path: string): Promise<{ entries: TreeEntry[]; truncated: boolean } | null>;
+  /**
+   * The two roots the inspector's trees hang from, for one session.
+   *
+   * `null` means nothing was measured — no session, or a build whose preload predates
+   * this API. Both roots are `null` together when the main process cannot resolve the
+   * session's working directory either; the trees then ask for a session rather than
+   * rooting at a guess.
+   */
+  sessionRoots(sid: string | null): Promise<{ agentRoot: string | null; sessionRoot: string | null } | null>;
 }
 
 export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
@@ -1413,6 +1449,32 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
    * meaning "what the session holds" rather than "what this client sent": the next
    * read overwrites it whole, and any drift is corrected rather than accumulated.
    */
+  /**
+   * One directory level for the inspector's trees (issue #3026).
+   *
+   * `null` is "this build has no channel", which the tree renders as its own sentence.
+   * A failure to *read* is rethrown instead: the daemon's message is the reason the host
+   * needs, and folding it into the same blank would hide a path that does not exist.
+   */
+  async function listDir(p: string): Promise<{ entries: TreeEntry[]; truncated: boolean } | null> {
+    if (!emrg.listFiles) return null;
+    const answer = await emrg.listFiles({ path: p });
+    return {
+      entries: Array.isArray(answer?.entries) ? (answer.entries as TreeEntry[]) : [],
+      truncated: !!answer?.truncated,
+    };
+  }
+
+  /** The two roots for one session; `null` = nothing was measured. */
+  async function sessionRoots(
+    sid: string | null,
+  ): Promise<{ agentRoot: string | null; sessionRoot: string | null } | null> {
+    if (!sid || !emrg.sessionRoots) return null;
+    const answer = await emrg.sessionRoots({ sessionId: sid });
+    const str = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
+    return { agentRoot: str(answer?.agentRoot), sessionRoot: str(answer?.sessionRoot) };
+  }
+
   function notePromptSubmitted(sid: string | null, text: string): void {
     const prompt = text.trim();
     if (!sid || !prompt) return;
@@ -1441,5 +1503,7 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
     reorderOpenSessions,
     listInputHistory,
     notePromptSubmitted,
+    listDir,
+    sessionRoots,
   };
 }
