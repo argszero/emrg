@@ -623,17 +623,17 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     await waitFor(() => expect(screen.getByTestId("rename-dialog")).toBeInTheDocument());
   });
 
-  // The two entry points moved out of the sidebar when it became the open-sessions
-  // list (issue #2959): "new" is the band's `+`, and the history browser that used to
-  // be the open-chat dialog is now the search overlay.
-  it("status band「+」opens the new-session dialog", async () => {
+  // The two entry points left the sidebar when it became the open-sessions list
+  // (issue #2959) and landed in the session column's header; the band carried a second
+  // pair until issue #3028 removed it, so these tests click the one that stayed.
+  it("the session column's「+」opens the new-session dialog", async () => {
     render(wrapper(<Shell />));
-    await waitFor(() => expect(screen.getByTestId("band-new")).toBeInTheDocument());
-    fireEvent.click(screen.getByTestId("band-new"));
+    await waitFor(() => expect(screen.getByTestId("session-col-new")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("session-col-new"));
     await waitFor(() => expect(screen.getByTestId("new-session-dialog")).toBeInTheDocument());
   });
 
-  it("status band search opens the overlay and a hit switches session", async () => {
+  it("the session column's search opens the overlay and a hit switches session", async () => {
     const m = mockEmrg();
     render(wrapper(<Shell />));
     await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
@@ -642,7 +642,7 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     m.emit(sessionsFrame([{ session_id: "s1", title: "Alpha" }, { session_id: "s2", title: "Beta" }]));
     m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
     await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(1));
-    fireEvent.click(screen.getByTestId("band-search"));
+    fireEvent.click(screen.getByTestId("session-col-search"));
     await waitFor(() => expect(screen.getByTestId("search-overlay")).toBeInTheDocument());
     fireEvent.change(screen.getByTestId("search-input"), { target: { value: "beta" } });
     const hit = await screen.findByTestId("search-hit");
@@ -670,7 +670,7 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
     await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(1));
 
-    fireEvent.click(screen.getByTestId("band-search"));
+    fireEvent.click(screen.getByTestId("session-col-search"));
     await waitFor(() => expect(screen.getByTestId("search-overlay")).toBeInTheDocument());
     // 一次请求够到全部 agent：不是每个 agent 各问一次。
     await waitFor(() => expect(m.listAllSessions).toHaveBeenCalledTimes(1));
