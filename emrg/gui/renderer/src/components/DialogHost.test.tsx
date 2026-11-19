@@ -32,9 +32,9 @@ function appState(over: Partial<DaemonAppState> = {}): DaemonAppState {
     openSessions: [],
     busyBySid: {},
     turnStartBySid: {},
-    // No `turn_progress` frame has reached this fixture (issue #2959), so neither the
-    // round nor the turn's token total has been reported — absent, not zero.
-    roundBySid: {},
+    // No `turn_progress` frame has reached this fixture (issue #2959), so the turn's
+    // spend has not been reported — absent, not zero. The per-session round was removed
+    // with the band's counter (issue #3039), so there is no round field to seed here.
     usageWindow: null,
     // No rewind has been announced to this fixture (#2351) — the counter is only
     // ever compared for change, and "absent" is the state before any `rewind_result`.

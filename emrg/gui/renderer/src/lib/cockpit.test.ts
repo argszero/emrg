@@ -14,7 +14,6 @@ import {
   countLabel,
   filterByName,
   findBodyWidthCaps,
-  formatRound,
   formatTokens,
   groupSize,
   mergeSessionRows,
@@ -123,11 +122,10 @@ describe("band readings", () => {
     expect(formatTokens(2_500_000)).toBe("2.5M");
   });
 
-  it("formatRound：未上报是 —；第 0 轮不存在", () => {
-    expect(formatRound(null)).toBe("—");
-    expect(formatRound(0)).toBe("—");
-    expect(formatRound(1)).toBe("1");
-    expect(formatRound(3.7)).toBe("3");
+  it("formatRound 已随状态带的轮次格子删除（issue #3039）", async () => {
+    // 这个函数唯一的调用者是被删掉的那个格子。它若被谁加回来，这里就该红。
+    const cockpit = await import("./cockpit");
+    expect(Object.prototype.hasOwnProperty.call(cockpit, "formatRound")).toBe(false);
   });
 
   it("countLabel 是「命中 / 总数」", () => {

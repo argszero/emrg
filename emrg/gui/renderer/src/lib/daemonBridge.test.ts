@@ -207,28 +207,22 @@ describe("createDaemonBridge", () => {
     expect(st.turnStartBySid["s1"]).toBe(1756785600500);
   });
 
-  it("issue #2959：turn_progress → 状态带的轮次（daemon 的循环，不是客户端的算术）", () => {
-    // 轮次来自 daemon 每一轮开头的那一帧。这里钉三件事：缺席不是零、帧按会话隔离、
-    // 非数字字段不写；新一轮开始则归零（上一轮的轮数不该挂到这一轮）。
-    const { emit, bridge } = setup();
-    // ① 没报过就是没有：状态带据此渲染 «—»，而不是第 1 轮
-    expect(bridge.store.get().roundBySid["s1"]).toBeUndefined();
-    // 花费不是这一帧的事，也不是任何 per-turn 字段的事（rant 2026-11-19T09:31:00）
-    expect(Object.prototype.hasOwnProperty.call(bridge.store.get(), "turnTokensBySid")).toBe(false);
+  it("issue #3039：per-session 轮数随状态带的格子一起删了，turn_progress 只剩重读花费", () => {
+    // 这个值曾有写者、清零和格式器，而唯一的读者是被删掉的那个格子。这里钉两件事：
+    // 帧照旧到达（daemon 没变，别处仍读它），但本端不再留下任何轮数字段。
+    const { emit, bridge, usageWindow } = setup();
+    expect(Object.prototype.hasOwnProperty.call(bridge.store.get(), "roundBySid")).toBe(false);
 
     emit({ type: "turn_progress", data: { round: 1 }, sid: "s1" });
     emit({ type: "turn_progress", data: { round: 3 }, sid: "s1" });
-    expect(bridge.store.get().roundBySid["s1"]).toBe(3);
-    // ② 帧是会话级的：s2 没收到就没有读数
-    expect(bridge.store.get().roundBySid["s2"]).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(bridge.store.get(), "roundBySid")).toBe(false);
 
-    // ③ 一个形状不对的帧不得把轮数抹成 NaN
-    emit({ type: "turn_progress", data: { round: "4" }, sid: "s1" });
-    expect(bridge.store.get().roundBySid["s1"]).toBe(3);
-
-    // ④ 新一轮开始 → 轮数归零
     emit({ type: "turn_start", data: { started_at: 1756785600.5 }, sid: "s1" });
-    expect(bridge.store.get().roundBySid["s1"]).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(bridge.store.get(), "roundBySid")).toBe(false);
+
+    // 花费不是这一帧的事，也不是任何 per-turn 字段的事（rant 2026-11-19T09:31:00）
+    expect(Object.prototype.hasOwnProperty.call(bridge.store.get(), "turnTokensBySid")).toBe(false);
+    expect(usageWindow).toHaveBeenCalled();
   });
 
   it("rant 2026-11-19T09:31:00：花费读数是 daemon 的 24 小时窗口，三段分开、坏值不编数字", async () => {

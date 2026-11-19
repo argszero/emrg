@@ -587,16 +587,16 @@ export function Shell() {
   const busy = activeSid ? (appState.busyBySid[activeSid] ?? false) : false;
   const disconnected = activeSid ? (appState.disconnectedBySid[activeSid] ?? false) : false;
 
-  // ── The status band's two daemon readings: the running round, and the spend ──
+  // ── The status band's daemon reading: the spend ──
   //
-  // The round comes from `turn_progress`, the frame the daemon broadcasts at the top of
-  // every round; the spend is the daemon's rolling 24-hour window (rant
-  // 2026-11-19T09:31:00), read by the bridge and not counted here. Neither is derived:
-  // a client that counted rounds, or added up usage it happened to see, would answer
-  // with its own arithmetic the moment a stream restarts or another window watches the
-  // same turn. `null` is "not reported", which the band renders as `—` rather than as
-  // round 1 or as zero tokens.
-  const round = activeSid ? (appState.roundBySid[activeSid] ?? null) : null;
+  // The spend is the daemon's rolling 24-hour window (rant 2026-11-19T09:31:00), read by
+  // the bridge and not counted here: a client that added up usage it happened to see
+  // would answer with its own arithmetic the moment a stream restarts or another window
+  // watches the same turn. `null` is "not reported", which the band renders as `—` rather
+  // than as zero tokens.
+  //
+  // The turn counter is not looked up here any more (issue #3039): the band's cell is
+  // gone, so the value, its writer and its reset went with it.
   const usageWindow = appState.usageWindow;
 
   /**
@@ -1110,7 +1110,6 @@ export function Shell() {
       ) : null}
       <StatusBand
         running={busy}
-        round={round}
         startedAtMs={activeTurnStart}
         usage={usageWindow}
         leftOpen={leftOpen}

@@ -132,17 +132,6 @@ export interface DaemonAppState {
   /** 每会话 turn 开始时刻（epoch ms；rant 2026-09-02T10:36:26 daemon turn_start 权威广播） */
   turnStartBySid: Record<string, number>;
   /**
-   * Which round of the current turn each session is on, as the daemon reported it
-   * (issue #2959).
-   *
-   * Written only by `turn_progress` — the frame the daemon broadcasts at the top of
-   * every round — so the status band's counter is a reading of the daemon's loop, not
-   * a client's count of the frames it happened to receive. An absent key means no
-   * round has been reported for this turn, which the band renders as `—` rather than
-   * as round 1: a turn that has not started a round has not started one.
-   */
-  roundBySid: Record<string, number>;
-  /**
    * The daemon's rolling 24-hour token window (rant 2026-11-19T09:31:00).
    *
    * `null` = the daemon has not answered one yet. It is **not** per session and it is
@@ -406,7 +395,6 @@ export function createDaemonAppStore(): SnapshotStore<DaemonAppState> {
     openSessions: [],
     busyBySid: {},
     turnStartBySid: {},
-    roundBySid: {},
     usageWindow: null,
     rewoundBySid: {},
     disconnectedBySid: {},
@@ -946,44 +934,25 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
         // Rant 2026-09-02T10:36:26：daemon 权威 turn 开始（含后台演化/其他客户端
         // turn）——记 start 时刻并置 busy；计时基准与 TUI 同一来源。
         //
-        // issue #2959：新一轮是状态带轮次读数的起点。`turn_progress` 只写不清（理由
-        // 在该 case 里），所以上一轮的轮数会一直挂到本轮第一帧为止；这里连同 busy
-        // 一起清掉，轮数于是和「这一轮开始了」同时归零。
+        // 轮次读数随状态带的格子一起删掉了（issue #3039）：不再有 per-session 轮数
+        // 需要在这里归零，所以这一帧只做它本来那两件事。
         //
-        // 花费不再是这里的事（rant 2026-11-19T09:31:00）：那是最近 24 小时的窗口，
+        // 花费也不再是这里的事（rant 2026-11-19T09:31:00）：那是最近 24 小时的窗口，
         // 换会话、关窗口、重启 GUI 都不该动它，所以它也不再由「新一轮」清零。
         const startedAt = (data as { started_at?: number }).started_at;
         const k = KEY(sid);
         if (typeof startedAt === "number" && startedAt > 0) {
-          const { [k]: _dropRound, ...roundsRest } = store.get().roundBySid;
           store.update((s) => ({
             ...s,
             busyBySid: { ...s.busyBySid, [k]: true },
             turnStartBySid: { ...s.turnStartBySid, [k]: startedAt * 1000 },
-            roundBySid: roundsRest,
           }));
         }
         break;
       }
       case "turn_progress": {
-        // Issue #2959：daemon 在每一轮开头广播的读数——第几轮。只写不清：turn 结束时
-        // 它是这一轮的结论，抹掉只会让状态带在 `turn_end` 到下一轮之间闪回 «—»；
-        // `turn_start` 才是新 turn 的起点（见上面的 `case "turn_start"`）。
-        //
-        // 花费不在这帧里了（rant 2026-11-19T09:31:00）：窗口由 daemon 记账，本端在
-        // 每一帧到达时重读一次，于是轮次照旧是 daemon 的循环，而花费是那一份账本。
-        const p = data as { round?: number };
-        const k = KEY(sid);
-        // Bound to a constant before the callback: inside the updater the narrowing of a
-        // mutable field is gone, and `Math.floor` would be handed `number | undefined`.
-        const reported = p.round;
-        if (typeof reported === "number" && Number.isFinite(reported) && reported > 0) {
-          const roundNumber = Math.floor(reported);
-          store.update((s) => ({
-            ...s,
-            roundBySid: { ...s.roundBySid, [k]: roundNumber },
-          }));
-        }
+        // Issue #2959 的轮次读数已随状态带的格子删除（issue #3039）：这一帧在本端只
+        // 剩「重读一次花费」这件事。daemon 照常广播，别处仍读它，所以帧本身不变。
         void refreshUsageWindow();
         break;
       }
