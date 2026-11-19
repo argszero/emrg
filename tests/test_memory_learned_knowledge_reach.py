@@ -52,7 +52,7 @@ MEMORY_HEADING = "## Memory"
 #: here: the four triggers; a measurement as knowledge; the three things an entry says; the look
 #: before the work; improving rather than duplicating; no exhortation; which store.
 LEARNED_TERMS = (
-    "What was learned is recorded in the round it was learned in, and not only a mistake",
+    "What a round learned is worth an entry, and not only what it got wrong",
     "a judgement that was wrong, a way of working that cost more than it had to, a better way that turned up, and a premise that turned out not to hold",
     "A number measured once is knowledge",
     "what is better or wrong instead, and how that is known",
@@ -84,21 +84,26 @@ def _block_after(text: str, heading: str) -> str:
     return rest if end == -1 else rest[:end]
 
 
-def _render_system_prompt() -> str:
+def _render_system_prompt(has_memories: bool = True) -> str:
     """The prompt a session receives, rendered by the daemon's own Jinja environment.
 
     The daemon's `_get_jinja_env` is what `_build_system_prompt` uses; a fresh `Environment` could
     differ in `trim_blocks` / `lstrip_blocks` or in the loader path, and the prompt under test would
-    then be one nobody receives. `has_memories` is true because the group sits in the branch that
-    speaks to a session which already holds memories — the only session that can have learned
-    something to record.
+    then be one nobody receives.
+
+    Both branches are rendered, because the group sits **above** the `has_memories` gate rather than
+    inside it. A session that has written nothing is the one deciding what is worth writing, so it is
+    the reader the rules exist for, and a placement inside the gate would keep every character in the
+    file while telling that reader nothing — the shape this section already paid for once, when the
+    row bound and the line cap sat inside it and the round that created an index was told neither
+    (`tests/test_memory_row_bound_reach.py` records that measurement).
     """
     from emrg.server.daemon import _get_jinja_env  # noqa: PLC0415
 
     return _get_jinja_env().get_template("system.j2").render(
         os_name="test",
         config_dir="/nonexistent",
-        has_memories=True,
+        has_memories=has_memories,
         agent_memory_dir="/tmp/memory",
         agent_memory_index_path="/tmp/memory/MEMORY.md",
         session_memory_dir="/tmp/session-memory",
@@ -144,6 +149,28 @@ def test_the_group_is_stated_once_and_sits_before_the_correction_rules() -> None
     )
 
 
+def test_a_session_with_no_index_still_receives_what_a_round_learned() -> None:
+    """The reach the group's placement buys, read on the branch that has no index.
+
+    A session holding no memory is the one deciding what is worth writing, so it is the reader these
+    rules exist for. Placed inside `{% if has_memories %}` they would keep every character in the
+    file and reach exactly the session that needs them least — the shape this section has already
+    paid for once, with the row bound and the line cap.
+    """
+    rendered = _render_system_prompt(has_memories=False)
+    assert "*No memories yet." in rendered, (
+        "this fixture no longer renders the no-index branch, so it is not the reading it claims to "
+        "be — the branch marker is the whole subject of this test"
+    )
+    block = _block_after(rendered, MEMORY_HEADING)
+    assert block, "the rendered prompt carries no Memory section"
+    missing = [term for term in LEARNED_TERMS if term not in block]
+    assert not missing, (
+        "a session with no memory index is not told what earns an entry — the group sits inside the "
+        f"`has_memories` gate, which is the one branch that has already written something: {missing}"
+    )
+
+
 def test_a_session_receives_the_learned_knowledge_rules() -> None:
     """The render leg: a group behind a false `{% if %}` reaches no session at all."""
     block = _block_after(_render_system_prompt(), MEMORY_HEADING)
@@ -152,6 +179,25 @@ def test_a_session_receives_the_learned_knowledge_rules() -> None:
     assert not missing, (
         "the rules are in the template but not in the rendered prompt — a block moved behind a "
         f"false conditional keeps every character in the file and reaches nobody: {missing}"
+    )
+
+
+def test_the_group_is_outside_the_index_gate_in_the_template() -> None:
+    """The placement itself, read on the source: above the gate, not inside it.
+
+    The two render tests above would both pass if a later edit moved the group inside the gate while
+    keeping the no-index assertion's own subject intact — so the source is read for where the group
+    sits relative to the conditional, not only for what it says.
+    """
+    text = SYSTEM_PROMPT.read_text(encoding="utf-8")
+    block = _block_after(text, MEMORY_HEADING)
+    gate = block.find("{% if has_memories %}")
+    group = block.find(LEARNED_TERMS[0])
+    assert gate != -1, "the Memory section no longer carries the has_memories conditional"
+    assert group != -1, "the learned-knowledge group is gone from the Memory section"
+    assert group < gate, (
+        "the learned-knowledge group now sits inside the `has_memories` branch — the round that has "
+        "written nothing decides what is worth writing, and it is the one reader the gate excludes"
     )
 
 
