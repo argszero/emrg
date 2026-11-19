@@ -6,7 +6,8 @@
  *   vendor/marked.min.js            — marked UMD 构建
  *   vendor/dompurify.min.js         — DOMPurify UMD 构建
  *   vendor/highlight.custom.js      — highlight.js 核心 + ~20 常用语言子集（mini CJS loader 包装）
- *   vendor/highlight.github-dark.css— 代码高亮主题（本地 CSS）
+ *   （代码块的主题 CSS 不在这里：renderer/css/highlight.css 由 main.tsx 引入，颜色取自
+ *     tokens.css 的 --hl-*，浅色与深色各一套——issue #3013）
  *   vendor/monaco/vs/**             — monaco-editor min/vs（rant 09:17:45 提示词编辑器；
  *                                     排除 language/ 与 assets/：仅用 markdown，无语言 worker，
  *                                     file:// worker 由 no-op getWorkerUrl 兜底 → 体积 24M → ~6.7M）
@@ -66,12 +67,6 @@ ${registers}
 })(typeof window !== 'undefined' ? window : this);
 `;
 fs.writeFileSync(path.join(VENDOR, "highlight.custom.js"), bundle);
-
-// 4. 主题 CSS
-fs.copyFileSync(
-  path.join(NM, "highlight.js", "styles", "github-dark.css"),
-  path.join(VENDOR, "highlight.github-dark.css")
-);
 
 // 5. Monaco Editor（rant 2026-08-15T09:17:45/09:20:12 方案 A）：
 //    拷 min/vs（排除 language/ 语言服务与 assets/ 独立 worker —— markdown 不需要）
