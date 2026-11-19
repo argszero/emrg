@@ -1,13 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   FENCE_END_RE,
   isFenceClosed,
   createMarkdownRenderer,
+  installCodeCopy,
   normalizeImageSrc,
   isLocalImageSrc,
   type MarkedLike,
   type StreamState,
 } from "./markdown";
+import { EN_DICT, ZH_DICT } from "./i18n-dicts";
 
 /**
  * markdown.test.ts — marked/DOMPurify/highlight 封装纯逻辑测试（Batch 1 remainder）。
@@ -59,6 +61,82 @@ function makeFakeMarked(opts?: { hljs?: unknown; dompurify?: unknown }): {
     },
   };
   return { marked, dompurify, hljs };
+}
+
+/** 文本驱动 fake marked：按 ``` 围栏切分 段落/code token；闭合状态由收尾围栏决定。
+ * 提到模块级：代码块复制的用例也要多块与自定义代码文本，两个 describe 共用一份。 */
+function makeTextMarked(): { marked: MarkedLike; dompurify: { sanitize: (h: string) => string } } {
+  let codeRenderer: ((code: string, infostring: string, escaped: boolean) => string) | null = null;
+  const dompurify = { sanitize: (h: string) => h.replace(/<script[\s\S]*?<\/script>/gi, "") };
+
+  function tokenize(text: string): Array<Record<string, unknown>> {
+    const lines = text.split("\n");
+    const tokens: Array<Record<string, unknown>> = [];
+    let fence: string | null = null;
+    let lang = "";
+    const codeBuf: string[] = [];
+    const paraBuf: string[] = [];
+    const flushPara = () => {
+      const t = paraBuf.join("\n").trim();
+      if (t) tokens.push({ type: "paragraph", raw: t, text: t });
+      paraBuf.length = 0;
+    };
+    for (const line of lines) {
+      const m = /^(`{3,}|~{3,})[ \t]*([A-Za-z0-9_+-]*)[ \t]*$/.exec(line);
+      if (!fence && m) {
+        flushPara();
+        fence = m[1];
+        lang = m[2] || "";
+        continue;
+      }
+      if (fence && m && m[1][0] === fence[0] && m[1].length >= fence.length) {
+        tokens.push({ type: "code", raw: fence + "\n" + codeBuf.join("\n") + "\n" + fence, text: codeBuf.join("\n"), lang });
+        fence = null;
+        codeBuf.length = 0; // 每块各自归零：不清空的话，下一块会把这一块的正文再抄一遍
+        continue;
+      }
+      if (fence) {
+        codeBuf.push(line);
+        continue;
+      }
+      paraBuf.push(line);
+    }
+    if (fence) {
+      // 未闭合：raw 无收尾围栏 → engine isFenceClosed false → live 纯文本路径
+      tokens.push({ type: "code", raw: fence + "\n" + codeBuf.join("\n"), text: codeBuf.join("\n"), lang });
+    } else {
+      flushPara();
+    }
+    return tokens;
+  }
+
+  const renderToken = (tok: Record<string, unknown>): string => {
+    if (tok.type === "code") {
+      const code = String(tok.text ?? "");
+      const lg = String(tok.lang ?? "");
+      return codeRenderer ? codeRenderer(code, lg, false) : `<pre>${code}</pre>`;
+    }
+    return `<p>${String(tok.text ?? "")}</p>`;
+  };
+
+  return {
+    dompurify,
+    marked: {
+      parse(text: string) {
+        return tokenize(text).map(renderToken).join("");
+      },
+      lexer(text: string) {
+        return tokenize(text);
+      },
+      parser(tokens: Array<Record<string, unknown>>) {
+        return tokens.map(renderToken).join("");
+      },
+      use(opts) {
+        if (opts.renderer?.code) codeRenderer = opts.renderer.code;
+        return undefined;
+      },
+    },
+  };
 }
 
 describe("FENCE_END_RE / isFenceClosed（双态验证）", () => {
@@ -171,80 +249,6 @@ describe("createMarkdownRenderer：块投影流式（jsdom）", () => {
 });
 
 describe("块投影：live 代码围栏 未闭合→纯文本 / 闭合→完整渲染（rant 2026-09-02T21:07:35 验收）", () => {
-  /** 文本驱动 fake marked：按 ``` 围栏切分 段落/code token；闭合状态由收尾围栏决定 */
-  function makeTextMarked(): { marked: MarkedLike; dompurify: { sanitize: (h: string) => string } } {
-    let codeRenderer: ((code: string, infostring: string, escaped: boolean) => string) | null = null;
-    const dompurify = { sanitize: (h: string) => h.replace(/<script[\s\S]*?<\/script>/gi, "") };
-
-    function tokenize(text: string): Array<Record<string, unknown>> {
-      const lines = text.split("\n");
-      const tokens: Array<Record<string, unknown>> = [];
-      let fence: string | null = null;
-      let lang = "";
-      const codeBuf: string[] = [];
-      const paraBuf: string[] = [];
-      const flushPara = () => {
-        const t = paraBuf.join("\n").trim();
-        if (t) tokens.push({ type: "paragraph", raw: t, text: t });
-        paraBuf.length = 0;
-      };
-      for (const line of lines) {
-        const m = /^(`{3,}|~{3,})[ \t]*([A-Za-z0-9_+-]*)[ \t]*$/.exec(line);
-        if (!fence && m) {
-          flushPara();
-          fence = m[1];
-          lang = m[2] || "";
-          continue;
-        }
-        if (fence && m && m[1][0] === fence[0] && m[1].length >= fence.length) {
-          tokens.push({ type: "code", raw: fence + "\n" + codeBuf.join("\n") + "\n" + fence, text: codeBuf.join("\n"), lang });
-          fence = null;
-          continue;
-        }
-        if (fence) {
-          codeBuf.push(line);
-          continue;
-        }
-        paraBuf.push(line);
-      }
-      if (fence) {
-        // 未闭合：raw 无收尾围栏 → engine isFenceClosed false → live 纯文本路径
-        tokens.push({ type: "code", raw: fence + "\n" + codeBuf.join("\n"), text: codeBuf.join("\n"), lang });
-      } else {
-        flushPara();
-      }
-      return tokens;
-    }
-
-    const renderToken = (tok: Record<string, unknown>): string => {
-      if (tok.type === "code") {
-        const code = String(tok.text ?? "");
-        const lg = String(tok.lang ?? "");
-        return codeRenderer ? codeRenderer(code, lg, false) : `<pre>${code}</pre>`;
-      }
-      return `<p>${String(tok.text ?? "")}</p>`;
-    };
-
-    return {
-      dompurify,
-      marked: {
-        parse(text: string) {
-          return tokenize(text).map(renderToken).join("");
-        },
-        lexer(text: string) {
-          return tokenize(text);
-        },
-        parser(tokens: Array<Record<string, unknown>>) {
-          return tokens.map(renderToken).join("");
-        },
-        use(opts) {
-          if (opts.renderer?.code) codeRenderer = opts.renderer.code;
-          return undefined;
-        },
-      },
-    };
-  }
-
   it("未闭合围栏：live 保持纯文本 .stream-code（不高亮、无复制按钮）", () => {
     const fake = makeTextMarked();
     const r = createMarkdownRenderer({ marked: fake.marked, DOMPurify: fake.dompurify });
@@ -390,5 +394,173 @@ describe("块投影：正文里有选区 → 这一帧一个 DOM 都不写（iss
     await md.resumeStream(body, state);
     expect(body.innerHTML).not.toBe(before);
     expect(state.pendingFinalize).toBeUndefined();
+  });
+});
+
+describe("代码块复制按钮：点击写剪贴板（issue #3037）", () => {
+  /** 带缩进、空行与中文标点的代码：复制结果必须与屏幕上那一块逐字相等 */
+  const CODE = 'def f():\n    # 中文标点，不动。\n\n    return "值"';
+  const ONE = "先说一句\n\n```py\n" + CODE + "\n```";
+  const TWO = "开头\n\n```js\nconst a = 1;\n```\n\n中间\n\n```py\n" + CODE + "\n```";
+
+  const dictT = (dict: Record<string, string>) => (key: string) => dict[key] ?? key;
+  const zh = dictT(ZH_DICT);
+  const en = dictT(EN_DICT);
+
+  afterEach(() => {
+    vi.useRealTimers();
+    document.body.innerHTML = "";
+  });
+
+  /** 真实 DOM：root(.transcript-view) > body。委托装在 root 上，与 TranscriptView 同形。 */
+  function mount(
+    opts: { t?: (key: string) => string; writeText?: (text: string) => Promise<void> } = {},
+  ) {
+    const fake = makeTextMarked();
+    const t = opts.t;
+    const md = createMarkdownRenderer({
+      marked: fake.marked,
+      DOMPurify: fake.dompurify,
+      ...(t ? { t } : {}),
+    });
+    const root = document.createElement("div");
+    root.className = "transcript-view";
+    const body = document.createElement("div");
+    root.appendChild(body);
+    document.body.appendChild(root);
+    const writes: string[] = [];
+    installCodeCopy(root, {
+      ...(t ? { t } : {}),
+      writeText:
+        opts.writeText ??
+        ((text: string) => {
+          writes.push(text);
+          return Promise.resolve();
+        }),
+    });
+    return { root, body, md, writes };
+  }
+
+  /** 给 Promise 链跑完的机会（fake timers 不会替你清微任务队列之外的链） */
+  const settle = async (): Promise<void> => {
+    for (let i = 0; i < 4; i++) await Promise.resolve();
+  };
+
+  /** 真派发点击事件，不直接调用处理函数 */
+  const click = (node: Element): void => {
+    node.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+  };
+
+  const copyBtn = (body: HTMLElement, i = 0): HTMLButtonElement =>
+    body.querySelectorAll<HTMLElement>(".code-block")[i].querySelector<HTMLButtonElement>(".code-copy")!;
+
+  it("流式中已闭合的代码块：点按钮写入该块原文，1.5s 后复原", async () => {
+    vi.useFakeTimers();
+    const { md, body, writes } = mount({ t: zh });
+    const state: StreamState = { stableCount: 0, rawText: "" };
+    expect(md.streamProject(body, ONE, state)).toBe(true);
+    const pre = body.querySelector(".code-block pre")!;
+    const btn = copyBtn(body);
+    expect(btn.textContent).toBe("复制代码");
+
+    click(btn);
+    await settle();
+
+    expect(writes).toEqual([CODE]); // 缩进、空行、中文标点逐字保留
+    expect(writes[0]).toBe(pre.textContent); // 写进去的就是屏幕上那一块
+    expect(writes[0]).not.toContain("language-"); // 不夹带高亮留下的痕迹
+    expect(writes[0]).not.toContain("```"); // 不夹带围栏与语言名
+    expect(btn.textContent).toBe("已复制 ✓");
+
+    await vi.advanceTimersByTimeAsync(1499);
+    expect(btn.textContent).toBe("已复制 ✓");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(btn.textContent).toBe("复制代码");
+  });
+
+  it("回答结束整块重写后按钮仍然可用（委托不在按钮上）", async () => {
+    const { md, body, writes } = mount();
+    const state: StreamState = { stableCount: 0, rawText: "" };
+    md.streamProject(body, ONE, state);
+    const before = copyBtn(body);
+    await md.streamFinalize(body, ONE);
+    const after = copyBtn(body);
+    expect(after).not.toBe(before); // 节点确实被换掉了
+    click(after);
+    await settle();
+    expect(writes).toEqual([CODE]);
+  });
+
+  it("一段回答里多个代码块：只复制被点的那一块", async () => {
+    const { md, body, writes } = mount();
+    const state: StreamState = { stableCount: 0, rawText: "" };
+    md.streamProject(body, TWO, state);
+    const btns = body.querySelectorAll(".code-copy");
+    expect(btns.length).toBe(2);
+
+    click(btns[1]);
+    await settle();
+    expect(writes).toEqual([CODE]);
+
+    click(btns[0]);
+    await settle();
+    // writes 记的是点击顺序（先点的第二块），不是 DOM 顺序
+    expect(writes).toEqual([CODE, "const a = 1;"]);
+  });
+
+  it("写入失败：文案切「复制失败」，3s 后才复原", async () => {
+    vi.useFakeTimers();
+    const { md, body } = mount({ t: zh, writeText: () => Promise.reject(new Error("denied")) });
+    const state: StreamState = { stableCount: 0, rawText: "" };
+    md.streamProject(body, ONE, state);
+    const btn = copyBtn(body);
+
+    click(btn);
+    await settle();
+    expect(btn.textContent).toBe("复制失败");
+
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(btn.textContent).toBe("复制失败"); // 成功那一档的时长不适用于失败
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(btn.textContent).toBe("复制代码");
+  });
+
+  it("按钮文案与成功反馈跟着界面语言（中/英）", async () => {
+    vi.useFakeTimers();
+    for (const [t, label, ok] of [
+      [zh, "复制代码", "已复制 ✓"],
+      [en, "Copy code", "Copied ✓"],
+    ] as const) {
+      document.body.innerHTML = "";
+      const { md, body, writes } = mount({ t });
+      const state: StreamState = { stableCount: 0, rawText: "" };
+      md.streamProject(body, ONE, state);
+      const btn = copyBtn(body);
+      expect(btn.textContent).toBe(label);
+
+      click(btn);
+      await settle();
+      expect(writes).toEqual([CODE]);
+      expect(btn.textContent).toBe(ok);
+
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(btn.textContent).toBe(label);
+    }
+  });
+
+  it("失败反馈也是中英各一条", async () => {
+    vi.useFakeTimers();
+    for (const [t, fail] of [
+      [zh, "复制失败"],
+      [en, "Copy failed"],
+    ] as const) {
+      document.body.innerHTML = "";
+      const { md, body } = mount({ t, writeText: () => Promise.reject(new Error("denied")) });
+      const state: StreamState = { stableCount: 0, rawText: "" };
+      md.streamProject(body, ONE, state);
+      click(copyBtn(body));
+      await settle();
+      expect(copyBtn(body).textContent).toBe(fail);
+    }
   });
 });

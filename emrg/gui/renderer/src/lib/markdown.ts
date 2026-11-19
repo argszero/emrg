@@ -362,3 +362,89 @@ export function createMarkdownRenderer(deps: {
 
   return { renderMarkdown, streamProject, streamFinalize, resumeStream };
 }
+
+/** 复制成功后的复原时长；失败给的更长，因为它是唯一能说明「这次没复制上」的东西（issue #3037）。 */
+export const COPY_OK_MS = 1500;
+export const COPY_FAIL_MS = 3000;
+
+export interface CodeCopyDeps {
+  /** 文案来源；与 createMarkdownRenderer 的 `t` 同源，缺省用英文兜底。 */
+  t?: Translate;
+  /** 写剪贴板；测试注入用，缺省走 navigator.clipboard.writeText。 */
+  writeText?: (text: string) => Promise<void>;
+  /** 覆写两种反馈的时长（毫秒）。 */
+  okMs?: number;
+  failMs?: number;
+}
+
+/**
+ * 默认写入：渲染进程里的 `navigator.clipboard`。
+ * 与 `AtpLoginDialog` 复制设备码、`ErrorBoundary` 复制错误信息走的是同一条通道。
+ */
+function writeClipboard(text: string): Promise<void> {
+  const board = typeof navigator === "undefined" ? null : navigator.clipboard;
+  if (!board || typeof board.writeText !== "function") {
+    return Promise.reject(new Error("clipboard unavailable"));
+  }
+  return board.writeText(text);
+}
+
+/**
+ * 接管聊天区代码块右上角复制按钮的点击（issue #3037）。
+ *
+ * 为什么是委托、不是给每个按钮绑监听：块投影每帧重写尾部 live 块，done 时
+ * `streamFinalize` 又把 `.md-stream` 的 innerHTML 整个换掉 —— 绑在按钮上的监听随节点一起
+ * 消失，块被重写一次按钮就哑了。委托挂在长期存在的正文容器上，重写多少次都不用重新注册。
+ *
+ * 复制的是 `.code-block pre` 的 `textContent`：屏幕上显示的那段文字本身。高亮的
+ * `<span class="hljs-*">` 只是包裹，`textContent` 天然剥掉标签；语言名在 `<code class>`
+ * 的属性里，也不是文本 —— 两者都进不了剪贴板，而缩进、空行、中文标点原样保留。
+ *
+ * 返回解除绑定的函数（组件卸载时调用）。
+ */
+export function installCodeCopy(root: HTMLElement, deps: CodeCopyDeps = {}): () => void {
+  const translate = deps.t;
+  const say = (key: string, fallback: string): string => (translate ? translate(key) : fallback);
+  const write = deps.writeText ?? writeClipboard;
+  const okMs = deps.okMs ?? COPY_OK_MS;
+  const failMs = deps.failMs ?? COPY_FAIL_MS;
+  /** 每个按钮最多一个待复原计时器：连点两次时，第一次的计时器不会提前抹掉第二次的反馈。 */
+  const pending = new WeakMap<Element, ReturnType<typeof setTimeout>>();
+
+  const flash = (btn: Element, text: string, ms: number): void => {
+    const prev = pending.get(btn);
+    if (prev !== undefined) clearTimeout(prev);
+    btn.textContent = text;
+    const timer = setTimeout(() => {
+      pending.delete(btn);
+      // 复原成当前语言的正常文案，而不是点下去那一刻抄下来的字符串
+      btn.textContent = say("md.copyCode", "Copy code");
+    }, ms);
+    pending.set(btn, timer);
+  };
+
+  const onClick = (event: Event): void => {
+    const target = event.target as Element | null;
+    if (!target || typeof target.closest !== "function") return;
+    const btn = target.closest(".code-copy");
+    if (!btn || !root.contains(btn)) return;
+    const block = btn.closest(".code-block");
+    const pre = block ? block.querySelector("pre") : null;
+    if (!pre) return;
+    const text = pre.textContent ?? "";
+    let done: Promise<void>;
+    try {
+      done = Promise.resolve(write(text));
+    } catch (err) {
+      // 同步抛（老实现/IPC 直写）与 Promise 拒绝对使用者是同一件事
+      done = Promise.reject(err);
+    }
+    done.then(
+      () => flash(btn, say("chat.copied", "Copied ✓"), okMs),
+      () => flash(btn, say("chat.copyFailed", "Copy failed"), failMs),
+    );
+  };
+
+  root.addEventListener("click", onClick);
+  return () => root.removeEventListener("click", onClick);
+}
