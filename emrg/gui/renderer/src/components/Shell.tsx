@@ -612,9 +612,19 @@ export function Shell() {
         live = false;
       };
     }
-    void bridge.sessionRoots(activeSid).then((r) => {
-      if (live && r) setRoots(r);
-    });
+    // A build whose preload has no such channel **rejects** rather than answering, and
+    // an unhandled rejection here is a console error in the app and a red suite in CI
+    // (measured: run 44472804661, where a test removed `window.emrg` while this call was
+    // in flight). `null` is the answer the trees already render as "not measured", so a
+    // failure keeps both roots null instead of escaping.
+    void bridge
+      .sessionRoots(activeSid)
+      .then((r) => {
+        if (live && r) setRoots(r);
+      })
+      .catch(() => {
+        if (live) setRoots({ agentRoot: null, sessionRoot: null });
+      });
     return () => {
       live = false;
     };

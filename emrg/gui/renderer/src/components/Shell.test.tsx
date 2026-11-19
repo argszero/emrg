@@ -227,6 +227,31 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     expect(screen.getByTestId("conn-status").querySelector(".conn-dot")?.className).toContain("gray");
   });
 
+  it("a roots read that fails is swallowed instead of escaping as an unhandled rejection (issue #3026)", async () => {
+    // The inspector's two roots come from the main process, and a build whose preload
+    // lacks the channel **rejects** rather than answering. Shell owes that rejection a
+    // handler: without one it escapes as an unhandled rejection — a console error in the
+    // app, and a red suite in CI (measured: run 44472804661, where a test removed
+    // `window.emrg` while this call was in flight and the renderer step failed on it).
+    const seen: unknown[] = [];
+    const onRejection = (reason: unknown) => seen.push(reason);
+    process.on("unhandledRejection", onRejection);
+    try {
+      const m = mockEmrg();
+      m.sessionRoots.mockRejectedValue(new Error("sessionRoots unavailable"));
+      render(wrapper(<Shell />));
+      await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+      m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+      await waitFor(() => expect(m.sessionRoots).toHaveBeenCalled());
+      // Flush the microtask queue the rejection would travel on.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(seen).toEqual([]);
+      expect(screen.getByTestId("transcript-view")).toBeInTheDocument();
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+  });
+
   it("auto-selects the first open session and renders its transcript from broadcasts", async () => {
     const m = mockEmrg();
     render(wrapper(<Shell />));
