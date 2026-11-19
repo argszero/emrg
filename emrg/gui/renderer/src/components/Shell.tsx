@@ -107,6 +107,15 @@ interface WorkspaceBridge {
    * 清掉一份还归那条会话所有的内容，等于凭空丢掉它。
    */
   closeSession?(p: { sessionId: string }): Promise<unknown>;
+  /**
+   * 拖拽调序（`emrg:reorderOpenSessions`；issue #3022）：把整份新顺序交给主进程。
+   *
+   * 顺序的唯一真源在主进程 —— 它收下、落盘、广播，列表照那次广播画。这里再排一次
+   * 就是第二个真源，而两个真源打架的样子就是「列表跳一下」。
+   *
+   * 可选：这条消息比某些已装客户端新，未接线时那次拖拽落空，列表不动。
+   */
+  reorderOpenSessions?(p: { sids: string[] }): Promise<unknown>;
   pickAgentDir(): Promise<{ path?: string } | null>;
   registerAgent(p: { path: string }): Promise<{ ok?: boolean; path?: string }>;
   removeAgent(p: { name: string; path?: string }): Promise<{ ok?: boolean; error?: string; protected?: boolean }>;
@@ -775,6 +784,18 @@ export function Shell() {
    * 关闭失败时什么都不清：主进程说没关掉，内容就还是那条会话的，清掉等于凭空丢内容。
    * 主进程的拒绝是抛出来的（非法 session id），所以这里的失败就是那次 `catch`。
    */
+  /**
+   * 拖拽调序（issue #3022）：把新顺序交给主进程，顺序的唯一真源在那里。
+   *
+   * 这里不动本地数组：主进程收下、落盘、广播 `open_sessions`，新顺序从那次广播回来。
+   * 失败就什么都不做 —— 列表照旧显示，下一次广播仍是真相。
+   */
+  async function reorderOpenSessionList(sids: string[]): Promise<void> {
+    const b = wsBridge();
+    if (!b?.reorderOpenSessions) return;
+    await b.reorderOpenSessions({ sids });
+  }
+
   async function closeOpenSession(sid: string): Promise<void> {
     const b = wsBridge();
     if (!b?.closeSession) return;
@@ -1106,6 +1127,7 @@ export function Shell() {
                 turnStartBySid={appState.turnStartBySid}
                 onSelect={selectSession}
                 onClose={(sid) => void closeOpenSession(sid)}
+                onReorder={(sids) => void reorderOpenSessionList(sids)}
                 onSearch={() => setSearchOpen(true)}
                 onNew={() => dialogHost.current?.openNewSession()}
               />

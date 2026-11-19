@@ -15,7 +15,14 @@ const crypto = require("crypto");
 const { parse: parseToml, stringify: stringifyToml } = require("smol-toml");
 const { generateSessionId, isSessionId, pickSessionCwd } = require("./daemon_client");
 const { ConnManager } = require("./conn-manager");
-const { guiStatePath, sanitizeOpenSessions, saveGuiState, DEFAULT_CAP } = require("./gui-state");
+const {
+  guiStatePath,
+  sanitizeOpenSessions,
+  addOpened,
+  reorderOpenSessions,
+  saveGuiState,
+  DEFAULT_CAP,
+} = require("./gui-state");
 const { externalNavPolicy } = require("./nav-policy");
 const { makeConfigPrivate } = require("./config_mode");
 // issue #2774：aitokenpool 的 GitHub 账号登录。协议与 config 合并全在这个纯模块里
@@ -655,11 +662,10 @@ vision = false
         logger.warn(`[gui:switch] REJECT invalid agent path=${projectPath}`);
         throw new Error("invalid agent path");
       }
-      // P6（rant 15:07:19 上限 20）：显式打开新会话超限 → 提示不自动关（已打开 sid 复用不拦）
-      if (openSessions.size >= DEFAULT_CAP && !openSessions.has(sessionId)) {
-        logger.warn(`[gui:switch] REJECT too many open sessions (${openSessions.size}/${DEFAULT_CAP}) sid=${sessionId}`);
-        throw new Error(`too many open sessions (${DEFAULT_CAP}) — close some first`);
-      }
+      // 上限 20（issue #3022）：打开第 21 条时挤掉「最久没有活动」的那一条，不再拒绝。
+      // 旧规则（rant 15:07:19）是「提示不自动关」；新要求是「只挤掉最久无活动的一条，
+      // 其余行一个都不许挪位」。后者更晚，而且给出了具体替代，所以拒绝在这里退场。
+      // 挤出落在 touchOpenSession：只有那里知道条目与连接的对应关系，能连带关掉连接。
       // 切会话不再因「当前会话仍在流式」而拒绝（issue #2637）：切走只打开/复用**目标**
       // 会话的连接，旧连接原样保留（见下方 openSession 之后的 P4 注释），所以一个正在
       // 生成的回合不受切换影响。真正会切断回合的是主动关闭——`ConnManager.close()`
@@ -742,6 +748,18 @@ vision = false
       openSessions: openSessionsList(),
       activeSid: currentSessionId,
     }));
+
+    // issue #3022：侧边栏拖拽调序。顺序只有一个真源（主进程），拖完立刻落盘；
+    // 渲染层收到广播就照新顺序画，自己不排第二次。
+    ipcMain.handle("emrg:reorderOpenSessions", async (_e, { sids } = {}) => {
+      if (!Array.isArray(sids) || sids.some((sid) => !validateSessionId(sid))) {
+        throw new Error("invalid sids");
+      }
+      applyOpenOrder(reorderOpenSessions(openSessionsList(), sids));
+      schedulePersistGuiState();
+      broadcastOpenSessions();
+      return { openSessions: openSessionsList(), activeSid: currentSessionId };
+    });
 
     ipcMain.handle("emrg:newSession", async (_e, { projectPath } = {}) => {
       // P6（rant 15:07:19 边界）：projectPath 校验（新建会话指定项目时）
@@ -1505,17 +1523,42 @@ vision = false
   }
 
   // 记录/刷新一个打开会话（复用连接、恢复重开、recoverAll 均刷新）
-  function touchOpenSession(sid, projectPath) {
+  // issue #3022：数组顺序就是侧边栏顺序，Map 的插入顺序照着它重建。
+  function applyOpenOrder(entries) {
+    openSessions.clear();
+    for (const entry of entries) openSessions.set(entry.sid, entry);
+  }
+
+  function touchOpenSession(sid, projectPath, openedAt) {
     // ⚠️ (rant 2026-08-28T22:28:47) 保留已有 v 字段（含 title）：
     // 每次 message_delta 重写时若丢弃 title，侧边栏会在「名字→id」间抖动；
     // 异步 listSessions 拉回的 title 必须跨调用保留。
-    const v = openSessions.get(sid) || {};
-    openSessions.set(sid, {
-      ...v,
-      projectName: projectNameOf(projectPath),
-      projectPath,
-      lastActive: new Date().toISOString(),
-    });
+    //
+    // issue #3022：位置与 openedAt 在**第一次**打开时写定，此后只有 lastActive 动，
+    // 而 lastActive 只供上限裁剪读。新会话排最上面；已打开的会话原地不动，所以
+    // 切会话、来消息、完成帧都不会让任何一行换位置。
+    const now = new Date().toISOString();
+    const prev = openSessions.get(sid);
+    if (prev) {
+      prev.projectName = projectNameOf(projectPath);
+      prev.projectPath = projectPath;
+      prev.lastActive = now;
+    } else {
+      const entry = {
+        sid,
+        projectName: projectNameOf(projectPath),
+        projectPath,
+        openedAt: openedAt || now,
+        lastActive: now,
+      };
+      const { entries, evicted } = addOpened(openSessionsList(), entry, DEFAULT_CAP);
+      for (const gone of evicted) {
+        // 被挤出的条目不能再留着连接：连接还在，就没有任何一行能关掉它。
+        connManager?.close(gone);
+        logger.info(`[gui:open] evicted longest-inactive sid=${gone} (cap ${DEFAULT_CAP})`);
+      }
+      applyOpenOrder(entries);
+    }
     broadcastOpenSessions();
     // 跨项目标题（rant 12:01:44）：异步拉该会话所在项目列表取 title——
     // 找到则 v.title = s.title 并广播（失败/无 title → 保持 undefined → 侧边栏 sid 兜底）
@@ -1556,6 +1599,8 @@ vision = false
         sid,
         projectName: v.projectName,
         projectPath: v.projectPath,
+        // issue #3022：openedAt 与数组顺序一起落盘，重启后复原的是读到的那一版。
+        openedAt: v.openedAt,
         lastActive: v.lastActive,
       }));
       const state = {
@@ -1589,6 +1634,10 @@ vision = false
   async function restoreOpenSessions(sessions) {
     const { openSessions: saved, activeSid } = readGuiState();
     const validSids = new Set((sessions || []).map((s) => s.session_id));
+    // issue #3022：先把盘上的顺序放回 Map（失效条目剔除），再逐条重开连接。恢复的是
+    // 用户离开时的位置与打开时刻，不是重开顺序——openSession 走到的 touchOpenSession
+    // 见到条目已在，就不会重写 openedAt，也不会把它挪到最上面。
+    applyOpenOrder(saved.filter((e) => validSids.has(e.sid)).slice(0, DEFAULT_CAP));
     let restored = 0;
     for (const entry of saved) {
       if (restored >= 20) break; // 恢复上限（sanitize 已守，双保险）
@@ -1636,9 +1685,16 @@ vision = false
   }
 
   function openSessionsList() {
-    return [...openSessions.entries()]
-      .map(([sid, v]) => ({ sid, projectName: v.projectName, projectPath: v.projectPath, lastActive: v.lastActive, title: v.title }))
-      .sort((a, b) => String(b.lastActive || "").localeCompare(String(a.lastActive || "")));
+    // issue #3022：**不排序**。这里的顺序就是侧边栏的顺序，由打开时刻与拖拽决定；
+    // 一旦按 lastActive 排回去，别的会话来一条消息就会把整列挪一次。
+    return [...openSessions.entries()].map(([sid, v]) => ({
+      sid,
+      projectName: v.projectName,
+      projectPath: v.projectPath,
+      openedAt: v.openedAt,
+      lastActive: v.lastActive,
+      title: v.title,
+    }));
   }
 
   function guiStateFilePath() {

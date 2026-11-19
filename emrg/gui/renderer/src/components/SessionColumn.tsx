@@ -1,10 +1,10 @@
+import { useState } from "react";
 import { useI18n } from "../lib/i18n";
 import {
   formatElapsed,
   isActive,
   resolveEntryTitle,
   sessionLabel,
-  sortOpenSessions,
   type OpenSessionEntry,
   type SessionInfo,
 } from "../lib/sidebar";
@@ -42,6 +42,14 @@ export interface SessionColumnProps {
   labelFn?: (agent: string, title: string, sid: string) => string;
   /** 每会话 turn 开始时刻（epoch ms；busy 会话显示 [m:ss] 计时） */
   turnStartBySid?: Record<string, number>;
+  /**
+   * 把拖拽后的新顺序交出去（issue #3022）。
+   *
+   * 这一层不存顺序：它只报告「用户把哪一行放到了哪一行上」，主进程收下、落盘、
+   * 广播，新的顺序从 `openSessions` 回来。两层各存一份就是两个真源，而这类
+   * 冲突最后总是以「列表跳一下」的形式出现在用户眼前。不传则不渲染拖拽。
+   */
+  onReorder?: (sids: string[]) => void;
 }
 
 export function SessionColumn({
@@ -54,10 +62,36 @@ export function SessionColumn({
   onNew,
   labelFn = sessionLabel,
   turnStartBySid = {},
+  onReorder,
 }: SessionColumnProps) {
   const { t } = useI18n();
-  const entries = sortOpenSessions(openSessions);
+  // issue #3022：不排序 —— 主进程给的数组顺序就是显示顺序（opens 先后 + 拖拽）。
+  const entries = openSessions;
   const nowMs = Date.now();
+  const [draggingSid, setDraggingSid] = useState<string | null>(null);
+  const [dropTargetSid, setDropTargetSid] = useState<string | null>(null);
+  const endDrag = () => {
+    setDraggingSid(null);
+    setDropTargetSid(null);
+  };
+  // 把拖动的那一行插到落点那一行原来的位置上：其余各行的相对顺序不变，只挪这一行。
+  const dropOn = (targetSid: string) => {
+    if (!onReorder || !draggingSid || draggingSid === targetSid) {
+      endDrag();
+      return;
+    }
+    const order = entries.map((e) => e.sid);
+    const from = order.indexOf(draggingSid);
+    const to = order.indexOf(targetSid);
+    if (from === -1 || to === -1) {
+      endDrag();
+      return;
+    }
+    order.splice(from, 1);
+    order.splice(to, 0, draggingSid);
+    onReorder(order);
+    endDrag();
+  };
 
   return (
     <div className="session-col" data-testid="session-column">
@@ -105,7 +139,29 @@ export function SessionColumn({
           const active = isActive(entry.sid, activeSid);
           const timer = formatElapsed(turnStartBySid[entry.sid], nowMs);
           return (
-            <div className="session-row-wrap" key={entry.sid}>
+            <div
+              className="session-row-wrap"
+              key={entry.sid}
+              draggable={!!onReorder}
+              data-dragging={draggingSid === entry.sid ? "true" : undefined}
+              data-drop-target={dropTargetSid === entry.sid ? "true" : undefined}
+              onDragStart={(e) => {
+                setDraggingSid(entry.sid);
+                e.dataTransfer?.setData("text/plain", entry.sid);
+                if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+              }}
+              onDragOver={(e) => {
+                if (!draggingSid) return;
+                // 不 preventDefault 就不会有 drop 事件，这一行也就永远落不下来。
+                e.preventDefault();
+                setDropTargetSid(entry.sid);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                dropOn(entry.sid);
+              }}
+              onDragEnd={endDrag}
+            >
               <button
                 type="button"
                 className={`session-row${active ? " active" : ""}`}
