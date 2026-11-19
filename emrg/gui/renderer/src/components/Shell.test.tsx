@@ -36,6 +36,12 @@ function mockEmrg() {
   // Issue #2349 part 2/2: the prompts the host typed in this session, as the daemon
   // holds them (oldest first) — the list the composer's ↑ walks.
   const listInputHistory = vi.fn().mockResolvedValue({ entries: ["first", "second"], hasMore: false });
+  // issue #3026：右栏两个文件树 —— 两个根由主进程解析，目录一层一层问 daemon
+  const listFiles = vi.fn().mockResolvedValue({ entries: [], truncated: false });
+  const sessionRoots = vi.fn().mockResolvedValue({
+    agentRoot: "/p/emrg",
+    sessionRoot: "/p/emrg/.emrg/sessions/s1",
+  });
   // Batch 5 slice 8：任务 CRUD + Rant 提交（window.emrg 桥已暴露，main.js IPC 在列）
   const taskCreate = vi.fn().mockResolvedValue({ ok: true });
   const taskUpdate = vi.fn().mockResolvedValue({ ok: true });
@@ -72,6 +78,8 @@ function mockEmrg() {
     listSkills,
     listHistory,
     listInputHistory,
+    listFiles,
+    sessionRoots,
     taskCreate,
     taskUpdate,
     taskDelete,
@@ -99,6 +107,8 @@ function mockEmrg() {
     listRants,
     listHistory,
     listInputHistory,
+    listFiles,
+    sessionRoots,
     taskCreate,
     taskUpdate,
     taskDelete,
@@ -219,6 +229,42 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     expect(screen.getByTestId("session-column-aside")).toBeInTheDocument();
     // 无 emrg → 连接状态点灰色（未连接）
     expect(screen.getByTestId("conn-status").querySelector(".conn-dot")?.className).toContain("gray");
+  });
+
+  it("a roots read that fails is swallowed instead of escaping as an unhandled rejection (issue #3026)", async () => {
+    // The inspector's two roots come from the main process, and a build whose preload
+    // lacks the channel **rejects** rather than answering. Shell owes that rejection a
+    // handler: without one it escapes as an unhandled rejection — a console error in the
+    // app, and a red suite in CI (measured: run 44472804661, where a test removed
+    // `window.emrg` while this call was in flight and the renderer step failed on it).
+    // `process` is not in the renderer's type set — `tsconfig.json` names exactly two
+    // type packages, neither Node's — so it is reached through the global object by
+    // shape, the same cast this file already uses for `window.emrg`. (Measured: an
+    // ancestor `@types/node` made a plain `process.on` green locally and TS2591 red on
+    // CI's Linux leg, where the renderer tree is installed on its own.)
+    const host = globalThis as unknown as {
+      process?: {
+        on: (event: "unhandledRejection", handler: (reason: unknown) => void) => void;
+        off: (event: "unhandledRejection", handler: (reason: unknown) => void) => void;
+      };
+    };
+    const seen: unknown[] = [];
+    const onRejection = (reason: unknown) => seen.push(reason);
+    host.process?.on("unhandledRejection", onRejection);
+    try {
+      const m = mockEmrg();
+      m.sessionRoots.mockRejectedValue(new Error("sessionRoots unavailable"));
+      render(wrapper(<Shell />));
+      await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+      m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+      await waitFor(() => expect(m.sessionRoots).toHaveBeenCalled());
+      // Flush the microtask queue the rejection would travel on.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(seen).toEqual([]);
+      expect(screen.getByTestId("transcript-view")).toBeInTheDocument();
+    } finally {
+      host.process?.off("unhandledRejection", onRejection);
+    }
   });
 
   it("auto-selects the first open session and renders its transcript from broadcasts", async () => {
