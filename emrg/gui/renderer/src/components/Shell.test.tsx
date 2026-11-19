@@ -233,9 +233,20 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     // handler: without one it escapes as an unhandled rejection — a console error in the
     // app, and a red suite in CI (measured: run 44472804661, where a test removed
     // `window.emrg` while this call was in flight and the renderer step failed on it).
+    // `process` is not in the renderer's type set — `tsconfig.json` names exactly two
+    // type packages, neither Node's — so it is reached through the global object by
+    // shape, the same cast this file already uses for `window.emrg`. (Measured: an
+    // ancestor `@types/node` made a plain `process.on` green locally and TS2591 red on
+    // CI's Linux leg, where the renderer tree is installed on its own.)
+    const host = globalThis as unknown as {
+      process?: {
+        on: (event: "unhandledRejection", handler: (reason: unknown) => void) => void;
+        off: (event: "unhandledRejection", handler: (reason: unknown) => void) => void;
+      };
+    };
     const seen: unknown[] = [];
     const onRejection = (reason: unknown) => seen.push(reason);
-    process.on("unhandledRejection", onRejection);
+    host.process?.on("unhandledRejection", onRejection);
     try {
       const m = mockEmrg();
       m.sessionRoots.mockRejectedValue(new Error("sessionRoots unavailable"));
@@ -248,7 +259,7 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
       expect(seen).toEqual([]);
       expect(screen.getByTestId("transcript-view")).toBeInTheDocument();
     } finally {
-      process.off("unhandledRejection", onRejection);
+      host.process?.off("unhandledRejection", onRejection);
     }
   });
 
