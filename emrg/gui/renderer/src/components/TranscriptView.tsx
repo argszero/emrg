@@ -69,6 +69,16 @@ export function isAtBottom(el: { scrollTop: number; clientHeight: number; scroll
   return el.scrollHeight - el.clientHeight - el.scrollTop < 1;
 }
 
+/**
+ * 读者输入的宽限窗口（issue #3046）。
+ *
+ * 一次滚轮或触控板手势会在输入事件之后陆续产生若干 scroll 事件，拖滚动条更久，所以「读者
+ * 滚了」不能只看有没有输入事件，要看输入是不是**刚**发生。窗口取几帧的量级：比它更早的
+ * 输入不再解释任何一个 scroll 事件，于是重排、图片解码与滚动锚定造成的位置变化不会被误判
+ * 成读者自己滚走了。
+ */
+export const USER_INTENT_MS = 250;
+
 export interface TranscriptViewProps {
   store: TranscriptStore;
   sid?: string | null;
@@ -123,6 +133,11 @@ export function TranscriptView({
   // autoScroll 用 ref（滚动高频，避免每帧 setState 重渲染）；atBottom 用 state（驱动按钮显隐）
   const autoScrollRef = useRef(true);
   const [atBottom, setAtBottom] = useState(true);
+  // 读者输入的最近时刻、指针是否正按着：跟随开关的两个来源（issue #3046 清单第 1 条）。
+  const lastUserInputAt = useRef(0);
+  const pointerDownRef = useRef(false);
+  // 最近一次补底写进去的位置与时刻：紧随其后的那个 scroll 事件是这次写入的回声，不是读者。
+  const lastPadRef = useRef<{ top: number; at: number } | null>(null);
   const sidKey = sid ?? "";
   // 滚动事件与 ResizeObserver 的闭包不跟着每次重渲染重建，会话 id 走 ref
   const sidKeyRef = useRef(sidKey);
@@ -149,12 +164,83 @@ export function TranscriptView({
     [rememberPosition],
   );
 
+  // ── 读者的输入才是跟随的开关（issue #3046） ──
+  // 判定此前直接挂在 scroll 事件上：任何不是本组件选择的位置变化——它自己补底写入的回声、
+  // ResizeObserver 的补偿、工具组表头每秒刷新引起的重排、图片解码、以及浏览器的滚动锚定
+  // ——都被读成「读者走了」，于是跟随由组件自己关掉，而且关了不回来（关掉以后没有任何东西
+  // 再把视口补到底）。现在 scroll 事件只负责它唯一能负责的事：**读者真的滚了**的时候，按
+  // 此刻的离底距离更新跟随。读者滚动的起点是输入事件，不是位置变化，所以开关由输入驱动。
+  const markUserInput = useCallback((): void => {
+    lastUserInputAt.current = Date.now();
+    // 读者一动手，上一次补底留下的回声凭证立即作废：否则读者恰好停在那个位置上时（刚挂载
+    // 完补底写的是 0，而「滚到顶」也是 0），他这一次真正的滚动会被当成回声吞掉。
+    lastPadRef.current = null;
+  }, []);
+
+  /** 这一下位置变化是不是读者弄的：输入在宽限窗口内，或指针正按着（拖滚动条）。 */
+  const userDriven = useCallback(
+    (): boolean => pointerDownRef.current || Date.now() - lastUserInputAt.current <= USER_INTENT_MS,
+    [],
+  );
+
+  /**
+   * 补到**真正的**底部（清单第 4 条）：写完再读一次，写入期间内容又长高就再写一次。
+   * 每写一次都记下位置与时刻，于是紧随其后的那个 scroll 事件能被认出是自己这次写入的回声
+   * （清单第 3 条），不会被当成读者滚动。
+   */
+  const padToBottom = useCallback(
+    (el: HTMLDivElement) => {
+      el.scrollTop = el.scrollHeight;
+      if (!isAtBottom(el)) el.scrollTop = el.scrollHeight;
+      lastPadRef.current = { top: el.scrollTop, at: Date.now() };
+      autoScrollRef.current = true;
+      setAtBottom(true);
+      rememberPosition(el, true);
+    },
+    [rememberPosition],
+  );
+
+  // 输入监听：滚轮、触控板、键盘翻页、落在滚动条上的按下。capture 是为了连子元素上发生的
+  // 输入一起看到；`pointerup` 挂在 document 上，因为松手可能落在视口之外。
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const onInput = (e: Event): void => {
+      if (e.type === "pointerdown") pointerDownRef.current = true;
+      markUserInput();
+    };
+    const release = (): void => {
+      pointerDownRef.current = false;
+    };
+    const types = ["wheel", "touchstart", "touchmove", "keydown", "pointerdown"] as const;
+    for (const ty of types) el.addEventListener(ty, onInput, { capture: true });
+    document.addEventListener("pointerup", release, { capture: true });
+    document.addEventListener("pointercancel", release, { capture: true });
+    return () => {
+      for (const ty of types) el.removeEventListener(ty, onInput, { capture: true });
+      document.removeEventListener("pointerup", release, { capture: true });
+      document.removeEventListener("pointercancel", release, { capture: true });
+    };
+  }, [markUserInput]);
+
   // scroll 监听（capture，因 scroll 不冒泡；挂在 .transcript-view 自身上，捕获子元素滚动）
   useEffect(() => {
     const el = viewportRef.current;
     if (!el) return;
     const onScroll = () => {
-      updateAutoScroll(el);
+      // 刚补过底：位置正是那次写入的值，且在宽限窗口内 —— 这是回声，不是读者。
+      const pad = lastPadRef.current;
+      if (pad && el.scrollTop === pad.top && Date.now() - pad.at <= USER_INTENT_MS) {
+        lastPadRef.current = null;
+        return;
+      }
+      if (userDriven()) {
+        // 读者真的滚了：跟随与否按此刻的离底距离定（读者可感知的行为一点没变）。
+        updateAutoScroll(el);
+      } else if (autoScrollRef.current) {
+        // 位置变了但不是读者弄的（重排、图片解码、锚定）：跟随中就把视口补回底部。
+        padToBottom(el);
+      }
       // 滚动到顶 → 加载更早一页（rant 2026-09-01T20:19:40；防抖由 onLoadOlder 触发方负责）。
       // 判定不在这里重写：它就是 `lib/history.ts` 的 `shouldLoadOlder`（issue #1979 ——
       // 此处曾有一份副本，而生产路径读的正是副本，于是改库里的阈值不会有任何效果）。
@@ -164,7 +250,7 @@ export function TranscriptView({
     };
     el.addEventListener("scroll", onScroll, { capture: true });
     return () => el.removeEventListener("scroll", onScroll, { capture: true });
-  }, [updateAutoScroll, hasMore, loading, onLoadOlder]);
+  }, [updateAutoScroll, userDriven, padToBottom, hasMore, loading, onLoadOlder]);
 
   // ── 代码块复制按钮（issue #3037） ──
   // 挂在 `transcript-view` 这个长期存在的滚动容器上，而不是逐个按钮：块投影每帧重写尾部
@@ -189,13 +275,14 @@ export function TranscriptView({
     const content = contentRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver(() => {
-      if (autoScrollRef.current) el.scrollTop = el.scrollHeight;
-      updateAutoScroll(el);
+      // 高度变了而一个 scroll 事件都没有（图片解码、文字重新折行、工具组表头刷新）：
+      // 跟随中补到新的底部；不跟随就把视口留在读者正在读的地方（清单第 2、4 条）。
+      if (autoScrollRef.current) padToBottom(el);
     });
     ro.observe(el);
     if (content) ro.observe(content);
     return () => ro.disconnect();
-  }, [updateAutoScroll]);
+  }, [padToBottom]);
 
   // 新消息 append/流入 → 若 autoScroll 为 true 则滚到底。这一件事订阅的是每次变更都动的
   // `getVersion`（流式文本是原地 append 进已有段，结构不变），所以它住在独立的
@@ -205,10 +292,8 @@ export function TranscriptView({
   const scrollToBottom = () => {
     const el = viewportRef.current;
     if (!el) return;
-    el.scrollTop = el.scrollHeight;
-    autoScrollRef.current = true;
-    setAtBottom(true);
-    rememberPosition(el, true);
+    // padToBottom 顺带记下这次写入，于是一个点击不会在紧接着的 scroll 事件里被读成读者滚动。
+    padToBottom(el);
   };
 
   // ── 前插的滚差补偿（宿主报障 2026-10-08 的第二半：上翻一页后视觉位置跳掉一屏） ──
@@ -259,11 +344,9 @@ export function TranscriptView({
         autoScrollRef.current = rec.following;
         setAtBottom(isAtBottom(el));
       } else {
-        // 从没打开过的会话：贴底并跟随（清单第 8 条）。
-        el.scrollTop = el.scrollHeight;
-        autoScrollRef.current = true;
-        setAtBottom(true);
-        rememberPosition(el, true);
+        // 从没打开过的会话：贴底并跟随（清单第 8 条）。padToBottom 一并置跟随、清按钮、
+        // 记位置，并留下这次写入的位置与时刻。
+        padToBottom(el);
       }
     } else if (prepends !== lastPrependRef.current) {
       lastPrependRef.current = prepends;
@@ -323,7 +406,12 @@ export function TranscriptView({
         ))}
       </div>
       {/* 跟随滚动：订阅每次变更（含每个 token），但它只重渲染自己 */}
-      <AutoScroll store={store} viewportRef={viewportRef} autoScrollRef={autoScrollRef} />
+      <AutoScroll
+        store={store}
+        viewportRef={viewportRef}
+        autoScrollRef={autoScrollRef}
+        padToBottom={padToBottom}
+      />
       </div>
       {!atBottom ? (
         <button
@@ -351,20 +439,22 @@ function AutoScroll({
   store,
   viewportRef,
   autoScrollRef,
+  padToBottom,
 }: {
   store: TranscriptStore;
   viewportRef: { current: HTMLDivElement | null };
   autoScrollRef: { current: boolean };
+  padToBottom: (el: HTMLDivElement) => void;
 }) {
   const version = useSyncExternalStore(store.subscribe, store.getVersion);
   useEffect(() => {
     const el = viewportRef.current;
     if (!el) return;
-    // 首次无条目时不误滚；version 变更即触发（覆盖 delta/tool/done 全部写入）
-    if (autoScrollRef.current) {
-      el.scrollTop = el.scrollHeight;
-    }
-  }, [version, viewportRef, autoScrollRef]);
+    // 首次无条目时不误滚；version 变更即触发（覆盖 delta/tool/done 全部写入）。
+    // 每一次补底都经过 padToBottom：它写下这次写入的位置与时刻，于是每个 token 引起的那个
+    // scroll 事件不会被读成读者滚动（clip 掉跟随的正是这一串回声）。
+    if (autoScrollRef.current) padToBottom(el);
+  }, [version, viewportRef, autoScrollRef, padToBottom]);
   return null;
 }
 

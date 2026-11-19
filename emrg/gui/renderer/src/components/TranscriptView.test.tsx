@@ -200,6 +200,7 @@ describe("TranscriptView", () => {
     Object.defineProperty(viewport, "scrollHeight", { value: 1000, configurable: true });
     Object.defineProperty(viewport, "clientHeight", { value: 400, configurable: true });
     act(() => {
+      viewport.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
       viewport.dispatchEvent(new Event("scroll", { bubbles: false }));
     });
   }
@@ -603,6 +604,7 @@ describe("TranscriptView", () => {
     Object.defineProperty(viewport, "clientHeight", { value: 400, configurable: true });
     // 触发 scroll（capture listener 会拾取）
     act(() => {
+      viewport.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
       viewport.dispatchEvent(new Event("scroll", { bubbles: false }));
     });
     expect(container.querySelector(".transcript-back-to-bottom")).not.toBeNull();
@@ -621,6 +623,7 @@ describe("TranscriptView", () => {
     Object.defineProperty(viewport, "scrollHeight", { value: 1000, configurable: true });
     Object.defineProperty(viewport, "clientHeight", { value: 400, configurable: true });
     act(() => {
+      viewport.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
       viewport.dispatchEvent(new Event("scroll", { bubbles: false }));
     });
     // 底部 → autoScroll=true；新消息到达 → 自动滚到底
@@ -652,6 +655,7 @@ describe("TranscriptView", () => {
     mockHeightByMessages(viewport); // 1 条 → 800
     // 上翻到顶：scrollTop=0（派发 scroll 让 atBottom 翻转，走一次真实提交）
     act(() => {
+      viewport.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
       viewport.dispatchEvent(new Event("scroll", { bubbles: false }));
     });
     // 更早一页插到最前 → DOM 变高 400（2 条 → 1200）
@@ -668,6 +672,7 @@ describe("TranscriptView", () => {
     const viewport = container.querySelector(".transcript-view") as HTMLElement;
     mockHeightByMessages(viewport);
     act(() => {
+      viewport.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
       viewport.dispatchEvent(new Event("scroll", { bubbles: false }));
     });
     // 同样长高 400——若补偿只看「高度变了」而不看「是前插」，这里会错误地跳到 400
@@ -1023,6 +1028,7 @@ describe("聊天区滚动（issue #3024）", () => {
     const viewport = container.querySelector(".transcript-view") as HTMLElement;
     metricsTo(1000, 0); // 上翻离底
     act(() => {
+      viewport.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
       viewport.dispatchEvent(new Event("scroll"));
     });
     const button = container.querySelector(".transcript-back-to-bottom");
@@ -1053,18 +1059,21 @@ describe("聊天区滚动（issue #3024）", () => {
 
     metricsTo(1000, 599); // 差 1px
     act(() => {
+      viewport.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
       viewport.dispatchEvent(new Event("scroll"));
     });
     expect(container.querySelector(".transcript-back-to-bottom")).not.toBeNull();
 
     metricsTo(1000, 561); // 差 39px：旧的 40px 容差会把这里判成「在底部」
     act(() => {
+      viewport.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
       viewport.dispatchEvent(new Event("scroll"));
     });
     expect(container.querySelector(".transcript-back-to-bottom")).not.toBeNull();
 
     metricsTo(1000, 600); // 贴底
     act(() => {
+      viewport.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
       viewport.dispatchEvent(new Event("scroll"));
     });
     expect(container.querySelector(".transcript-back-to-bottom")).toBeNull();
@@ -1089,6 +1098,7 @@ describe("聊天区滚动（issue #3024）", () => {
     const viewport = container.querySelector(".transcript-view") as HTMLElement;
     metricsTo(1000, 600); // 在底部
     act(() => {
+      viewport.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
       viewport.dispatchEvent(new Event("scroll"));
     });
     expect(container.querySelector(".transcript-back-to-bottom")).toBeNull();
@@ -1106,6 +1116,7 @@ describe("聊天区滚动（issue #3024）", () => {
     // 不在底部时同一次高度变化只重算判定，不替读者滚动（读者自己滚上去，走真实的 scroll）
     metricsTo(1400, 100);
     act(() => {
+      viewport.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
       viewport.dispatchEvent(new Event("scroll"));
     });
     metricsTo(1800, 100); // 又长高 400，仍然没有 scroll 事件
@@ -1124,6 +1135,7 @@ describe("聊天区滚动（issue #3024）", () => {
     const viewport = container.querySelector(".transcript-view") as HTMLElement;
     metricsTo(1000, 600); // 贴底
     act(() => {
+      viewport.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
       viewport.dispatchEvent(new Event("scroll"));
     });
     // 流式：第一条 delta 建出这条助手消息（结构确实变了），之后同一 request_id 的追加
@@ -1149,6 +1161,7 @@ describe("聊天区滚动（issue #3024）", () => {
     metricsTo(3000, 0);
     metrics.scrollTop = 1200;
     act(() => {
+      viewport.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
       viewport.dispatchEvent(new Event("scroll"));
     });
     expect(memory.current.get("sa")).toEqual({ scrollTop: 1200, following: false });
@@ -1162,6 +1175,7 @@ describe("聊天区滚动（issue #3024）", () => {
     // sb 停在 400，再切回 sa
     metricsTo(800, 400);
     act(() => {
+      viewport.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
       viewport.dispatchEvent(new Event("scroll"));
     });
     metricsTo(3000, 400);
@@ -1183,6 +1197,7 @@ describe("聊天区滚动（issue #3024）", () => {
     metricsTo(2000, 0);
     metrics.scrollTop = 700;
     act(() => {
+      viewport.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
       viewport.dispatchEvent(new Event("scroll"));
     });
     expect(memory.current.get("s1")).toEqual({ scrollTop: 700, following: false });
@@ -1203,5 +1218,81 @@ describe("聊天区滚动（issue #3024）", () => {
     expect(metrics.scrollTop).toBe(700);
     void vp2;
   });
-});
 
+  /**
+   * 跟随只由读者自己的输入关掉（issue #3046）。
+   *
+   * 这一组的判别器是**帧的推进顺序**：先让内容变高，再让布局留下一个不在底部的位置，最后才
+   * 派发 scroll 事件。只伪造一个数值再手动派发事件的写法，在缺陷还在的时候也会绿——那种写法
+   * 证明不了任何事。
+   */
+  it("内容变高、布局留下一个不在底部的位置、随后才来 scroll 事件：跟随不断且补回底部（清单第 2、4 条）", () => {
+    installMetrics();
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("x", "s1");
+    const { container } = setup(store, "s1");
+    const viewport = container.querySelector(".transcript-view") as HTMLElement;
+    metricsTo(1000, 600); // 打开即贴底（max = 1000 - 400）
+    // 一帧：工具组表头刷新让内容变高，布局把位置留在 600（离底 400）
+    metricsTo(1400, 600);
+    act(() => {
+      viewport.dispatchEvent(new Event("scroll"));
+    });
+    // 读者没滚过 → 视口自己补回真正的底部，按钮不出现
+    expect(metrics.scrollTop).toBe(1400);
+    expect(container.querySelector(".transcript-back-to-bottom")).toBeNull();
+  });
+
+  it("补底写入的回声不算读者滚动：内容再长高时跟随仍在（清单第 3 条）", () => {
+    installMetrics();
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("a", "s1");
+    const { container } = setup(store, "s1");
+    const viewport = container.querySelector(".transcript-view") as HTMLElement;
+    metricsTo(1000, 600); // 贴底
+    act(() => {
+      store.handleDelta([{ request_id: "r1", content: "a" }], "s1");
+    });
+    // 浏览器对那次写入派发的 scroll 事件：位置正是写进去的值，且就在刚才
+    act(() => {
+      viewport.dispatchEvent(new Event("scroll"));
+    });
+    expect(container.querySelector(".transcript-back-to-bottom")).toBeNull();
+    // 再长高 400：若上一步被误读成读者滚动，这里就停在 1000 不动了
+    metricsTo(1400, 1000);
+    act(() => {
+      store.handleDelta([{ request_id: "r1", content: "b" }], "s1");
+    });
+    expect(metrics.scrollTop).toBe(1400);
+    expect(container.querySelector(".transcript-back-to-bottom")).toBeNull();
+  });
+
+  it("只有读者真的滚了才停止跟随：没有输入的 scroll 事件不停，滚轮之后的停（清单第 1 条反向）", () => {
+    installMetrics();
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("a", "s1");
+    const { container } = setup(store, "s1");
+    const viewport = container.querySelector(".transcript-view") as HTMLElement;
+    metricsTo(1000, 600); // 贴底跟随
+    // 重排造成的位置变化，没有输入：不算读者
+    metricsTo(1000, 560);
+    act(() => {
+      viewport.dispatchEvent(new Event("scroll"));
+    });
+    expect(container.querySelector(".transcript-back-to-bottom")).toBeNull();
+    // 滚轮真的来了，位置离开底部：这才是读者，按钮出现
+    metricsTo(1000, 300);
+    act(() => {
+      viewport.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
+      viewport.dispatchEvent(new Event("scroll"));
+    });
+    expect(container.querySelector(".transcript-back-to-bottom")).not.toBeNull();
+  });
+
+  it("滚动容器显式关掉滚动锚定（清单第 7 条）", () => {
+    expect(shellCss.length).toBeGreaterThan(0); // 读成空串会让这条空转通过
+    const rule = new RegExp(`\\.transcript-view\\s*\\{[^}]*\\}`).exec(shellCss)?.[0] ?? "";
+    expect(rule).not.toBe("");
+    expect(rule).toMatch(/overflow-anchor:\s*none/);
+  });
+});

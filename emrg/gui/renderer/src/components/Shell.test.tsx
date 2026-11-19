@@ -475,6 +475,8 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     Object.defineProperty(viewport, "scrollHeight", { value: 1000, configurable: true });
     Object.defineProperty(viewport, "clientHeight", { value: 400, configurable: true });
     act(() => {
+      // 真机上读者要上翻，先到的是滚轮；跟随开关只认输入（issue #3046）
+      viewport!.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
       viewport!.dispatchEvent(new Event("scroll", { bubbles: false }));
     });
   }
@@ -1565,6 +1567,7 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
 
       const viewport = document.querySelector(".transcript-view") as HTMLElement;
       metrics.scrollTop = 500; // 读者上翻离底
+      fireEvent.wheel(viewport); // 真机上滚轮先到，位置变化与 scroll 随后（issue #3046）
       fireEvent.scroll(viewport);
       expect(screen.getByTestId("back-to-bottom")).toBeInTheDocument();
 
