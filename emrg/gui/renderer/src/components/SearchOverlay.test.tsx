@@ -15,6 +15,23 @@ import type { SessionHit } from "../lib/cockpit";
 
 const HOUR = 3_600_000;
 
+/**
+ * The middle of one local day.
+ *
+ * The overlay's "today" bucket is the **local calendar day** (`sameLocalDay` compares
+ * `toDateString()`), so a fixture written as `Date.now() - HOUR` is "today" only while
+ * the suite runs two hours past local midnight or later. Measured on CI: the `test` leg
+ * started at 00:03 UTC on 2026-11-19 and this file's "今天的" hit fell on 11-18, so
+ * `search-group-today` was never rendered. Anchoring the fixture and `nowMs` to one
+ * instant inside the day keeps the assertion about grouping.
+ */
+function localNoon(daysAgo = 0): number {
+  const d = new Date();
+  d.setDate(d.getDate() - daysAgo);
+  d.setHours(12, 0, 0, 0);
+  return d.getTime();
+}
+
 function hit(over: Partial<SessionHit> = {}): SessionHit {
   return { sid: "s1", title: "Alpha", agent: "emrg", at: Date.now(), open: false, ...over };
 }
@@ -37,11 +54,13 @@ describe("SearchOverlay", () => {
   });
 
   it("三组：打开中 / 今天 / 更早，各归各位", () => {
+    const now = localNoon();
     setup({
+      nowMs: now,
       hits: [
         hit({ sid: "open", title: "打开的那个", open: true }),
-        hit({ sid: "today", title: "今天的", at: Date.now() - HOUR }),
-        hit({ sid: "old", title: "很久以前", at: Date.now() - 40 * 24 * HOUR }),
+        hit({ sid: "today", title: "今天的", at: now - HOUR }),
+        hit({ sid: "old", title: "很久以前", at: now - 40 * 24 * HOUR }),
       ],
     });
     expect(screen.getByTestId("search-group-open")).toHaveTextContent("打开的那个");
