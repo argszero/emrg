@@ -24,6 +24,8 @@ const api = {
   newSession: (payload) => ipcRenderer.invoke("emrg:newSession", payload),
   deleteSession: (payload) => ipcRenderer.invoke("emrg:deleteSession", payload),
   closeSession: (payload) => ipcRenderer.invoke("emrg:closeSession", payload),
+  // issue #3022：侧边栏拖拽调序——顺序的唯一真源在主进程，渲染层只上交新顺序。
+  reorderOpenSessions: (payload) => ipcRenderer.invoke("emrg:reorderOpenSessions", payload),
   getOpenSessions: () => ipcRenderer.invoke("emrg:getOpenSessions"),
   renameSession: (payload) => ipcRenderer.invoke("emrg:renameSession", payload),
   setModel: (payload) => ipcRenderer.invoke("emrg:setModel", payload),

@@ -34,6 +34,7 @@ const EXPECTED_INVOKE_METHODS = [
   "newSession",
   "deleteSession",
   "closeSession",
+  "reorderOpenSessions",
   "getOpenSessions",
   "renameSession",
   "setModel",
@@ -136,7 +137,7 @@ function parseApiBlock(block) {
 
 const api = parseApiBlock(extractApiBlock());
 
-test("window.emrg exposes the full contract (66 invoke + onEvent)", () => {
+test("window.emrg exposes the full contract (every invoke method in the frozen list, and onEvent)", () => {
   // 60 invoke 方法全部存在（防误删/改名）
   for (const name of EXPECTED_INVOKE_METHODS) {
     assert.ok(api.invoke.has(name), `缺少 invoke 方法 ${name}`);

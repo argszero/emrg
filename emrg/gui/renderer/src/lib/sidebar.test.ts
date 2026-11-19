@@ -1,17 +1,24 @@
 import { describe, expect, it } from "vitest";
+import * as sidebarModule from "./sidebar";
 import {
   formatElapsed,
   isActive,
   resolveEntryTitle,
   sessionLabel,
-  sortOpenSessions,
-  type OpenSessionEntry,
   type SessionInfo,
 } from "./sidebar";
 
 /**
  * sidebar.test.ts — Sidebar 纯逻辑测试（Batch 3，镜像 vanilla sidebar.js 行为）。
  */
+
+describe("顺序由主进程决定（issue #3022）", () => {
+  it("这一层不再导出排序函数：给它什么数组，它就按什么顺序画", () => {
+    // 一个「暂时没人调用」的排序函数迟早会被再调用一次，而它一跑，用户拖出来的
+    // 位置就被一次消息到达冲掉。所以它不能只是没人用，它必须不在。
+    expect(Object.keys(sidebarModule)).not.toContain("sortOpenSessions");
+  });
+});
 
 describe("sessionLabel", () => {
   it("有标题 → agent/title 格式", () => {
@@ -52,33 +59,6 @@ describe("resolveEntryTitle", () => {
   });
 });
 
-describe("sortOpenSessions", () => {
-  const mk = (sid: string, lastActive?: string): OpenSessionEntry => ({ sid, lastActive });
-
-  it("lastActive 倒序（最新在前）", () => {
-    const list = [
-      mk("a", "2026-08-26T08:00:00Z"),
-      mk("b", "2026-08-26T09:00:00Z"),
-      mk("c", "2026-08-25T10:00:00Z"),
-    ];
-    expect(sortOpenSessions(list).map((e) => e.sid)).toEqual(["b", "a", "c"]);
-  });
-
-  it("无时间戳 → 排最后；不修改入参数组", () => {
-    const list = [mk("a", "2026-08-26T08:00:00Z"), mk("b"), mk("c", "2026-08-25T10:00:00Z")];
-    const sorted = sortOpenSessions(list);
-    expect(sorted.map((e) => e.sid)).toEqual(["a", "c", "b"]);
-    expect(list.map((e) => e.sid)).toEqual(["a", "b", "c"]); // 入参未变
-  });
-
-  it("非法时间戳按 NaN 处理（排后），空数组幂等", () => {
-    expect(sortOpenSessions([mk("a", "not-a-date"), mk("b", "2026-08-26T08:00:00Z")]).map((e) => e.sid)).toEqual([
-      "b",
-      "a",
-    ]);
-    expect(sortOpenSessions([])).toEqual([]);
-  });
-});
 
 describe("isActive", () => {
   it("相等 → true；不等 → false", () => {

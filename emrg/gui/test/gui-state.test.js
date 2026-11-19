@@ -5,7 +5,14 @@ const assert = require("node:assert");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { guiStatePath, sanitizeOpenSessions, saveGuiState, DEFAULT_CAP } = require("../gui-state.js");
+const {
+  guiStatePath,
+  sanitizeOpenSessions,
+  addOpened,
+  reorderOpenSessions,
+  saveGuiState,
+  DEFAULT_CAP,
+} = require("../gui-state.js");
 
 // Every temp home this file creates, so the run can hand them all back. Without the
 // `after()` hook below, `node --test` left three directories per run behind in
@@ -48,7 +55,7 @@ test("gui-state: sanitize 跳过失效条目（缺 sid/projectPath）", () => {
   assert.deepStrictEqual(out.map((s) => s.sid), ["s1", "s3"], "invalid entries dropped, order preserved");
 });
 
-test("gui-state: sanitize 按 lastActive 倒序 + 上限 20", () => {
+test("gui-state: sanitize 保持顺序，只按 lastActive 裁掉最久无活动的（issue #3022）", () => {
   const list = Array.from({ length: 25 }, (_, i) => ({
     sid: `s${i}`,
     projectPath: `/p/${i}`,
@@ -56,17 +63,30 @@ test("gui-state: sanitize 按 lastActive 倒序 + 上限 20", () => {
   }));
   const out = sanitizeOpenSessions(list);
   assert.strictEqual(out.length, DEFAULT_CAP, "capped at 20");
-  assert.strictEqual(out[0].sid, "s24", "most recent first (lastActive desc)");
-  assert.strictEqual(out[19].sid, "s5", "oldest kept is the 20th");
+  // 顺序是**入参的顺序**，不是 lastActive 的顺序：最久无活动的 s0..s4 被裁掉，
+  // 留下的 20 条仍按交进来的次序排列。
+  assert.deepStrictEqual(
+    out.map((s) => s.sid),
+    list.slice(5).map((s) => s.sid),
+    "the 20 kept entries keep the order they were handed in",
+  );
 });
 
-test("gui-state: sanitize 缺失 lastActive 视作最旧（字符串比较稳定）", () => {
+test("gui-state: 缺失 lastActive 只影响「谁被裁掉」，不影响顺序", () => {
   const out = sanitizeOpenSessions([
     { sid: "no-ts", projectPath: "/x" },
     { sid: "new", projectPath: "/y", lastActive: "2026-08-10T12:00:00" },
   ]);
-  assert.strictEqual(out[0].sid, "new");
-  assert.strictEqual(out[1].sid, "no-ts");
+  assert.deepStrictEqual(out.map((s) => s.sid), ["no-ts", "new"], "order is the order it was handed in");
+  // 满 21 条时，没有时间戳的那条就是最久无活动的一条，被裁掉的是它。
+  const full = Array.from({ length: 21 }, (_, i) => ({
+    sid: `k${i}`,
+    projectPath: `/k/${i}`,
+    lastActive: i === 7 ? undefined : `2026-08-10T${String(i).padStart(2, "0")}:00:00`,
+  }));
+  const trimmed = sanitizeOpenSessions(full);
+  assert.strictEqual(trimmed.length, DEFAULT_CAP);
+  assert.ok(!trimmed.some((s) => s.sid === "k7"), "the entry with no stamp is the one the cap drops");
 });
 
 test("gui-state: saveGuiState 原子写 + 目录自动创建", () => {
@@ -99,4 +119,64 @@ test("gui-state: 写盘侧上限——persist 前先 sanitize（主流程调用�
   assert.strictEqual(out.length, DEFAULT_CAP, "never persists more than 20");
   assert.strictEqual(out[0].sid, "s0", "most recent first");
   assert.strictEqual(out[19].sid, "s19", "20th kept");
+});
+
+test("gui-state: 新打开的一条排最上面，已打开的原地不动（issue #3022）", () => {
+  const a = { sid: "a", projectPath: "/a", openedAt: "o1", lastActive: "t1" };
+  const b = { sid: "b", projectPath: "/b", openedAt: "o2", lastActive: "t2" };
+  let list = addOpened([], a).entries;
+  list = addOpened(list, b).entries;
+  // A 又来了一条消息：活动变了，位置不变。
+  list = addOpened(list, { ...a, lastActive: "t9" }).entries;
+  assert.deepStrictEqual(list.map((s) => s.sid), ["b", "a"], "activity never moves a row; open order does");
+});
+
+test("gui-state: 满 20 条时开第 21 条，挤掉最久无活动的那条，其余位置逐条不变（issue #3022）", () => {
+  const full = Array.from({ length: DEFAULT_CAP }, (_, i) => ({
+    sid: `s${i}`,
+    projectPath: `/p/${i}`,
+    openedAt: `o${i}`,
+    lastActive: `2026-08-10T${String(i).padStart(2, "0")}:00:00`,
+  }));
+  const fresh = { sid: "new", projectPath: "/new", openedAt: "now", lastActive: "2026-08-11T00:00:00" };
+  const { entries, evicted } = addOpened(full, fresh, DEFAULT_CAP);
+  assert.deepStrictEqual(evicted, ["s0"], "the longest-inactive entry is the one evicted");
+  assert.strictEqual(entries.length, DEFAULT_CAP);
+  assert.strictEqual(entries[0].sid, "new", "the session just opened goes to the top");
+  assert.deepStrictEqual(
+    entries.slice(1).map((s) => s.sid),
+    full.slice(1).map((s) => s.sid),
+    "every other row keeps its place, compared row by row",
+  );
+});
+
+test("gui-state: 拖出来的顺序原样落地，没点名的一律按原相对顺序跟在后面（issue #3022）", () => {
+  const list = ["c", "b", "a"].map((sid) => ({ sid, projectPath: `/${sid}` }));
+  assert.deepStrictEqual(reorderOpenSessions(list, ["a", "c", "b"]).map((s) => s.sid), ["a", "c", "b"]);
+  assert.deepStrictEqual(
+    reorderOpenSessions(list, ["a"]).map((s) => s.sid),
+    ["a", "c", "b"],
+    "an unnamed entry keeps its own order after the named ones",
+  );
+  assert.deepStrictEqual(
+    reorderOpenSessions(list, ["a", "nope"]).map((s) => s.sid),
+    ["a", "c", "b"],
+    "an unknown sid is skipped, not left as a hole",
+  );
+});
+
+test("gui-state: 顺序与打开时刻写盘再读回来一模一样（issue #3022）", () => {
+  const h = tmpHome();
+  const state = {
+    openSessions: sanitizeOpenSessions([
+      { sid: "a", projectPath: "/a", openedAt: "o1", lastActive: "t1" },
+      { sid: "c", projectPath: "/c", openedAt: "o3", lastActive: "t3" },
+      { sid: "b", projectPath: "/b", openedAt: "o2", lastActive: "t2" },
+    ]),
+    activeSid: "a",
+  };
+  saveGuiState(h, state);
+  const back = JSON.parse(fs.readFileSync(guiStatePath(h), "utf8"));
+  assert.deepStrictEqual(back.openSessions.map((s) => s.sid), ["a", "c", "b"]);
+  assert.deepStrictEqual(back.openSessions.map((s) => s.openedAt), ["o1", "o3", "o2"]);
 });
