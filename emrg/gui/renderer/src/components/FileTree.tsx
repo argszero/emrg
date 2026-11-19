@@ -12,6 +12,7 @@ import {
   type TreeEntry,
   type TreeRow,
 } from "../lib/fileTree";
+import { ContextMenu, type ContextMenuId } from "./ContextMenu";
 
 /**
  * FileTree — one directory tree, rooted wherever its caller says (issue #3026).
@@ -26,7 +27,21 @@ import {
  * The levels are lazy: a folder's children are asked for when it is expanded, never
  * before, because the two roots here are working directories and a recursive read of one
  * is exactly the cost this tree exists to avoid.
+ *
+ * Right-clicking a row — or the root name in the toolbar, for the root itself — offers
+ * the two things a tree row is for: take its absolute path away, or hand it to the
+ * system (issue #3041). The menu is the repository's existing `.ctx-menu` block, and the
+ * notice rows that stand in for an empty, loading or unreadable directory answer no
+ * menu at all, because there is no path behind them.
  */
+
+/** How long «已复制 ✓» stays before the menu closes itself. */
+const COPY_FEEDBACK_MS = 1000;
+
+/** The one main-process call this component makes (preload.js `emrg:openFile`). */
+interface OpenFileBridge {
+  openFile?: (payload: { filePath: string }) => Promise<unknown>;
+}
 
 /** What one directory's listing resolves to; `null` = this build cannot ask at all. */
 export type LoadDir = (path: string) => Promise<{ entries: TreeEntry[]; truncated: boolean } | null>;
@@ -59,6 +74,13 @@ export function FileTree({ root, loadDir, testId }: FileTreeProps) {
   // A refresh re-reads; the counter is the effect's trigger, not a value it reads.
   const [refreshSeq, setRefreshSeq] = useState(0);
   const bodyRef = useRef<HTMLDivElement | null>(null);
+  // Right-click state: where the menu sits, which path it acts on, which item the arrow
+  // keys light up, and what the copy item says once it has been tried.
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const copyTimer = useRef<number | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(null);
+  const [menuActive, setMenuActive] = useState(0);
+  const [copyState, setCopyState] = useState<"ok" | "fail" | null>(null);
 
   const read = useCallback(
     async (dir: string): Promise<void> => {
@@ -101,6 +123,9 @@ export function FileTree({ root, loadDir, testId }: FileTreeProps) {
   useEffect(() => {
     setExpanded(new Set());
     setSelected(null);
+    // A menu opened on the old tree points at a path this root no longer shows.
+    setMenu(null);
+    setCopyState(null);
     setDirs({});
     if (root) void read(root);
     // `read` is re-created when the loader or the dictionary changes; the root and the
@@ -124,7 +149,121 @@ export function FileTree({ root, loadDir, testId }: FileTreeProps) {
     [dirs, read],
   );
 
+  const closeMenu = useCallback((): void => {
+    setMenu(null);
+    setCopyState(null);
+    if (copyTimer.current !== null) {
+      window.clearTimeout(copyTimer.current);
+      copyTimer.current = null;
+    }
+  }, []);
+
+  const openMenuAt = (e: React.MouseEvent, path: string): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    // The menu acts on one row, so that row is the selected one too — without it the
+    // menu has no visible subject.
+    setSelected(path);
+    setMenu({ x: e.clientX, y: e.clientY, path });
+    setMenuActive(0);
+    setCopyState(null);
+    // ↑↓ / Enter / Esc arrive on the body; the root name and the rows are not focusable.
+    bodyRef.current?.focus();
+  };
+
+  const copyPath = async (path: string): Promise<void> => {
+    try {
+      const board = typeof navigator === "undefined" ? null : navigator.clipboard;
+      if (!board || typeof board.writeText !== "function") throw new Error("clipboard unavailable");
+      await board.writeText(path);
+      setCopyState("ok");
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+      copyTimer.current = window.setTimeout(() => closeMenu(), COPY_FEEDBACK_MS);
+    } catch {
+      // No clipboard to write into: say so and leave the menu standing, so trying again
+      // is one more click rather than reopening the row.
+      setCopyState("fail");
+    }
+  };
+
+  const openWithDefault = async (path: string): Promise<void> => {
+    closeMenu();
+    const bridge = (window as unknown as { emrg?: OpenFileBridge }).emrg;
+    try {
+      await bridge?.openFile?.({ filePath: path });
+    } catch {
+      // The main process reports its own failures and the menu is already gone; there is
+      // no second surface here to report into.
+    }
+  };
+
+  const pick = (id: ContextMenuId): void => {
+    const path = menu?.path;
+    if (!path) return;
+    if (id === "copy") void copyPath(path);
+    else void openWithDefault(path);
+  };
+
+  const menuItems = useMemo(
+    () => [
+      {
+        id: "copy" as const,
+        label:
+          copyState === "ok"
+            ? t("inspector.treeCopied")
+            : copyState === "fail"
+              ? t("inspector.treeCopyFailed")
+              : t("inspector.treeCopyPath"),
+        testId: `${testId}-menu-copy`,
+      },
+      {
+        id: "open" as const,
+        label: t("inspector.treeOpenDefault"),
+        testId: `${testId}-menu-open`,
+      },
+    ],
+    [copyState, t, testId],
+  );
+
+  // A press anywhere but the menu dismisses it; the menu's own items stop that press
+  // before it gets here.
+  useEffect(() => {
+    if (!menu) return;
+    const onDown = (e: MouseEvent): void => {
+      if (menuRef.current?.contains(e.target as Node)) return;
+      closeMenu();
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [menu, closeMenu]);
+
+  // The copy timer must not outlive the tree.
+  useEffect(
+    () => () => {
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+    },
+    [],
+  );
+
   const onKeyDown = (e: React.KeyboardEvent): void => {
+    if (menu) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeMenu();
+        return;
+      }
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const step = e.key === "ArrowDown" ? 1 : menuItems.length - 1;
+        setMenuActive((i) => (i + step) % menuItems.length);
+        return;
+      }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        pick(menuItems[menuActive]?.id ?? "copy");
+        return;
+      }
+    }
     if (rows.length === 0) return;
     const current = rows.find((r) => r.path === selected) ?? null;
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -159,7 +298,15 @@ export function FileTree({ root, loadDir, testId }: FileTreeProps) {
   return (
     <div className="ft" data-testid={testId} data-root={root ?? ""}>
       <div className="ft-toolbar">
-        <span className="ft-root" data-testid={`${testId}-root`} title={root ?? ""}>
+        <span
+          className="ft-root"
+          data-testid={`${testId}-root`}
+          title={root ?? ""}
+          onContextMenu={(e) => {
+            // The toolbar's root name stands for the root directory itself.
+            if (root) openMenuAt(e, root);
+          }}
+        >
           {root ? baseName(root) : "—"}
         </span>
         <button
@@ -189,6 +336,10 @@ export function FileTree({ root, loadDir, testId }: FileTreeProps) {
         role="tree"
         tabIndex={0}
         onKeyDown={onKeyDown}
+        onScroll={() => {
+          // The menu is fixed at the pointer, so a scroll leaves its row behind.
+          if (menu) closeMenu();
+        }}
         data-testid={`${testId}-body`}
       >
         {!root ? (
@@ -227,6 +378,7 @@ export function FileTree({ root, loadDir, testId }: FileTreeProps) {
                 setSelected(row.path);
                 open(row);
               }}
+              onContextMenu={(e) => openMenuAt(e, row.path)}
               title={row.name}
             >
               {/* One 1px guide per level: what makes a deep row's parentage readable
@@ -256,6 +408,17 @@ export function FileTree({ root, loadDir, testId }: FileTreeProps) {
           </p>
         ) : null}
       </div>
+      {menu ? (
+        <ContextMenu
+          anchor={{ x: menu.x, y: menu.y }}
+          items={menuItems}
+          active={menuActive}
+          testId={`${testId}-menu`}
+          menuRef={menuRef}
+          onPick={pick}
+          onHover={setMenuActive}
+        />
+      ) : null}
     </div>
   );
 }
