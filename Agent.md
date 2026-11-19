@@ -41,7 +41,7 @@ The execution model, in this repo's own terms (`emrg/server/daemon.py`):
 What EMRG does today — capability statements, not a changelog.
 
 - **TUI client** — markdown/diffs, slash commands, autocomplete, pickers, clipboard images (`vision` per model), ESC interrupt, CJK-aware input
-- **Electron GUI** — streaming chat, tool-status cards, sessions, models, settings, onboarding, reconnect with daemon respawn
+- **Electron GUI** — streaming chat, tool-status cards, sessions, models, settings, onboarding, reconnect, daemon respawn
 - **Scheduled tasks** — `TaskHandler` for any registered project: builtin and custom types, CRUD, hot reload, `when` early wake
 - **Rant-driven evolution** — host feedback through `/rant` drives the cycles
 - **Memory** — project and session memory (YAML frontmatter + a Markdown index), compact/clear, capped prompt footprint
@@ -54,8 +54,8 @@ What EMRG does today — capability statements, not a changelog.
 One line per command: what it answers. Foreground daemon: `python -m emrg`.
 
 - Python: `uv run pytest tests/ -v` — the number is **measured, never stored**: `uv run --no-sync python3 scripts/check-doc-count.py --measure`. Import check: `uv run python -c "from emrg.client.app import run_client"`
-GUI: `cd emrg/gui && npm test` (212: 102 daemon_client + 22 conn-manager + 7 integration + 7 nav-policy + 7 gui-state + 9 build-config + 11 boot-contract + 3 preload-api + 2 theme-guard + 2 image-hash + 8 switch-session + 19 atp_login + 4 gui-op-log + 9 theme-setting) — syntax: `node --check main.js preload.js daemon_client.js`
-Renderer: `cd emrg/gui/renderer && npm run typecheck && npm test` (853: 5 snapshot-store + 13 utils + 3 ErrorBoundary + 2 App smoke + 12 commands + 4 copywriting + 11 i18n + 21 markdown + 34 transcript + 11 conversationType + 43 TranscriptView + 22 history + 29 historyReplay + 36 composer + 72 Composer + 16 sidebar + 32 workspaceView + 15 WorkspaceView + 10 dialog + 6 Dialog + 9 ConfirmDialog + 9 RenameDialog + 12 dialogLists + 3 HelpDialog + 9 MemoryDialog + 8 SkillsDialog + 8 openSession + 6 WelcomeDialog + 20 OpenSessionDialog + 7 NewSessionDialog + 7 rewind + 8 RewindDialog + 7 GithubDeviceDialog + 67 daemonBridge + 12 DaemonBridgeProvider + 61 Shell + 5 page + 25 DialogHost + 35 SettingsPanel + 18 TaskFormDialog + 5 RantDialog + 8 vendorMarkdown + 10 highlightTheme + 6 ApprovalDialog + 16 SandboxRootsDialog + 40 cockpit + 7 inspector + 1 residue + 8 StatusBand + 6 SearchOverlay + 5 ResizeHandle + 8 IconRail)
+GUI: `cd emrg/gui && npm test` (216: 102 daemon_client + 22 conn-manager + 7 integration + 7 nav-policy + 11 gui-state + 9 build-config + 11 boot-contract + 3 preload-api + 2 theme-guard + 2 image-hash + 8 switch-session + 19 atp_login + 4 gui-op-log + 9 theme-setting) — syntax: `node --check main.js preload.js daemon_client.js`
+Renderer: `cd emrg/gui/renderer && npm run typecheck && npm test` (858: 5 snapshot-store + 13 utils + 3 ErrorBoundary + 2 App smoke + 12 commands + 4 copywriting + 11 i18n + 21 markdown + 34 transcript + 11 conversationType + 43 TranscriptView + 22 history + 29 historyReplay + 36 composer + 72 Composer + 14 sidebar + 32 workspaceView + 15 WorkspaceView + 10 dialog + 6 Dialog + 9 ConfirmDialog + 9 RenameDialog + 12 dialogLists + 3 HelpDialog + 9 MemoryDialog + 8 SkillsDialog + 8 openSession + 6 WelcomeDialog + 20 OpenSessionDialog + 7 NewSessionDialog + 7 rewind + 8 RewindDialog + 7 GithubDeviceDialog + 67 daemonBridge + 12 DaemonBridgeProvider + 62 Shell + 5 page + 25 DialogHost + 35 SettingsPanel + 18 TaskFormDialog + 5 RantDialog + 8 vendorMarkdown + 10 highlightTheme + 6 ApprovalDialog + 16 SandboxRootsDialog + 40 cockpit + 7 inspector + 1 residue + 8 StatusBand + 6 SearchOverlay + 5 ResizeHandle + 8 IconRail + 6 SessionColumn)
 - CI: pytest on ubuntu **and windows-2025**, the GUI suites, and an actionlint gate over `.github/workflows/`; re-trigger a dropped push with `scripts/re-trigger-ci.sh <branch>`, never an empty commit
 - Merge gates, run before merging — each asks what no other gate asks: `uv run --no-sync python3 scripts/check-vote-count.py` (approvals still valid) · `scripts/check-pr-base.py` (base reaches master) · `scripts/check-merge-freshness.py` (that green CI is about the landing tree) · `scripts/check-merge-order.py` (dirt and what it lands) · `scripts/check-merge-landing-diff.py` (what the landing changes) · `scripts/check-merge-pairs.py` / `scripts/check-merge-sequence.py` (a pair, or a whole order) · `scripts/check-merge-tree-health.py` (the merged tree passes one guard) · `scripts/check-merge-plan-suite.py` (the plan's final tree passes the suite) — all under `uv run --no-sync python3`
 - Post-merge audit: `uv run --no-sync python3 scripts/check-merge-landed.py <N>` (did the merge land a tree its reviews named)
@@ -73,7 +73,7 @@ Every guard that reads a working tree names it before its verdict; a question it
 
 ## Packaging
 
-Only `icon.svg` is committed; generated icon products are gitignored and CI builds them (`bash packaging/gen-assets.sh` locally first; `.icns` needs macOS `iconutil`).
+Only `icon.svg` is committed; generated icon products are gitignored, built by CI (`bash packaging/gen-assets.sh` first; `.icns` needs macOS `iconutil`).
 
 ## Configuration
 

@@ -86,11 +86,17 @@ test("emrg:switchSession 的处理块不再读 ownStream（issue #2637）", () =
   );
 });
 
-test("switchSession 的其余三条拒绝仍在（区域是真的处理块，不是空片）", () => {
+test("switchSession 的其余两条拒绝仍在（区域是真的处理块，不是空片）", () => {
   const region = handlerRegion(source, "switchSession");
   assert.ok(region.includes('throw new Error("invalid session_id")'), "the session_id refusal must stay");
   assert.ok(region.includes('throw new Error("invalid agent path")'), "the agent-path refusal must stay");
-  assert.ok(region.includes("too many open sessions"), "the open-session cap refusal must stay");
+  // issue #3022：上限不再拒绝。开第 21 条时挤掉最久无活动的那一条，条目与连接的
+  // 挤出落在 touchOpenSession（那里才拿得到两者的对应关系）。所以这里断言的是
+  // **拒绝已经不在**——留着它，用户就还会看到「先关掉一条」而不是得到他要开的那条。
+  assert.ok(
+    !region.includes("too many open sessions"),
+    "the open-session cap refusal must be gone: opening a 21st session evicts the longest-inactive entry",
+  );
 });
 
 test("switchSession 不关闭它离开的那个连接（去掉拒绝的那一步所依赖的事实）", () => {
