@@ -464,16 +464,23 @@ vision = false
     // 一次会各存一份，功能无碍，仅存储），GUI 自身去重自洽（同字节 → 同文件名 → 跳过写盘）。
     //
     /**
-     * `<agent>/.emrg/sessions/<id>/<sub>` 的**唯一**构造点。
+     * `<root>/.emrg/sessions/<id>` 的**唯一**构造点。
      *
-     * 两个 handler（图片、任意文件）落盘到同一个会话目录的两个子目录，路径只能有一份拼法：
-     * `tests/test_session.py` 钉住 GUI 侧「整个 Electron 客户端里只有一处拼出这段路径」，
-     * 与 Python 侧由单一 producer 产出的那条规则对齐。它们共享文件系统、不共享运行时，所以
-     * 这里不可能调用 Python 那份，能做的是不要出现第二份。
+     * 三个调用方共用同一个会话目录：图片与任意文件落盘到它下面的子目录，右栏的会话文件树要它的根。
+     * 路径只能有一份拼法——`tests/test_session.py` 钉住 GUI 侧「整个 Electron 客户端里只有一处
+     * 拼出这段路径」，与 Python 侧由单一 producer 产出的那条规则对齐。它们共享文件系统、不共享
+     * 运行时，所以这里不可能调用 Python 那份，能做的是不要出现第二份。
+     *
+     * 根并不总是同一个：会话目录可能建在项目里（`<cwd>/.emrg/sessions/<id>`），也可能是 home 级
+     * 的（`~/.emrg/sessions/<id>`）。所以根由调用方给，**拼法**留在这里。
      */
+    function sessionDir(root, sessionId) {
+      return path.join(root, ".emrg", "sessions", sessionId);
+    }
+
     function sessionSubdir(sessionId, sub) {
       const projectRoot = resolveSessionCwd(sessionId) || DEFAULT_CWD;
-      return path.join(projectRoot, ".emrg", "sessions", sessionId, sub);
+      return path.join(sessionDir(projectRoot, sessionId), sub);
     }
 
     // ⚠️ 算法只能从**打包运行时**支持的摘要里选，不能从开发机上的 node 选（issue #2363）：
@@ -898,8 +905,8 @@ vision = false
       let cwd = resolveSessionCwd(sessionId);
       if (!cwd) cwd = await askSessionCwd(sessionId, DEFAULT_CWD);
       if (!cwd) return { agentRoot: null, sessionRoot: null };
-      const inProject = path.join(cwd, ".emrg", "sessions", sessionId);
-      const inHome = path.join(os.homedir(), ".emrg", "sessions", sessionId);
+      const inProject = sessionDir(cwd, sessionId);
+      const inHome = sessionDir(os.homedir(), sessionId);
       let sessionRoot = inProject;
       if (!fs.existsSync(inProject) && fs.existsSync(inHome)) sessionRoot = inHome;
       return { agentRoot: cwd, sessionRoot };
