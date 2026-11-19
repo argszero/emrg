@@ -25,6 +25,7 @@ const fakeMd: MarkdownRenderer = {
   renderMarkdown: async (text) => `<div class="md-test">${text}</div>`,
   streamProject: () => false,
   streamFinalize: async () => {},
+    resumeStream: async () => {},
 };
 
 /**

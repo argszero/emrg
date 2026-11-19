@@ -10,6 +10,7 @@ import {
   type TranscriptStore,
 } from "../lib/transcript";
 import { createMarkdownRenderer, type MarkdownRenderer, type StreamState } from "../lib/markdown";
+import { seedSelection, selectionIn } from "../lib/selection";
 import { canLoadOlder, scrollCompensation, shouldLoadOlder } from "../lib/history";
 import { formatMessageTime, messageTimeTitle } from "../lib/utils";
 import { toolPhrases } from "../lib/copywriting";
@@ -286,7 +287,20 @@ export function TranscriptView({
           )
         ) : null}
       {/* 内容盒：只有它能观察到「高度变了但没有 scroll 事件」 */}
-      <div className="transcript-content" ref={contentRef}>
+      {/* 按下的地方不是正文（✦、时间、工具行、摘要条、两条消息之间的空白）时，先放一个折叠
+          选区在最近的 caret 上：随后的拖动于是从那个字延伸，而不是从段落开头（issue #3034）。 */}
+      <div
+        className="transcript-content"
+        ref={contentRef}
+        onPointerDown={(e) => {
+          const target = e.target as HTMLElement | null;
+          if (target && target.closest(".md-stream, .assistant-plain")) return;
+          seedSelection(typeof document === "undefined" ? null : document, {
+            x: e.clientX,
+            y: e.clientY,
+          });
+        }}
+      >
         {entries.map((entry, i) => (
           <EntryView key={entry.id} entry={entry} index={i} t={t} md={md} store={store} sid={sid} />
         ))}
@@ -474,6 +488,22 @@ function AssistantSegmentView({
       setProjected(ok);
     }
   }, [segment.typing, segment.text, md]);
+
+  // 选区消失后补做被推迟的重写（issue #3034）。拖动结束不给任何回调，`selectionchange` 是
+  // 唯一能报「选区没了」的信号；没有待补内容时这个监听什么都不做，所以它常驻也不会写 DOM。
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const onSelectionChange = () => {
+      const host = hostRef.current;
+      const state = stateRef.current;
+      if (!host || !state) return;
+      if (state.pendingText === undefined && state.pendingFinalize === undefined) return;
+      if (selectionIn(host)) return;
+      void md.resumeStream(host, state);
+    };
+    document.addEventListener("selectionchange", onSelectionChange);
+    return () => document.removeEventListener("selectionchange", onSelectionChange);
+  }, [md]);
 
   // done/封存（typing 移除）：agent 模式 → streamFinalize 把 live 块一次性校正为全量
   // markdown（与旧 renderMarkdown 整体渲染同源）；plain 模式由 MarkdownText 兜底。
