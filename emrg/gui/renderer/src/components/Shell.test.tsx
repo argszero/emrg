@@ -54,6 +54,8 @@ function mockEmrg() {
   // Rant 2026-11-18T18:41:06 item 8: closing an open session is a channel of its own —
   // the main process disconnects it and keeps the data on disk.
   const closeSession = vi.fn().mockResolvedValue({ ok: true });
+  // issue #3022：拖拽调序交给主进程 —— 它落盘并广播，渲染层自己不排第二遍。
+  const reorderOpenSessions = vi.fn().mockResolvedValue({ openSessions: [] });
   // Rant 2026-10-29T14:21:57: the stop button must reach the daemon for a turn this
   // client did not start, so the bridge it calls has to exist here.
   const cancel = vi.fn().mockResolvedValue({ ok: true });
@@ -83,6 +85,7 @@ function mockEmrg() {
     triggerTask,
     switchSession,
     closeSession,
+    reorderOpenSessions,
     cancel,
   };
   return {
@@ -109,6 +112,7 @@ function mockEmrg() {
     triggerTask,
     switchSession,
     closeSession,
+    reorderOpenSessions,
     cancel,
     emit: (evt: DaemonEventFrame) => listeners.forEach((cb) => cb(evt)),
   };
@@ -1372,6 +1376,37 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
     expect(m.closeSession).toHaveBeenCalledTimes(1);
     // 内容归那条会话所有：它被关掉了，就不该再挂在这个窗口里。
     await waitFor(() => expect(screen.queryByText("content-one")).not.toBeInTheDocument());
+  });
+
+  /**
+   * 拖拽调序（issue #3022）：拖完的新顺序交给主进程，形状是 `{ sids }`。
+   *
+   * 量的是接线，不是列的算法 —— 列的算法在 `SessionColumn.test.tsx`。少了这条线，
+   * 列算得再对也交不到任何地方：松手后界面回到原样，而所有单元测试都是绿的。
+   * `{ sids }` 也必须在这里量 —— 主进程解构的就是这个字段，交一个裸数组过去，
+   * 收到的 `sids` 是 undefined，主进程只会抛「invalid sids」。
+   */
+  it("拖拽会话行 → 新顺序交给主进程（emrg:reorderOpenSessions）", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }, { sid: "s2", title: "Beta" }]));
+    await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(2));
+
+    // 拖拽事件挂在行外层的包装 div 上，不是按钮本身。
+    const rowFor = (sid: string): HTMLElement => {
+      const item = screen.getAllByTestId("open-session-item").find((el) => el.dataset.sid === sid);
+      expect(item).toBeTruthy();
+      return (item as HTMLElement).parentElement as HTMLElement;
+    };
+    // 把 s2 拖到 s1 上：其余各行相对不动，只挪这一行。
+    fireEvent.dragStart(rowFor("s2"));
+    fireEvent.dragOver(rowFor("s1"));
+    fireEvent.drop(rowFor("s1"));
+
+    await waitFor(() => expect(m.reorderOpenSessions).toHaveBeenCalledWith({ sids: ["s2", "s1"] }));
+    // 只交一次：渲染层不改自己那份顺序，新顺序从主进程的广播回来。
+    expect(m.reorderOpenSessions).toHaveBeenCalledTimes(1);
   });
 
   /**

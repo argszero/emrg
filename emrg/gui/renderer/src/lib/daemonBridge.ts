@@ -468,6 +468,15 @@ export interface DaemonBridgeDeps {
      * window still held in memory (rant 2026-11-18T18:41:06, item 8).
      */
     closeSession?(p: { sessionId: string }): Promise<{ ok?: boolean; closed?: boolean }>;
+    /**
+     * Reorder the open-session list (preload.reorderOpenSessions；未接线时为 undefined)。
+     *
+     * The main process owns the order (issue #3022): this hands it the sequence the user
+     * dragged into place and nothing else. The list that comes back on the next
+     * `open_sessions` broadcast is the answer — a renderer that also moved its own copy
+     * would be right about itself and wrong as soon as main refused.
+     */
+    reorderOpenSessions?(p: { sids: string[] }): Promise<unknown>;
     init?(): Promise<InitResult>;
     /** 回答 daemon 的提权提问（preload.respondApproval；未接线时为 undefined） */
     respondApproval?(p: {
@@ -543,6 +552,15 @@ export interface DaemonBridge {
    * content the session still owns.
    */
   closeSession(sid: string | null): Promise<boolean>;
+  /**
+   * Hand the main process a new order for the open-session list (issue #3022).
+   *
+   * Nothing is reordered here: main owns the order, persists it and broadcasts the list
+   * back. Answers false when the channel is missing (a build whose preload predates it) or
+   * the main process refused, so the caller knows the drag reached nowhere instead of
+   * assuming it did.
+   */
+  reorderOpenSessions(sids: string[]): Promise<boolean>;
   /**
    * Read one session's input history from the daemon, and store it (issue #2349,
    * part 2/2).
@@ -1209,6 +1227,25 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
   }
 
   /**
+   * Give the main process a new order for the open-session list (issue #3022).
+   *
+   * Nothing is reordered in this layer: main owns the order, persists it and broadcasts
+   * the list back, and that broadcast is what the sidebar draws. Returns false when there
+   * is nothing to ask with — a build whose preload predates this API, or an empty order.
+   */
+  async function reorderOpenSessions(sids: string[]): Promise<boolean> {
+    if (!Array.isArray(sids) || sids.length === 0) return false;
+    const sender = emrg.reorderOpenSessions;
+    if (typeof sender !== "function") return false;
+    try {
+      await sender({ sids });
+    } catch {
+      return false;
+    }
+    return true;
+  }
+
+  /**
    * Ask the daemon to add, remove or list this session's extra writable roots.
    *
    * Nothing is written to the store here, and that is the same point
@@ -1313,6 +1350,7 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
     setSandbox,
     setSandboxRoots,
     closeSession,
+    reorderOpenSessions,
     listInputHistory,
     notePromptSubmitted,
   };
