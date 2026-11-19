@@ -33,7 +33,8 @@ import type { TranscriptStore } from "../lib/transcript";
  * 任意文件同样三个入口，区别只在结尾——图片按视觉交给模型（vision 内容），其它文件落盘
  * 后把**路径**写进正文，模型自己用 read 工具去读。
  *
- * 保留的行为一条都没动（每条都有测试）：Enter 发送 / Shift+Enter 换行 / 开头 `/` 唤起
+ * 保留的行为一条都没动（每条都有测试）：Enter 发送 / Shift+Enter 或 Option+Enter 换行 /
+ * 开头 `/` 唤起
  * 补全 / ↑↓ 召回历史 / 草稿实时保存与恢复 / 高度自适应到上限后内滚 / 发送失败回填 /
  * busy 时排队。格式栏、格式快捷键与链接对话框随 markdown 编辑体验一起删除。
  */
@@ -486,6 +487,14 @@ export function Composer({
 
   /* ── 键盘：补全菜单 / 输入历史 / Esc 停止 / Enter 发送 ── */
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>): void {
+    // Option+Enter 与 Shift+Enter 同义：换行，不发送（issue #3050）。放在最前面，因为补全
+    // 菜单开着时回车是"选中"，而按着 Option 的意图仍然是换行；换行由这里自己插一个——
+    // 浏览器对 Option+Enter 未必插，插不插要由这里决定，才不会有时空一行有时不空。
+    if (e.key === "Enter" && e.altKey) {
+      e.preventDefault();
+      insertRaw("\n");
+      return;
+    }
     // / 补全菜单键盘导航（vanilla rant 19:44 P1）：↑↓ 移动、Enter 选择、Esc 关闭
     const m = menuRef.current;
     if (m.items.length > 0) {
@@ -558,8 +567,9 @@ export function Composer({
       stopRef.current();
       return;
     }
-    // Enter（非 Shift）与 Ctrl+Enter 同发送；Shift+Enter 交给 textarea 原生换行
-    if (e.key === "Enter" && !e.shiftKey) {
+    // Enter（非 Shift、非 Option）与 Ctrl+Enter 同发送；Shift+Enter 与 Option+Enter 换行
+    // （Option+Enter 已在上面的分支返回，这里再排除一次：读这行的人不该先去读那段）
+    if (e.key === "Enter" && !e.shiftKey && !e.altKey) {
       e.preventDefault();
       void submitRef.current();
     }

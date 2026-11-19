@@ -250,6 +250,53 @@ describe("Composer — 发送流", () => {
     expect(s.value()).toBe("line one");
   });
 
+  it("Option+Enter 不发送，插一个换行，原文一个字不丢（issue #3050）", async () => {
+    let sent = 0;
+    const s = setup(createTranscriptStore(), {
+      sendMessage: async () => {
+        sent++;
+        return {};
+      },
+    });
+    s.setText("半句话");
+    s.press("Enter", { altKey: true });
+    expect(sent).toBe(0);
+    expect(s.value()).toBe("半句话\n");
+    // 光标落到新的一行，而不是停在原处或跳回开头
+    await waitFor(() => expect(s.input().selectionStart).toBe("半句话\n".length));
+  });
+
+  it("连按两次 Option+Enter 就多两行，一次也没发出去", () => {
+    let sent = 0;
+    const s = setup(createTranscriptStore(), {
+      sendMessage: async () => {
+        sent++;
+        return {};
+      },
+    });
+    s.setText("a");
+    s.press("Enter", { altKey: true });
+    s.press("Enter", { altKey: true });
+    expect(sent).toBe(0);
+    expect(s.value()).toBe("a\n\n");
+  });
+
+  it("补全菜单开着时 Option+Enter 仍然换行，不选中菜单项", () => {
+    const s = setup(createTranscriptStore());
+    s.setText("/he");
+    expect(screen.getByTestId("cmd-menu")).toBeTruthy();
+    s.press("Enter", { altKey: true });
+    // 选中会把补全项填进输入框，换行则原文后面多一行
+    expect(s.value()).toBe("/he\n");
+  });
+
+  it("占位提示同时列出两个换行键（issue #3050）", () => {
+    const s = setup(createTranscriptStore());
+    const placeholder = s.input().getAttribute("placeholder") ?? "";
+    expect(placeholder).toContain("Shift+Enter");
+    expect(placeholder).toContain("Option+Enter");
+  });
+
   it("空输入不发送（只有空白也一样）", async () => {
     let sent = 0;
     const s = setup(createTranscriptStore(), {
