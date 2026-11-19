@@ -431,20 +431,50 @@ export function toolRowText(row: ToolRow, t: TranslateFn): string {
   return `${row.callLabel ?? ""}${row.toolName} ${label}${row.intent ? ` ${row.intent}` : ""}`;
 }
 
+/** 组里还在跑的行贡献的时间（秒）；没有在跑的行、或它没有起点时返回 null。
+ *
+ * 这是客户端唯一自己算的一段时间，而且只算**运行期间**：一行结束时 daemon 报的 `elapsed`
+ * 顶上来，本地推算值随即消失，屏幕上最后留下的是 daemon 量出来的那个数
+ * （rant 2026-11-19T09:31:00）。`Math.max(0, …)` 兜住「起点在未来」——墙钟往回跳一步时，
+ * 表头宁可停一下也不显示负数。
+ */
+export function runningShare(group: ToolGroup, nowMs?: number): number | null {
+  if (nowMs === undefined) return null;
+  let total = 0;
+  let any = false;
+  for (const row of group.rows) {
+    if (row.status !== "running" || row.startedAtMs === undefined) continue;
+    any = true;
+    total += Math.max(0, (nowMs - row.startedAtMs) / 1000);
+  }
+  return any ? total : null;
+}
+
 /** 组摘要的一句话：四种缺省各有自己的键。
  *
  * `timed` 为假（重放的老记录一行都没量过耗时）时不出现时间、也不出现 `0.0s`；`latest`
- * 为空时整个括号不出现，而不是留一对空括号——两者都是宿主在屏幕上看出来的东西（#2980）。 */
-export function summaryLine(group: ToolGroup, latest: string, t: TranslateFn): string {
+ * 为空时整个括号不出现，而不是留一对空括号——两者都是宿主在屏幕上看出来的东西（#2980）。
+ *
+ * `nowMs` 传入时才把「还在跑」的那几行算进去，因此表头在运行期间每 0.1 秒往上走一格；
+ * 不传（单元测试、非运行态）则只有已结束的行，与改动前逐字一致。
+ */
+export function summaryLine(
+  group: ToolGroup,
+  latest: string,
+  t: TranslateFn,
+  nowMs?: number,
+): string {
   const summary = group.summary;
   if (!summary) return "";
   const count = summary.count;
-  if (!summary.timed) {
+  const live = runningShare(group, nowMs);
+  const timed = summary.timed || live !== null;
+  if (!timed) {
     return latest
       ? t("chat.toolGroupSummaryNoTime", { count, latest })
       : t("chat.toolGroupSummaryCountOnly", { count });
   }
-  const time = summary.totalElapsed.toFixed(1) + "s";
+  const time = (summary.totalElapsed + (live ?? 0)).toFixed(1) + "s";
   return latest
     ? t("chat.toolGroupSummary", { count, time, latest })
     : t("chat.toolGroupSummaryNoLatest", { count, time });
@@ -528,6 +558,13 @@ function ToolRowView({
   );
 }
 
+/** 组表头耗时的刷新节奏：只要组里还有工具在跑，每 0.1 秒往上走一格（rant 2026-11-19T09:31:00）。
+ *
+ * 定时器住在组自己身上，不在 Shell：0.1 秒的刷新只重渲染这一个组，整屏不动。组内全部
+ * 结束后 effect 清掉定时器，数字停在最终值，不留常驻定时器。
+ */
+export const TOOL_GROUP_TICK_MS = 100;
+
 /** 连续工具合并组：bar 摘要 + 收起/展开（rant 21:28:49） */
 function ToolGroupView({
   group,
@@ -542,8 +579,21 @@ function ToolGroupView({
   store: TranscriptStore;
   sid: string | null;
 }) {
+  // 只有「在跑且知道起点」的行才让表头动起来：老记录没有起点，于是这里为假——
+  // 不挂定时器、不算贡献、也不显示时间（rant 2026-11-19T09:31:00 第 7 条）。
+  const running = group.rows.some(
+    (r) => r.status === "running" && r.startedAtMs !== undefined,
+  );
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!running) return;
+    const id = setInterval(() => setTick((n) => n + 1), TOOL_GROUP_TICK_MS);
+    return () => clearInterval(id);
+  }, [running]);
+
   const latestRow = group.rows.length ? group.rows[group.rows.length - 1] : undefined;
-  const summaryText = summaryLine(group, latestRow ? toolRowText(latestRow, t) : "", t);
+  const nowMs = running ? Date.now() : undefined;
+  const summaryText = summaryLine(group, latestRow ? toolRowText(latestRow, t) : "", t, nowMs);
 
   return (
     <div className={`tool-group ${group.collapsed ? "collapsed" : ""}`}>
