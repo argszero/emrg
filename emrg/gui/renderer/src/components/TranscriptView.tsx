@@ -9,7 +9,12 @@ import {
   type TranscriptEntry,
   type TranscriptStore,
 } from "../lib/transcript";
-import { createMarkdownRenderer, type MarkdownRenderer, type StreamState } from "../lib/markdown";
+import {
+  createMarkdownRenderer,
+  installCodeCopy,
+  type MarkdownRenderer,
+  type StreamState,
+} from "../lib/markdown";
 import { seedSelection, selectionIn } from "../lib/selection";
 import { canLoadOlder, scrollCompensation, shouldLoadOlder } from "../lib/history";
 import { formatMessageTime, messageTimeTitle } from "../lib/utils";
@@ -160,6 +165,18 @@ export function TranscriptView({
     el.addEventListener("scroll", onScroll, { capture: true });
     return () => el.removeEventListener("scroll", onScroll, { capture: true });
   }, [updateAutoScroll, hasMore, loading, onLoadOlder]);
+
+  // ── 代码块复制按钮（issue #3037） ──
+  // 挂在 `transcript-view` 这个长期存在的滚动容器上，而不是逐个按钮：块投影每帧重写尾部
+  // live 块、done 时把 `.md-stream` 的 innerHTML 整个换掉，按钮节点被换掉，绑在它身上的
+  // 监听随之消失。容器不重建，一次绑定覆盖流式中、封存后、以及任何一次重写。
+  // `t` 换语言时换身份（I18nProvider 的 useMemo 按 locale 重建），所以依赖它重新绑定，
+  // 复原文案才会是当下语言的。
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    return installCodeCopy(el, { t });
+  }, [t]);
 
   // ── 高度变化也要重算（issue #3024 清单第 3、4 条） ──
   // 图片解码完、侧栏拖宽后文字重新折行、工具组展开、输入框长高 —— 这些都只改高度，一个
