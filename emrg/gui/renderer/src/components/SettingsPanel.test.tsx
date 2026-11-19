@@ -115,6 +115,17 @@ describe("SettingsPanel", () => {
     expect(screen.queryByTestId("settings-body-model")).toBeNull();
   });
 
+  it("the shortcuts page names both newline keys (issue #3050)", async () => {
+    setup();
+    await screen.findByTestId("settings-body-model");
+    fireEvent.click(screen.getByTestId("settings-tab-shortcuts"));
+    const row = screen.getByTestId("shortcut-newline");
+    expect(row.textContent).toContain("Shift+Enter");
+    expect(row.textContent).toContain("Option+Enter");
+    // 右边那格是一句说明，不是空 span
+    expect(row.textContent).toContain("New line");
+  });
+
   it("loads settings from bridge into model tab", async () => {
     setup();
     await waitFor(() =>

@@ -1199,6 +1199,10 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
                       <span className="task-name">Esc</span>
                       <span className="task-hint">{t("settings.shortcutInterrupt")}</span>
                     </div>
+                    <div className="task-row" data-testid="shortcut-newline">
+                      <span className="task-name">Shift+Enter / Option+Enter</span>
+                      <span className="task-hint">{t("settings.shortcutNewline")}</span>
+                    </div>
                   </div>
                 </div>
               </div>
