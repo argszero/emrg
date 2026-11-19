@@ -97,6 +97,16 @@ describe("WorkspaceView", () => {
     );
   });
 
+  // issue #3017 第 7 条：一栏宽度会把路径裁短，整行悬停必须能看到完整路径。
+  it("agent 行：整行悬停显示完整路径", () => {
+    const p = agent("emrg", "/Users/argszero/.emrg/evolution/emrg");
+    setup({ agents: [p] });
+    expect(screen.getAllByTestId("agent-row")[0]).toHaveAttribute(
+      "title",
+      "/Users/argszero/.emrg/evolution/emrg",
+    );
+  });
+
   it("项目查看会话 → 子视图；返回 → 回列表", async () => {
     const p = agent("emrg");
     const onViewSessions = vi.fn();
