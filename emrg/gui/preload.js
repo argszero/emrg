@@ -49,6 +49,8 @@ const api = {
   listMemories: (payload) => ipcRenderer.invoke("emrg:listMemories", payload),
   readMemory: (payload) => ipcRenderer.invoke("emrg:readMemory", payload),
   listFiles: (payload) => ipcRenderer.invoke("emrg:listFiles", payload), // 右栏工作区 P1：目录树
+  // issue #3026：右栏两个文件树的两个根（agent 工作目录 / 该会话的会话目录）
+  sessionRoots: (payload) => ipcRenderer.invoke("emrg:sessionRoots", payload),
   readFile: (payload) => ipcRenderer.invoke("emrg:readFile", payload), // 右栏工作区 P1：文件查看器
   previewHtml: (payload) => ipcRenderer.invoke("emrg:previewHtml", payload), // P2.3：HTML 预览（WebContentsView）
   closePreview: (payload) => ipcRenderer.invoke("emrg:closePreview", payload), // P2.3：关闭/切走 HTML 预览

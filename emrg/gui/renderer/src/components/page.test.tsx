@@ -70,21 +70,34 @@ describe("SessionColumn", () => {
 });
 
 describe("InspectorPanel", () => {
-  it("三个 tab，名字就是本轮动作 / 文件 / 记忆", () => {
+  it("三个 tab：agent 目录 / 会话目录 / 记忆，默认选 agent 目录", () => {
     render(
       <I18nProvider lang="en">
-        <InspectorPanel actions={[]} files={[]} />
+        <InspectorPanel agentRoot="/p/emrg" sessionRoot="/p/emrg/.emrg/sessions/s1" />
       </I18nProvider>,
     );
-    expect(screen.getByTestId("inspector-tab-actions")).toHaveTextContent("This turn");
-    expect(screen.getByTestId("inspector-tab-files")).toHaveTextContent("Files");
+    expect(screen.getByTestId("inspector-tab-agent")).toHaveTextContent("Agent dir");
+    expect(screen.getByTestId("inspector-tab-session")).toHaveTextContent("Session dir");
     expect(screen.getByTestId("inspector-tab-memory")).toHaveTextContent("Memory");
     expect(screen.getByTestId("inspector-panel").querySelectorAll("[role='tab']")).toHaveLength(3);
+    // 默认那一栏就是 agent 目录（issue #3026 第 1 条）
+    expect(screen.getByTestId("inspector-tab-agent")).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByTestId("inspector-tree-agent")).toBeInTheDocument();
+    expect(screen.queryByTestId("inspector-tree-session")).toBeNull();
+  });
+
+  it("没有会话时两棵树都说先选会话，而不是画一棵空树", () => {
+    render(
+      <I18nProvider lang="en">
+        <InspectorPanel />
+      </I18nProvider>,
+    );
+    expect(screen.getByTestId("inspector-tree-agent-no-session")).toHaveTextContent("Select a session");
   });
 });
 
 describe("StatusBand", () => {
-  it("右端四个按钮之外别无他物", () => {
+  it("右端只有两个栏开关，别无他物（issue #3028）", () => {
     const noop = () => {};
     render(
       <I18nProvider lang="en">
@@ -96,12 +109,10 @@ describe("StatusBand", () => {
           rightOpen
           onToggleLeft={noop}
           onToggleRight={noop}
-          onSearch={noop}
-          onNew={noop}
         />
       </I18nProvider>,
     );
     const band = screen.getByTestId("status-band");
-    expect(band.querySelectorAll("button")).toHaveLength(4);
+    expect(band.querySelectorAll("button")).toHaveLength(2);
   });
 });

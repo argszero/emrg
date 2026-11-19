@@ -1,44 +1,55 @@
 import { useState } from "react";
 import { useI18n } from "../lib/i18n";
-import { formatActionElapsed, type TurnAction, type TurnFile } from "../lib/inspector";
+import { FileTree, type LoadDir } from "./FileTree";
 
 /**
- * InspectorPanel — the page's fourth section, three tabs wide (issue #2969).
+ * InspectorPanel — the page's fourth section, three tabs wide (issue #2969 / #3026).
  *
- * It answers three questions about the turn being watched: what did it do (the tool
- * calls, in order, each with the duration the daemon measured), which files did it
- * name, and where does this session's memory live. The last one is a door rather than
- * a copy: the memory surface is a dialog that can read, scope and page itself, and a
- * second reader here would be a second answer to the same question.
+ * Two of the three tabs are the same tree with a different root: the working directory
+ * of the agent this session belongs to, and the session's own session directory. Those
+ * are the two places a session actually writes, and before this they had no surface at
+ * all — the column offered a list of what the current turn happened to touch, which
+ * emptied itself on every new message and said nothing about either directory.
  *
- * What this component is *not*: the old results panel. That panel brought its own tab
- * names, its own width, its own persistor and an English empty state, and it survived
- * the shell rebuild by being rendered inside the new skeleton. None of it is carried
- * over — this column's width belongs to the shell, which is also what makes it a
- * sibling of its drag handle rather than the owner of it.
+ * The third tab is a door rather than a copy: the memory surface is a dialog that can
+ * read, scope and page itself, and a second reader here would be a second answer to the
+ * same question.
+ *
+ * What this component is *not*: the old results panel, and no longer the old inspector
+ * either. The turn's tool calls and the paths it named are gone from here — the
+ * transcript already shows both, one row per call, with the duration the daemon
+ * measured. A second list of the same thing was a copy that could disagree.
  */
-export type InspectorTabId = "actions" | "files" | "memory";
+export type InspectorTabId = "agent" | "session" | "memory";
 
 const TABS: { id: InspectorTabId; labelKey: string; testId: string }[] = [
-  { id: "actions", labelKey: "inspector.tabActions", testId: "inspector-tab-actions" },
-  { id: "files", labelKey: "inspector.tabFiles", testId: "inspector-tab-files" },
+  { id: "agent", labelKey: "inspector.tabAgentDir", testId: "inspector-tab-agent" },
+  { id: "session", labelKey: "inspector.tabSessionDir", testId: "inspector-tab-session" },
   { id: "memory", labelKey: "inspector.tabMemory", testId: "inspector-tab-memory" },
 ];
 
 export interface InspectorPanelProps {
   /** 当前会话；`null` = 还没选中会话 */
   sid?: string | null;
-  /** 本轮已经跑过的工具调用（lib/inspector 从 transcript 读出来，顺序即执行顺序） */
-  actions: TurnAction[];
-  /** 本轮点过名的文件 */
-  files: TurnFile[];
+  /** 该会话所属 agent 的工作目录（绝对路径）；`null` = 不知道 */
+  agentRoot?: string | null;
+  /** 该会话自己的会话目录（绝对路径）；`null` = 不知道 */
+  sessionRoot?: string | null;
+  /** 读一层目录；未接线时为 undefined，树会把原因说出来而不是画一棵空树 */
+  loadDir?: LoadDir;
   /** 打开记忆面板（记忆列表归那个对话框，这里只给门） */
   onOpenMemory?: () => void;
 }
 
-export function InspectorPanel({ sid = null, actions, files, onOpenMemory }: InspectorPanelProps) {
+export function InspectorPanel({
+  sid = null,
+  agentRoot = null,
+  sessionRoot = null,
+  loadDir,
+  onOpenMemory,
+}: InspectorPanelProps) {
   const { t } = useI18n();
-  const [active, setActive] = useState<InspectorTabId>("actions");
+  const [active, setActive] = useState<InspectorTabId>("agent");
 
   return (
     <section className="inspector" data-testid="inspector-panel" data-sid={sid ?? ""}>
@@ -57,44 +68,12 @@ export function InspectorPanel({ sid = null, actions, files, onOpenMemory }: Ins
           </button>
         ))}
       </div>
-      <div className="inspector-body" role="tabpanel">
-        {active === "actions" ? (
-          actions.length === 0 ? (
-            <p className="inspector-empty" data-testid="inspector-actions-empty">
-              {t("inspector.emptyActions")}
-            </p>
-          ) : (
-            <ol className="inspector-list" data-testid="inspector-actions">
-              {actions.map((a) => (
-                <li className="inspector-row" data-testid="inspector-action-row" key={a.callId}>
-                  <span className="inspector-row-name" title={a.toolName}>
-                    {a.toolName}
-                  </span>
-                  <span className="inspector-row-meta" data-testid="inspector-action-elapsed">
-                    {formatActionElapsed(a.elapsed)}
-                  </span>
-                </li>
-              ))}
-            </ol>
-          )
+      <div className="inspector-body" role="tabpanel" data-testid="inspector-body">
+        {active === "agent" ? (
+          <FileTree testId="inspector-tree-agent" root={agentRoot} loadDir={loadDir} />
         ) : null}
-        {active === "files" ? (
-          files.length === 0 ? (
-            <p className="inspector-empty" data-testid="inspector-files-empty">
-              {t("inspector.emptyFiles")}
-            </p>
-          ) : (
-            <ul className="inspector-list" data-testid="inspector-files">
-              {files.map((f) => (
-                <li className="inspector-row" data-testid="inspector-file-row" key={f.path}>
-                  <span className="inspector-row-name" title={f.path}>
-                    {f.path}
-                  </span>
-                  <span className="inspector-row-meta">{f.toolName}</span>
-                </li>
-              ))}
-            </ul>
-          )
+        {active === "session" ? (
+          <FileTree testId="inspector-tree-session" root={sessionRoot} loadDir={loadDir} />
         ) : null}
         {active === "memory" ? (
           <div className="inspector-memory" data-testid="inspector-memory">
