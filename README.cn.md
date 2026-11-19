@@ -20,6 +20,13 @@
   <a href="README.md">🇬🇧 English</a> | <b>🇨🇳 中文</b>
 </p>
 
+<p align="center">
+  <a href="https://app.args.fun/emrg"><b>官网</b></a> ·
+  <a href="https://app.args.fun/emrg/loop">一条吐槽怎么上线</a> ·
+  <a href="https://app.args.fun/emrg/tools">工具</a> ·
+  <a href="https://app.args.fun/emrg/compare">对比</a>
+</p>
+
 ---
 
 **如果每次使用，你的编程助手都在变得更好，会怎样？**
