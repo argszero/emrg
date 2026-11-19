@@ -104,6 +104,12 @@ class ToolStart:
     #: answered (rant 2026-10-20T12:22:21). Absent on an older frame ⇒ `""`, which
     #: is the same thing a single call shows.
     call_label: str = ""
+    #: When this call started executing, as epoch seconds — the instant the daemon also
+    #: measures the finished call's `elapsed` from. A client uses it to show a running
+    #: call contributing time to its group's header, which otherwise stands still until
+    #: the call ends (rant 2026-11-19T09:31:00). `0.0` when absent: an older frame names
+    #: no instant, and a client must then show no time rather than count from zero.
+    started_at: float = 0.0
 
     @classmethod
     def from_dict(cls, d: dict) -> ToolStart:
@@ -114,6 +120,7 @@ class ToolStart:
             arguments=d.get("arguments", {}),
             intent=d.get("intent", ""),
             call_label=d.get("call_label", ""),
+            started_at=d.get("started_at", 0.0),
         )
 
 

@@ -15,6 +15,10 @@ import "./shell.css";
 // surfaces and the density step. After shell.css, because it describes the same
 // elements and must win where the two disagree.
 import "./cockpit.css";
+// 代码块语法高亮（issue #3013）：只有一份规则表，颜色全部来自 tokens.css 的 --hl-*，
+// 于是浅色皮肤与深色皮肤各自得到自己那一套，而红色/绿色 diff 行也跟着换底色。
+// 位置在最后：它描述的 .hljs 元素不应被任何一层通用代码样式改写。
+import "../css/highlight.css";
 
 const rootEl = document.getElementById("root");
 if (!rootEl) {

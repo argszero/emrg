@@ -52,6 +52,8 @@ const SHEETS = [
   { key: "../../css/animations.css", rel: "css/animations.css" },
   { key: "../shell.css", rel: "src/shell.css" },
   { key: "../cockpit.css", rel: "src/cockpit.css" },
+  // 代码块高亮（issue #3013）：一份规则表，颜色取自 tokens.css 的 --hl-*。
+  { key: "../../css/highlight.css", rel: "css/highlight.css" },
 ].map(({ key, rel }) => {
   const css = RAW[key];
   // A sheet the glob did not read would drop out of the cascade in silence, and every

@@ -1,0 +1,129 @@
+/* highlight.css — 代码块语法高亮，两层：这里的规则只说「哪类 token 用哪个颜色」，
+ * 颜色本身全部由 tokens.css 的 --hl-* 给出（issue #3013）。
+ *
+ * 为什么不带一份现成主题的 CSS：仓库原先只有 vendor/highlight.github-dark.css 一份
+ * GitHub Dark，且是无条件引入——皮肤换成浅色时，代码块外框变浅、里面的文字仍是深色那套，
+ * 深底浅字的 diff 行在浅页上几乎看不见。把颜色搬到变量层之后，浅色/深色由皮肤选择，
+ * 本文件里一个写死的色值都没有（tests 里有断言：出现字面色值即红）。
+ *
+ * 载入顺序：css/tokens.css（变量）→ … → 本文件，最后由 src/main.tsx 引入。
+ */
+
+/* Vendor 主题里的两条排版规则随主题搬过来：少了它们代码块的换行与内边距都会变，
+ * 而深色皮肤的观感必须与改动前逐项一致。 */
+pre code.hljs {
+  display: block;
+  overflow-x: auto;
+  padding: 1em;
+}
+
+code.hljs {
+  padding: 3px 5px;
+}
+
+.hljs {
+  color: var(--hl-text);
+  background: var(--hl-bg);
+}
+
+/* keyword — prettylights-syntax-keyword */
+.hljs-doctag,
+.hljs-keyword,
+.hljs-meta .hljs-keyword,
+.hljs-template-tag,
+.hljs-template-variable,
+.hljs-type,
+.hljs-variable.language_ {
+  color: var(--hl-keyword);
+}
+
+/* entity — prettylights-syntax-entity */
+.hljs-title,
+.hljs-title.class_,
+.hljs-title.class_.inherited__,
+.hljs-title.function_ {
+  color: var(--hl-entity);
+}
+
+/* constant — prettylights-syntax-constant */
+.hljs-attr,
+.hljs-attribute,
+.hljs-literal,
+.hljs-meta,
+.hljs-number,
+.hljs-operator,
+.hljs-variable,
+.hljs-selector-attr,
+.hljs-selector-class,
+.hljs-selector-id {
+  color: var(--hl-constant);
+}
+
+/* string — prettylights-syntax-string */
+.hljs-regexp,
+.hljs-string,
+.hljs-meta .hljs-string {
+  color: var(--hl-string);
+}
+
+/* variable — prettylights-syntax-variable */
+.hljs-built_in,
+.hljs-symbol {
+  color: var(--hl-variable);
+}
+
+/* comment — prettylights-syntax-comment */
+.hljs-comment,
+.hljs-code,
+.hljs-formula {
+  color: var(--hl-comment);
+}
+
+/* entity-tag — prettylights-syntax-entity-tag */
+.hljs-name,
+.hljs-quote,
+.hljs-selector-tag,
+.hljs-selector-pseudo {
+  color: var(--hl-tag);
+}
+
+/* storage-modifier-import — 与正文同色 */
+.hljs-subst {
+  color: var(--hl-text);
+}
+
+/* markup-heading */
+.hljs-section {
+  color: var(--hl-section);
+  font-weight: bold;
+}
+
+/* markup-list */
+.hljs-bullet {
+  color: var(--hl-bullet);
+}
+
+/* markup-italic / markup-bold — 与正文同色，只加权 */
+.hljs-emphasis {
+  color: var(--hl-text);
+  font-style: italic;
+}
+
+.hljs-strong {
+  color: var(--hl-text);
+  font-weight: bold;
+}
+
+/* markup-inserted / markup-deleted —— 浅色下必须是浅底深字，深色下保持原样 */
+.hljs-addition {
+  color: var(--hl-add-fg);
+  background-color: var(--hl-add-bg);
+}
+
+.hljs-deletion {
+  color: var(--hl-del-fg);
+  background-color: var(--hl-del-bg);
+}
+
+/* purposely ignored — 与 vendor 主题一致，不设颜色：
+ * .hljs-char.escape_, .hljs-link, .hljs-params, .hljs-property, .hljs-punctuation, .hljs-tag */

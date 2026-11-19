@@ -9,7 +9,8 @@ This module holds the two things that fix it and keeps them in one place:
 
   * **what the background is** — ``COLORFGBG`` when the terminal sets it (free), otherwise an OSC 11
     query with a bounded timeout and a sentinel so a silent terminal cannot hang the client, and
-    ``None`` when neither answers, which means "keep the dark appearance" rather than a guess;
+    ``None`` when neither answers, which means "keep the dark appearance" rather than a guess —
+    and a code block then paints no board of its own either (``code_theme``);
   * **what a named colour becomes** — a light palette whose members are chosen to clear 4.5:1
     against the background that was *really detected*, with a role degrading to the terminal's
     default foreground when it cannot.
@@ -28,7 +29,10 @@ import select
 import sys
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:  # annotations only: rich is imported where the theme is built
+    from rich.syntax import SyntaxTheme
 
 # ── the modes ────────────────────────────────────────────────────────────────────────────────
 
@@ -531,11 +535,56 @@ def themed_style(style):
     return out
 
 
-def code_theme() -> str:
-    """The pygments theme for fenced code blocks, for the resolved background.
+_terminal_default_theme = None
+
+
+def terminal_default_theme():
+    """A syntax theme that names no colour at all: the terminal's own default foreground.
+
+    This exists for the one case where nothing was measured (issue #3013, requirement 6). A
+    pygments style **cannot** express it: every style pygments ships paints a board of its own
+    (``monokai`` ``#272822``, ``friendly`` ``#f0f0f0``, ``bw`` ``#ffffff``), and even a style
+    written with no colours does not survive the trip — ``rich.syntax.PygmentsSyntaxTheme``
+    substitutes ``#000000`` for a token whose style names none (measured: ``syntax.py:170``,
+    ``color="#" + color if color else "#000000"``), which on a dark terminal is invisible text.
+    Subclassing rich's own :class:`SyntaxTheme` is the only way to say "no colour": every token
+    and the background return ``Style.null()``, so what the host sees is their own terminal.
+
+    Built lazily and cached: ``rich.syntax`` is not otherwise imported at this module's load.
+    """
+    global _terminal_default_theme
+    if _terminal_default_theme is None:
+        from rich.style import Style
+        from rich.syntax import SyntaxTheme
+
+        class _TerminalDefault(SyntaxTheme):
+            def get_style_for_token(self, token_type):  # noqa: ARG002 - the API's signature
+                return Style.null()
+
+            def get_background_style(self):
+                return Style.null()
+
+        _terminal_default_theme = _TerminalDefault()
+    return _terminal_default_theme
+
+
+def code_theme() -> str | SyntaxTheme:
+    """The pygments theme for fenced code blocks, for the resolved appearance.
 
     ``monokai`` is a dark theme: on a light terminal a fenced block is a black board in the middle
     of a white page (issue #2246, requirement 4). The light alternative is ``friendly``, which
     ships with pygments — no new dependency.
+
+    **When the appearance was never measured — no setting, and a terminal that answered no
+    background — neither name is right.** Every style pygments ships paints a board of its own
+    (``monokai`` ``#272822``, ``friendly`` ``#f0f0f0``, even ``bw`` ``#ffffff``), so choosing one
+    is a guess about a background nobody read, and the dark one turns a light terminal's page
+    black in the middle (issue #3013, requirement 6). That case returns a theme carrying no
+    colours at all: the terminal's own default foreground, and no board. A host who wants colours
+    picks an appearance — and that choice is now one key both clients read, so the TUI is no
+    longer blind to what the GUI was told.
     """
-    return "friendly" if get_theme().is_light else "monokai"
+    current = get_theme()
+    if current.source == "default" and not current.is_light:
+        return terminal_default_theme()
+    return "friendly" if current.is_light else "monokai"

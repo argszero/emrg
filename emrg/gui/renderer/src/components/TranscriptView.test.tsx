@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { TranscriptView, summaryLine } from "./TranscriptView";
+import { TOOL_GROUP_TICK_MS, TranscriptView, summaryLine } from "./TranscriptView";
 import { createTranscriptStore, type ToolGroup, type TranscriptStore } from "../lib/transcript";
 import { I18nProvider, t as translate } from "../lib/i18n";
 import {
@@ -501,6 +501,73 @@ describe("TranscriptView", () => {
     expect(group).not.toHaveClass("collapsed");
   });
 
+  it("表头耗时：还在跑的工具也计入，每 0.1 秒走一格，全部结束即停表（rant 2026-11-19T09:31:00）", () => {
+    vi.useFakeTimers();
+    try {
+      // 「现在」钉在整秒上，起点就落在这一刻：表头第一眼是已量过的 0.4s + 在跑行的 0.0s
+      vi.setSystemTime(new Date("2026-11-19T00:00:00Z"));
+      const startedAtSec = Math.floor(Date.now() / 1000);
+      const store = createTranscriptStore({ t: (k) => k });
+      store.handleToolStart({ tool_call_id: "t1", tool_name: "bash", request_id: "r1" }, "s1");
+      store.handleToolEnd({ tool_call_id: "t1", tool_name: "bash", elapsed: 0.4, content: "" }, "s1");
+      store.handleToolStart(
+        { tool_call_id: "t2", tool_name: "read", request_id: "r1", started_at: startedAtSec },
+        "s1",
+      );
+      const { container } = setup(store, "s1");
+      const header = () => container.querySelector(".tool-group-summary")!.textContent ?? "";
+
+      // 在跑的那一行不再是「贡献 0」：0.4s 之外时间照样出现，正因为它有了起点
+      expect(header()).toBe("2个工具执行 0.4s（read 正在读取文件…）");
+      expect(vi.getTimerCount(), "在跑的组应当挂着表头刷新定时器").toBe(1);
+
+      // 一格一格推进：每次只推一个间隔、每次都要求表头正好加 0.1。
+      // 一次推 1.2 秒只会证明「推得够远就会重渲染」——间隔被错手改成 1 秒，那样推法照样
+      // 通过（第一次推就跨过了唯一的定时器），而宿主看到的是一秒跳一下。
+      for (let k = 1; k <= 12; k += 1) {
+        act(() => {
+          vi.advanceTimersByTime(TOOL_GROUP_TICK_MS);
+        });
+        expect(header(), `第 ${k} 格`).toBe(
+          `2个工具执行 ${(0.4 + k / 10).toFixed(1)}s（read 正在读取文件…）`,
+        );
+      }
+
+      // 结束：daemon 量出来的 elapsed 顶上来，本地推算消失，定时器跟着清掉
+      act(() => {
+        store.handleToolEnd({ tool_call_id: "t2", tool_name: "read", elapsed: 1.5, content: "" }, "s1");
+      });
+      expect(header()).toBe("2个工具执行 1.9s（read 已读取文件）");
+      expect(vi.getTimerCount(), "组内全部结束后不应留常驻定时器").toBe(0);
+      // 停表之后再推时钟：数字一动不动（定时器真的没了，不是「还在跑但这一次没触发」）
+      act(() => {
+        vi.advanceTimersByTime(2000);
+      });
+      expect(header()).toBe("2个工具执行 1.9s（read 已读取文件）");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("老帧没有起点：在跑的组不显示时间、也不挂定时器（rant 2026-11-19T09:31:00）", () => {
+    vi.useFakeTimers();
+    try {
+      const store = createTranscriptStore({ t: (k) => k });
+      store.handleToolStart({ tool_call_id: "t1", tool_name: "bash", request_id: "r1" }, "s1");
+      // 前一个工具必须先结束才会成组（两个同时在跑的行各自独立成行）
+      store.handleToolEnd({ tool_call_id: "t1", tool_name: "bash", content: "" }, "s1");
+      store.handleToolStart({ tool_call_id: "t2", tool_name: "read", request_id: "r1" }, "s1");
+      const { container } = setup(store, "s1");
+      // 没有起点就没有可算的区间：宁可整段时间不出现，也不拿 0 充数（#2980 同一口径）
+      expect(container.querySelector(".tool-group-summary")!.textContent).toBe(
+        "2个工具执行（read 正在读取文件…）",
+      );
+      expect(vi.getTimerCount(), "没有起点就不该有定时器在空转").toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("广播流与 own stream 均不显示 remote 标签（rant 2026-08-28T22:16:36 去掉）", () => {
     const store = createTranscriptStore({ t: (k) => k });
     store.handleDelta([{ request_id: "r1", content: "broadcast" }], "s1");
@@ -814,5 +881,73 @@ describe("#2980：组摘要的四种缺省", () => {
 
   it("既没有时间也没有最后一行 → 只剩数量", () => {
     expect(summaryLine(groupOf(undefined, undefined), "", zh)).toBe("2个工具执行");
+  });
+
+  /** 一行已量过 0.5s，另一行还在跑、带起点：`nowMs` 一传，在跑那行就按「现在 − 起点」入账。 */
+  function liveGroup(startedAtMs: number): ToolGroup {
+    const store = createTranscriptStore({ t: (k) => k });
+    store.handleToolStart({ tool_call_id: "a", tool_name: "bash", request_id: "r1" }, "s1");
+    store.handleToolEnd({ tool_call_id: "a", tool_name: "bash", content: "", elapsed: 0.5 }, "s1");
+    store.handleToolStart(
+      { tool_call_id: "b", tool_name: "read", request_id: "r1", started_at: startedAtMs / 1000 },
+      "s1",
+    );
+    const entry = store.getEntries("s1").find((e) => e.kind === "tool-group");
+    expect(entry, "两个连续的工具没有并成一组").toBeDefined();
+    return (entry as { group: ToolGroup }).group;
+  }
+
+  it("在跑的那一行按起点入账：已量 0.5s + 在跑 2.0s = 2.5s", () => {
+    expect(summaryLine(liveGroup(1_000_000), "read 正在读取文件…", zh, 1_002_000)).toBe(
+      "2个工具执行 2.5s（read 正在读取文件…）",
+    );
+  });
+
+  it("起点在未来（墙钟往回跳）：夹到 0，表头不出现负数", () => {
+    expect(summaryLine(liveGroup(1_000_000), "read 正在读取文件…", zh, 999_000)).toBe(
+      "2个工具执行 0.5s（read 正在读取文件…）",
+    );
+  });
+
+  it("结束的行带着起点也只算 daemon 的 elapsed：本地推算不叠上去", () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    store.handleToolStart(
+      { tool_call_id: "a", tool_name: "bash", request_id: "r1", started_at: 1_000 },
+      "s1",
+    );
+    store.handleToolEnd({ tool_call_id: "a", tool_name: "bash", content: "", elapsed: 0.5 }, "s1");
+    store.handleToolStart(
+      { tool_call_id: "b", tool_name: "read", request_id: "r1", started_at: 1_002 },
+      "s1",
+    );
+    const entry = store.getEntries("s1").find((e) => e.kind === "tool-group");
+    expect(entry, "两个连续的工具没有并成一组").toBeDefined();
+    // 「现在」= 起点后 3.0s：在跑那行入账 3.0s；已结束的 a 起点在 5s 之前，但它只算 0.5s
+    // ——两个数都算就是 8.5s，屏幕上那个数就既不是 daemon 量的、也不是宿主等的。
+    expect(
+      summaryLine((entry as { group: ToolGroup }).group, "read 正在读取文件…", zh, 1_005_000),
+    ).toBe("2个工具执行 3.5s（read 正在读取文件…）");
+  });
+
+  it("不传 nowMs：与改动前逐字一致，在跑的行不入账", () => {
+    expect(summaryLine(liveGroup(1_000_000), "read 正在读取文件…", zh)).toBe(
+      "2个工具执行 0.5s（read 正在读取文件…）",
+    );
+  });
+
+  it("已量过的行为零、在跑的行有起点 → 时间照样出现（旧版把它算作「一行都没量过」）", () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    store.handleToolStart({ tool_call_id: "a", tool_name: "bash", request_id: "r1" }, "s1");
+    // 没带 elapsed 的结束帧（失败/取消）：这一行什么都没量到，但它让下一行能并进组
+    store.handleToolEnd({ tool_call_id: "a", tool_name: "bash", content: "" }, "s1");
+    store.handleToolStart(
+      { tool_call_id: "b", tool_name: "read", request_id: "r1", started_at: 1_000 },
+      "s1",
+    );
+    const entry = store.getEntries("s1").find((e) => e.kind === "tool-group");
+    expect(entry, "两个连续的工具没有并成一组").toBeDefined();
+    expect(
+      summaryLine((entry as { group: ToolGroup }).group, "read 正在读取文件…", zh, 1_001_500),
+    ).toBe("2个工具执行 1.5s（read 正在读取文件…）");
   });
 });
