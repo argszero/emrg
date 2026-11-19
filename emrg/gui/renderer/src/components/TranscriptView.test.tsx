@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readFileSync } from "node:fs";
+// 样式表走 Vite 的 `?raw`，不用 `node:fs`：渲染层的 tsconfig 只声明
+// `vite/client` 与 `@testing-library/jest-dom`，`node:fs` 在本机因为 `emrg/gui/node_modules`
+// 提升了 `@types/node` 才编得过，而 CI 在 `emrg/gui/renderer` 里 `npm ci` 没有这个邻居——
+// 同一份文件这里绿、那里红（`tests/test_renderer_node_types.py` 钉的就是这条）。
+import shellCss from "../shell.css?raw";
 import { act } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { TOOL_GROUP_TICK_MS, TranscriptView, summaryLine } from "./TranscriptView";
@@ -1031,11 +1035,9 @@ describe("聊天区滚动（issue #3024）", () => {
   });
 
   it("壳是定位基准、按钮绝对定位于其上，滚动容器不再是（清单第 1 条）", () => {
-    // vitest 的 import.meta.url 不是 file: 协议，按运行目录读真实样式表
-    const css = readFileSync("src/shell.css", "utf8");
-    expect(css.length).toBeGreaterThan(0); // 读成空串会让下面三条空转通过
+    expect(shellCss.length).toBeGreaterThan(0); // 读成空串会让下面三条空转通过
     const ruleOf = (selector: string): string =>
-      new RegExp(`${selector}\\s*\\{[^}]*\\}`).exec(css)?.[0] ?? "";
+      new RegExp(`${selector}\\s*\\{[^}]*\\}`).exec(shellCss)?.[0] ?? "";
     expect(ruleOf("\\.transcript-shell")).toMatch(/position:\s*relative/);
     expect(ruleOf("\\.transcript-back-to-bottom")).toMatch(/position:\s*absolute/);
     // 滚动容器若仍带 position:relative，按钮的定位基准就又回到滚动内容上
