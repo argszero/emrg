@@ -274,7 +274,8 @@ def read_sessions(
 ) -> tuple[list[Message], list[Path], str | None, str | None]:
     """Host messages in `roots`' session histories, plus the span they cover.
 
-    `history_*.jsonl` is the complete daily record and `history.jsonl` the current
+    `history_*.jsonl` — under the session directory or under its `history/`
+    subdirectory — is the complete daily record, and `history.jsonl` the current
     context; both are read because a session created today has a daily file while a
     compacted one may hold a host message only in the current file. Rows are deduped
     on `(timestamp, session, text)`, so reading both is not a double count.
@@ -284,7 +285,15 @@ def read_sessions(
     stamps: list[str] = []
     seen: set[tuple[str, str, str]] = set()
     for root in roots:
-        files = sorted(root.glob("history_*.jsonl")) + sorted(root.glob("history.jsonl"))
+        # The archives live in `history/` (issue #3048), and a session not opened since the
+        # move still holds them at its top level. Both places are read, so neither an old
+        # nor a new session is invisible to this question — a missed file here reads as
+        # "the host never said it", which is the one answer this tool must not give wrongly.
+        files = (
+            sorted(root.glob("history_*.jsonl"))
+            + sorted((root / "history").glob("history_*.jsonl"))
+            + sorted(root.glob("history.jsonl"))
+        )
         present = [f for f in files if f.exists()]
         if present:
             scanned.append(root)

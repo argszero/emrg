@@ -5,10 +5,10 @@ Session ID format: s_YYMMDD_HHMM_xxxx
 
 Directory structure:
   <cwd>/.emrg/sessions/<session_id>/
-    meta.json              # Session metadata
-    history.jsonl          # Current conversation (compacted)
-    history_YYMMDD.jsonl   # Daily full history (never compacted)
-    llm.jsonl              # Raw LLM request/response
+    meta.json                        # Session metadata
+    history.jsonl                    # Current conversation (compacted)
+    llm.jsonl                        # Raw LLM request/response
+    history/history_YYMMDD.jsonl     # Daily full history (never compacted)
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import json
 import logging
 import ntpath
 import os
+import re
 import secrets
 import time
 from datetime import datetime
@@ -320,6 +321,51 @@ def records_to_messages(records: list[dict]) -> list[dict]:
     return _validate_tool_messages(messages)
 
 
+def _archive_lines(path: Path) -> list[bytes]:
+    """Every line of ``path``, each one ending in a newline.
+
+    Bytes, not text: an archive is JSON lines this module wrote, but a run interrupted
+    mid-write can leave a line that is not valid UTF-8. Reading it with ``errors="replace"``
+    would rewrite those bytes as U+FFFD and lose what they were, so a merge never decodes
+    the file it merges.
+
+    A last line without a newline is given one, because the lines appended after it would
+    otherwise be glued to it — two records becoming one record that is neither.
+
+    The kind is asked first, through this module's one way of asking: the session directory
+    sits inside the agent's own workspace, so a FIFO at an archive's name is something a
+    session can create, and an open on it never returns.
+    """
+    _refuse_a_non_regular_subject(path)
+    return [line if line.endswith(b"\n") else line + b"\n"
+            for line in path.read_bytes().splitlines(keepends=True)]
+
+
+def _merge_archive(source: Path, destination: Path) -> None:
+    """Append the records ``source`` holds to ``destination``, each one once.
+
+    Idempotent, and that is what makes an interrupted migration safe to repeat: a second
+    run over the same pair adds nothing. The merged content is written to a staging file
+    beside the destination and renamed into place, so a death mid-write leaves the
+    previous file whole rather than half-written; only then is the source removed.
+    """
+    kept = _archive_lines(destination)
+    seen = set(kept)
+    for line in _archive_lines(source):
+        if line in seen:
+            continue
+        seen.add(line)
+        kept.append(line)
+    staging = destination.with_name(destination.name + ".merging")
+    # The write asks its subject's kind for the reason the read does — a staging path is
+    # still a path inside the agent's workspace, and writing to a FIFO blocks as an open
+    # does.
+    _refuse_a_non_regular_subject(staging)
+    staging.write_bytes(b"".join(kept))
+    staging.replace(destination)
+    source.unlink()
+
+
 def _refuse_a_non_regular_subject(path: Path) -> None:
     """Raise when ``path`` is not a regular file — an open on it would never return.
 
@@ -489,6 +535,17 @@ def session_dir(cwd: Path, session_id: str) -> Path:
     return as_agent(cwd).sessions_dir / session_id
 
 
+#: The subdirectory a session keeps its per-day archives in (issue #3048). A session
+#: directory's top level then holds the live files and the other subdirectories, so the
+#: listing a reader is shown offers what can be opened instead of one file per day used.
+DAILY_HISTORY_DIR = "history"
+
+#: A per-day archive's name, and the only shape that migrates. The live files
+#: (`history.jsonl`, `llm.jsonl`, `meta.json`) and everything else at the top level stay
+#: where they are: this module moves one class of file, so it names that class.
+_DAILY_ARCHIVE_NAME = re.compile(r"^history_\d{6}\.jsonl$")
+
+
 class Session:
     """Manages a single conversation session on disk.
 
@@ -517,6 +574,10 @@ class Session:
         self._meta_path = self._dir / "meta.json"
         self._history_path = self._dir / "history.jsonl"
         self._llm_path = self._dir / "llm.jsonl"
+
+        # A session written before the archives moved still holds them at its top level,
+        # and construction is the one moment every opener passes through (issue #3048).
+        self.migrate_daily_archives()
 
         self._message_count: int = 0
         self._compact_count: int = 0
@@ -864,10 +925,70 @@ class Session:
 
     # ── Message persistence ───────────────────────────────────
 
+    def _history_dir(self) -> Path:
+        """The subdirectory this session's per-day archives live in."""
+        return self._dir / DAILY_HISTORY_DIR
+
     def _daily_history_path(self) -> Path:
         """Return the daily history file path for today."""
         date_str = datetime.now().strftime("%y%m%d")
-        return self._dir / f"history_{date_str}.jsonl"
+        return self._history_dir() / f"history_{date_str}.jsonl"
+
+    def migrate_daily_archives(self) -> list[Path]:
+        """Move per-day archives written at the top level into ``history/``.
+
+        Called from ``__init__``, so every opener — a client turn, the scheduler, a
+        subagent — leaves the directory in one layout, rather than the layout depending on
+        which code path happened to open it. A session with nothing to move pays one
+        listing of its own directory and writes nothing.
+
+        A name already present in ``history/`` is merged line by line, not replaced: the
+        two files are the same day's record, and the one already there may be the older of
+        them. Returns the destinations, in the order they were handled.
+        """
+        target = self._history_dir()
+        moved: list[Path] = []
+        try:
+            entries = sorted(self._dir.iterdir())
+        except OSError as exc:
+            # A directory that cannot be listed leaves the layout as it was. The archive
+            # is still readable where it is, which is the point of not failing an open
+            # over housekeeping.
+            logger.warning(
+                "session %s: cannot list %s to migrate archives: %s",
+                self.session_id, self._dir, exc,
+            )
+            return moved
+        for entry in entries:
+            if not _DAILY_ARCHIVE_NAME.match(entry.name):
+                continue
+            # `is_file()` is true only for a regular file. The session directory sits
+            # inside the agent's own workspace, so a FIFO at this name is a thing a
+            # session can create, and the read that merges it would never return.
+            if not entry.is_file():
+                continue
+            destination = target / entry.name
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+                if destination.exists():
+                    _merge_archive(entry, destination)
+                else:
+                    # `replace` is a rename inside one directory tree: the archive keeps
+                    # its bytes and its inode instead of being copied across the disk.
+                    entry.replace(destination)
+            except (OSError, NotARegularFile) as exc:
+                logger.warning(
+                    "session %s: cannot move %s into %s: %s",
+                    self.session_id, entry.name, target, exc,
+                )
+                continue
+            moved.append(destination)
+        if moved:
+            logger.info(
+                "session %s: moved %d daily archive(s) into %s",
+                self.session_id, len(moved), target,
+            )
+        return moved
 
     def append_message(self, record: dict) -> None:
         """Append a message record to both history.jsonl and daily history.
@@ -889,8 +1010,11 @@ class Session:
         with open(self._history_path, "a", encoding="utf-8") as f:
             f.write(line)
 
-        # Write to daily history
+        # Write to daily history. The subdirectory is created here rather than by the path
+        # helper: a path helper that writes is a second writer, and a fresh session has no
+        # archive yet.
         daily_path = self._daily_history_path()
+        daily_path.parent.mkdir(parents=True, exist_ok=True)
         _refuse_a_non_regular_subject(daily_path)
         with open(daily_path, "a", encoding="utf-8") as f:
             f.write(line)
@@ -1105,7 +1229,7 @@ class Session:
     TAIL_TRUNCATION_NOTICE = (
         "\n\n[truncated on compaction: this record held {total} chars, and one "
         "record of the retained tail may hold at most {budget}; {omitted} chars "
-        "were dropped. The untrimmed record is still in history_YYMMDD.jsonl.]"
+        "were dropped. The untrimmed record is still in history/history_YYMMDD.jsonl.]"
     )
 
     @staticmethod

@@ -730,6 +730,80 @@ class TestSessionAppendMessage:
         assert record["role"] == "user"
         assert record["content"] == "daily test"
 
+    def test_daily_history_lives_in_a_history_subfolder(self, tmp_path):
+        """The per-day archive lands under `history/`, not at the session's top level.
+
+        A session directory's listing is what a reader is shown, and one file per day the
+        session was used pushed `memory/`, `tmp/` and `sub-agent/` out of sight (issue
+        #3048). Asserted on the file that a write really created, not on the helper alone:
+        a helper can name the subfolder while the writer ignores it.
+        """
+        session = Session.create(tmp_path)
+        session.append_message({"role": "user", "content": "subfolder"})
+
+        daily_path = session._daily_history_path()
+        assert daily_path.exists(), "the write did not create the daily archive at all"
+        assert daily_path.parent == session.dir_path / "history", (
+            f"the daily archive went to {daily_path.parent}, not to the history/ subfolder"
+        )
+        assert not list(session.dir_path.glob("history_*.jsonl")), (
+            "a daily archive is at the session's top level, which is the listing the move "
+            "exists to clear"
+        )
+
+    def test_opening_a_session_migrates_top_level_archives(self, tmp_path):
+        """Archives already written at the top level move into `history/` on open.
+
+        Records are conserved, and a name present in both places is merged rather than
+        replaced: the two files are the same day's record, and the one already in the
+        subfolder may be the older of them (issue #3048).
+        """
+        session = Session.create_with_id("migrate-me", tmp_path)
+        (session.dir_path / "history_261101.jsonl").write_text(
+            '{"timestamp": "1", "role": "user", "content": "old day"}\n', encoding="utf-8")
+        (session.dir_path / "history_261102.jsonl").write_text(
+            '{"timestamp": "2", "role": "user", "content": "collides"}\n', encoding="utf-8")
+        nested = session.dir_path / "history"
+        nested.mkdir()
+        shared = nested / "history_261102.jsonl"
+        shared.write_text(
+            '{"timestamp": "3", "role": "user", "content": "kept"}\n', encoding="utf-8")
+
+        reopened = Session.load("migrate-me", tmp_path)
+
+        assert not list(reopened.dir_path.glob("history_*.jsonl")), (
+            "the top level still holds a daily archive after the session was opened"
+        )
+        assert (nested / "history_261101.jsonl").is_file(), "the lone archive was not moved"
+        merged = shared.read_text(encoding="utf-8").splitlines()
+        assert len(merged) == 2, f"the name collision lost a record: {merged}"
+        assert "kept" in shared.read_text(encoding="utf-8")
+        assert "collides" in shared.read_text(encoding="utf-8")
+
+    def test_migrating_twice_adds_no_record(self, tmp_path):
+        """A second open over the same pair adds nothing, so an interrupted merge is safe.
+
+        The source is removed only after the merged content is on disk, so a death between
+        the write and the removal leaves both files; the next open then merges them again
+        and must not duplicate what it already carries.
+        """
+        session = Session.create_with_id("idem", tmp_path)
+        nested = session.dir_path / "history"
+        nested.mkdir()
+        shared = nested / "history_261103.jsonl"
+        shared.write_text(
+            '{"timestamp": "1", "role": "user", "content": "kept"}\n', encoding="utf-8")
+        (session.dir_path / "history_261103.jsonl").write_text(
+            '{"timestamp": "2", "role": "user", "content": "appended"}\n', encoding="utf-8")
+
+        Session.load("idem", tmp_path)
+        once = shared.read_text(encoding="utf-8")
+        Session.load("idem", tmp_path)
+
+        assert shared.read_text(encoding="utf-8") == once, (
+            "a repeated migration appended a record the destination already held"
+        )
+
     def test_append_message_adds_timestamp(self, tmp_path):
         """append_message() adds a timestamp if not provided."""
         session = Session.create(tmp_path)

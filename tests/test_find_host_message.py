@@ -135,6 +135,38 @@ class TestTheHeadCap:
         assert "a reply mentioning" not in done.stdout
 
 
+class TestTheArchivesMoved:
+    """Issue #3048 moved every per-day archive into the session's `history/` subdirectory.
+
+    This tool's "not found" is what a cycle builds a claim of absence on, so a location it
+    stopped reading is the worst kind of wrong answer: it stays silent, and the silence
+    reads as the host never having said it. Both layouts are read, because a session not
+    opened since the move still holds its archives at the top level.
+    """
+
+    def test_a_daily_file_under_the_history_subfolder_is_read(self, tmp_path: Path):
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        (log_dir / "emrgd.log").write_text(
+            "2026-09-01 00:00:00 [DEBUG] [-] [-] emrg.server.daemon: starting up\n",
+            encoding="utf-8",
+        )
+        session = tmp_path / "sessions" / "sess-a"
+        nested = session / "history"
+        nested.mkdir(parents=True)
+        (nested / "history_260915.jsonl").write_text(
+            session_row("2026-09-15T10:00:00.000000+08:00", "the host said nutmeg") + "\n",
+            encoding="utf-8",
+        )
+
+        done = run(["--pattern", "nutmeg",
+                    "--log-dir", str(log_dir), "--sessions", str(session)])
+
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert "sessions" in done.stdout, "the source that found it is named"
+        assert "nutmeg" in done.stdout
+
+
 class TestTheSchedulerIsNotTheHost:
     def test_a_rendered_task_prompt_is_set_aside(self, sources):
         done = run(["--pattern", "Evolution Cycle", *both(sources)])

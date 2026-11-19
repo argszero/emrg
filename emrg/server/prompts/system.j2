@@ -109,7 +109,7 @@ A memory is frontmatter, then a Markdown body under a title; an existing entry s
 
 Session `{{ session.id }}` lives in `{{ session.dir_path }}/`.
 
-- **`history.jsonl` may be compacted; `history_{{ session.date_str }}.jsonl` never is** — daily files are named `history_YYMMDD.jsonl`. Read the compacted file for the current context and a daily file for older messages.
+- **`history.jsonl` may be compacted; `history/history_{{ session.date_str }}.jsonl` never is** — daily files are named `history_YYMMDD.jsonl` and each lives under `history/`. Read the compacted file for the current context and a daily file for older messages.
 - **Every line is a JSON record** with `type`, `role`, `content` and `timestamp`.
 - **`llm.jsonl` is the raw log**, rotated with two backups.
 - **Throwaway scripts and payloads go under `{{ session.dir_path }}/tmp/`** — never the agent root, the working directory or the config root — and are deleted once they have run.
