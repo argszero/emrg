@@ -17,7 +17,9 @@
  *   2. **真机腿（附近有 Electron 才跑）**：直接问那个运行时 `crypto.getHashes()`，断言
  *      `main.js` 用到的摘要一个都不缺。白名单因此不会悄悄漂移成「测试和现实各说一套」。
  *      CI 用 `npm ci --omit=dev` 装依赖，没有 Electron 二进制，所以这腿在 CI 里是**跳过**，
- *      CI 的真门禁是第 1 条。
+ *      CI 的真门禁是第 1 条。**找不到二进制、或找到的跑不起来（过期副本被系统 SIGKILL），
+ *      这一腿都算「没测到」** —— 跳过并点名是哪个、为什么，绝不读成红：一个没被问到的运行时
+ *      说明不了 `main.js` 有错（issue #3057）。
  *
  * 非空洞：第 1 条先断言「提取到了至少一个摘要字面量」。把算法名挪进变量
  * （`createHash(ALGO)`）会让提取结果为空 —— 那时它必须**红**，不能因为「没东西可查」而绿：
@@ -58,26 +60,44 @@ function digestsUsed(source) {
   return out;
 }
 
-/** 找一台能当 Node 用的 Electron 二进制；找不到返回 null（不是失败）。 */
-function findElectron() {
+const PROBE_ARGS = ["-e", "console.log(require('crypto').getHashes().join(','))"];
+
+/** 这台机器上可能有 Electron 二进制的地方，最好的排前面。 */
+function electronCandidates() {
   const fromEnv = process.env.EMRG_ELECTRON_BIN;
-  if (fromEnv && fs.existsSync(fromEnv)) return fromEnv;
   const dist = path.join(GUI_ROOT, "node_modules", "electron", "dist");
-  const candidates = [
+  const home = process.env.HOME || "";
+  return [
+    ...(fromEnv ? [fromEnv] : []),
     path.join(dist, "electron"), // linux
     path.join(dist, "electron.exe"), // windows
     path.join(dist, "Electron.app", "Contents", "MacOS", "Electron"), // darwin
-    "/Applications/EMRG.app/Contents/MacOS/EMRG", // 打包版（本机已安装）
-    path.join(process.env.HOME || "", "Applications", "EMRG.app", "Contents", "MacOS", "EMRG"),
+    // 安装树里那份是**权威副本**：make-installer.sh 的 payload 装到 INSTALL_DEST/emrg-gui/，
+    // 再从这里**复制**一份到 ~/Applications 给宿主点。复制件只在重跑安装器时才刷新，
+    // 所以问之前先问安装树那份（issue #3057）。
+    path.join(home, ".emrg", "install", "emrg-gui", "EMRG.app", "Contents", "MacOS", "EMRG"),
+    "/Applications/EMRG.app/Contents/MacOS/EMRG", // 打包版（装到系统目录时）
+    path.join(home, "Applications", "EMRG.app", "Contents", "MacOS", "EMRG"), // 上面那份的复制件
   ];
-  for (const c of candidates) {
-    try {
-      if (fs.existsSync(c)) return c;
-    } catch {
-      // 一个够不着的候选不是失败：下一个
-    }
+}
+
+/** 请一个候选当 Node 跑一次，报它支持的摘要；问不动就把问不动的样子说清楚。 */
+function probeDigests(bin) {
+  try {
+    const out = execFileSync(bin, PROBE_ARGS, {
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+      encoding: "utf-8",
+      timeout: 60_000,
+    });
+    const available = new Set(out.trim().split(",").filter(Boolean));
+    if (available.size === 0) return { ok: false, why: "它报了个空摘要集" };
+    return { ok: true, available };
+  } catch (err) {
+    // 文件在、但跑不起来（例如过期副本被系统 SIGKILL）不是判据：
+    // 它没测到 main.js 的任何东西。
+    const how = err.signal ? `被 ${err.signal} 杀掉` : `退出码 ${err.status}`;
+    return { ok: false, why: how };
   }
-  return null;
 }
 
 test("every digest in main.js is one the packaged Electron runtime reports", () => {
@@ -98,27 +118,35 @@ test("every digest in main.js is one the packaged Electron runtime reports", () 
 });
 
 test("the local Electron binary reports every digest main.js uses", (t) => {
-  const bin = findElectron();
-  if (!bin) {
-    t.skip("no Electron binary here (CI installs `npm ci --omit=dev`); the allowlist leg above is the gate");
+  const used = digestsUsed(fs.readFileSync(MAIN_JS, "utf-8"));
+  const tried = [];
+  for (const bin of electronCandidates()) {
+    let exists = false;
+    try {
+      exists = fs.existsSync(bin);
+    } catch {
+      // 一个够不着的候选不是失败：下一个
+    }
+    if (!exists) continue;
+    const asked = probeDigests(bin);
+    if (!asked.ok) {
+      tried.push(`${bin}（${asked.why}）`);
+      continue;
+    }
+    assert.ok(used.length > 0, "提取不到任何摘要字面量 —— 见上一条的说明");
+    const missing = used.filter((d) => !asked.available.has(d));
+    assert.deepStrictEqual(
+      missing,
+      [],
+      `${bin} 没有 ${JSON.stringify(missing)}（它报的是 ${[...asked.available].join("/")}）`,
+    );
     return;
   }
-  const out = execFileSync(
-    bin,
-    ["-e", "console.log(require('crypto').getHashes().join(','))"],
-    {
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
-      encoding: "utf-8",
-      timeout: 60_000,
-    },
-  );
-  const available = new Set(out.trim().split(",").filter(Boolean));
-  const used = digestsUsed(fs.readFileSync(MAIN_JS, "utf-8"));
-  assert.ok(used.length > 0, "提取不到任何摘要字面量 —— 见上一条的说明");
-  const missing = used.filter((d) => !available.has(d));
-  assert.deepStrictEqual(
-    missing,
-    [],
-    `${bin} 没有 ${JSON.stringify(missing)}（它报的是 ${[...available].join("/")}）`,
-  );
+  const gate = "白名单那条腿才是门禁";
+  if (tried.length === 0) {
+    t.skip(`这里没有 Electron 二进制（CI 用 \`npm ci --omit=dev\` 装依赖）；${gate}`);
+    return;
+  }
+  // 找到过、但一个都问不动：这一腿对 main.js 什么都没测到，说清是哪几个、为什么。
+  t.skip(`这里找到的 Electron 二进制都问不动，本腿因此什么都没测到：${tried.join("；")}；${gate}`);
 });
