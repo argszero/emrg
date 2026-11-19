@@ -246,7 +246,6 @@ export function Shell() {
   }, []);
   const activeSessionEntry = appState.openSessions.find((o) => o.sid === activeSid);
   const activeKnown = appState.sessions.find((s) => s.session_id === activeSid);
-  const activeTitle = activeSessionEntry?.title || activeKnown?.title || t("app.unnamed");
   const activeAgent = activeSessionEntry?.projectName || "";
   const activeMsgCount = (activeKnown as { message_count?: number } | undefined)?.message_count ?? 0;
   // The turn's elapsed time is no longer formatted here: the status band does it from
