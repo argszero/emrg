@@ -45,6 +45,15 @@ export interface ToolRow {
   arguments?: unknown;
   /** 仅成功且提供 elapsed 时记录（chat.js 只在 ok 时写 dataset.elapsed，供合并组摘要求和） */
   elapsed?: number;
+  /**
+   * 这一行开始执行的那一刻（epoch ms），取自 daemon 的 `tool_start.started_at`。
+   *
+   * 只有**还在跑**的行靠它贡献时间：组表头的耗时在运行期间每 0.1 秒往上走，走的就是
+   * 「当前时刻 − 这个起点」。结束时 daemon 报的 `elapsed` 覆盖这份本地推算，屏幕上最后
+   * 留下的是 daemon 量出来的那个数（rant 2026-11-19T09:31:00）。重放的老记录没有这个
+   * 字段 ⇒ undefined ⇒ 不显示时间，也不拿 0 充数。
+   */
+  startedAtMs?: number;
   content?: string;
   /** 点击行切换输出可见性（.tool-output hidden） */
   outputExpanded: boolean;
@@ -186,6 +195,8 @@ export interface ToolStartData {
   arguments?: unknown;
   /** 同批第几个，daemon 算好的成品字符串（`"(2/3) "` / `""`）——rant 2026-10-20T12:22:21。 */
   call_label?: string;
+  /** 这次调用开始执行的那一刻（epoch 秒），由 daemon 在开始那一帧下发；老帧没有这个字段。 */
+  started_at?: number;
 }
 export interface ToolEndData {
   tool_call_id: string;
@@ -333,6 +344,9 @@ function updateToolGroup(group: ToolGroup): void {
     // 渲染层据此选一句不含时间的文案——而不是拿 0 去显示成 `0.0s`。
     const timedRows = group.rows.filter((r) => r.elapsed !== undefined);
     const total = timedRows.reduce((acc, r) => acc + (r.elapsed ?? 0), 0);
+    // `timed` 只由**已结束**的行决定。还在跑的那几行由渲染层按「当前时刻 − 起点」实时入账
+    // （summaryLine）——那一段不是「已量过的耗时」，模型这层替它记账就是把同一件事写两遍，
+    // 两处只要有一处改了就互相矛盾（反向验证里删掉模型这层，渲染层的行为一个字都没变）。
     group.summary = {
       count: group.rows.length,
       totalElapsed: total,
@@ -572,6 +586,9 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
         arguments: data.arguments,
         // daemon 给什么就存什么，不数、不拼（rant 2026-10-20T12:22:21）。
         callLabel: data.call_label,
+        // 起点同样是 daemon 给的（epoch 秒 → 毫秒）；客户端不自己取起点，否则屏幕上
+        // 走着的数与结束时 daemon 报的数会是两段不同的区间（rant 2026-11-19T09:31:00）。
+        startedAtMs: typeof data.started_at === "number" ? data.started_at * 1000 : undefined,
         outputExpanded: false,
         fullExpanded: false,
       };
