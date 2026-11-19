@@ -1,4 +1,5 @@
 import { escapeHtml } from "./utils";
+import { selectionIn } from "./selection";
 
 /**
  * markdown.ts — marked + DOMPurify + highlight.js 封装（Batch 1 remainder，设计 §5 项 5）。
@@ -93,7 +94,9 @@ type Translate = (key: string) => string;
 export interface MarkdownRenderer {
   renderMarkdown(mdText: string): Promise<string>;
   streamProject(body: HTMLElement, text: string, state: StreamState): boolean;
-  streamFinalize(body: HTMLElement, text: string): Promise<void>;
+  streamFinalize(body: HTMLElement, text: string, state?: StreamState): Promise<void>;
+  /** 推迟期间攒下的文本，等选区消失后一次补做（issue #3034）。 */
+  resumeStream(body: HTMLElement, state: StreamState): Promise<void>;
 }
 
 /** 块投影流式状态（挂在消息节点上） */
@@ -102,6 +105,10 @@ export interface StreamState {
   live?: HTMLElement | null;
   stableCount: number;
   rawText: string;
+  /** 选区落在正文内时被推迟的最新文本；下一帧不再写 DOM，只把它换掉。 */
+  pendingText?: string;
+  /** 收尾校正被推迟时的全文；选区消失后由 `resumeStream` 补做一次。 */
+  pendingFinalize?: string;
 }
 
 /** 创建 markdown 渲染器（vendor 依赖构造注入；无 marked 时 renderMarkdown 转义降级） */
@@ -110,8 +117,24 @@ export function createMarkdownRenderer(deps: {
   DOMPurify?: DomPurifyLike;
   hljs?: HljsLike;
   t?: Translate;
+  /**
+   * 正文里是否有活选区。为真时流式重写整帧推迟：改写尾部块或重建结构都会把宿主正在拖选的
+   * 那几个字换掉，选区随之消失（issue #3034）。
+   *
+   * 缺省的判定就是 `selectionIn`，所以两个构造点（`TranscriptView` 与 `vendorMarkdown`）不必各
+   * 自传一遍——一条规则一个产出者。传进来只为一件事：测试要能直接说「有」或「没有」。
+   */
+  selectionHolds?: (body: HTMLElement) => boolean;
 }): MarkdownRenderer {
   const { marked, DOMPurify, hljs, t } = deps;
+  /** 一次判定；判定本身抛异常时按「没有选区」处理，宁可控一次 DOM 也不让流式停死。 */
+  const holdsSelection = (body: HTMLElement): boolean => {
+    try {
+      return (deps.selectionHolds ?? ((b: HTMLElement) => selectionIn(b)))(body) === true;
+    } catch {
+      return false;
+    }
+  };
   const sanitize = (html: string): string => (DOMPurify ? DOMPurify.sanitize(html) : html);
   const copyLabel = (): string => (t ? t("md.copyCode") : "Copy code");
 
@@ -241,6 +264,12 @@ export function createMarkdownRenderer(deps: {
     ensureConfigured();
     try {
       state.rawText = text;
+      // 选区在正文里：这一帧一个 DOM 都不写，只记下最新文本（issue #3034）。
+      if (holdsSelection(body)) {
+        state.pendingText = text;
+        return true;
+      }
+      state.pendingText = undefined;
       // 首次进入流式：重建 body（mark span 元素 + md-stream 容器）
       if (!state.container) {
         body.innerHTML = "";
@@ -290,7 +319,13 @@ export function createMarkdownRenderer(deps: {
    * done 收尾：live 块转 full（一次性校正）。
    * 与既有 done 渲染同源（renderMarkdown 全量渲染），仅容器结构保留 mark span。
    */
-  async function streamFinalize(body: HTMLElement, text: string): Promise<void> {
+  async function streamFinalize(body: HTMLElement, text: string, state?: StreamState): Promise<void> {
+    // 选区在正文里：整体重写会把它抹掉，推到选区消失之后（issue #3034）。
+    if (holdsSelection(body)) {
+      if (state) state.pendingFinalize = text;
+      return;
+    }
+    if (state) state.pendingFinalize = undefined;
     const html = await renderMarkdown(text);
     const container = body.querySelector ? body.querySelector(".md-stream") : null;
     if (container) {
@@ -305,5 +340,25 @@ export function createMarkdownRenderer(deps: {
     }
   }
 
-  return { renderMarkdown, streamProject, streamFinalize };
+  /**
+   * 选区消失后的补做：收尾校正优先，否则补投影。
+   *
+   * 两件事按「谁更需要最新全文」排序——收尾是终态，投影只是中间帧；补做时用的都是推迟期间攒下的
+   * 最新文本，所以宿主看到的落点是最终内容，而不是选区消失那一刻的旧内容。
+   */
+  async function resumeStream(body: HTMLElement, state: StreamState): Promise<void> {
+    if (state.pendingFinalize !== undefined) {
+      const text = state.pendingFinalize;
+      state.pendingFinalize = undefined;
+      await streamFinalize(body, text, state);
+      return;
+    }
+    if (state.pendingText !== undefined) {
+      const text = state.pendingText;
+      state.pendingText = undefined;
+      streamProject(body, text, state);
+    }
+  }
+
+  return { renderMarkdown, streamProject, streamFinalize, resumeStream };
 }

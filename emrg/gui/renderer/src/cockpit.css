@@ -30,6 +30,17 @@
   line-height: 1.62;
 }
 
+/* ✦、消息时间、工具行、工具组摘要条与系统消息不可选：它们贴着正文的头和尾，被拖进选区只会
+   把复制到的正文弄脏。不可选不等于按不动——按在这些件上起手时，`.transcript-content` 的
+   pointerdown 会先在最近的正文位置放一个折叠选区，拖动从那里延伸（issue #3034）。 */
+.react-shell .msg-assistant-mark,
+.react-shell .msg-time,
+.react-shell .tool-row,
+.react-shell .tool-group-bar,
+.react-shell .msg.system {
+  user-select: none;
+}
+
 .react-shell .msg-body {
   font-size: 13.5px;
   line-height: 1.72;

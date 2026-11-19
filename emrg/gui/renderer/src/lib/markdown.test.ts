@@ -6,6 +6,7 @@ import {
   normalizeImageSrc,
   isLocalImageSrc,
   type MarkedLike,
+  type StreamState,
 } from "./markdown";
 
 /**
@@ -136,7 +137,7 @@ describe("createMarkdownRenderer：块投影流式（jsdom）", () => {
     const fake = makeFakeMarked();
     const r = createMarkdownRenderer({ marked: fake.marked, DOMPurify: fake.dompurify });
     const body = document.createElement("div");
-    const state = { stableCount: 0, rawText: "" };
+    const state: StreamState = { stableCount: 0, rawText: "" };
     const ok = r.streamProject(body, "hello", state);
     expect(ok).toBe(true);
     expect(body.querySelector(".msg-assistant-mark")?.textContent).toBe("✦ ");
@@ -152,7 +153,7 @@ describe("createMarkdownRenderer：块投影流式（jsdom）", () => {
   it("streamProject 无 marked → 返回 false（调用方回退纯文本）", () => {
     const r = createMarkdownRenderer({});
     const body = document.createElement("div");
-    const state = { stableCount: 0, rawText: "" };
+    const state: StreamState = { stableCount: 0, rawText: "" };
     expect(r.streamProject(body, "hello", state)).toBe(false);
   });
 
@@ -160,7 +161,7 @@ describe("createMarkdownRenderer：块投影流式（jsdom）", () => {
     const fake = makeFakeMarked();
     const r = createMarkdownRenderer({ marked: fake.marked, DOMPurify: fake.dompurify });
     const body = document.createElement("div");
-    const state = { stableCount: 0, rawText: "" };
+    const state: StreamState = { stableCount: 0, rawText: "" };
     r.streamProject(body, "hello", state);
     await r.streamFinalize(body, "final text");
     const stream = body.querySelector(".md-stream");
@@ -248,7 +249,7 @@ describe("块投影：live 代码围栏 未闭合→纯文本 / 闭合→完整�
     const fake = makeTextMarked();
     const r = createMarkdownRenderer({ marked: fake.marked, DOMPurify: fake.dompurify });
     const body = document.createElement("div");
-    const state = { stableCount: 0, rawText: "" };
+    const state: StreamState = { stableCount: 0, rawText: "" };
     const ok = r.streamProject(body, "intro\n\n```py\nstill open", state);
     expect(ok).toBe(true);
     // intro 段落已稳定渲染（stable），未闭合围栏在 live 块
@@ -262,7 +263,7 @@ describe("块投影：live 代码围栏 未闭合→纯文本 / 闭合→完整�
     const fake = makeTextMarked();
     const r = createMarkdownRenderer({ marked: fake.marked, DOMPurify: fake.dompurify });
     const body = document.createElement("div");
-    const state = { stableCount: 0, rawText: "" };
+    const state: StreamState = { stableCount: 0, rawText: "" };
     r.streamProject(body, "intro\n\n```py\nstill open", state);
     expect(body.querySelector(".md-block.live .stream-code")).not.toBeNull();
     // 追加收尾围栏后再次投影：live 块内容替换为完整渲染（引擎 parser 路径）
@@ -318,5 +319,76 @@ describe("isLocalImageSrc：放行条件只认 img[src] 的 file:（issue #2638�
 
   it("img[src] 但不是 file: → false（javascript:/data: 走默认策略）", () => {
     expect(isLocalImageSrc("img", "src", "javascript:alert(1)")).toBe(false);
+  });
+});
+
+describe("块投影：正文里有选区 → 这一帧一个 DOM 都不写（issue #3034）", () => {
+  /** 一个能回答「有没有选区」的判定，测试自己开关。 */
+  const holds = (on: () => boolean) => ({ selectionHolds: on });
+
+  it("有选区：streamProject 不碰 body/容器，只记下最新文本", () => {
+    const fake = makeFakeMarked();
+    let selected = true;
+    const md = createMarkdownRenderer({ marked: fake.marked, DOMPurify: fake.dompurify, ...holds(() => selected) });
+    const body = document.createElement("div");
+    const state: StreamState = { stableCount: 0, rawText: "" };
+
+    expect(md.streamProject(body, "hello\n```js\nconst a=1;\n```", state)).toBe(true);
+    // 什么都没写：body 仍是空的，没有 mark span、没有 md-stream
+    expect(body.innerHTML).toBe("");
+    expect(state.pendingText).toContain("const a=1;");
+
+    // 再吃一帧，仍不写
+    expect(md.streamProject(body, "hello\n```js\nconst a=2;\n```", state)).toBe(true);
+    expect(body.innerHTML).toBe("");
+    expect(state.pendingText).toContain("const a=2;");
+  });
+
+  it("选区清空后 resumeStream 一次补写成最新内容", async () => {
+    const fake = makeFakeMarked();
+    let selected = true;
+    const md = createMarkdownRenderer({ marked: fake.marked, DOMPurify: fake.dompurify, ...holds(() => selected) });
+    const body = document.createElement("div");
+    const state: StreamState = { stableCount: 0, rawText: "" };
+    md.streamProject(body, "hello\n```js\nconst a=1;\n```", state);
+
+    selected = false;
+    await md.resumeStream(body, state);
+
+    expect(body.querySelector(".md-stream")).not.toBeNull();
+    expect(body.querySelector(".md-assistant-mark, .msg-assistant-mark")).not.toBeNull();
+    expect(body.textContent).toContain("hello");
+    expect(state.pendingText).toBeUndefined();
+  });
+
+  it("没有选区时照常写：这一条防止「有选区才渲染」被当成通用规则", () => {
+    const fake = makeFakeMarked();
+    const md = createMarkdownRenderer({ marked: fake.marked, DOMPurify: fake.dompurify, ...holds(() => false) });
+    const body = document.createElement("div");
+    const state: StreamState = { stableCount: 0, rawText: "" };
+    expect(md.streamProject(body, "hello\n```js\nconst a=1;\n```", state)).toBe(true);
+    expect(body.querySelector(".md-stream")).not.toBeNull();
+    expect(state.pendingText).toBeUndefined();
+  });
+
+  it("有选区时收尾校正也推迟，并在补做时落成最终内容", async () => {
+    const fake = makeFakeMarked();
+    let selected = true;
+    const md = createMarkdownRenderer({ marked: fake.marked, DOMPurify: fake.dompurify, ...holds(() => selected) });
+    const body = document.createElement("div");
+    const state: StreamState = { stableCount: 0, rawText: "" };
+    // 先无选区地投影出一棵树，再开选区收尾
+    const md2 = createMarkdownRenderer({ marked: fake.marked, DOMPurify: fake.dompurify, ...holds(() => false) });
+    md2.streamProject(body, "hello\n```js\nconst a=1;\n```", state);
+    const before = body.innerHTML;
+
+    await md.streamFinalize(body, "hello\n```js\nconst a=1;\n```", state);
+    expect(body.innerHTML).toBe(before); // 一个字符都没重写
+    expect(state.pendingFinalize).toBeDefined();
+
+    selected = false;
+    await md.resumeStream(body, state);
+    expect(body.innerHTML).not.toBe(before);
+    expect(state.pendingFinalize).toBeUndefined();
   });
 });
