@@ -167,6 +167,29 @@ describe("sortByName / filterByName", () => {
 
 const HOUR = 3_600_000;
 
+/**
+ * A fixed instant at `hour`:`minute` local time, `daysAgo` days back.
+ *
+ * `searchSessions` buckets by **local calendar day** (`sameLocalDay` compares
+ * `toDateString()`), so a fixture built as `Date.now() - HOUR` is "today" only while the
+ * suite runs two hours past local midnight or later. Measured on CI: the `test` leg
+ * started at 00:03 UTC on 2026-11-19, `now - 1*HOUR` fell on 11-18, and the assertion
+ * read `expected [] to deeply equal [ 't2', 't1' ]` on a release PR whose only change
+ * was version numbers. An anchor inside the day tests the grouping; it never tests the
+ * hour the runner happens to start at.
+ */
+function localAt(daysAgo: number, hour: number, minute = 0): number {
+  const d = new Date();
+  d.setDate(d.getDate() - daysAgo);
+  d.setHours(hour, minute, 0, 0);
+  return d.getTime();
+}
+
+/** The middle of one local day — far enough from either midnight to hold ±2 hours. */
+function localNoon(daysAgo = 0): number {
+  return localAt(daysAgo, 12);
+}
+
 function hit(over: Partial<SessionHit> = {}): SessionHit {
   return { sid: "s1", title: "Alpha", agent: "emrg", at: Date.now(), open: false, ...over };
 }
@@ -188,7 +211,7 @@ describe("sessionHits / searchSessions", () => {
   });
 
   it("三组：打开中 / 今天 / 更早，组内按最近活动倒序", () => {
-    const now = Date.now();
+    const now = localNoon();
     const hits = [
       hit({ sid: "o1", open: true, at: now - 2 * HOUR }),
       hit({ sid: "o2", open: true, at: now - HOUR }),
@@ -201,6 +224,22 @@ describe("sessionHits / searchSessions", () => {
     expect(g.today.map((h) => h.sid)).toEqual(["t2", "t1"]);
     expect(g.earlier.map((h) => h.sid)).toEqual(["e1"]);
     expect(groupSize(g)).toBe(5);
+  });
+
+  it("本地日期边界：「今天」是日历日，不是最近若干小时", () => {
+    // Twenty minutes apart, and they belong to different groups: the rule the overlay
+    // wears is the local calendar day, so a hit at 23:50 yesterday is "earlier" even
+    // though the clock has barely moved. Stated here so the bucket has a name, and so a
+    // fixture written as `now - HOUR` reads as the guess it is.
+    const now = localAt(0, 0, 10); // 00:10 local
+    const hits = [
+      hit({ sid: "yesterday", at: localAt(1, 23, 50) }),
+      hit({ sid: "today", at: localAt(0, 0, 5) }),
+    ];
+    const g = searchSessions(hits, "", now);
+    expect(g.today.map((h) => h.sid)).toEqual(["today"]);
+    expect(g.earlier.map((h) => h.sid)).toEqual(["yesterday"]);
+    expect(g.open).toEqual([]);
   });
 
   it("查询命中标题、会话 id 与 agent 名三处；空查询保留全部", () => {
