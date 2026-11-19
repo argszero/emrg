@@ -482,12 +482,28 @@ describe("图标轨与设置页的数值就是原型的数值（issue #2986）",
     expect(nav).toContain("gap: 1px");
   });
 
-  it("agent 列表分栏：每列最小 460px、间距 22px，而且是行不是卡片墙", () => {
+  // issue #3017：agent 页恒定一栏，不再随窗口宽度分栏；22px 原是列间距，一栏下变成行间距，收到 2px。
+  it("agent 列表一栏：单列、行间距 2px，仍然是行不是卡片墙", () => {
     const grid = block(".agent-grid");
-    expect(grid).toContain("repeat(auto-fill, minmax(460px, 1fr))");
-    expect(grid).toContain("gap: 22px");
+    expect(grid).toContain("grid-template-columns: minmax(0, 1fr)");
+    expect(grid).toContain("gap: 2px");
+    // 分栏规则必须真的不在了，不能只靠新规则「看起来更像」。
+    expect(grid).not.toContain("auto-fill");
     // 「不是卡片」不能只靠类名还在不在来判：类还在，边框必须透明，否则一眼又变回卡片墙。
     expect(block(".agent-card")).toContain("border: 1px solid transparent");
+  });
+
+  // issue #3017：整页一条 720px 居中栏——标题、搜索框、列表、底部按钮共用它；其它页不受影响。
+  it("agent 页一条 720px 居中栏，任务与 rant 页没有这条上限", () => {
+    const body = block('.workspace-view[data-view="agents"] .workspace-view-body');
+    expect(body).toContain("max-width: 720px");
+    expect(body).toContain("margin-inline: auto");
+    expect(body).toContain("width: 100%");
+    expect(cssSource).not.toContain('.workspace-view[data-view="tasks"] .workspace-view-body');
+    expect(cssSource).not.toContain('.workspace-view[data-view="rants"] .workspace-view-body');
+    expect(cssSource).not.toContain(
+      '.workspace-view[data-view="settings"] .workspace-view-body {\n  width: 100%',
+    );
   });
 
   it("会话栏头部高 30px，底部一条分隔线", () => {

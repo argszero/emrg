@@ -854,10 +854,21 @@ body.col-resizing * {
 /* 460px a column and 22px between them: the prototype fits two or three agents where
  * the card wall fitted one and a half. `auto-fill` is what makes the count follow the
  * window; `1fr` is what stops a wide window from leaving a ragged last column. */
+/* issue #3017：agent 页恒定一栏，不再随窗口宽度分栏。多栏下每行要把名字、路径与按钮
+ * 横跨整屏才读完，读起来散；一栏是一条约 720px 的阅读宽度。栏宽上限与居中落在整页的包装上，
+ * 标题、搜索框、列表、底部新增按钮因此共用同一条栏；窄窗口按 100% 铺满，不出现横向滚动。
+ * 作用域只到 agent 页，任务/rant/设置三页不受影响。 */
+.workspace-view[data-view="agents"] .workspace-view-body {
+  width: 100%;
+  max-width: 720px;
+  margin-inline: auto;
+}
+
 .agent-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(460px, 1fr));
-  gap: 22px;
+  grid-template-columns: minmax(0, 1fr);
+  /* 22px 原是列间距；一栏之下它变成行间距，太散，收到 2px（issue #3017 第 4 条）。 */
+  gap: 2px;
   align-content: start;
 }
 

@@ -421,7 +421,7 @@ function AgentList({
         const name = p.name || p.path || "?";
         const hint = projectHint(p, t);
         return (
-          <div className="agent-card" key={name} data-testid="agent-row">
+          <div className="agent-card" key={name} data-testid="agent-row" title={p.path || name}>
             {runningAgents.has(name) ? (
               <span className="agent-dot" data-testid="agent-running-dot" title={t("tasks.running")} />
             ) : null}
