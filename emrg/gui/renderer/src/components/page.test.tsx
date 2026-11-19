@@ -103,7 +103,6 @@ describe("StatusBand", () => {
       <I18nProvider lang="en">
         <StatusBand
           running={false}
-          round={null}
           usage={null}
           leftOpen
           rightOpen

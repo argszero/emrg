@@ -14,7 +14,6 @@ import {
   countLabel,
   filterByName,
   findBodyWidthCaps,
-  formatRound,
   formatTokens,
   groupSize,
   mergeSessionRows,
@@ -121,13 +120,6 @@ describe("band readings", () => {
     expect(formatTokens(999)).toBe("999");
     expect(formatTokens(1500)).toBe("1.5k");
     expect(formatTokens(2_500_000)).toBe("2.5M");
-  });
-
-  it("formatRound：未上报是 —；第 0 轮不存在", () => {
-    expect(formatRound(null)).toBe("—");
-    expect(formatRound(0)).toBe("—");
-    expect(formatRound(1)).toBe("1");
-    expect(formatRound(3.7)).toBe("3");
   });
 
   it("countLabel 是「命中 / 总数」", () => {
