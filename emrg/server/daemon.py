@@ -5292,6 +5292,16 @@ class EmrgServer:
                     # because a wall clock can step; seconds, because that is the
                     # unit both clients print.
                     call_started = time.monotonic()
+                    # The same instant on the wall clock, so a client can count a running
+                    # call up from the daemon's own start instead of inventing one. Two
+                    # clocks because they answer two questions: `monotonic` measures the
+                    # finished call's `elapsed` (a wall clock can step mid-call), while
+                    # `time.time()` is the only instant another process can compare
+                    # against its own `Date.now()`. Both are read here, before the start
+                    # frame goes out, so they name one instant and the number a client
+                    # watches cannot drift away from the number the daemon reports at the
+                    # end (rant 2026-11-19T09:31:00).
+                    call_started_at = time.time()
 
                     # Notify client (broadcast to all session subscribers)
                     await self._broadcast(session.session_id, {
@@ -5302,6 +5312,11 @@ class EmrgServer:
                         "arguments": args,
                         "intent": args.get("intent") or "",
                         "call_label": call_labels[call_index],
+                        # Epoch seconds: the instant this call started, which the client
+                        # uses to show a running call contributing time to its group's
+                        # header. Absent from an older frame ⇒ the client shows no time
+                        # rather than inventing a start of its own.
+                        "started_at": call_started_at,
                     })
 
                     # The pieces of a call the model must not choose (D1).
