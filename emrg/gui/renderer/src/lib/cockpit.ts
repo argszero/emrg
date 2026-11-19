@@ -122,12 +122,6 @@ export function formatTokens(n: number | null | undefined): string {
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
-/** The round counter: `null` means no round has been reported for this turn. */
-export function formatRound(n: number | null | undefined): string {
-  if (n === null || n === undefined || !Number.isFinite(n) || n < 1) return "—";
-  return String(Math.floor(n));
-}
-
 /* ── The search overlay's three groups ────────────────────── */
 
 /** One session a search can reach: open now, or known from the daemon's listing. */

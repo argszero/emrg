@@ -7,11 +7,12 @@ import { STATUS_BAND_HEIGHT } from "../lib/cockpit";
 /**
  * StatusBand.test.tsx — the one row that is always on screen (issue #2959 item 1).
  *
- * Two of its cells are readings of the daemon (`round` from `turn_progress`, and the
- * rolling 24-hour window) and one is derived from a daemon timestamp (`startedAtMs`).
- * All three are asserted with a number *and* with `null`, because "the daemon has not
- * reported" must render as `—` rather than as round 1 or as zero tokens — an invented
- * reading is the defect class this cockpit exists to remove.
+ * One cell is a reading of the daemon (the rolling 24-hour window) and one is derived
+ * from a daemon timestamp (`startedAtMs`). Both are asserted with a number *and* with
+ * `null`, because "the daemon has not reported" must render as `—` rather than as zero
+ * tokens — an invented reading is the defect class this cockpit exists to remove. The
+ * turn counter that used to sit between them is gone (issue #3039), and the last test
+ * here is the one that says so.
  *
  * The window is three segments and never a total (rant 2026-11-19T09:31:00), and each
  * segment is `null` on its own: an endpoint that never reports cache hits must show `—`
@@ -27,7 +28,6 @@ function setup(props: Partial<Parameters<typeof StatusBand>[0]> = {}) {
     <I18nProvider lang="en">
       <StatusBand
         running={false}
-        round={null}
         usage={null}
         leftOpen
         rightOpen
@@ -51,14 +51,12 @@ describe("StatusBand", () => {
     expect(screen.getByTestId("band-state")).toHaveClass("idle");
   });
 
-  it("运行中 + 有轮数 + 有窗口：三个格子都报读数", () => {
+  it("运行中 + 有窗口：两个格子都报读数", () => {
     setup({
       running: true,
-      round: 3,
       usage: { input: 12_300_000, cache: 11_100_000, output: 245_000, windowStart: 0, windowEnd: 1 },
     });
     expect(screen.getByTestId("band-state")).toHaveTextContent("Running");
-    expect(screen.getByTestId("band-round")).toHaveTextContent("round 3");
     expect(screen.getByTestId("band-usage")).toHaveTextContent(
       "24h in 12.3M · cache 11.1M · out 245.0k",
     );
@@ -78,7 +76,6 @@ describe("StatusBand", () => {
       <I18nProvider lang="zh">
         <StatusBand
           running
-          round={1}
           usage={{ input: 1000, cache: 900, output: 10, windowStart: 0, windowEnd: 1 }}
           leftOpen
           rightOpen
@@ -91,9 +88,8 @@ describe("StatusBand", () => {
     expect(screen.getByTestId("band-usage")).toHaveTextContent("24h 输入 1.0k · 缓存 900 · 输出 10");
   });
 
-  it("daemon 还没报 → 画 —，不画第 1 轮、也不画 0 token", () => {
-    setup({ running: true, round: null, usage: null });
-    expect(screen.getByTestId("band-round")).toHaveTextContent("round —");
+  it("daemon 还没报 → 画 —，不画 0 token", () => {
+    setup({ running: true, usage: null });
     expect(screen.getByTestId("band-usage")).toHaveTextContent("24h in — · cache — · out —");
   });
 
@@ -108,22 +104,44 @@ describe("StatusBand", () => {
     expect(screen.getByTestId("band-elapsed")).toHaveTextContent("—");
   });
 
-  it("只有四项读数与两个栏开关：会话标题、模型、消息条数都不在这行里（issue #2969）", () => {
+  it("只有三项读数与两个栏开关：会话标题、模型、消息条数都不在这行里（issue #2969）", () => {
     setup({
       running: true,
-      round: 2,
       usage: { input: 3000, cache: 2000, output: 400, windowStart: 0, windowEnd: 1 },
       startedAtMs: Date.now() - 65_000,
     });
     const band = screen.getByTestId("status-band");
-    // 四个变的读数……
-    expect(band.querySelectorAll(".band-state, .band-item")).toHaveLength(4);
+    // 三个变的读数：状态、计时、最近 24 小时。轮数那一格连同它右边的分隔符一起没了
+    // （issue #3039）——这一行已经说了在跑、跑了多久，轮数没有第二个用处。
+    expect(band.querySelectorAll(".band-state, .band-item")).toHaveLength(3);
     // ……两个按钮，一个不多：搜索与新建会话的入口在会话栏（issue #3028）
     expect(band.querySelectorAll("button")).toHaveLength(2);
     // 一个不动的值出现在这一行，就是把状态带变回了顶栏：这三样是宿主点名移出的
     for (const gone of ["session-info", "conn-status", "conn-vision"]) {
       expect(screen.queryByTestId(gone)).not.toBeInTheDocument();
     }
+  });
+
+  it("轮数那一格端到端消失：没有 band-round，也没有它的文案（issue #3039）", () => {
+    render(
+      <I18nProvider lang="zh">
+        <StatusBand
+          running
+          startedAtMs={Date.now()}
+          usage={null}
+          leftOpen
+          rightOpen
+          onToggleLeft={vi.fn()}
+          onToggleRight={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+    // 格子不在、dom 里找不到它的 testid
+    expect(screen.queryByTestId("band-round")).toBeNull();
+    // 文案也不在：中文界面里这一行再没有一个「轮」字（中英两条键都删了）
+    const band = screen.getByTestId("status-band");
+    expect(band.textContent).not.toContain("轮");
+    expect(band.textContent).not.toContain("round");
   });
 
   it("两个按钮：两个栏开关，各自回自己的回调；搜索与新建不在状态带上（issue #3028）", () => {

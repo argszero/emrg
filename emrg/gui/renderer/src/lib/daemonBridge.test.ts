@@ -207,28 +207,19 @@ describe("createDaemonBridge", () => {
     expect(st.turnStartBySid["s1"]).toBe(1756785600500);
   });
 
-  it("issue #2959：turn_progress → 状态带的轮次（daemon 的循环，不是客户端的算术）", () => {
-    // 轮次来自 daemon 每一轮开头的那一帧。这里钉三件事：缺席不是零、帧按会话隔离、
-    // 非数字字段不写；新一轮开始则归零（上一轮的轮数不该挂到这一轮）。
+  it("issue #3039：轮数端到端消失——本端不再保留「每个会话在第几轮」", () => {
+    // 状态带去掉了轮数那一格，所以读它的那条路也一起删：留一份没人读的状态就是第二
+    // 份答案。这一帧仍然留下它原本就在做的事（重读花费），只是不再写轮数。
     const { emit, bridge } = setup();
-    // ① 没报过就是没有：状态带据此渲染 «—»，而不是第 1 轮
-    expect(bridge.store.get().roundBySid["s1"]).toBeUndefined();
-    // 花费不是这一帧的事，也不是任何 per-turn 字段的事（rant 2026-11-19T09:31:00）
-    expect(Object.prototype.hasOwnProperty.call(bridge.store.get(), "turnTokensBySid")).toBe(false);
-
-    emit({ type: "turn_progress", data: { round: 1 }, sid: "s1" });
+    const has = (k: string) => Object.prototype.hasOwnProperty.call(bridge.store.get(), k);
+    expect(has("roundBySid")).toBe(false);
+    // 花费不是任何 per-turn 字段的事（rant 2026-11-19T09:31:00）
+    expect(has("turnTokensBySid")).toBe(false);
     emit({ type: "turn_progress", data: { round: 3 }, sid: "s1" });
-    expect(bridge.store.get().roundBySid["s1"]).toBe(3);
-    // ② 帧是会话级的：s2 没收到就没有读数
-    expect(bridge.store.get().roundBySid["s2"]).toBeUndefined();
-
-    // ③ 一个形状不对的帧不得把轮数抹成 NaN
-    emit({ type: "turn_progress", data: { round: "4" }, sid: "s1" });
-    expect(bridge.store.get().roundBySid["s1"]).toBe(3);
-
-    // ④ 新一轮开始 → 轮数归零
+    expect(has("roundBySid")).toBe(false);
+    // 帧本身照旧生效：turn_start 仍然置 busy
     emit({ type: "turn_start", data: { started_at: 1756785600.5 }, sid: "s1" });
-    expect(bridge.store.get().roundBySid["s1"]).toBeUndefined();
+    expect(bridge.store.get().busyBySid["s1"]).toBe(true);
   });
 
   it("rant 2026-11-19T09:31:00：花费读数是 daemon 的 24 小时窗口，三段分开、坏值不编数字", async () => {
@@ -240,7 +231,7 @@ describe("createDaemonBridge", () => {
       input: 12_300_000, cache: 11_100_000, output: 245_000,
       windowStart: 1_700_000_000, windowEnd: 1_700_086_400,
     });
-    emit({ type: "turn_progress", data: { round: 2 }, sid: "s1" });
+    emit({ type: "turn_progress", data: {}, sid: "s1" });
     await vi.waitFor(() => expect(bridge.store.get().usageWindow).not.toBeNull());
     const reading = bridge.store.get().usageWindow!;
     expect(reading.input).toBe(12_300_000);
@@ -249,7 +240,7 @@ describe("createDaemonBridge", () => {
     expect(reading.windowEnd).toBe(1_700_086_400);
 
     usageWindow.mockResolvedValue({ input: "abc", cache: null, output: -5, windowStart: "x" });
-    emit({ type: "turn_progress", data: { round: 3 }, sid: "s1" });
+    emit({ type: "turn_progress", data: {}, sid: "s1" });
     await vi.waitFor(() => expect(bridge.store.get().usageWindow?.input).toBeNull());
     const bad = bridge.store.get().usageWindow!;
     expect(bad.output).toBeNull();
