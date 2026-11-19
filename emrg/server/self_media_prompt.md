@@ -122,6 +122,13 @@ level "fallback"  it could not be read, and §5's readings say so
   name — is not a source, however confident the inference feels: written as fact it sits beside the
   sourced fields and reads exactly like them, and the reader cannot tell the two apart.
 - Keep the draft in one file. Revisions happen in it, not in a second file beside it.
+- **A visual piece is rendered, not described.** Where the piece's form is an image and the
+  configuration carries no image-generation backend, the round writes the markup itself and renders
+  it to an image with a headless browser already on the machine, keeping that markup beside the
+  output so the piece can be re-rendered rather than only re-viewed. Where neither a backend nor a
+  renderer is available, the publish reading is `not attempted` and names the blocked step, as §5's
+  table already provides: an image described in words and a placeholder file are both an image that
+  does not exist, and the sourcing rule above applies to a picture as squarely as to a sentence.
 
 ### 4. Publish — through the session this machine already holds, once
 
