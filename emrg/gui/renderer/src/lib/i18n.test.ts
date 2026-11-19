@@ -105,11 +105,13 @@ describe("词典完整性守卫（防漂移）", () => {
   // 2026-11-19 issue #3037：代码块复制按钮接线，`chat.copyCode` 从来没有读者（按钮文案一直是
   // `md.copyCode`）→ 491 - 1 = 490。
   // 2026-11-19 issue #3039：状态带去掉轮数那一格，它的文案与悬停说明两条键一起删 → 490 - 2 = 488。
-  it("zh/en 各 488 个 key 且完全对齐", () => {
+  // 2026-11-19 issue #3041：两棵目录树的右键菜单四项（复制完整路径 / 使用默认方式打开 /
+  // 已复制 / 复制失败）→ 488 + 4 = 492。
+it("zh/en 各 492 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(488);
-    expect(enKeys.length).toBe(488);
+    expect(zhKeys.length).toBe(492);
+    expect(enKeys.length).toBe(492);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);

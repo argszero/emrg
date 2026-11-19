@@ -146,4 +146,230 @@ describe("FileTree", () => {
     fireEvent.click(screen.getByTestId("t-collapse"));
     await waitFor(() => expect(screen.getAllByTestId("t-row")).toHaveLength(1));
   });
+
+  /**
+   * 右键菜单（issue #3041）。每一条对着工单的一项：右键先把该行选中且不改它的展开状态、
+   * 两项的文案与顺序、复制的是绝对路径、写不进去时说的是失败、打开走已有的通道、根名作用于
+   * 根目录而提示行什么都不出、键盘 ↑↓ / Enter / Esc、点外与滚动关闭、右下角向内翻转。
+   */
+  describe("右键菜单", () => {
+    const MENU = "t-menu";
+
+    function stubClipboard(writeText: (text: string) => Promise<void>): void {
+      Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    }
+
+    function stubOpenFile() {
+      const openFile = vi.fn(async (_payload: { filePath: string }) => ({ ok: true }));
+      (window as unknown as { emrg?: unknown }).emrg = { openFile };
+      return openFile;
+    }
+
+    function unstub(): void {
+      delete (window as unknown as { emrg?: unknown }).emrg;
+      Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+    }
+
+    const dirTree = () =>
+      vi.fn(async (p: string) =>
+        p === "/r"
+          ? { entries: [e("src", "dir"), e("a.md")], truncated: false }
+          : { entries: [e("deep.md")], truncated: false },
+      );
+
+    it("右键一行：菜单出现、该行同时被选中，两项按固定顺序；目录不会因此展开", async () => {
+      const load = dirTree();
+      renderTree(load);
+      await waitFor(() => expect(screen.getAllByTestId("t-row")).toHaveLength(2));
+      const dirRow = screen.getAllByTestId("t-row")[0];
+
+      fireEvent.contextMenu(dirRow, { clientX: 40, clientY: 60 });
+
+      const menu = screen.getByTestId(MENU);
+      expect(dirRow).toHaveAttribute("aria-selected", "true");
+      const labels = Array.from(menu.querySelectorAll("[role='menuitem']")).map((n) => n.textContent);
+      expect(labels).toEqual(["Copy full path", "Open with default app"]);
+      // 展开是左键点目录的事：右键不该顺带把它打开，也不该去拉子项
+      expect(dirRow).toHaveAttribute("aria-expanded", "false");
+      expect(load).toHaveBeenCalledTimes(1);
+    });
+
+    it("复制：交给剪贴板的是这一行的绝对路径，成功后就地变成已复制并自行关闭", async () => {
+      const writeText = vi.fn(async (_text: string) => {});
+      stubClipboard(writeText);
+      try {
+        const load = dirTree();
+        renderTree(load);
+        await waitFor(() => expect(screen.getAllByTestId("t-row")).toHaveLength(2));
+        fireEvent.click(screen.getAllByTestId("t-row")[0]);
+        await waitFor(() => expect(screen.getAllByTestId("t-row")).toHaveLength(3));
+        // 展开后的顺序是：src、它自己的 deep.md、然后是文件 a.md
+        const deep = screen.getAllByTestId("t-row")[1];
+        expect(deep).toHaveAttribute("data-path", "/r/deep.md");
+
+        fireEvent.contextMenu(deep, { clientX: 40, clientY: 60 });
+        fireEvent.mouseDown(screen.getByTestId(`${MENU}-copy`));
+
+        await waitFor(() => expect(writeText).toHaveBeenCalledWith("/r/deep.md"));
+        await waitFor(() => expect(screen.getByTestId(`${MENU}-copy`)).toHaveTextContent("Copied ✓"));
+        // 约一秒后菜单自行关闭
+        await waitFor(() => expect(screen.queryByTestId(MENU)).toBeNull(), { timeout: 2500 });
+      } finally {
+        unstub();
+      }
+    });
+
+    it("复制失败：就地变成复制失败，菜单留着", async () => {
+      stubClipboard(() => Promise.reject(new Error("clipboard denied")));
+      try {
+        renderTree(tree([e("a.md")]));
+        await waitFor(() => expect(screen.getAllByTestId("t-row")).toHaveLength(1));
+        fireEvent.contextMenu(screen.getAllByTestId("t-row")[0], { clientX: 40, clientY: 60 });
+        fireEvent.mouseDown(screen.getByTestId(`${MENU}-copy`));
+        await waitFor(() => expect(screen.getByTestId(`${MENU}-copy`)).toHaveTextContent("Copy failed"));
+        expect(screen.getByTestId(MENU)).toBeInTheDocument();
+      } finally {
+        unstub();
+      }
+    });
+
+    it("使用默认方式打开：把这一行的路径交给打开通道，菜单随即关掉", async () => {
+      const openFile = stubOpenFile();
+      try {
+        renderTree(tree([e("a.md")]));
+        await waitFor(() => expect(screen.getAllByTestId("t-row")).toHaveLength(1));
+        fireEvent.contextMenu(screen.getAllByTestId("t-row")[0], { clientX: 40, clientY: 60 });
+        fireEvent.mouseDown(screen.getByTestId(`${MENU}-open`));
+        await waitFor(() => expect(openFile).toHaveBeenCalledWith({ filePath: "/r/a.md" }));
+        await waitFor(() => expect(screen.queryByTestId(MENU)).toBeNull());
+      } finally {
+        unstub();
+      }
+    });
+
+    it("根名右键作用于根目录；空、加载中、读不了的提示行右键都不出菜单", async () => {
+      const writeText = vi.fn(async (_text: string) => {});
+      stubClipboard(writeText);
+      try {
+        const first = renderTree(tree([e("a.md")]));
+        await waitFor(() => expect(screen.getAllByTestId("t-row")).toHaveLength(1));
+        fireEvent.contextMenu(screen.getByTestId("t-root"), { clientX: 10, clientY: 10 });
+        fireEvent.mouseDown(screen.getByTestId(`${MENU}-copy`));
+        await waitFor(() => expect(writeText).toHaveBeenCalledWith("/r"));
+        first.unmount();
+
+        // 空目录
+        const empty = renderTree(tree([]));
+        await waitFor(() => expect(screen.getByTestId("t-empty")).toBeInTheDocument());
+        fireEvent.contextMenu(screen.getByTestId("t-empty"));
+        expect(screen.queryByTestId(MENU)).toBeNull();
+        empty.unmount();
+
+        // 加载中
+        const pending = renderTree(vi.fn(() => new Promise(() => {})) as never);
+        expect(screen.getByTestId("t-loading")).toBeInTheDocument();
+        fireEvent.contextMenu(screen.getByTestId("t-loading"));
+        expect(screen.queryByTestId(MENU)).toBeNull();
+        pending.unmount();
+
+        // 读不了
+        renderTree(
+          vi.fn(async () => {
+            throw new Error("path not found: /r");
+          }),
+        );
+        await waitFor(() => expect(screen.getByTestId("t-error")).toBeInTheDocument());
+        fireEvent.contextMenu(screen.getByTestId("t-error"));
+        expect(screen.queryByTestId(MENU)).toBeNull();
+      } finally {
+        unstub();
+      }
+    });
+
+    it("键盘：↓↑ 移动菜单高亮而不是行选中，Enter 执行，Esc 关闭", async () => {
+      const writeText = vi.fn(async (_text: string) => {});
+      stubClipboard(writeText);
+      try {
+        renderTree(dirTree());
+        await waitFor(() => expect(screen.getAllByTestId("t-row")).toHaveLength(2));
+        const body = screen.getByTestId("t-body");
+        const fileRow = screen.getAllByTestId("t-row")[1];
+        fireEvent.contextMenu(fileRow, { clientX: 40, clientY: 60 });
+
+        expect(screen.getByTestId(`${MENU}-copy`)).toHaveClass("active");
+        fireEvent.keyDown(body, { key: "ArrowDown" });
+        await waitFor(() => expect(screen.getByTestId(`${MENU}-open`)).toHaveClass("active"));
+        // 菜单开着时箭头不再移动行选中
+        expect(fileRow).toHaveAttribute("aria-selected", "true");
+        fireEvent.keyDown(body, { key: "ArrowUp" });
+        await waitFor(() => expect(screen.getByTestId(`${MENU}-copy`)).toHaveClass("active"));
+
+        fireEvent.keyDown(body, { key: "Enter" });
+        await waitFor(() => expect(writeText).toHaveBeenCalledWith("/r/a.md"));
+
+        fireEvent.keyDown(body, { key: "Escape" });
+        await waitFor(() => expect(screen.queryByTestId(MENU)).toBeNull());
+      } finally {
+        unstub();
+      }
+    });
+
+    it("点菜单外、滚动、换根都关掉菜单", async () => {
+      const view = renderTree(tree([e("a.md")]));
+      await waitFor(() => expect(screen.getAllByTestId("t-row")).toHaveLength(1));
+      const row = screen.getAllByTestId("t-row")[0];
+
+      fireEvent.contextMenu(row, { clientX: 40, clientY: 60 });
+      expect(screen.getByTestId(MENU)).toBeInTheDocument();
+      fireEvent.mouseDown(document.body);
+      await waitFor(() => expect(screen.queryByTestId(MENU)).toBeNull());
+
+      fireEvent.contextMenu(row, { clientX: 40, clientY: 60 });
+      fireEvent.scroll(screen.getByTestId("t-body"));
+      await waitFor(() => expect(screen.queryByTestId(MENU)).toBeNull());
+
+      fireEvent.contextMenu(row, { clientX: 40, clientY: 60 });
+      view.rerender(
+        <I18nProvider lang="en">
+          <FileTree testId="t" root="/other" loadDir={tree([e("b.md")])} />
+        </I18nProvider>,
+      );
+      await waitFor(() => expect(screen.queryByTestId(MENU)).toBeNull());
+    });
+
+    it("贴着窗口右下角时向内翻转，两条边都不出窗口；在窗口中间不翻", async () => {
+      const rect = { width: 180, height: 72, top: 0, left: 0, right: 0, bottom: 0, x: 0, y: 0, toJSON: () => ({}) };
+      const rectSpy = vi
+        .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+        .mockReturnValue(rect as DOMRect);
+      const before = { w: window.innerWidth, h: window.innerHeight };
+      Object.defineProperty(window, "innerWidth", { value: 800, configurable: true });
+      Object.defineProperty(window, "innerHeight", { value: 600, configurable: true });
+      try {
+        renderTree(tree([e("a.md")]));
+        await waitFor(() => expect(screen.getAllByTestId("t-row")).toHaveLength(1));
+        const row = screen.getAllByTestId("t-row")[0];
+
+        fireEvent.contextMenu(row, { clientX: 400, clientY: 300 });
+        const inside = screen.getByTestId(MENU);
+        expect(inside).toHaveAttribute("data-flipped-x", "0");
+        expect(inside).toHaveAttribute("data-flipped-y", "0");
+
+        fireEvent.contextMenu(row, { clientX: 795, clientY: 595 });
+        const menu = screen.getByTestId(MENU) as HTMLElement;
+        expect(menu).toHaveAttribute("data-flipped-x", "1");
+        expect(menu).toHaveAttribute("data-flipped-y", "1");
+        const left = parseFloat(menu.style.left);
+        const top = parseFloat(menu.style.top);
+        expect(left).toBe(795 - rect.width);
+        expect(top).toBe(595 - rect.height);
+        expect(left + rect.width).toBeLessThanOrEqual(800);
+        expect(top + rect.height).toBeLessThanOrEqual(600);
+      } finally {
+        rectSpy.mockRestore();
+        Object.defineProperty(window, "innerWidth", { value: before.w, configurable: true });
+        Object.defineProperty(window, "innerHeight", { value: before.h, configurable: true });
+      }
+    });
+  });
 });
