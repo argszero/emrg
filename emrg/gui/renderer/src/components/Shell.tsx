@@ -1079,8 +1079,6 @@ export function Shell() {
         rightOpen={rightOpen}
         onToggleLeft={() => setLeftOpen((v) => !v)}
         onToggleRight={() => setRightOpen((v) => !v)}
-        onSearch={() => setSearchOpen(true)}
-        onNew={() => dialogHost.current?.openNewSession()}
       />
       <div className="react-shell-body">
         <IconRail activeView={activeView} onSwitchView={switchView} />

@@ -84,7 +84,7 @@ describe("InspectorPanel", () => {
 });
 
 describe("StatusBand", () => {
-  it("右端四个按钮之外别无他物", () => {
+  it("右端只有两个栏开关，别无他物（issue #3028）", () => {
     const noop = () => {};
     render(
       <I18nProvider lang="en">
@@ -96,12 +96,10 @@ describe("StatusBand", () => {
           rightOpen
           onToggleLeft={noop}
           onToggleRight={noop}
-          onSearch={noop}
-          onNew={noop}
         />
       </I18nProvider>,
     );
     const band = screen.getByTestId("status-band");
-    expect(band.querySelectorAll("button")).toHaveLength(4);
+    expect(band.querySelectorAll("button")).toHaveLength(2);
   });
 });
