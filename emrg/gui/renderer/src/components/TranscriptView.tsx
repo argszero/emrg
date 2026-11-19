@@ -205,19 +205,30 @@ export function TranscriptView({
   useEffect(() => {
     const el = viewportRef.current;
     if (!el) return;
-    const onInput = (e: Event): void => {
-      if (e.type === "pointerdown") pointerDownRef.current = true;
+    const onInput = (): void => markUserInput();
+    // 「按下」只有落在**滚动条**上才算读者在滚动（清单第 1 条）。按在正文里不算：读者点一下
+    // 文字选中一段，随后内容长高产生的那个 scroll 事件不该被当成他自己滚走了 —— 那正是这次
+    // 要修的那个缺陷换一个入口再来一次。滚动条的宽度是 offsetWidth - clientWidth，为 0 就是
+    // 没有滚动条，此时任何按下都不算。
+    const onPointerDown = (e: Event): void => {
+      const rect = el.getBoundingClientRect();
+      const gutter = el.offsetWidth - el.clientWidth;
+      const onScrollbar = gutter > 0 && (e as MouseEvent).clientX >= rect.left + el.clientWidth;
+      if (!onScrollbar) return;
+      pointerDownRef.current = true;
       markUserInput();
     };
     const release = (): void => {
       pointerDownRef.current = false;
     };
-    const types = ["wheel", "touchstart", "touchmove", "keydown", "pointerdown"] as const;
+    const types = ["wheel", "touchstart", "touchmove", "keydown"] as const;
     for (const ty of types) el.addEventListener(ty, onInput, { capture: true });
+    el.addEventListener("pointerdown", onPointerDown, { capture: true });
     document.addEventListener("pointerup", release, { capture: true });
     document.addEventListener("pointercancel", release, { capture: true });
     return () => {
       for (const ty of types) el.removeEventListener(ty, onInput, { capture: true });
+      el.removeEventListener("pointerdown", onPointerDown, { capture: true });
       document.removeEventListener("pointerup", release, { capture: true });
       document.removeEventListener("pointercancel", release, { capture: true });
     };

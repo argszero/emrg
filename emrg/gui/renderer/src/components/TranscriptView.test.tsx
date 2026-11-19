@@ -1289,6 +1289,34 @@ describe("聊天区滚动（issue #3024）", () => {
     expect(container.querySelector(".transcript-back-to-bottom")).not.toBeNull();
   });
 
+  it("按在正文上不算读者滚动，按在滚动条上才算（清单第 1 条）", () => {
+    installMetrics();
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("a", "s1");
+    const { container } = setup(store, "s1");
+    const viewport = container.querySelector(".transcript-view") as HTMLElement;
+    // 视口有 15px 纵向滚动条：clientWidth 785、offsetWidth 800，右边缘在 800
+    Object.defineProperty(viewport, "clientWidth", { configurable: true, get: () => 785 });
+    Object.defineProperty(viewport, "offsetWidth", { configurable: true, get: () => 800 });
+    viewport.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, right: 800, bottom: 400, width: 800, height: 400, x: 0, y: 0 }) as DOMRect;
+    metricsTo(1000, 600); // 贴底跟随
+    // 按在正文里（x=100）：位置因重排离开底部，但这不是读者在滚动 → 跟随不关
+    metricsTo(1000, 560);
+    act(() => {
+      viewport.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, clientX: 100 }));
+      viewport.dispatchEvent(new Event("scroll"));
+    });
+    expect(container.querySelector(".transcript-back-to-bottom")).toBeNull();
+    // 按在滚动条上（x=795）：这才是读者在拖 → 跟随关，按钮出现
+    metricsTo(1000, 300);
+    act(() => {
+      viewport.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, clientX: 795 }));
+      viewport.dispatchEvent(new Event("scroll"));
+    });
+    expect(container.querySelector(".transcript-back-to-bottom")).not.toBeNull();
+  });
+
   it("滚动容器显式关掉滚动锚定（清单第 7 条）", () => {
     expect(shellCss.length).toBeGreaterThan(0); // 读成空串会让这条空转通过
     const rule = new RegExp(`\\.transcript-view\\s*\\{[^}]*\\}`).exec(shellCss)?.[0] ?? "";
