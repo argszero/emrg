@@ -9,7 +9,7 @@ import {
   buildEvolveAgents,
   preprocessRantMarkdown,
   projectHint,
-  rantFirstLine,
+  rantSummary,
   rantStatusMeta,
   rantTimestamp,
   taskHint,
@@ -617,7 +617,7 @@ function RantList({
         const key = String(r.timestamp || r.agent || r.message || Math.random());
         const ts = rantTimestamp(r.timestamp);
         const st = rantStatusMeta(r.status, t);
-        const firstLine = rantFirstLine(r.message);
+        const summary = rantSummary(r.message);
         const isExpanded = expanded === key;
         return (
           <div key={key}>
@@ -630,7 +630,7 @@ function RantList({
               <span className="rant-col-agent">{r.agent || "—"}</span>
               <span className={`task-badge ${st.badgeCls}`} data-testid="rant-status-badge">{st.text}</span>
               <span className="rant-col-progress">{r.progress ? String(r.progress) : "—"}</span>
-              <span className="rant-col-content">{firstLine}</span>
+              <span className="rant-col-content">{summary}</span>
               {/* The delete control sits inside the row that toggles the detail, so its
                   clicks must not also expand the row — otherwise asking "delete?" would
                   open the rant the question is about. */}
