@@ -107,13 +107,47 @@ export function rantTimestamp(ts?: string | null): string {
 
 /* ── Rant 行工具 ─────────────────────────────────────────── */
 
-/** 内容列摘要：message 首行（去空行 + md 标题/列表标记）；缺失 "—" */
-export function rantFirstLine(message?: string | null): string {
-  const msg = message || "";
-  const firstLine = (msg.split("\n").find((l) => l.trim() !== "") || "")
-    .replace(/^#{1,6}\s+/, "")
-    .replace(/^[>*\-\s]+/, "");
-  return firstLine || "—";
+/** 内容列摘要的长度上限：超出即截断并加省略号（issue #3015） */
+const RANT_SUMMARY_MAX = 60;
+
+/** 行内 markdown 记号全部去掉：链接只留文字、行内代码去反引号、强调记号去掉，空白归一成单个空格 */
+function plainInline(line: string): string {
+  return line
+    .replace(/^#{1,6}\s+/, "") // 标题记号
+    .replace(/^(?:[-*+]\s+|>\s?|\d+[.)]\s+)+/, "") // 列表与引用记号（后有空白，才不误伤 **加粗**）
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1") // 链接与图片只留文字
+    .replace(/`+([^`]*)`+/g, "$1") // 行内代码
+    .replace(/(\*\*|__)(.*?)\1/g, "$2") // 加粗
+    .replace(/(\*|_)(.*?)\1/g, "$2") // 斜体
+    .replace(/~~(.*?)~~/g, "$1") // 删除线
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * 内容列摘要（issue #3015）：首行是一级标题就用这个标题，否则跳过二级及更深的节标题、取第一段正文；
+ * 全篇只有节标题时退回第一个节标题的文字；去掉行内 markdown 记号，按 60 字截断加省略号；缺失 "—"。
+ *
+ * 列里显示的必须是这一条在说什么。取「文档第一行」时，按本仓四段式写的 rant 首行都是「## 要什么」，
+ * 列表里好几条长得一模一样，展开才能分辨。
+ */
+export function rantSummary(message?: string | null): string {
+  const lines = String(message || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  if (!lines.length) return "—";
+  const isSectionHeading = (line: string) => /^#{2,6}\s+/.test(line);
+  let picked: string;
+  if (/^#\s+/.test(lines[0])) {
+    picked = lines[0];
+  } else {
+    // 二级及更深的节标题不是正文：跳过它们，取第一段正文；一个正文行都没有时退回第一个节标题。
+    picked = lines.find((line) => !isSectionHeading(line)) ?? lines[0];
+  }
+  const text = plainInline(picked);
+  if (!text) return "—";
+  return text.length > RANT_SUMMARY_MAX ? `${text.slice(0, RANT_SUMMARY_MAX)}…` : text;
 }
 
 export interface RantStatusMeta {
