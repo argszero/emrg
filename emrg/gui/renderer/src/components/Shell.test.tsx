@@ -1517,4 +1517,78 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
     await waitFor(() => expect(m.closeSession).toHaveBeenCalledTimes(1));
     expect(screen.getByText("content-one")).toBeInTheDocument();
   });
+
+  /**
+   * 关闭会话连它的滚动位置记录一起丢（issue #3024 清单第 9 条）：关掉再打开按**首次
+   * 打开**处理，落在底部，而不是回到关闭前上翻到的那一处。
+   *
+   * 记录若不删，这条就红在 500 上：重开时它被当成「回来过的地方」，而那条会话在磁盘上
+   * 已经是另一次打开。jsdom 没有布局，三条度量挂在原型上读一个可变对象。
+   */
+  it("关掉再打开同一条会话时，滚动位置按首次打开处理（issue #3024 清单第 9 条）", async () => {
+    const metrics = { scrollTop: 0, scrollHeight: 2000, clientHeight: 400 };
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+      configurable: true,
+      get: () => metrics.scrollHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+      configurable: true,
+      get: () => metrics.clientHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, "scrollTop", {
+      configurable: true,
+      get: () => metrics.scrollTop,
+      set: (v: number) => {
+        metrics.scrollTop = v;
+      },
+    });
+    try {
+      const m = mockEmrg();
+      // 关闭那一帧 IPC 先不落定：主进程的广播在它之前到达（生产就是这个顺序），
+      // 否则关闭的后续会在重开之后才跑，把刚重开的会话又清掉——量到的是另一种时序。
+      let releaseClose: () => void = () => {};
+      m.closeSession.mockImplementation(() => new Promise<void>((r) => { releaseClose = () => r(); }));
+      // 重开时从磁盘读回一条：它出现就证明「s1 真的又是当前会话」，断言不是空转
+      let reopened = false;
+      m.listHistory.mockImplementation(() =>
+        Promise.resolve(
+          reopened
+            ? { messages: [{ record_index: 0, kind: "message", role: "user", content: "from disk" }], hasMore: false }
+            : { messages: [], hasMore: false },
+        ),
+      );
+      render(wrapper(<Shell />));
+      await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+      m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }], "s1"));
+      m.emit(deltaFrame("s1", "content-one"));
+      await waitFor(() => expect(screen.getByText("content-one")).toBeInTheDocument());
+
+      const viewport = document.querySelector(".transcript-view") as HTMLElement;
+      metrics.scrollTop = 500; // 读者上翻离底
+      fireEvent.scroll(viewport);
+      expect(screen.getByTestId("back-to-bottom")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByTestId("close-open-session"));
+      await waitFor(() => expect(m.closeSession).toHaveBeenCalledWith({ sessionId: "s1" }));
+      m.emit(openSessionsFrame([], null));
+      await waitFor(() => expect(screen.queryByTestId("open-session-item")).toBeNull());
+
+      reopened = true;
+      await act(async () => {
+        releaseClose();
+      });
+      m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }], "s1"));
+      await waitFor(() => expect(screen.getByText("from disk")).toBeInTheDocument());
+
+      // 首次打开 = 贴底 + 跟随。记录若不删，这里留下的是关闭前的 500（离底 1100px）。
+      await waitFor(() =>
+        expect(metrics.scrollHeight - metrics.clientHeight - metrics.scrollTop).toBeLessThanOrEqual(0),
+      );
+      expect(screen.queryByTestId("back-to-bottom")).toBeNull();
+    } finally {
+      delete (HTMLElement.prototype as { scrollHeight?: unknown }).scrollHeight;
+      delete (HTMLElement.prototype as { clientHeight?: unknown }).clientHeight;
+      delete (HTMLElement.prototype as { scrollTop?: unknown }).scrollTop;
+    }
+  });
 });

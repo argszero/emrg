@@ -35,7 +35,7 @@ import {
 } from "../lib/cockpit";
 import { InspectorPanel } from "./InspectorPanel";
 import { WorkspaceView, type WorkspaceViewId } from "./WorkspaceView";
-import { TranscriptView } from "./TranscriptView";
+import { TranscriptView, type ScrollMemory } from "./TranscriptView";
 import { Composer, type CommandRouting } from "./Composer";
 import { DialogHost, type DialogHostHandle } from "./DialogHost";
 import {
@@ -805,6 +805,7 @@ export function Shell() {
       return;
     }
     transcript.clear(sid);
+    scrollMemoryRef.current.delete(sid); // 清单第 9 条：关掉再打开 = 首次打开
     // 「已加载」标记和分页游标一起丢掉，与 `reloadHistory` 清的是同一对：留下游标，
     // 重开时第一页会从旧游标往前取，最新那些记录一页都不在里面。
     historyLoadedRef.current.delete(sid);
@@ -822,6 +823,12 @@ export function Shell() {
   // （切换走/回来不重复 append）。
   const historyPagesRef = useRef<ReturnType<typeof createHistoryPages>>(createHistoryPages());
   const historyLoadedRef = useRef<Set<string>>(new Set());
+  /**
+   * 每条会话的滚动位置（issue #3024 清单第 6、7 条）。归 Shell 而不是 TranscriptView：
+   * 切到别的页面时整个聊天区被卸载，位置必须活过那一次卸载。关闭会话时一并删掉
+   * （清单第 9 条：关掉再打开按首次打开处理，落在底部）。
+   */
+  const scrollMemoryRef = useRef<ScrollMemory>(new Map());
   const historyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /**
@@ -1189,6 +1196,8 @@ export function Shell() {
                 hasMore={activePaging?.hasMore ?? false}
                 loading={activePaging?.loading ?? false}
                 onLoadOlder={onScrollTop}
+                // 会话各自的滚动位置（issue #3024 清单第 6、7 条）：这一层活过聊天区的卸载
+                scrollMemory={scrollMemoryRef}
               />
               <Composer
                 store={transcript}
