@@ -1473,6 +1473,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         nonlocal history_index, history_saved_input
         nonlocal turn_ended_cancelled, cancel_receipt_held
         nonlocal current_model, current_vision, current_sandbox, current_roots
+        nonlocal current_usage
         nonlocal _last_center, _elapsed_task, conn
         nonlocal _request_start, turn_running
         # /task-session: the daemon's verdict on a task's session decides whether
