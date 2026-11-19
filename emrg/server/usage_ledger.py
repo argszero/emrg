@@ -21,9 +21,14 @@ size is bounded by the window rather than by uptime.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Callable
+
+from emrg.tools.base import non_regular_kind
+
+logger = logging.getLogger(__name__)
 
 #: The window's width. The rant names it, and both the sum and the prune read it, so a
 #: change moves them together instead of leaving one behind.
@@ -55,6 +60,25 @@ def _a_count(value: object) -> int | None:
     if value < 0:
         return None
     return int(value)
+
+
+def _refuse_non_regular(path: Path) -> str | None:
+    """The kind of ``path`` when it is not a regular file, else None.
+
+    Asked **before** every open in this module, because opening is what decides whether the
+    caller returns at all: a FIFO blocks at the open until a peer appears and raises nothing,
+    so no ``except OSError`` bounds it — and these opens run on the daemon's path, where that
+    block is the whole daemon and the only recovery is a restart, which belongs to the host
+    alone.
+
+    Absence is not a refusal. :func:`non_regular_kind` **stats**, so the ledger's ordinary
+    first record — a file that is not there yet — arrives as an ``OSError``, and that is the
+    case this answers None for.
+    """
+    try:
+        return non_regular_kind(path)
+    except OSError:
+        return None
 
 
 class UsageLedger:
@@ -90,6 +114,18 @@ class UsageLedger:
             measured = True
         if not measured:
             return
+        kind = _refuse_non_regular(self._path)
+        if kind:
+            # A FIFO here blocks the append until a reader appears, and this append runs in
+            # the round that just finished, on the daemon's event loop: the line is dropped
+            # rather than the daemon. Nothing is claimed from it — the window simply does
+            # not count it, and the log says why the number is short.
+            logger.warning(
+                "usage ledger %s is a %s, not a regular file — this round is not recorded",
+                self._path,
+                kind,
+            )
+            return
         self._prune_if_stale()
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._path, "a", encoding="utf-8") as f:
@@ -108,7 +144,7 @@ class UsageLedger:
                 return
         except OSError:
             return
-        if not self._path.is_file():
+        if _refuse_non_regular(self._path):
             return
         edge = float(self._clock()) - WINDOW_SECONDS
         kept = [entry for entry in self._read() if float(entry["ts"]) >= edge]
@@ -128,7 +164,7 @@ class UsageLedger:
         a kill between the open and the flush; one unparsable line must not cost the
         window every other record.
         """
-        if not self._path.is_file():
+        if _refuse_non_regular(self._path):
             return []
         try:
             text = self._path.read_text(encoding="utf-8", errors="replace")

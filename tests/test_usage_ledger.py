@@ -24,6 +24,7 @@ claim about spending; None is the absence of one.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -156,3 +157,22 @@ def test_stale_records_are_dropped_once_the_file_passes_its_cap(tmp_path, monkey
     kept = _lines(path)
     assert [entry["prompt_tokens"] for entry in kept] == [10]
     assert ledger.window()["input"] == 10
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+def test_a_fifo_at_the_ledger_path_is_neither_written_nor_read(tmp_path: Path) -> None:
+    """A planted FIFO costs the record, not the daemon.
+
+    The harm the kind check prevents is a **block**: a FIFO's open waits for a peer and
+    raises nothing, so no ``except`` bounds it — and both callers run on the daemon's event
+    loop, where that wait is the whole daemon and the only recovery is a restart. This
+    test finishing is the assertion that neither open happened; the three Nones say the
+    round was dropped rather than invented.
+    """
+    os.mkfifo(tmp_path / "usage-ledger.jsonl")
+    ledger, _clock = _ledger(tmp_path)
+
+    ledger.record({"prompt_tokens": 100, "cache_hit_tokens": 80, "completion_tokens": 5})
+
+    window = ledger.window()
+    assert (window["input"], window["cache"], window["output"]) == (None, None, None)
