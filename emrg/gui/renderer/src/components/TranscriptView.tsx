@@ -37,6 +37,32 @@ import { MarkdownText } from "./MarkdownText";
  * - 本组件不含滚动/欢迎屏副作用（Batch 5 接线时由宿主容器负责）。
  */
 
+/**
+ * 一条会话的滚动位置记录（issue #3024）。
+ *
+ * 只有两件事要记：视口停在哪个 `scrollTop`，以及离开时是否还在跟随（`following`
+ * 为真时，回来之后新到的内容依旧补滚到底）。记录只活在客户端内存里：关掉客户端
+ * 就没了，这是清单第 9 条要的「不跨客户端重启」。
+ */
+export interface ScrollRecord {
+  scrollTop: number;
+  following: boolean;
+}
+
+/** 会话 id → 它自己的滚动位置。 */
+export type ScrollMemory = Map<string, ScrollRecord>;
+
+/**
+ * 「在底部」的唯一判定（issue #3024 清单第 2 条）：**没有容差带**。
+ *
+ * 之前是 `scrollTop + clientHeight >= scrollHeight - 40`，于是离底 39px 也算在底部
+ * ——按钮凭空消失，而下一条流式文字把正在读的那一段甩走。现在只有贴底几种情况算：
+ * 差值小于 1px（`scrollTop` 在某些缩放下是小数，等于 0 的那一格与 1 之间就落在这里）。
+ */
+export function isAtBottom(el: { scrollTop: number; clientHeight: number; scrollHeight: number }): boolean {
+  return el.scrollHeight - el.clientHeight - el.scrollTop < 1;
+}
+
 export interface TranscriptViewProps {
   store: TranscriptStore;
   sid?: string | null;
@@ -52,6 +78,12 @@ export interface TranscriptViewProps {
   loading?: boolean;
   /** 滚动到顶 / 点击顶部条的回调（触发方防抖；vanilla loadOlderHistory 语义） */
   onLoadOlder?: () => void;
+  /**
+   * 每条会话的滚动位置（issue #3024 清单第 6、7 条）。必须由**不随本组件卸载而消失**
+   * 的那一层持有：切到别的页面时整个聊天区会被卸载，位置要活过那一次卸载，所以这份
+   * Map 归 `Shell`，这里只读写。不传时本组件自持一份，仅供单测与独立渲染使用。
+   */
+  scrollMemory?: { readonly current: ScrollMemory };
 }
 
 export function TranscriptView({
@@ -61,6 +93,7 @@ export function TranscriptView({
   hasMore = false,
   loading = false,
   onLoadOlder,
+  scrollMemory,
 }: TranscriptViewProps) {
   // 版本号快照：订阅的是**结构**版本 —— 条目集合变了才 +1。流式的文本增长不动它，所以
   // 每来一个 token 都不用把整条会话重新渲染一遍；条目自己的版本由 EntryView 单独订阅
@@ -79,15 +112,36 @@ export function TranscriptView({
   // 以下镜像 vanilla app.js:773-776（autoScroll 标志 + 底部 40px 容差）与 app.js:1711-1719
   // （回到底部悬浮按钮）。scroll 事件不冒泡 → 用 capture:true 监听（vanilla 同）。
   const viewportRef = useRef<HTMLDivElement>(null);
+  /** 滚动的**内容**外层：只有它的高度变化能反映图片解码、展开、重排（issue #3024）。 */
+  const contentRef = useRef<HTMLDivElement>(null);
   // autoScroll 用 ref（滚动高频，避免每帧 setState 重渲染）；atBottom 用 state（驱动按钮显隐）
   const autoScrollRef = useRef(true);
   const [atBottom, setAtBottom] = useState(true);
+  const sidKey = sid ?? "";
+  // 滚动事件与 ResizeObserver 的闭包不跟着每次重渲染重建，会话 id 走 ref
+  const sidKeyRef = useRef(sidKey);
+  sidKeyRef.current = sidKey;
+  // 位置记录归调用方（切页时本组件会卸载，见 `scrollMemory` 的注释）；不传时自持一份
+  const ownMemoryRef = useRef<ScrollMemory>(new Map());
+  const memoryRef = scrollMemory ?? ownMemoryRef;
 
-  const updateAutoScroll = useCallback((el: HTMLDivElement) => {
-    const ab = el.scrollTop + el.clientHeight >= el.scrollHeight - 40;
-    autoScrollRef.current = ab;
-    setAtBottom(ab);
-  }, []);
+  /** 把当前视口写进这条会话那一格（清单第 6 条：按会话分开，不是全局一个值）。 */
+  const rememberPosition = useCallback(
+    (el: HTMLDivElement, following: boolean) => {
+      memoryRef.current.set(sidKeyRef.current, { scrollTop: el.scrollTop, following });
+    },
+    [memoryRef],
+  );
+
+  const updateAutoScroll = useCallback(
+    (el: HTMLDivElement) => {
+      const ab = isAtBottom(el);
+      autoScrollRef.current = ab;
+      setAtBottom(ab);
+      rememberPosition(el, ab);
+    },
+    [rememberPosition],
+  );
 
   // scroll 监听（capture，因 scroll 不冒泡；挂在 .transcript-view 自身上，捕获子元素滚动）
   useEffect(() => {
@@ -106,6 +160,25 @@ export function TranscriptView({
     return () => el.removeEventListener("scroll", onScroll, { capture: true });
   }, [updateAutoScroll, hasMore, loading, onLoadOlder]);
 
+  // ── 高度变化也要重算（issue #3024 清单第 3、4 条） ──
+  // 图片解码完、侧栏拖宽后文字重新折行、工具组展开、输入框长高 —— 这些都只改高度，一个
+  // scroll 事件都不产生：判定与按钮于是停在变化前的取值上（明明在底部却不跟随），而跟随
+  // 本身也只订阅了 store 的写入计数（纯高度增长一条都不跟）。所以两处都盯：容器自己的盒子
+  // （窗口缩放、拖分隔条）与内容盒子（图片、展开、重排）。
+  // jsdom 没有 ResizeObserver —— 要钉这条规则的单测自己装一个假的，不用这个接口的用例不受影响。
+  useEffect(() => {
+    const el = viewportRef.current;
+    const content = contentRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => {
+      if (autoScrollRef.current) el.scrollTop = el.scrollHeight;
+      updateAutoScroll(el);
+    });
+    ro.observe(el);
+    if (content) ro.observe(content);
+    return () => ro.disconnect();
+  }, [updateAutoScroll]);
+
   // 新消息 append/流入 → 若 autoScroll 为 true 则滚到底。这一件事订阅的是每次变更都动的
   // `getVersion`（流式文本是原地 append 进已有段，结构不变），所以它住在独立的
   // `AutoScroll` 里：每个 token 只重渲染那一棵返回 null 的子树，条目列表不在它的渲染路径上。
@@ -117,6 +190,7 @@ export function TranscriptView({
     el.scrollTop = el.scrollHeight;
     autoScrollRef.current = true;
     setAtBottom(true);
+    rememberPosition(el, true);
   };
 
   // ── 前插的滚差补偿（宿主报障 2026-10-08 的第二半：上翻一页后视觉位置跳掉一屏） ──
@@ -139,8 +213,10 @@ export function TranscriptView({
   // 落到 `scrollHeight`，刚加载出来的一页会被立刻甩到底部——补偿白做。「回到底部」按钮
   // 的显隐由同一个判断驱动，所以两者始终一致。
   const prepends = store.getPrepends(sid);
-  const sidKey = sid ?? "";
-  const lastSidRef = useRef(sidKey);
+  // 初值是 null 而不是 sidKey：**挂载本身也要走一次恢复**。切到别的页面再回来是一次
+  // 重新挂载，初值若等于 sidKey，那一次就被当成「什么都没变」，位置永远落在底部
+  // （issue #3024 清单第 7 条要的正是这一次）。
+  const lastSidRef = useRef<string | null>(null);
   const lastPrependRef = useRef(prepends);
   const preCommitRef = useRef<{ scrollTop: number; scrollHeight: number } | null>(null);
   const viewportEl = viewportRef.current;
@@ -153,9 +229,24 @@ export function TranscriptView({
     const el = viewportRef.current;
     if (!el) return;
     if (lastSidRef.current !== sidKey) {
-      // 切会话：另一个桶的计数与本桶无关，重置而不是当成一次前插。
+      // 切会话（或切页回来重新挂载）：另一个桶的计数与本桶无关，重置而不是当成一次前插；
+      // 同时把这一条会话自己的位置接回来（issue #3024 清单第 6、7、8 条）。
       lastSidRef.current = sidKey;
       lastPrependRef.current = prepends;
+      const rec = memoryRef.current.get(sidKey);
+      if (rec) {
+        // 内容变短时记下的偏移可能超出新高度，夹回可滚动范围（浏览器自己也会夹，
+        // 但上面那句「判定与恢复用同一个值」不该依赖浏览器的夹取）。
+        el.scrollTop = Math.min(Math.max(rec.scrollTop, 0), Math.max(el.scrollHeight - el.clientHeight, 0));
+        autoScrollRef.current = rec.following;
+        setAtBottom(isAtBottom(el));
+      } else {
+        // 从没打开过的会话：贴底并跟随（清单第 8 条）。
+        el.scrollTop = el.scrollHeight;
+        autoScrollRef.current = true;
+        setAtBottom(true);
+        rememberPosition(el, true);
+      }
     } else if (prepends !== lastPrependRef.current) {
       lastPrependRef.current = prepends;
       const prev = preCommitRef.current;
@@ -168,33 +259,41 @@ export function TranscriptView({
   }, [structureVersion, prepends, sidKey, updateAutoScroll]);
 
   return (
-    <div className="transcript-view" data-testid="transcript-view" ref={viewportRef}>
-      {loadBar ? (
-        // 顶部历史条（宿主报障 2026-10-08：点击「↑ 加载更早消息」没有任何效果）。CSS 一直写着
-        // `cursor: pointer`、文案也一直是祈使句（"↑ 加载更早消息"），但它此前只是纯文本 div——
-        // 可点的样子、不可点的实体。`canLoadOlder(hasMore, loading)` 为真时它是**真按钮**
-        // （键盘可达、点击即触发与滚动到顶同一个防抖回调）；为假时（加载中 / 没有更多）退化为
-        // 状态文字，不再冒充控件。与上面的 scroll 触发读同一条规则（issue #1979）。
-        canLoadOlder(hasMore, loading) && onLoadOlder ? (
-          <button
-            type="button"
-            className="history-load-bar"
-            data-testid="history-load-bar"
-            onClick={onLoadOlder}
-          >
-            {loadBar}
-          </button>
-        ) : (
-          <div className="history-load-bar" data-testid="history-load-bar">
-            {loadBar}
-          </div>
-        )
-      ) : null}
-      {entries.map((entry, i) => (
-        <EntryView key={entry.id} entry={entry} index={i} t={t} md={md} store={store} sid={sid} />
-      ))}
+    // 外层不动、内层滚（issue #3024 清单第 1 条）：按钮此前画在滚动容器内部，`position:
+    // absolute` 于是把它放进**滚动内容**的坐标系 —— 上翻一屏就随内容一起滚出可视区，
+    // 判定说要显示，屏幕上什么也没有。现在它是这层不滚动的壳的子元素。
+    <div className="transcript-shell" data-testid="transcript-shell">
+      <div className="transcript-view" data-testid="transcript-view" ref={viewportRef}>
+        {loadBar ? (
+          // 顶部历史条（宿主报障 2026-10-08：点击「↑ 加载更早消息」没有任何效果）。CSS 一直写着
+          // `cursor: pointer`、文案也一直是祈使句（"↑ 加载更早消息"），但它此前只是纯文本 div——
+          // 可点的样子、不可点的实体。`canLoadOlder(hasMore, loading)` 为真时它是**真按钮**
+          // （键盘可达、点击即触发与滚动到顶同一个防抖回调）；为假时（加载中 / 没有更多）退化为
+          // 状态文字，不再冒充控件。与上面的 scroll 触发读同一条规则（issue #1979）。
+          canLoadOlder(hasMore, loading) && onLoadOlder ? (
+            <button
+              type="button"
+              className="history-load-bar"
+              data-testid="history-load-bar"
+              onClick={onLoadOlder}
+            >
+              {loadBar}
+            </button>
+          ) : (
+            <div className="history-load-bar" data-testid="history-load-bar">
+              {loadBar}
+            </div>
+          )
+        ) : null}
+      {/* 内容盒：只有它能观察到「高度变了但没有 scroll 事件」 */}
+      <div className="transcript-content" ref={contentRef}>
+        {entries.map((entry, i) => (
+          <EntryView key={entry.id} entry={entry} index={i} t={t} md={md} store={store} sid={sid} />
+        ))}
+      </div>
       {/* 跟随滚动：订阅每次变更（含每个 token），但它只重渲染自己 */}
       <AutoScroll store={store} viewportRef={viewportRef} autoScrollRef={autoScrollRef} />
+      </div>
       {!atBottom ? (
         <button
           type="button"

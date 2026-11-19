@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { act } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { TOOL_GROUP_TICK_MS, TranscriptView, summaryLine } from "./TranscriptView";
@@ -951,3 +952,253 @@ describe("#2980：组摘要的四种缺省", () => {
     ).toBe("2个工具执行 1.5s（read 正在读取文件…）");
   });
 });
+
+/**
+ * 聊天区滚动（issue #3024）：按钮的落点、贴底判定、高度变化的重算，以及每条会话自己的
+ * 位置。
+ *
+ * jsdom 既没有布局也没有真正的滚动。三条度量挂在 `HTMLElement.prototype` 上、读一个可变
+ * 对象，于是**重新挂载出来的新元素也戴同一副尺子**（切页回来那条用例正需要这一点）；
+ * 「按钮在不在可视区内」读的是结构与真实样式表的定位基准 —— 一次假造的屏幕坐标证明不了
+ * 任何事。
+ */
+describe("聊天区滚动（issue #3024）", () => {
+  const metrics = { scrollTop: 0, scrollHeight: 0, clientHeight: 400 };
+
+  function installMetrics(): void {
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+      configurable: true,
+      get: () => metrics.scrollHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+      configurable: true,
+      get: () => metrics.clientHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, "scrollTop", {
+      configurable: true,
+      get: () => metrics.scrollTop,
+      set: (v: number) => {
+        metrics.scrollTop = v;
+      },
+    });
+  }
+
+  afterEach(() => {
+    // jsdom 把这三条挂在 Element.prototype 上：删掉自造的那份就还原了
+    delete (HTMLElement.prototype as { scrollHeight?: unknown }).scrollHeight;
+    delete (HTMLElement.prototype as { clientHeight?: unknown }).clientHeight;
+    delete (HTMLElement.prototype as { scrollTop?: unknown }).scrollTop;
+    metrics.scrollTop = 0;
+    metrics.scrollHeight = 0;
+    metrics.clientHeight = 400;
+    vi.unstubAllGlobals();
+  });
+
+  type Memory = { current: Map<string, { scrollTop: number; following: boolean }> };
+
+  function view(store: TranscriptStore, sid: string | null, memory: Memory) {
+    return (
+      <I18nProvider lang="zh">
+        <TranscriptView store={store} sid={sid} renderer={fakeMd} scrollMemory={memory} />
+      </I18nProvider>
+    );
+  }
+
+  function metricsTo(scrollHeight: number, scrollTop: number, clientHeight = 400): void {
+    metrics.scrollHeight = scrollHeight;
+    metrics.scrollTop = scrollTop;
+    metrics.clientHeight = clientHeight;
+  }
+
+  it("按钮是滚动容器的兄弟而不是后代（清单第 1 条）", () => {
+    installMetrics();
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("bottom", "s1");
+    const { container } = setup(store, "s1");
+    const viewport = container.querySelector(".transcript-view") as HTMLElement;
+    metricsTo(1000, 0); // 上翻离底
+    act(() => {
+      viewport.dispatchEvent(new Event("scroll"));
+    });
+    const button = container.querySelector(".transcript-back-to-bottom");
+    expect(button).not.toBeNull();
+    // 挂在滚动容器内部 ⇒ 布局落在**滚动内容**的坐标系 ⇒ 随内容一起滚出可视区，
+    // 判定说要显示而屏幕上什么也没有。
+    expect(viewport.contains(button)).toBe(false);
+    const shell = container.querySelector(".transcript-shell");
+    expect(button!.parentElement).toBe(shell);
+    expect(shell!.contains(viewport)).toBe(true);
+  });
+
+  it("壳是定位基准、按钮绝对定位于其上，滚动容器不再是（清单第 1 条）", () => {
+    // vitest 的 import.meta.url 不是 file: 协议，按运行目录读真实样式表
+    const css = readFileSync("src/shell.css", "utf8");
+    expect(css.length).toBeGreaterThan(0); // 读成空串会让下面三条空转通过
+    const ruleOf = (selector: string): string =>
+      new RegExp(`${selector}\\s*\\{[^}]*\\}`).exec(css)?.[0] ?? "";
+    expect(ruleOf("\\.transcript-shell")).toMatch(/position:\s*relative/);
+    expect(ruleOf("\\.transcript-back-to-bottom")).toMatch(/position:\s*absolute/);
+    // 滚动容器若仍带 position:relative，按钮的定位基准就又回到滚动内容上
+    expect(ruleOf("\\.transcript-view")).not.toMatch(/position:\s*relative/);
+  });
+
+  it("离底 1px 即显示按钮，贴底才隐藏（清单第 2 条：没有容差带）", () => {
+    installMetrics();
+    const store = createTranscriptStore({ t: (k) => k });
+    const { container } = setup(store, "s1");
+    const viewport = container.querySelector(".transcript-view") as HTMLElement;
+
+    metricsTo(1000, 599); // 差 1px
+    act(() => {
+      viewport.dispatchEvent(new Event("scroll"));
+    });
+    expect(container.querySelector(".transcript-back-to-bottom")).not.toBeNull();
+
+    metricsTo(1000, 561); // 差 39px：旧的 40px 容差会把这里判成「在底部」
+    act(() => {
+      viewport.dispatchEvent(new Event("scroll"));
+    });
+    expect(container.querySelector(".transcript-back-to-bottom")).not.toBeNull();
+
+    metricsTo(1000, 600); // 贴底
+    act(() => {
+      viewport.dispatchEvent(new Event("scroll"));
+    });
+    expect(container.querySelector(".transcript-back-to-bottom")).toBeNull();
+  });
+
+  it("内容变高却没有 scroll 事件时，判定与跟随同步更新（清单第 3、4 条）", () => {
+    installMetrics();
+    const callbacks: Array<() => void> = [];
+    class FakeResizeObserver {
+      constructor(cb: () => void) {
+        callbacks.push(cb);
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    }
+    vi.stubGlobal("ResizeObserver", FakeResizeObserver);
+
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("x", "s1");
+    const { container } = setup(store, "s1");
+    const viewport = container.querySelector(".transcript-view") as HTMLElement;
+    metricsTo(1000, 600); // 在底部
+    act(() => {
+      viewport.dispatchEvent(new Event("scroll"));
+    });
+    expect(container.querySelector(".transcript-back-to-bottom")).toBeNull();
+    expect(callbacks.length).toBeGreaterThan(0);
+
+    // 图片解码完 / 文字重新折行：高度变了，**一个 scroll 事件都没有**
+    metricsTo(1400, 600);
+    act(() => {
+      callbacks.forEach((cb) => cb());
+    });
+    // 本来就在底部 → 补滚到新的底部，而不是停在旧高度上
+    expect(metrics.scrollTop).toBe(1400);
+    expect(container.querySelector(".transcript-back-to-bottom")).toBeNull();
+
+    // 不在底部时同一次高度变化只重算判定，不替读者滚动（读者自己滚上去，走真实的 scroll）
+    metricsTo(1400, 100);
+    act(() => {
+      viewport.dispatchEvent(new Event("scroll"));
+    });
+    metricsTo(1800, 100); // 又长高 400，仍然没有 scroll 事件
+    act(() => {
+      callbacks.forEach((cb) => cb());
+    });
+    expect(metrics.scrollTop).toBe(100);
+    expect(container.querySelector(".transcript-back-to-bottom")).not.toBeNull();
+  });
+
+  it("流式文字到达时照旧跟随：它是版本号而不是结构化消息（清单第 4 条）", () => {
+    installMetrics();
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("a", "s1");
+    const { container } = setup(store, "s1");
+    const viewport = container.querySelector(".transcript-view") as HTMLElement;
+    metricsTo(1000, 600); // 贴底
+    act(() => {
+      viewport.dispatchEvent(new Event("scroll"));
+    });
+    // 流式：第一条 delta 建出这条助手消息（结构确实变了），之后同一 request_id 的追加
+    // 只动内容版本 —— 跟随必须对**后者**也生效，否则每来一个 token 就冻住一次。
+    act(() => {
+      store.handleDelta([{ request_id: "r1", content: "a" }], "s1");
+    });
+    metrics.scrollHeight = 1200;
+    act(() => {
+      store.handleDelta([{ request_id: "r1", content: "more" }], "s1");
+    });
+    expect(metrics.scrollTop).toBe(1200);
+  });
+
+  it("每条会话各记自己的位置，互切各回各位；没打开过的贴底（清单第 6、8 条）", () => {
+    installMetrics();
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("a", "sa");
+    const memory: Memory = { current: new Map() };
+    const { container, rerender } = render(view(store, "sa", memory));
+    const viewport = container.querySelector(".transcript-view") as HTMLElement;
+
+    metricsTo(3000, 0);
+    metrics.scrollTop = 1200;
+    act(() => {
+      viewport.dispatchEvent(new Event("scroll"));
+    });
+    expect(memory.current.get("sa")).toEqual({ scrollTop: 1200, following: false });
+
+    // 切到从没打开过的 sb（内容短得多）：贴底并跟随，而不是沿用 sa 的 1200
+    metricsTo(800, 0);
+    rerender(view(store, "sb", memory));
+    expect(metrics.scrollTop).toBe(800);
+    expect(memory.current.get("sb")?.following).toBe(true);
+
+    // sb 停在 400，再切回 sa
+    metricsTo(800, 400);
+    act(() => {
+      viewport.dispatchEvent(new Event("scroll"));
+    });
+    metricsTo(3000, 400);
+    rerender(view(store, "sa", memory));
+    expect(metrics.scrollTop).toBe(1200); // 自己那一处，不是 sb 的 400
+    // 离开时不在跟随，回来仍不跟：新内容不把读者甩走
+    store.addUserMessage("while away", "sa");
+    expect(metrics.scrollTop).toBe(1200);
+  });
+
+  it("切到别的页面再回来（卸载后重新挂载）位置与跟随状态一并恢复（清单第 7 条）", () => {
+    installMetrics();
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("a", "s1");
+    const memory: Memory = { current: new Map() };
+
+    const first = render(view(store, "s1", memory));
+    const viewport = first.container.querySelector(".transcript-view") as HTMLElement;
+    metricsTo(2000, 0);
+    metrics.scrollTop = 700;
+    act(() => {
+      viewport.dispatchEvent(new Event("scroll"));
+    });
+    expect(memory.current.get("s1")).toEqual({ scrollTop: 700, following: false });
+
+    first.unmount(); // 切到 agent 页：聊天区整块被卸载
+    store.addUserMessage("while away", "s1"); // 期间到了新内容，文档变高
+    metricsTo(2400, 2400); // 重新挂载时浏览器给出的初值就是贴底
+
+    const second = render(view(store, "s1", memory));
+    const vp2 = second.container.querySelector(".transcript-view") as HTMLElement;
+    // 回来落在离开时那一处，不是底部
+    expect(metrics.scrollTop).toBe(700);
+    expect(second.container.querySelector(".transcript-back-to-bottom")).not.toBeNull();
+    // 跟随状态也一并恢复：不在底部，新内容不动视口
+    act(() => {
+      store.addUserMessage("after return", "s1");
+    });
+    expect(metrics.scrollTop).toBe(700);
+    void vp2;
+  });
+});
+
