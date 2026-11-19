@@ -88,6 +88,7 @@ from emrg.sandbox.roots import (
 )
 from emrg.server import content_risk_probe
 from emrg.server.tool_types import ToolResult
+from emrg.server.usage_ledger import UsageLedger
 from emrg.memory import (
     INDEX_COUNT_WARN,
     INDEX_SIZE_WARN,
@@ -184,6 +185,12 @@ from emrg.server.scheduler import (
 from emrg.server import logcontext
 
 logger = logging.getLogger(__name__)
+
+#: The rolling 24-hour token ledger's file (rant 2026-11-19T09:31:00). Module level, and
+#: read per call by `_usage_ledger` rather than captured in `__init__`: a ledger instance
+#: held on the server would put every test that drives a tool loop into the HOST's own
+#: file, which is the one file whose contents the host actually reads.
+_USAGE_LEDGER_PATH = config_dir() / "usage-ledger.jsonl"
 
 #: The tools a **host-named writable root** reaches (rant 2026-10-09T09:43:39).
 #:
@@ -3198,6 +3205,13 @@ class EmrgServer:
             # could forget to name.
             await self._handle_list_all_sessions(ws)
 
+        elif msg_type == "usage_window":
+            # Rant 2026-11-19T09:31:00: the host-wide last-24-hours totals. No session and
+            # no `cwd` -- the window is the subject, so there is no directory a caller
+            # could name to narrow it to whichever session it happens to have open, which
+            # is exactly the reading the host rejected.
+            await self._send(ws, {"type": "usage_window", **self._usage_ledger.window()})
+
         elif msg_type == "resolve_session_cwd":
             session_id = msg.get("session_id", "")
             if not session_id:
@@ -4663,12 +4677,6 @@ class EmrgServer:
         # tool set for it.
         force_ask = False
         round_num = 1
-        # Issue #2959: this turn's cumulative token count. The GUI's status band
-        # reports what the turn has spent, and a client that kept its own total
-        # would be a second ledger — one that drifts the moment a round is retried,
-        # a stream restarts, or another client watches the same turn. This one is
-        # written where the provider's usage is already read, and nowhere else.
-        turn_tokens = 0
         # Bound before the loop, not only at the end of each round: the
         # round-budget guard at the top of the loop reflects on `full_content`
         # and can be reached before any round has run (a `max_tool_rounds`
@@ -4751,18 +4759,21 @@ class EmrgServer:
             logger.debug("tool loop round %d: %d messages, %d tools",
                          round_num, len(messages), len(tools_openai))
 
-            # Issue #2959: one frame per round, carrying the round number and the
-            # turn's cumulative tokens. It is sent at the round's *start*, so the
-            # band's counter moves when a round begins rather than when one ends —
-            # a client watching a slow round sees that it is on round 4, not that it
-            # is still on round 3. `tokens` is the total of the rounds already
-            # finished; the round now starting has no usage yet.
+            # Issue #2959: one frame per round, carrying the round number. It is sent at
+            # the round's *start*, so the band's counter moves when a round begins rather
+            # than when one ends — a client watching a slow round sees that it is on
+            # round 4, not that it is still on round 3.
+            #
+            # The turn's cumulative tokens used to ride here and do not any more (rant
+            # 2026-11-19T09:31:00): that figure answered "what has this turn spent" while
+            # the host was asking "what have I spent today", and it restarted with every
+            # session switch and GUI restart. The spend is the `usage_window` request's
+            # now — one ledger, the last 24 hours, kept by the daemon.
             await self._broadcast(session.session_id, {
                 "type": "turn_progress",
                 "session_id": session.session_id,
                 "request_id": req.id,
                 "round": round_num,
-                "tokens": turn_tokens,
             })
 
             # Auto-compact: if token count exceeds threshold, compact before this round
@@ -5047,10 +5058,12 @@ class EmrgServer:
             # round emits exactly one anchor-bias-heartbeat with an explicit
             # state (anchored=true / anchored=false + reason) so a skipped
             # round is a labeled observation, not an absence.
-            # Issue #2959: fold this round's real usage into the turn's total before
-            # the anchor refresh below reads the same dict. `turn_progress` next round
-            # reports it; nothing else writes this counter.
-            turn_tokens += self._counted_tokens(final_usage)
+            # Rant 2026-11-19T09:31:00: this round's real usage goes into the rolling
+            # 24-hour ledger before the anchor refresh below reads the same dict, and this
+            # is its only writer. A per-turn counter used to sit here; it reset with every
+            # session switch and GUI restart, which is why a day's spend could not be read
+            # from it.
+            self._usage_ledger.record(final_usage)
             self._refresh_usage_anchor(
                 session, final_usage, request_messages, tools_openai
             )
@@ -5538,27 +5551,16 @@ class EmrgServer:
         pct = round(hit / prompt * 100)
         return f", cache {pct}%"
 
-    @staticmethod
-    def _counted_tokens(usage: dict | None) -> int:
-        """Tokens one round spent, as the provider reported them.
+    @property
+    def _usage_ledger(self) -> UsageLedger:
+        """The rolling 24-hour ledger, resolved per call (rant 2026-11-19T09:31:00).
 
-        `prompt_tokens + completion_tokens` — the two counts every OpenAI-compatible
-        endpoint reports. A missing or non-numeric field counts as 0 rather than
-        raising: an endpoint that reports only one of them is still a measurement,
-        and a turn's total must not turn into a guess because one round was odd.
-
-        This is the quantity the status band shows (issue #2959). It is **not** money:
-        no price is configured anywhere the client can read, so a currency figure
-        would be invented rather than derived.
+        Resolved rather than held on the server. A ledger built in `__init__` would follow
+        every test that drives a tool loop into the HOST's file, and that file is the one
+        the host reads to see what a day cost; `_USAGE_LEDGER_PATH` is the seam that keeps
+        a test on its own.
         """
-        if not usage:
-            return 0
-        total = 0
-        for key in ("prompt_tokens", "completion_tokens"):
-            value = usage.get(key)
-            if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
-                total += int(value)
-        return total
+        return UsageLedger(_USAGE_LEDGER_PATH)
 
     # ── Token estimation helpers ──────────────────────────────
 

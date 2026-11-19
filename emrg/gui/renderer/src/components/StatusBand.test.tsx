@@ -7,11 +7,15 @@ import { STATUS_BAND_HEIGHT } from "../lib/cockpit";
 /**
  * StatusBand.test.tsx — the one row that is always on screen (issue #2959 item 1).
  *
- * Two of its cells are readings of the daemon (`round` from `turn_progress`, `tokens`
- * from the same frame) and one is derived from a daemon timestamp (`startedAtMs`).
+ * Two of its cells are readings of the daemon (`round` from `turn_progress`, and the
+ * rolling 24-hour window) and one is derived from a daemon timestamp (`startedAtMs`).
  * All three are asserted with a number *and* with `null`, because "the daemon has not
  * reported" must render as `—` rather than as round 1 or as zero tokens — an invented
  * reading is the defect class this cockpit exists to remove.
+ *
+ * The window is three segments and never a total (rant 2026-11-19T09:31:00), and each
+ * segment is `null` on its own: an endpoint that never reports cache hits must show `—`
+ * there while input and output still read.
  */
 
 function setup(props: Partial<Parameters<typeof StatusBand>[0]> = {}) {
@@ -24,7 +28,7 @@ function setup(props: Partial<Parameters<typeof StatusBand>[0]> = {}) {
       <StatusBand
         running={false}
         round={null}
-        tokens={null}
+        usage={null}
         leftOpen
         rightOpen
         {...handlers}
@@ -47,17 +51,50 @@ describe("StatusBand", () => {
     expect(screen.getByTestId("band-state")).toHaveClass("idle");
   });
 
-  it("运行中 + 有轮数 + 有 token：三个格子都报读数", () => {
-    setup({ running: true, round: 3, tokens: 1500 });
+  it("运行中 + 有轮数 + 有窗口：三个格子都报读数", () => {
+    setup({
+      running: true,
+      round: 3,
+      usage: { input: 12_300_000, cache: 11_100_000, output: 245_000, windowStart: 0, windowEnd: 1 },
+    });
     expect(screen.getByTestId("band-state")).toHaveTextContent("Running");
     expect(screen.getByTestId("band-round")).toHaveTextContent("round 3");
-    expect(screen.getByTestId("band-spend")).toHaveTextContent("1.5k tokens");
+    expect(screen.getByTestId("band-usage")).toHaveTextContent(
+      "24h in 12.3M · cache 11.1M · out 245.0k",
+    );
+  });
+
+  it("一段没测定就画 —，不画 0：三段各自独立", () => {
+    setup({
+      running: true,
+      usage: { input: 1000, cache: null, output: 5, windowStart: 0, windowEnd: 1 },
+    });
+    expect(screen.getByTestId("band-usage")).toHaveTextContent("24h in 1.0k · cache — · out 5");
+  });
+
+  it("状态带不再说「累计」：窗口是三个独立段，不是一个当轮总数", () => {
+    // rant 2026-11-19T09:31:00 的中文口径：宿主看到的必须是最近 24 小时，而不是「本轮累计」。
+    render(
+      <I18nProvider lang="zh">
+        <StatusBand
+          running
+          round={1}
+          usage={{ input: 1000, cache: 900, output: 10, windowStart: 0, windowEnd: 1 }}
+          leftOpen
+          rightOpen
+          onToggleLeft={vi.fn()}
+          onToggleRight={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+    expect(screen.getByTestId("status-band").textContent).not.toContain("累计");
+    expect(screen.getByTestId("band-usage")).toHaveTextContent("24h 输入 1.0k · 缓存 900 · 输出 10");
   });
 
   it("daemon 还没报 → 画 —，不画第 1 轮、也不画 0 token", () => {
-    setup({ running: true, round: null, tokens: null });
+    setup({ running: true, round: null, usage: null });
     expect(screen.getByTestId("band-round")).toHaveTextContent("round —");
-    expect(screen.getByTestId("band-spend")).toHaveTextContent("— tokens");
+    expect(screen.getByTestId("band-usage")).toHaveTextContent("24h in — · cache — · out —");
   });
 
   it("计时来自 daemon 的轮开始时刻：中途打开也显示已过去的时间", () => {
@@ -72,7 +109,12 @@ describe("StatusBand", () => {
   });
 
   it("只有四项读数与两个栏开关：会话标题、模型、消息条数都不在这行里（issue #2969）", () => {
-    setup({ running: true, round: 2, tokens: 3400, startedAtMs: Date.now() - 65_000 });
+    setup({
+      running: true,
+      round: 2,
+      usage: { input: 3000, cache: 2000, output: 400, windowStart: 0, windowEnd: 1 },
+      startedAtMs: Date.now() - 65_000,
+    });
     const band = screen.getByTestId("status-band");
     // 四个变的读数……
     expect(band.querySelectorAll(".band-state, .band-item")).toHaveLength(4);

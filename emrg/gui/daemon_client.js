@@ -969,6 +969,16 @@ class DaemonClient {
   // 所以：每类型一条 FIFO 队列，清理一律按 **entry 身份**。
   // 两条同类型命令的响应体在协议上不可区分，因此「第一条帧配第一条命令」是能做
   // 到的最强配对；对 `listSessions` 这类调用者，两者拿到的本来就是同一份数据。
+  /** The daemon's rolling 24-hour token window (rant 2026-11-19T09:31:00).
+   *
+   * One question, one answer: the daemon owns the ledger, so the GUI asks for the window
+   * rather than adding up the usage frames it happened to see. The answer's frame type is
+   * the command's own, which `sendCommandAndWait` already pairs by.
+   */
+  usageWindow(timeoutMs = 10000) {
+    return this.sendCommandAndWait("usage_window", {}, timeoutMs);
+  }
+
   sendCommandAndWait(commandType, payload = {}, timeoutMs = PENDING_TIMEOUT_MS) {
     const respType = RESPONSE_TYPES[commandType] || commandType;
     return new Promise((resolve, reject) => {

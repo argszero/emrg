@@ -1,28 +1,20 @@
-"""One `turn_progress` frame per round: the round number and the turn's token total.
+"""One `turn_progress` frame per round, carrying the round number and nothing else.
 
-Issue #2959 rebuilt the GUI into an agent cockpit, and the cockpit's status band
-reports two numbers the contract names — which round of the turn is running, and how
-many tokens the turn has spent. Both were previously unobservable from any client:
-`round_num` lived only inside the daemon's tool loop, and the usage anchors were
-server-internal bookkeeping for auto-compaction.
+Issue #2959 rebuilt the GUI into an agent cockpit, and the cockpit's status band reports
+which round of the turn is running. `round_num` had lived only inside the daemon's tool
+loop before that, so no client could see it, and the frame is what makes it observable.
 
-The reason the numbers are the daemon's and not a client's is the whole point of the
-frame: a client that counted rounds would answer with its own arithmetic the moment a
-stream restarts or a second window watches the same turn, and a client that added up
-usage would be a second ledger that drifts from the one the provider bills. So the
-subjects here are:
+The number is the daemon's and not a client's, which is the whole point of the frame: a
+client that counted rounds would answer with its own arithmetic the moment a stream
+restarts or a second window watches the same turn.
 
-* **the live frame, read off the wire.** `_run_tool_loop` is driven with a stubbed LLM
-  that reports usage on every round, and the `turn_progress` broadcasts are read in
-  order. A counter computed but never attached to a frame fails here, which a unit test
-  of `_counted_tokens` alone would have passed.
-* **the ordering the band depends on.** The frame is sent at the round's *start*, so a
-  client watching a slow round sees that it is on round 4 rather than on round 3 — the
-  round now beginning has no usage yet, so its frame carries what the finished rounds
-  spent.
-* **the count itself, in both directions.** A provider that reports only one of the two
-  fields is still a measurement; a missing field, a string, a bool or a negative number
-  is not, and none of them may raise.
+**The spend is no longer here** (rant 2026-11-19T09:31:00). This frame also carried the
+turn's cumulative tokens; that figure reset every time a session was switched, a window
+closed or the GUI restarted, so it answered "what has this turn spent" while the host was
+asking "what have I spent today". The window — last 24 hours, three segments, read from
+the daemon's own ledger — is answered by the `usage_window` request instead, and its
+tests are in `test_usage_ledger.py`. What is left to pin here is the round number and the
+addresses a window with several sessions open needs to route by.
 
 No daemon is started, stopped or restarted: `_run_tool_loop` is called directly, with
 the broadcast stubbed, in the shape `test_tool_call_batch_label.py` established.
@@ -32,8 +24,6 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-
-import pytest
 
 from emrg.config import LlmConfig
 from emrg.protocol import TaskRequest
@@ -56,11 +46,11 @@ def _make_server(tmp_path: Path) -> EmrgServer:
     return server
 
 
-def _drive(tmp_path: Path, monkeypatch, usages: list[dict | None]) -> list[dict]:
-    """Run one tool loop whose first rounds emit a tool call, returning every frame.
+def _drive(tmp_path: Path, monkeypatch) -> list[dict]:
+    """Run one tool loop whose first two rounds emit a tool call, returning its frames.
 
-    `usages[i]` is the usage the provider reports on round `i`. The last round emits
-    no tool call, which is what ends the loop.
+    The third round emits no tool call, which is what ends the loop. Usage is reported on
+    every round because a real provider does — and because a frame must not depend on it.
     """
     monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH",
                         tmp_path / "planted-fire-heartbeat")
@@ -77,9 +67,8 @@ def _drive(tmp_path: Path, monkeypatch, usages: list[dict | None]) -> list[dict]
     async def fake_stream(messages, tools=None):
         index = state["round"]
         state["round"] += 1
-        usage = usages[index] if index < len(usages) else None
-        last = index == len(usages) - 1
-        if last:
+        usage = {"prompt_tokens": 10 * index, "completion_tokens": 5}
+        if index == 2:
             yield {"content": "done", "tool_calls": None,
                    "finish_reason": "stop", "usage": usage}
         else:
@@ -105,55 +94,25 @@ def _drive(tmp_path: Path, monkeypatch, usages: list[dict | None]) -> list[dict]
 
 def test_one_frame_per_round_with_the_round_number(tmp_path, monkeypatch):
     """Three rounds → three frames, numbered 1, 2, 3 in the order they were sent."""
-    frames = _drive(tmp_path, monkeypatch, [
-        {"prompt_tokens": 10, "completion_tokens": 5},
-        {"prompt_tokens": 20, "completion_tokens": 5},
-        {"prompt_tokens": 30, "completion_tokens": 5},
-    ])
+    frames = _drive(tmp_path, monkeypatch)
     assert [f["round"] for f in frames] == [1, 2, 3]
 
 
-def test_the_total_is_the_rounds_already_finished(tmp_path, monkeypatch):
-    """Round 1 reports 0 spent; each later frame carries the finished rounds' total."""
-    frames = _drive(tmp_path, monkeypatch, [
-        {"prompt_tokens": 10, "completion_tokens": 5},
-        {"prompt_tokens": 20, "completion_tokens": 3},
-        {"prompt_tokens": 30, "completion_tokens": 1},
-    ])
-    assert [f["tokens"] for f in frames] == [0, 15, 38]
+def test_the_frame_carries_no_spend_reading(tmp_path, monkeypatch):
+    """The turn's token total is gone (rant 2026-11-19T09:31:00): no frame carries one.
 
-
-def test_a_round_with_no_usage_adds_nothing_and_does_not_raise(tmp_path, monkeypatch):
-    """A provider that reports no usage on one round is a 0, not an exception."""
-    frames = _drive(tmp_path, monkeypatch, [
-        None,
-        {"prompt_tokens": 7, "completion_tokens": 3},
-    ])
-    assert [f["tokens"] for f in frames] == [0, 0]
+    This is the deletion's guard. A frame that kept `tokens` — even always at 0 — would
+    leave the client two sources for the same word, and the per-turn one is the source the
+    host complained about.
+    """
+    frames = _drive(tmp_path, monkeypatch)
+    assert frames
+    assert all("tokens" not in f for f in frames)
 
 
 def test_the_frame_names_the_session_and_the_request(tmp_path, monkeypatch):
     """A window with several sessions open can address the frame it was given."""
-    frames = _drive(tmp_path, monkeypatch, [{"prompt_tokens": 1, "completion_tokens": 1}])
+    frames = _drive(tmp_path, monkeypatch)
     assert frames
     assert frames[0]["session_id"] == "turn-progress"
     assert frames[0]["request_id"] == "req-progress"
-
-
-@pytest.mark.parametrize(
-    "usage,expected",
-    [
-        (None, 0),
-        ({}, 0),
-        ({"prompt_tokens": 10}, 10),
-        ({"completion_tokens": 4}, 4),
-        ({"prompt_tokens": 10, "completion_tokens": 4}, 14),
-        # 非数字与负数是「那次读数不可用」，不是 0 也算不进总数
-        ({"prompt_tokens": "10", "completion_tokens": 4}, 4),
-        ({"prompt_tokens": -5, "completion_tokens": 4}, 4),
-        ({"prompt_tokens": True, "completion_tokens": 4}, 4),
-    ],
-)
-def test_counted_tokens_reads_what_the_provider_reported(usage, expected):
-    """One field is a measurement; a wrong type or a negative number is not."""
-    assert EmrgServer._counted_tokens(usage) == expected

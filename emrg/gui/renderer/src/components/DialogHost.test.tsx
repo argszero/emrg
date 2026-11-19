@@ -35,7 +35,7 @@ function appState(over: Partial<DaemonAppState> = {}): DaemonAppState {
     // No `turn_progress` frame has reached this fixture (issue #2959), so neither the
     // round nor the turn's token total has been reported — absent, not zero.
     roundBySid: {},
-    turnTokensBySid: {},
+    usageWindow: null,
     // No rewind has been announced to this fixture (#2351) — the counter is only
     // ever compared for change, and "absent" is the state before any `rewind_result`.
     rewoundBySid: {},

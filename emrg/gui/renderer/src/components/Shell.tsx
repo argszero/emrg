@@ -589,13 +589,15 @@ export function Shell() {
 
   // ── The status band's two daemon readings: the running round, and the spend ──
   //
-  // Both come from `turn_progress`, the frame the daemon broadcasts at the top of every
-  // round. Neither is derived here: a client that counted rounds, or added up usage it
-  // happened to see, would answer with its own arithmetic the moment a stream restarts
-  // or another window watches the same turn. `null` is "not reported", which the band
-  // renders as `—` rather than as round 1 or as zero tokens.
+  // The round comes from `turn_progress`, the frame the daemon broadcasts at the top of
+  // every round; the spend is the daemon's rolling 24-hour window (rant
+  // 2026-11-19T09:31:00), read by the bridge and not counted here. Neither is derived:
+  // a client that counted rounds, or added up usage it happened to see, would answer
+  // with its own arithmetic the moment a stream restarts or another window watches the
+  // same turn. `null` is "not reported", which the band renders as `—` rather than as
+  // round 1 or as zero tokens.
   const round = activeSid ? (appState.roundBySid[activeSid] ?? null) : null;
-  const turnTokens = activeSid ? (appState.turnTokensBySid[activeSid] ?? null) : null;
+  const usageWindow = appState.usageWindow;
 
   /**
    * Where the inspector's two trees are rooted (issue #3026).
@@ -1110,7 +1112,7 @@ export function Shell() {
         running={busy}
         round={round}
         startedAtMs={activeTurnStart}
-        tokens={turnTokens}
+        usage={usageWindow}
         leftOpen={leftOpen}
         rightOpen={rightOpen}
         onToggleLeft={() => setLeftOpen((v) => !v)}
