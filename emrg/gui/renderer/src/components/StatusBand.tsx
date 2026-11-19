@@ -1,14 +1,14 @@
 import { useI18n } from "../lib/i18n";
 import { formatElapsed } from "../lib/sidebar";
-import { STATUS_BAND_HEIGHT, formatRound, formatTokens } from "../lib/cockpit";
+import { STATUS_BAND_HEIGHT, formatTokens } from "../lib/cockpit";
 import type { UsageWindowReading } from "../lib/daemonBridge";
 
 /**
  * StatusBand — the 44px row that replaces the application header (issue #2959 item 1).
  *
- * It carries **only what moves** (issue #2969): whether a turn is running, which round
- * it is on, how long it has been running, and what the last 24 hours cost. Four readings,
- * and that is the whole row's left side. The last one is a *window*, not this turn
+ * It carries **only what moves** (issue #2969): whether a turn is running, how long it
+ * has been running, and what the last 24 hours cost. Three readings, and that is the
+ * whole row's left side. The last one is a *window*, not this turn
  * (rant 2026-11-19T09:31:00): it survives a session switch and a GUI restart, which is
  * the whole reason it replaced the per-turn total. What does not move — the
  * session's title, its id, the model, the message count — is not here: the title is in
@@ -21,8 +21,6 @@ import type { UsageWindowReading } from "../lib/daemonBridge";
  */
 export interface StatusBandProps {
   running: boolean;
-  /** Rounds this turn has run; `null` = the daemon has not reported one. */
-  round: number | null;
   /** Turn start, epoch ms — the daemon's instant, never this client's receipt time. */
   startedAtMs?: number;
   /**
@@ -43,7 +41,6 @@ export interface StatusBandProps {
 
 export function StatusBand({
   running,
-  round,
   startedAtMs,
   usage,
   leftOpen,
@@ -66,10 +63,6 @@ export function StatusBand({
       <span className={`band-state ${running ? "running" : "idle"}`} data-testid="band-state">
         <i />
         {running ? t("band.running") : t("band.idle")}
-      </span>
-      <span className="band-sep" />
-      <span className="band-item" data-testid="band-round" title={t("band.roundTitle")}>
-        {t("band.round", { n: formatRound(round) })}
       </span>
       <span className="band-sep" />
       <span className="band-item band-mono" data-testid="band-elapsed">
