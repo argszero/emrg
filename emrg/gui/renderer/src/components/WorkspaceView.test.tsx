@@ -201,8 +201,8 @@ describe("WorkspaceView", () => {
     const badges = screen.getAllByTestId("rant-status-badge");
     expect(badges[0]).toHaveTextContent("待处理");
     expect(badges[1]).toHaveTextContent("已完成");
-    // 内容列摘要：md 标题去除
-    expect(screen.getByText("待处理", { selector: ".rant-col-content" })).toBeInTheDocument();
+    // 内容列摘要（issue #3015）：跳过「## 待处理」这个节标题，显示第一段正文
+    expect(screen.getByText("正文", { selector: ".rant-col-content" })).toBeInTheDocument();
     // 筛选：点"已完成" → 只剩 1 行
     await userEvent.click(screen.getByRole("button", { name: "已完成" }));
     expect(screen.getAllByTestId("rant-row")).toHaveLength(1);
@@ -216,6 +216,24 @@ describe("WorkspaceView", () => {
     expect(document.querySelector(".rant-md")).toHaveTextContent("正文");
     await userEvent.click(screen.getAllByTestId("rant-row")[0]);
     expect(document.querySelector(".rant-detail")).toBeNull();
+  });
+
+  // issue #3015：内容列短了，但搜索仍按整篇正文匹配——只出现在后面段落里的词必须还能搜到。
+  it("Rant 搜索：摘要没显示的词仍能命中（按整篇正文匹配）", async () => {
+    const rants = [
+      rant({
+        timestamp: "2026-11-19T10:13:01+08:00",
+        message: "## 要什么\n第一段正文\n\n## 为什么\n独角兽这个词只在后面",
+      }),
+      rant({ timestamp: "2026-11-19T09:14:14+08:00", message: "## 要什么\n另一条" }),
+    ];
+    setup({ activeView: "rants", rants });
+    expect(screen.getAllByTestId("rant-row")).toHaveLength(2);
+    // 内容列是第一段正文，不含后面段落里的那个词
+    expect(screen.getByText("第一段正文", { selector: ".rant-col-content" })).toBeInTheDocument();
+    expect(screen.queryByText(/独角兽/, { selector: ".rant-col-content" })).toBeNull();
+    await userEvent.type(screen.getByTestId("rants-search"), "独角兽");
+    expect(screen.getAllByTestId("rant-row")).toHaveLength(1);
   });
 
   it("Rant 空态：filter 空 → empty；filter 有值 → emptyFiltered", async () => {
