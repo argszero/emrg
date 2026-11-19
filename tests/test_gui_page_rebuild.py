@@ -323,4 +323,4 @@ def test_the_renderer_carries_no_stylesheet_the_entry_does_not_import() -> None:
     shipped = _shipped_sheets()
     assert shipped - imported == set(), sorted(str(p) for p in shipped - imported)
     assert imported - shipped == set(), sorted(str(p) for p in imported - shipped)
-    assert len(shipped) == 7, sorted(p.name for p in shipped)
+    assert len(shipped) == 8, sorted(p.name for p in shipped)

@@ -146,8 +146,11 @@ class StreamingMarkdown(Widget):
     until the fence closes) to avoid flickering syntax highlighting.
 
     Args:
-        code_theme: Pygments theme for code blocks. Empty (the default) follows the
-            resolved terminal theme; a value here overrides it.
+        code_theme: The code blocks' pygments theme — a style name, or a
+            `rich.syntax.PygmentsSyntaxTheme` when the appearance was never measured
+            and that theme brings no colours of its own (issue #3013). Empty (the
+            default) follows whatever `theme.code_theme()` resolves to; a value here
+            overrides it.
 
     Usage:
         stream = StreamingMarkdown()
@@ -158,7 +161,7 @@ class StreamingMarkdown(Widget):
 
     _buffer: str = ""
     _dirty: bool = True
-    code_theme: str = ""
+    code_theme: object = ""
     _last_rendered: list[Line] = field(default_factory=list)
     #: The daemon's moment for this reply. Empty while a turn is streaming — the
     #: value does not exist until the record is written — and set from the `done`
