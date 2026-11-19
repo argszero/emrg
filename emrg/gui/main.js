@@ -904,6 +904,21 @@ vision = false
 
     // 右栏工作区面板 P1（rant 2026-08-11T12:20:35）：list_files / read_file 透传
     // 走 requireConn() = 当前会话连接天然认证；daemon list_files → files_list
+    // Rant 2026-11-19T09:31:00：状态带的花费读数是最近 24 小时的滚动窗口，由 daemon
+    // 记账（重启不归零）。渲染层只读这一份，不自己累加——否则窗口一关就从零开始，
+    // 正是宿主不接受的那个口径。
+    ipcMain.handle("emrg:usageWindow", async () => {
+      const frame = await requireConn().sendCommandAndWait("usage_window", {}, 10000);
+      if (frame.error) throw new Error(frame.error);
+      return {
+        input: frame.input ?? null,
+        cache: frame.cache ?? null,
+        output: frame.output ?? null,
+        windowStart: frame.window_start ?? null,
+        windowEnd: frame.window_end ?? null,
+      };
+    });
+
     ipcMain.handle("emrg:listFiles", async (_e, { path: p } = {}) => {
       if (typeof p !== "string" || !p.trim()) throw new Error("invalid path");
       const frame = await requireConn().sendCommandAndWait("list_files", { path: p.trim() }, 10000);

@@ -28,6 +28,7 @@ const EXPECTED_INVOKE_METHODS = [
   "init",
   "sendMessage",
   "listSessions",
+  "usageWindow",
   "restartDaemon",
   "relaunchGui",
   "switchSession",

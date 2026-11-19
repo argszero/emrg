@@ -34,6 +34,10 @@ _REAL_CONFIG_FILES = (
     (Path.home() / ".emrg" / "config.toml").resolve(),
     (Path.home() / ".emrg" / "agents.yml").resolve(),
     (Path.home() / ".emrg" / "tasks.yml").resolve(),
+    # The 24-hour token ledger (rant 2026-11-19T09:31:00). Not a config file, but the one
+    # file whose contents the host actually reads to see what a day cost — a test that
+    # appended fabricated tokens to it would move that answer, silently and for a day.
+    (Path.home() / ".emrg" / "usage-ledger.jsonl").resolve(),
 )
 
 
@@ -141,6 +145,25 @@ def _guard_real_config_files(monkeypatch):
     # patched; measured, dropping either one leaves the other's callers open.
     monkeypatch.setattr(builtins, "open", guarded_open)
     monkeypatch.setattr(io, "open", guarded_io_open)
+
+
+@pytest.fixture(autouse=True)
+def _redirect_the_usage_ledger(monkeypatch, tmp_path):
+    """Every test's 24-hour token ledger is its own file.
+
+    Nineteen test modules drive `_run_tool_loop`, and the loop records the provider's
+    usage in the daemon's ledger on every round it finishes (rant 2026-11-19T09:31:00).
+    Left alone, one suite run would append thousands of fabricated tokens to the HOST's
+    ``~/.emrg/usage-ledger.jsonl`` — changing the very number the host opens the status
+    band to read, and keeping it wrong for a day.
+
+    Autouse for the same reason as the guards above: the test that would leak is the one
+    written three commits from now. The path is a module-level constant read per call, so
+    patching it here reaches every write.
+    """
+    import emrg.server.daemon as daemon_mod
+
+    monkeypatch.setattr(daemon_mod, "_USAGE_LEDGER_PATH", tmp_path / "usage-ledger.jsonl")
 
 
 @pytest.fixture(autouse=True)

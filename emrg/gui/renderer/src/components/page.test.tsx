@@ -104,7 +104,7 @@ describe("StatusBand", () => {
         <StatusBand
           running={false}
           round={null}
-          tokens={null}
+          usage={null}
           leftOpen
           rightOpen
           onToggleLeft={noop}

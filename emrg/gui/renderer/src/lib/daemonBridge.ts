@@ -143,15 +143,14 @@ export interface DaemonAppState {
    */
   roundBySid: Record<string, number>;
   /**
-   * Cumulative tokens this turn has spent, per the same frame (issue #2959).
+   * The daemon's rolling 24-hour token window (rant 2026-11-19T09:31:00).
    *
-   * The daemon adds them up from the provider's own `usage` (`daemon._counted_tokens`)
-   * because a client cannot: a compaction, a retried round or another client's turn
-   * all move the total where only the loop can see it. Absent = not reported, which is
-   * not zero — a turn with no usage reported yet and a turn that spent nothing are
-   * different claims, and only the first one is what an absent key means.
+   * `null` = the daemon has not answered one yet. It is **not** per session and it is
+   * not per turn: the window covers whatever was spent in the last 24 hours, so it
+   * survives a session switch, a window close and a GUI restart — that figure was the
+   * defect the host reported. What replaced it is one ledger in the daemon, read here.
    */
-  turnTokensBySid: Record<string, number>;
+  usageWindow: UsageWindowReading | null;
   /**
    * How many rewinds of each session this client has been told about (#2351).
    *
@@ -408,7 +407,7 @@ export function createDaemonAppStore(): SnapshotStore<DaemonAppState> {
     busyBySid: {},
     turnStartBySid: {},
     roundBySid: {},
-    turnTokensBySid: {},
+    usageWindow: null,
     rewoundBySid: {},
     disconnectedBySid: {},
     sandboxBySid: {},
@@ -456,6 +455,29 @@ export interface InitResult {
 }
 
 /** 注入依赖（onEvent/emrg 不设默认，接线层显式传入） */
+/**
+ * The daemon's rolling 24-hour window (rant 2026-11-19T09:31:00).
+ *
+ * Three segments kept apart, and each is `null` when no response in the window reported
+ * it: a client that showed 0 there would claim nothing was spent, where the truth is that
+ * nothing measured it. `windowStart`/`windowEnd` say which 24 hours these are, so a client
+ * can label the figure with the daemon's clock rather than its own.
+ */
+export interface UsageWindowReading {
+  input: number | null;
+  cache: number | null;
+  output: number | null;
+  windowStart: number | null;
+  windowEnd: number | null;
+}
+
+/** A count the daemon reported, or `null` — never a number invented from a bad answer. */
+function aReportedCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : null;
+}
+
 export interface DaemonBridgeDeps {
   onEvent: (cb: (evt: DaemonEventFrame) => void) => () => void;
   emrg: {
@@ -479,6 +501,21 @@ export interface DaemonBridgeDeps {
      */
     reorderOpenSessions?(p: { sids: string[] }): Promise<unknown>;
     init?(): Promise<InitResult>;
+    /**
+     * The daemon's rolling 24-hour token window (preload.usageWindow；未接线时为
+     * undefined) — rant 2026-11-19T09:31:00.
+     *
+     * The daemon owns the ledger, so the GUI asks for the window instead of adding up
+     * usage it happened to see: a client's own total is a second ledger, and it is the
+     * one that resets every time a window closes.
+     */
+    usageWindow?(): Promise<{
+      input?: unknown;
+      cache?: unknown;
+      output?: unknown;
+      windowStart?: unknown;
+      windowEnd?: unknown;
+    }>;
     /** 回答 daemon 的提权提问（preload.respondApproval；未接线时为 undefined） */
     respondApproval?(p: {
       sessionId: string;
@@ -909,40 +946,45 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
         // Rant 2026-09-02T10:36:26：daemon 权威 turn 开始（含后台演化/其他客户端
         // turn）——记 start 时刻并置 busy；计时基准与 TUI 同一来源。
         //
-        // issue #2959：新一轮也是状态带那两个读数的起点。`turn_progress` 只写不清
-        // （理由在该 case 里），所以上一轮的数字会一直挂到本轮第一帧为止——那一瞬间
-        // 把上一轮的花费读成这一轮的，是这套读数唯一能骗人的窗口。这里连同 busy
-        // 一起清掉，两个读数于是和「这一轮开始了」同时归零。
+        // issue #2959：新一轮是状态带轮次读数的起点。`turn_progress` 只写不清（理由
+        // 在该 case 里），所以上一轮的轮数会一直挂到本轮第一帧为止；这里连同 busy
+        // 一起清掉，轮数于是和「这一轮开始了」同时归零。
+        //
+        // 花费不再是这里的事（rant 2026-11-19T09:31:00）：那是最近 24 小时的窗口，
+        // 换会话、关窗口、重启 GUI 都不该动它，所以它也不再由「新一轮」清零。
         const startedAt = (data as { started_at?: number }).started_at;
         const k = KEY(sid);
         if (typeof startedAt === "number" && startedAt > 0) {
           const { [k]: _dropRound, ...roundsRest } = store.get().roundBySid;
-          const { [k]: _dropTokens, ...tokensRest } = store.get().turnTokensBySid;
           store.update((s) => ({
             ...s,
             busyBySid: { ...s.busyBySid, [k]: true },
             turnStartBySid: { ...s.turnStartBySid, [k]: startedAt * 1000 },
             roundBySid: roundsRest,
-            turnTokensBySid: tokensRest,
           }));
         }
         break;
       }
       case "turn_progress": {
-        // Issue #2959：daemon 在每一轮开头广播的读数——第几轮 + 本轮累计 token。
-        // 只写不清：turn 结束时这两个数字是这一轮的结论，抹掉它只会让状态带在
-        // `turn_end` 到下一轮之间闪回 «—»；`turn_start` 才是新 turn 的起点，由它
-        // 重置（见上面的 `case "turn_start"`）。
-        const p = data as { round?: number; tokens?: number };
+        // Issue #2959：daemon 在每一轮开头广播的读数——第几轮。只写不清：turn 结束时
+        // 它是这一轮的结论，抹掉只会让状态带在 `turn_end` 到下一轮之间闪回 «—»；
+        // `turn_start` 才是新 turn 的起点（见上面的 `case "turn_start"`）。
+        //
+        // 花费不在这帧里了（rant 2026-11-19T09:31:00）：窗口由 daemon 记账，本端在
+        // 每一帧到达时重读一次，于是轮次照旧是 daemon 的循环，而花费是那一份账本。
+        const p = data as { round?: number };
         const k = KEY(sid);
-        const next: Partial<DaemonAppState> = {};
-        if (typeof p.round === "number" && Number.isFinite(p.round) && p.round > 0) {
-          next.roundBySid = { ...store.get().roundBySid, [k]: Math.floor(p.round) };
+        // Bound to a constant before the callback: inside the updater the narrowing of a
+        // mutable field is gone, and `Math.floor` would be handed `number | undefined`.
+        const reported = p.round;
+        if (typeof reported === "number" && Number.isFinite(reported) && reported > 0) {
+          const roundNumber = Math.floor(reported);
+          store.update((s) => ({
+            ...s,
+            roundBySid: { ...s.roundBySid, [k]: roundNumber },
+          }));
         }
-        if (typeof p.tokens === "number" && Number.isFinite(p.tokens) && p.tokens >= 0) {
-          next.turnTokensBySid = { ...store.get().turnTokensBySid, [k]: p.tokens };
-        }
-        if (Object.keys(next).length > 0) store.update((s) => ({ ...s, ...next }));
+        void refreshUsageWindow();
         break;
       }
       case "turn_end": {
@@ -1166,11 +1208,55 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
     }
   }
 
+  /**
+   * How often a still client re-reads the window (rant 2026-11-19T09:31:00, item 4).
+   *
+   * A rolling window's far edge moves with the clock: records age out whether or not
+   * anything is happening here, so a client that only read on news would show a figure
+   * that stops shrinking.
+   */
+  const USAGE_WINDOW_POLL_MS = 15_000;
+
+  /**
+   * Ask the daemon for its 24-hour window and store the three segments.
+   *
+   * Armed only when the main process actually exposes the read: a renderer talking to an
+   * older main process has no reading to show, and inventing a zero for it would be a
+   * claim about spending that nothing measured.
+   */
+  async function refreshUsageWindow(): Promise<void> {
+    const ask = emrg.usageWindow;
+    if (typeof ask !== "function") return;
+    try {
+      const answer = await ask();
+      store.update((s) => ({
+        ...s,
+        usageWindow: {
+          input: aReportedCount(answer?.input),
+          cache: aReportedCount(answer?.cache),
+          output: aReportedCount(answer?.output),
+          windowStart: typeof answer?.windowStart === "number" ? answer.windowStart : null,
+          windowEnd: typeof answer?.windowEnd === "number" ? answer.windowEnd : null,
+        },
+      }));
+    } catch {
+      // A read that failed is "not reported": the previous reading stands rather than
+      // being replaced by zero, which would claim nothing was spent.
+    }
+  }
+
+  const usageTimer: ReturnType<typeof setInterval> | null =
+    typeof emrg.usageWindow === "function"
+      ? setInterval(() => { void refreshUsageWindow(); }, USAGE_WINDOW_POLL_MS)
+      : null;
+  if (usageTimer !== null) void refreshUsageWindow();
+
   const unsubscribe = onEvent((evt) => handleFrame(evt));
   // Teardown takes the bound with it: a timer armed for a question this bridge
   // will never render again is a write into a dead store (issue #1757).
   const dispose = (): void => {
     clearApprovalBound();
+    if (usageTimer !== null) clearInterval(usageTimer);
     unsubscribe();
   };
 
@@ -1192,6 +1278,8 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
       // the backend has no current session.
       ...(result.activeSid !== undefined ? { reportedSid: result.activeSid ?? null } : {}),
     }));
+    // item 4: opening a window is one of the three moments the reading is refreshed.
+    void refreshUsageWindow();
   }
 
   async function respondApproval(approved: boolean): Promise<boolean> {

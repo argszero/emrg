@@ -18,6 +18,8 @@ const api = {
   // 解不了的格式（macOS 的 TIFF）时，向 main 要剪贴板里的图（NSImage 解码 → PNG）。
   readClipboardImage: () => ipcRenderer.invoke("emrg:readClipboardImage"),
   listSessions: () => ipcRenderer.invoke("emrg:listSessions"),
+  // rant 2026-11-19T09:31:00：最近 24 小时的三段 token 读数（daemon 记账）
+  usageWindow: () => ipcRenderer.invoke("emrg:usageWindow"),
   restartDaemon: () => ipcRenderer.invoke("emrg:restartDaemon"),
   relaunchGui: () => ipcRenderer.invoke("emrg:relaunchGui"),
   switchSession: (payload) => ipcRenderer.invoke("emrg:switchSession", payload),
