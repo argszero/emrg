@@ -61,7 +61,7 @@ Renderer: `cd emrg/gui/renderer && npm run typecheck && npm test` (871: 5 snapsh
 - Post-merge audit: `uv run --no-sync python3 scripts/check-merge-landed.py <N>` (did the merge land a tree its reviews named)
 - Other tools: `uv run --no-sync python3 scripts/check-node-test-count.py --write` (the Node totals), `scripts/check-memory-index.py` (a MEMORY.md vs the index rule), `scripts/check-patch-files.py` (a rebuilt patch keeps its files), `scripts/check-staged-inverse.py` (an index holding an earlier commit's tree), `scripts/check-memory-rotation.py` (whose memory moved), `scripts/cast-vote.py` (a counted vote), `scripts/feishu-gate.py` (the third-party send gate), `bump-version.py`, `classify-conflict.py`, `sync-master-from-api.py`, `push-branch-from-api.py`
 
-Every guard that reads a working tree names it before its verdict; a question it cannot answer is reported unmeasurable, never as a pass.
+Every guard that reads a working tree names it before its verdict; an unanswerable question is unmeasurable, never a pass.
 
 ## Releasing
 
