@@ -30,6 +30,8 @@ const { makeConfigPrivate } = require("./config_mode");
 const atpLogin = require("./atp_login");
 // 主题的唯一读写（issue #3013）：`[client] theme` 是唯一真源，面板上的 `system` 即 `auto`。
 const themeSetting = require("./theme_setting");
+// 窗口标题的唯一组合规则（issue #3040）：main 进程只调它，绝不自己拼标题字符串。
+const { makeTitleRefresher } = require("./window-title");
 const APP_VERSION = require("./package.json").version;
 
 // issue #1100 加固：导航策略只放行应用自身 renderer dist 前缀内的 file:// URL
@@ -72,6 +74,15 @@ function main() {
   let openSessions = new Map();
   let guiStateTimer = null;
   const GUI_STATE_DEBOUNCE_MS = 1000;
+  // Rant 2026-11-19T18:06:48（issue #3040）：标题此前在三个地方各自拼一次，所以它只
+  // 新鲜到"最后一次记得写它的那个地方"——切换之后才改名/才拿到名字的会话，标题就停
+  // 在旧名字上。这里只留一条规则（window-title.js）+ 一个重算器：它不存快照，每次调
+  // 用现读当前会话与该会话的名字，因此名字迟到、改名、关闭都只需要再调一次。
+  const refreshWindowTitle = makeTitleRefresher({
+    setTitle: (title) => win?.setTitle(title),
+    getSessionId: () => currentSessionId,
+    getSessionName: (sid) => openSessions.get(sid)?.title,
+  });
   // Rant 2026-08-25T17:38:56（GUI 会话串线/空历史，根因 1+2）：会话级命令的 cwd
   // 必须取该会话**真实所属项目**——兜底 DEFAULT_CWD（homedir）会让所有 GUI 会话
   // 历史从 ~/.emrg/sessions/ 读取 → 一律空窗口，且 resume/task 在错误 cwd 误建
@@ -702,7 +713,7 @@ vision = false
         throw e;
       }
       currentSessionId = sessionId;
-      win.setTitle(`EMRG — ${sessionId}`); // G109
+      refreshWindowTitle(); // G109（issue #3040：标题只由 window-title.js 组合）
       // P4（rant 15:07:19）：多会话保持——切走**不再关闭**旧会话连接（浏览器 tab
       // 效果：切回继续生成/看现场）。关闭走 emrg:closeSession（P4 slice 2 侧边栏）。
       markSessionActive(sessionId); // 更新 lastActive + activeSid 防抖写盘
@@ -733,6 +744,7 @@ vision = false
         v.title = frame.title || clean;
         broadcastOpenSessions();
       }
+      refreshWindowTitle(); // 改名后立刻重算，不等下一次切换（issue #3040）
       return { ok: true, title: frame.title || clean };
     });
 
@@ -770,7 +782,7 @@ vision = false
       const sid = generateSessionId();
       // 同步 main 侧会话状态：重连后 resume 正确会话（G41）+ 窗口标题（G109）
       currentSessionId = sid;
-      win.setTitle(`EMRG — ${sid}`);
+      refreshWindowTitle();
       // P5 slice 2：新会话指定项目 → 先记簿记（发送时用其 cwd 建连接）
       if (projectPath) touchOpenSession(sid, projectPath);
       // P4：新会话在首条消息前不建连接（sendMessage 自动 open）——此处仅标记激活
@@ -1063,6 +1075,7 @@ vision = false
       }
       if (currentSessionId && closed.includes(currentSessionId)) {
         currentSessionId = null; // 激活会话被关 → 无激活（renderer 切相邻）
+        refreshWindowTitle(); // 当前会话被移走 → 标题跟着退（issue #3040）
       }
       const frame = await requireConn().sendCommandAndWait("remove_agent", { name: name.trim() }, 5000);
       schedulePersistGuiState();
@@ -1585,6 +1598,7 @@ vision = false
         if (s && s.title) {
           v.title = s.title;
           broadcastOpenSessions();
+          refreshWindowTitle(); // 名字到手就重算：新会话的第一条消息给它的名字由此进标题
         }
       })
       .catch(() => { /* 拉取失败保持 undefined → sid 兜底 */ });
@@ -1671,9 +1685,7 @@ vision = false
     } else if (openSessions.size > 0) {
       currentSessionId = openSessionsList()[0].sid;
     }
-    if (currentSessionId) {
-      win?.setTitle(`EMRG — ${currentSessionId}`);
-    }
+    refreshWindowTitle(); // 无恢复会话时它会写成裸应用名（issue #3040）
     schedulePersistGuiState(); // 失效条目剔除后重写盘
     broadcastOpenSessions();
     return restored;
@@ -1696,6 +1708,7 @@ vision = false
     schedulePersistGuiState();
     if (currentSessionId === sid) currentSessionId = null; // 关闭激活会话 → 无激活
     broadcastOpenSessions();
+    refreshWindowTitle(); // 关闭的若是当前会话，标题退回无会话形态（issue #3040）
     return { ok: true, closed: !!entry };
   }
 
