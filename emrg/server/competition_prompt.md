@@ -136,6 +136,8 @@ Exit condition: a leaderboard score is recorded in memory.
 
 One improvement per round: local validation → submit → record the score delta and the hypothesis behind the improvement. Record failed attempts too (so the same pitfall is not repeated).
 
+**An attempt's result is recorded as a value, not as the fact that it was tried.** "Record failed attempts too" is about what each attempt returned: the score it earned for the case it was aimed at, written as a number, with a zero written as `0` rather than left blank or replaced by prose about the attempt. The distinction is load-bearing in both directions — a set of attempts that each moved nothing reads identically to a set whose results were never read, and only the per-attempt number tells the two apart. So a case attempted repeatedly keeps one row per attempt, its history being the sequence of results rather than a count of tries; the closing summary reports the distribution over the round's attempts, including how many returned zero; and a round that cannot report that distribution has not finished recording. The row is written in the round that reads the attempt, never reconstructed later from what the round remembers having done.
+
 - Keep `best score` and the submission that produced it; never overwrite a better score with a worse one.
 - Note the submission budget/limits if the platform has any (many limit daily submissions).
 
