@@ -145,9 +145,44 @@ def _csi_modifier_action(data: bytes) -> str | None:
     return None
 
 
+def _short_tokens(value: object) -> str:
+    """A token count as the status line writes it: `830`, `12.3k`, `1.1M`, or `—`.
+
+    The abbreviations the GUI uses, spelled the same way here so the two clients put the
+    same figure on screen for the same ledger (rant 2026-11-19T09:31:00, item 7).
+    """
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+        return "—"
+    if value < 1000:
+        return str(int(value))
+    if value < 1_000_000:
+        return f"{value / 1000:.1f}k"
+    return f"{value / 1_000_000:.1f}M"
+
+
+def format_usage_window(usage: dict | None) -> str:
+    """The daemon's 24-hour window as one status segment (rant 2026-11-19T09:31:00).
+
+    Three figures and never their sum: the host reads this to see where the spend went,
+    and a total cannot say whether it went into the prompt or into the answer.
+
+    An empty string when the daemon has not answered — the line then stays exactly as it
+    was, the same rule `vision` and `sandbox` follow for an older daemon. A single field
+    no response reported prints `—` for that segment alone, never 0: nothing measured is
+    a different claim from nothing spent.
+    """
+    if not isinstance(usage, dict):
+        return ""
+    return (
+        f"24h in {_short_tokens(usage.get('input'))}"
+        f" · cache {_short_tokens(usage.get('cache'))}"
+        f" · out {_short_tokens(usage.get('output'))}"
+    )
+
+
 def _format_status_left(
     title: str, sid: str, model: str = "", vision: bool | None = None,
-    sandbox: str | None = None,
+    sandbox: str | None = None, usage: dict | None = None,
 ) -> str:
     """Format left status: version + session title + short ID + model (+ images).
 
@@ -182,6 +217,13 @@ def _format_status_left(
     # in another client took effect — which is most of what the setting is for.
     if sandbox:
         parts.append(f"[{sandbox}]")
+    # The last 24 hours, read from the daemon's ledger (rant 2026-11-19T09:31:00). Absent
+    # until the daemon answers, so the line is byte-identical to before for a daemon that
+    # does not know the request; it is never summed here, because a client's own total is
+    # the reading that resets whenever a session is switched.
+    window = format_usage_window(usage)
+    if window:
+        parts.append(window)
     return " ".join(parts)
 
 
@@ -1200,6 +1242,9 @@ async def interactive(init_auto_evolve: bool = False, console=None):
             pass
 
     await conn.send_command("ping")
+    # Rant 2026-11-19T09:31:00: the window is asked for once the connection is up, so
+    # the first screen already carries it instead of waiting for a turn to finish.
+    await conn.send_command("usage_window")
     term = Terminal(); stdin_fd = sys.stdin.fileno()
     stdin_queue: asyncio.Queue = asyncio.Queue()
 
@@ -1207,8 +1252,8 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         title: str, sid: str, model: str = "", vision: bool | None = None,
         sandbox: str | None = None,
     ) -> str:
-        """Format left status: version + session title + short ID + model."""
-        return _format_status_left(title, sid, model, vision, sandbox)
+        """Format left status: version + session title + short ID + model + 24h window."""
+        return _format_status_left(title, sid, model, vision, sandbox, current_usage)
     busy = False; server_id = ""; need_new_assistant = False; session_title = ""
     # The rows this client echoed locally for its own user messages, and the ids
     # of the requests they belong to. The moment a message was written does not
@@ -1250,6 +1295,11 @@ async def interactive(init_auto_evolve: bool = False, console=None):
     # daemon owns the list, this client renders what a frame or a session
     # snapshot says.
     current_roots: list[str] = []
+    # The daemon's rolling 24-hour token window (rant 2026-11-19T09:31:00), as the last
+    # `usage_window` answer gave it. None until then: display only, and this client never
+    # adds anything up — the ledger is the daemon's, which is what makes the number
+    # survive a session switch and a restart on both clients.
+    current_usage: dict | None = None
 
     def _narrate_the_stop() -> None:
         """Say that the turn stopped, from whichever frame made that knowable.
@@ -1739,6 +1789,24 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                         turn_running = True
                         _ensure_elapsed_timer()
                         logger.info("turn_start aligned: _request_start=%.3f", _request_start)
+                    # A turn starting means the one before it finished, so the 24-hour
+                    # window has moved: re-read it (rant 2026-11-19T09:31:00). Same
+                    # source as the GUI's reading, and the same three segments.
+                    await conn.send_command("usage_window")
+                    continue
+
+                if data.get("type") == "usage_window":
+                    # The daemon's answer (rant 2026-11-19T09:31:00), stored as it came:
+                    # this client shows the three segments and never adds them up.
+                    current_usage = {
+                        "input": data.get("input"),
+                        "cache": data.get("cache"),
+                        "output": data.get("output"),
+                    }
+                    status.update(
+                        left=_status_left(session_title, session_id, current_model, current_vision, current_sandbox),
+                        center=_last_center,
+                    )
                     continue
 
                 resp = TaskResponse.from_dict(data)

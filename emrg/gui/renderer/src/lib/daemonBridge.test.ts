@@ -26,14 +26,18 @@ function setup() {
     cb = handler;
     return disposeCb;
   });
+  const usageWindow = vi.fn().mockResolvedValue({
+    input: null, cache: null, output: null, windowStart: null, windowEnd: null,
+  });
   const bridge = createDaemonBridge({
     onEvent,
-    emrg: { sendMessage, setSandbox, setSandboxRoots },
+    emrg: { sendMessage, setSandbox, setSandboxRoots, usageWindow },
     transcript,
     t,
   });
   return {
-    bridge, transcript, t, sendMessage, setSandbox, setSandboxRoots, onEvent, disposeCb,
+    bridge, transcript, t, sendMessage, setSandbox, setSandboxRoots, usageWindow, onEvent,
+    disposeCb,
     emit: (f: DaemonEventFrame) => cb?.(f),
   };
 }
@@ -203,32 +207,54 @@ describe("createDaemonBridge", () => {
     expect(st.turnStartBySid["s1"]).toBe(1756785600500);
   });
 
-  it("issue #2959：turn_progress → 状态带的轮次与 token 读数（daemon 的循环，不是客户端的算术）", () => {
-    // 状态带的两个数字来自 daemon 每一轮开头的那一帧。这里钉四件事：缺席不是零、
-    // 帧按会话隔离、非数字字段不写、以及新一轮从零开始——最后一条是这套读数唯一
-    // 能骗人的窗口（上一轮的花费被读成本轮的）。
+  it("issue #2959：turn_progress → 状态带的轮次（daemon 的循环，不是客户端的算术）", () => {
+    // 轮次来自 daemon 每一轮开头的那一帧。这里钉三件事：缺席不是零、帧按会话隔离、
+    // 非数字字段不写；新一轮开始则归零（上一轮的轮数不该挂到这一轮）。
     const { emit, bridge } = setup();
-    // ① 没报过就是没有：状态带据此渲染 «—»，而不是第 1 轮、0 token
+    // ① 没报过就是没有：状态带据此渲染 «—»，而不是第 1 轮
     expect(bridge.store.get().roundBySid["s1"]).toBeUndefined();
-    expect(bridge.store.get().turnTokensBySid["s1"]).toBeUndefined();
+    // 花费不是这一帧的事，也不是任何 per-turn 字段的事（rant 2026-11-19T09:31:00）
+    expect(Object.prototype.hasOwnProperty.call(bridge.store.get(), "turnTokensBySid")).toBe(false);
 
-    emit({ type: "turn_progress", data: { round: 1, tokens: 0 }, sid: "s1" });
-    emit({ type: "turn_progress", data: { round: 3, tokens: 4210 }, sid: "s1" });
-    const st = bridge.store.get();
-    expect(st.roundBySid["s1"]).toBe(3);
-    expect(st.turnTokensBySid["s1"]).toBe(4210);
-    // ② 帧是会话级的：s2 没收到就没有读数
-    expect(st.roundBySid["s2"]).toBeUndefined();
-
-    // ③ 一个形状不对的帧不得把计数抹成 NaN
-    emit({ type: "turn_progress", data: { round: "4", tokens: null }, sid: "s1" });
+    emit({ type: "turn_progress", data: { round: 1 }, sid: "s1" });
+    emit({ type: "turn_progress", data: { round: 3 }, sid: "s1" });
     expect(bridge.store.get().roundBySid["s1"]).toBe(3);
-    expect(bridge.store.get().turnTokensBySid["s1"]).toBe(4210);
+    // ② 帧是会话级的：s2 没收到就没有读数
+    expect(bridge.store.get().roundBySid["s2"]).toBeUndefined();
 
-    // ④ 新一轮开始 → 旧的两个数字归零
+    // ③ 一个形状不对的帧不得把轮数抹成 NaN
+    emit({ type: "turn_progress", data: { round: "4" }, sid: "s1" });
+    expect(bridge.store.get().roundBySid["s1"]).toBe(3);
+
+    // ④ 新一轮开始 → 轮数归零
     emit({ type: "turn_start", data: { started_at: 1756785600.5 }, sid: "s1" });
     expect(bridge.store.get().roundBySid["s1"]).toBeUndefined();
-    expect(bridge.store.get().turnTokensBySid["s1"]).toBeUndefined();
+  });
+
+  it("rant 2026-11-19T09:31:00：花费读数是 daemon 的 24 小时窗口，三段分开、坏值不编数字", async () => {
+    // 状态带的花费来自 daemon 的账本，不是本端累加：换会话、关窗口、重启 GUI 都
+    // 不该把它清零。这里钉三件事：三段按 daemon 报的原样存、坏值变 null 而不是 NaN、
+    // 以及它不再按会话键控（窗口是宿主的，不是某个会话的）。
+    const { emit, bridge, usageWindow } = setup();
+    usageWindow.mockResolvedValue({
+      input: 12_300_000, cache: 11_100_000, output: 245_000,
+      windowStart: 1_700_000_000, windowEnd: 1_700_086_400,
+    });
+    emit({ type: "turn_progress", data: { round: 2 }, sid: "s1" });
+    await vi.waitFor(() => expect(bridge.store.get().usageWindow).not.toBeNull());
+    const reading = bridge.store.get().usageWindow!;
+    expect(reading.input).toBe(12_300_000);
+    expect(reading.cache).toBe(11_100_000);
+    expect(reading.output).toBe(245_000);
+    expect(reading.windowEnd).toBe(1_700_086_400);
+
+    usageWindow.mockResolvedValue({ input: "abc", cache: null, output: -5, windowStart: "x" });
+    emit({ type: "turn_progress", data: { round: 3 }, sid: "s1" });
+    await vi.waitFor(() => expect(bridge.store.get().usageWindow?.input).toBeNull());
+    const bad = bridge.store.get().usageWindow!;
+    expect(bad.output).toBeNull();
+    expect(bad.windowStart).toBeNull();
+    expect(Number.isNaN(bad.input as unknown as number)).toBe(false);
   });
 
   it("turn_end → 清 busy + turnStartBySid（幂等，与 done 重复不炸）", () => {

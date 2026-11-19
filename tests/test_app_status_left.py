@@ -96,3 +96,58 @@ class TestEffectiveVisionIsVisible:
 
         out = _format_status_left("main", "s_260727", "", True)
         assert "[" not in out, out
+
+
+class TestTheLast24Hours:
+    """The status bar carries the daemon's rolling 24-hour window (rant 2026-11-19T09:31:00).
+
+    Three segments and never their sum: the host reads this to see where a day's spend
+    went, and a total cannot say. The mutations this set exists to catch are the ones that
+    look harmless — collapsing the three into one figure, deriving the cache segment as
+    input minus hits, or printing 0 for a field no response ever reported.
+    """
+
+    def test_the_three_segments_are_shown_apart_with_k_and_m_abbreviations(self):
+        from emrg.client.app import format_usage_window
+
+        out = format_usage_window({"input": 12_300_000, "cache": 11_100_000, "output": 245_000})
+        assert out == "24h in 12.3M · cache 11.1M · out 245.0k", out
+
+    def test_nothing_is_totaled(self):
+        from emrg.client.app import format_usage_window
+
+        out = format_usage_window({"input": 100, "cache": 40, "output": 7})
+        assert out == "24h in 100 · cache 40 · out 7", out
+        assert "total" not in out
+
+    def test_the_cache_segment_is_the_reported_hit_not_the_difference(self):
+        """100 prompt tokens of which 80 were cache hits prints `cache 80`, not `20`."""
+        from emrg.client.app import format_usage_window
+
+        assert "cache 80" in format_usage_window({"input": 100, "cache": 80, "output": 1})
+
+    def test_a_field_no_response_reported_is_a_dash_not_a_zero(self):
+        """The absence of a measurement is `—`; a *reported* zero is `0`."""
+        from emrg.client.app import format_usage_window
+
+        assert format_usage_window({"input": 1000, "cache": None, "output": 5}) == (
+            "24h in 1.0k · cache — · out 5"
+        )
+        assert format_usage_window({"input": 0, "cache": 0, "output": 0}) == (
+            "24h in 0 · cache 0 · out 0"
+        )
+
+    def test_an_unanswered_window_leaves_the_line_byte_identical(self):
+        """An older daemon never answers the request: the line must not change at all."""
+        from emrg.client.app import _format_status_left
+
+        plain = _format_status_left("main", "s_260727", "deepseek-v4-flash")
+        assert _format_status_left("main", "s_260727", "deepseek-v4-flash", None, None, None) == plain
+
+    def test_the_window_rides_on_the_left_status_line(self):
+        from emrg.client.app import _format_status_left
+
+        out = _format_status_left(
+            "main", "s_260727", "m", None, None, {"input": 1, "cache": 0, "output": 2}
+        )
+        assert out.endswith("24h in 1 · cache 0 · out 2"), out
