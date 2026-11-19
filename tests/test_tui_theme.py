@@ -631,7 +631,24 @@ def test_ensure_theme_probes_once_per_process(monkeypatch, tmp_path):
 # ── requirement 4: the code-block theme follows the terminal ─────────────────────────────────
 
 
-def test_code_blocks_follow_the_theme():
+def _dark_measured(background=(0, 0, 0)):
+    """A background the terminal actually reported."""
+    theme.set_theme(theme.Theme(theme.DARK, background, "osc11"))
+
+
+def _render_code_block(code_theme) -> str:
+    """The bytes a truecolor terminal would receive for one fenced python block."""
+    from rich.console import Console
+    from rich.syntax import Syntax
+
+    buf = io.StringIO()
+    console = Console(file=buf, width=60, force_terminal=True, color_system="truecolor")
+    console.print(Syntax("def f(x):\n    return x  # note\n", "python", theme=code_theme))
+    return buf.getvalue()
+
+
+def test_code_blocks_follow_the_measured_theme():
+    _dark_measured()
     assert theme.code_theme() == "monokai"
     _light(WHITE)
     assert theme.code_theme() == "friendly"
@@ -642,7 +659,58 @@ def test_the_code_theme_name_is_one_rich_and_pygments_actually_have():
     from pygments.styles import get_all_styles
 
     available = set(get_all_styles())
-    theme.reset_theme()
+    _dark_measured()
     assert theme.code_theme() in available
     _light(WHITE)
     assert theme.code_theme() in available
+
+
+def test_a_measured_dark_terminal_still_gets_its_dark_board():
+    """The control for the test below: a background that WAS read still draws its palette."""
+    _dark_measured()
+    out = _render_code_block(theme.code_theme())
+    assert "\x1b[38;" in out, "no foreground escape at all — the reading below would prove nothing"
+    assert "\x1b[48;" in out, "no background escape: the board is gone even where it was measured"
+
+
+def test_an_unmeasured_appearance_gets_no_board_and_no_colour():
+    """Nothing measured ⇒ nothing invented (issue #3013, requirement 6).
+
+    Read from the bytes that would reach the terminal, not from a constant on our own class:
+    a theme that still named a colour would satisfy any inspection of ``background_color`` while
+    rich drew its palette anyway.
+    """
+    theme.reset_theme()  # no setting, and a terminal that answered nothing
+    resolved = theme.code_theme()
+    assert not isinstance(resolved, str), (
+        "an unmeasured appearance fell back to a named pygments style, and every one of those "
+        "paints a board of its own — monokai #272822, friendly #f0f0f0, bw #ffffff"
+    )
+
+    out = _render_code_block(resolved)
+    assert "\x1b[38;" not in out, "the block names foreground colours for a background nobody read"
+    assert "\x1b[48;" not in out, "the block paints a background nobody measured"
+
+
+def test_a_pygments_style_cannot_say_no_colour():
+    """Why the answer is a `SyntaxTheme` subclass and not a pygments style.
+
+    ``PygmentsSyntaxTheme`` substitutes ``#000000`` for a token whose style names no colour, so a
+    "colourless" pygments style renders black text — invisible on a dark terminal. Pinned here
+    because the next reader will otherwise propose exactly that, and the proposal looks right.
+    """
+    import pygments.style as ps
+    from pygments.token import Token
+    from rich.syntax import PygmentsSyntaxTheme
+
+    class Colourless(ps.Style):
+        background_color = None
+        default_style = ""
+        styles = {Token: ""}
+
+    style = PygmentsSyntaxTheme(Colourless).get_style_for_token(Token.Keyword)
+    assert style.color is not None, "rich changed: a colourless pygments style now stays colourless"
+    assert style.color.get_truecolor() == (0, 0, 0), (
+        f"rich substituted {style.color} instead of black — re-read this module's "
+        "terminal_default_theme() before deciding the workaround is still needed"
+    )

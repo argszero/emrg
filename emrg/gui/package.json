@@ -49,6 +49,7 @@
       "daemon_client.js",
       "nav-policy.js",
       "atp_login.js",
+      "theme_setting.js",
       "package.json",
       "scripts/**"
     ],
