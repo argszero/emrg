@@ -65,6 +65,25 @@
   /* 滚动条 */
   --scrollbar-thumb: #d3d6db;
   --scrollbar-hover: #b9bdc4;
+
+  /* 代码块语法高亮（issue #3013）。颜色只在这里定义：css/highlight.css 只决定「哪类
+   * token 用哪个变量」，一个色值都不写。每个前景与 --hl-bg 的 WCAG 对比度由渲染层测试
+   * 逐项断言（正文类 ≥4.5:1，注释 ≥3:1，diff 行按自己的底色算）。 */
+  --hl-bg: #f6f8fa;
+  --hl-text: #1f2328;
+  --hl-keyword: #cf222e;
+  --hl-entity: #8250df;
+  --hl-constant: #0550ae;
+  --hl-string: #0a3069;
+  --hl-variable: #953800;
+  --hl-comment: #59636e;
+  --hl-tag: #116329;
+  --hl-section: #0550ae;
+  --hl-bullet: #953800;
+  --hl-add-fg: #116329;
+  --hl-add-bg: #dafbe1;
+  --hl-del-fg: #82071e;
+  --hl-del-bg: #ffebe9;
 }
 
 /* 深色主题（跟随系统） */
@@ -93,6 +112,23 @@
     --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.45);
     --scrollbar-thumb: #3a3d45;
     --scrollbar-hover: #4a4e58;
+    /* 代码块高亮：与改动前 vendor/highlight.github-dark.css 逐项相同的取值，
+     * 深色皮肤的观感因此不变（渲染层测试把这份清单逐项写进断言）。 */
+    --hl-bg: #0d1117;
+    --hl-text: #c9d1d9;
+    --hl-keyword: #ff7b72;
+    --hl-entity: #d2a8ff;
+    --hl-constant: #79c0ff;
+    --hl-string: #a5d6ff;
+    --hl-variable: #ffa657;
+    --hl-comment: #8b949e;
+    --hl-tag: #7ee787;
+    --hl-section: #1f6feb;
+    --hl-bullet: #f2cc60;
+    --hl-add-fg: #aff5b4;
+    --hl-add-bg: #033a16;
+    --hl-del-fg: #ffdcd7;
+    --hl-del-bg: #67060c;
   }
 }
 
@@ -120,6 +156,21 @@
   --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.45);
   --scrollbar-thumb: #3a3d45;
   --scrollbar-hover: #4a4e58;
+  --hl-bg: #0d1117;
+  --hl-text: #c9d1d9;
+  --hl-keyword: #ff7b72;
+  --hl-entity: #d2a8ff;
+  --hl-constant: #79c0ff;
+  --hl-string: #a5d6ff;
+  --hl-variable: #ffa657;
+  --hl-comment: #8b949e;
+  --hl-tag: #7ee787;
+  --hl-section: #1f6feb;
+  --hl-bullet: #f2cc60;
+  --hl-add-fg: #aff5b4;
+  --hl-add-bg: #033a16;
+  --hl-del-fg: #ffdcd7;
+  --hl-del-bg: #67060c;
 }
 
 /* 手动强制浅色 */
@@ -146,4 +197,19 @@
   --shadow-lg: 0 12px 32px rgba(16, 24, 40, 0.14);
   --scrollbar-thumb: #d3d6db;
   --scrollbar-hover: #b9bdc4;
+  --hl-bg: #f6f8fa;
+  --hl-text: #1f2328;
+  --hl-keyword: #cf222e;
+  --hl-entity: #8250df;
+  --hl-constant: #0550ae;
+  --hl-string: #0a3069;
+  --hl-variable: #953800;
+  --hl-comment: #59636e;
+  --hl-tag: #116329;
+  --hl-section: #0550ae;
+  --hl-bullet: #953800;
+  --hl-add-fg: #116329;
+  --hl-add-bg: #dafbe1;
+  --hl-del-fg: #82071e;
+  --hl-del-bg: #ffebe9;
 }

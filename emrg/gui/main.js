@@ -21,6 +21,8 @@ const { makeConfigPrivate } = require("./config_mode");
 // issue #2774：aitokenpool 的 GitHub 账号登录。协议与 config 合并全在这个纯模块里
 // （main.js 只被 `node --check` 看、不被单测跑），这里只把 fetch 与 fs 接上去。
 const atpLogin = require("./atp_login");
+// 主题的唯一读写（issue #3013）：`[client] theme` 是唯一真源，面板上的 `system` 即 `auto`。
+const themeSetting = require("./theme_setting");
 const APP_VERSION = require("./package.json").version;
 
 // issue #1100 加固：导航策略只放行应用自身 renderer dist 前缀内的 file:// URL
@@ -1311,7 +1313,9 @@ vision = false
         model: cfg.llm?.model || "",
         models,
         modelDetails,
-        theme: cfg.gui?.theme || "system", // §7.1：外观主题持久化（浅色/深色/跟随系统）
+        // 一个键（issue #3013）：`[client] theme` 是唯一真源，TUI 读的也是它；老安装里的
+        // `[gui] theme` 仍然被读，于是升级后宿主原来的选择不会丢。
+        theme: themeSetting.themeForUi(cfg),
         lang: cfg.gui?.lang || "", // rant 22:22:50：语言持久化（""=跟随系统 / zh / en）
       };
     });
@@ -1333,8 +1337,9 @@ vision = false
       if (cfg.baseUrl !== undefined) toml.llm.base_url = cfg.baseUrl;
       if (cfg.model !== undefined) toml.llm.model = cfg.model;
       if (cfg.theme !== undefined) {
-        toml.gui = toml.gui || {};
-        toml.gui.theme = cfg.theme; // §7.1：主题持久化（浅色/深色/跟随系统）
+        // 一个键（issue #3013）：写 `[client] theme`，并把旧的 `[gui] theme` 删掉——只写不删
+        // 就等于每次保存都把两个键重新种回去，而 TUI 读的是 `[client]`，端到端又对不上了。
+        themeSetting.writeTheme(toml, cfg.theme);
       }
       if (cfg.lang !== undefined) {
         toml.gui = toml.gui || {};

@@ -12,7 +12,10 @@
  * - marked.min.js / dompurify.min.js：UMD → default import（vite 内联打包）
  * - highlight.custom.js：IIFE 副作用导入，运行时设 `window.hljs`
  *   （构建期在 Node 中执行时 typeof window === 'undefined' → no-op 安全）
- * - highlight.github-dark.css：代码块主题，随 bundle 输出
+ *
+ * 代码块的主题**不在**这里：`css/highlight.css` 由 `main.tsx` 引入，颜色取自
+ * `tokens.css` 的 `--hl-*`，所以它跟着皮肤走。此前这一行无条件引入
+ * `vendor/highlight.github-dark.css`，浅色皮肤下代码块仍是深色（issue #3013）。
  *
  * 接线后 createProdMarkdownRenderer() 交给 Shell → TranscriptView
  * （renderer prop），ResultPanel/PlainCode 的 window.hljs 读取也同步恢复。
@@ -20,7 +23,6 @@
 import marked from "../../../vendor/marked.min.js";
 import DOMPurify from "../../../vendor/dompurify.min.js";
 import "../../../vendor/highlight.custom.js";
-import "../../../vendor/highlight.github-dark.css";
 import { createMarkdownRenderer, type MarkdownRenderer } from "./markdown";
 
 /** 生产环境 markdown 渲染器（真实 marked + DOMPurify + hljs；缺省 t 走 createMarkdownRenderer 的 t 注入） */
