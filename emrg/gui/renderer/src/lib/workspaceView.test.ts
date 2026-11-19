@@ -1,7 +1,7 @@
 /**
  * workspaceView.test.ts — 工作区面板纯逻辑测试（Batch 3 WorkspaceView）。
  * 镜像 vanilla dialogs.js 行为：formatCountdown / formatRelativeTime / relTime /
- * rantTimestamp / rantFirstLine / rantStatusMeta / preprocessRantMarkdown /
+ * rantTimestamp / rantSummary / rantStatusMeta / preprocessRantMarkdown /
  * buildEvolveAgents / projectHint / taskStatusBadge / taskHint / taskMeta。
  */
 import { describe, expect, it, vi } from "vitest";
@@ -11,8 +11,8 @@ import {
   formatRelativeTime,
   preprocessRantMarkdown,
   projectHint,
-  rantFirstLine,
   rantStatusMeta,
+  rantSummary,
   rantTimestamp,
   relTime,
   taskHint,
@@ -85,16 +85,34 @@ describe("rantTimestamp", () => {
   });
 });
 
-describe("rantFirstLine", () => {
-  it("首行摘要去 md 标题/列表标记", () => {
-    expect(rantFirstLine("## 标题\n正文第二行")).toBe("标题");
-    expect(rantFirstLine("- 列表项\nnext")).toBe("列表项");
-    expect(rantFirstLine("\n  \n正文")).toBe("正文");
+describe("rantSummary", () => {
+  it("首行是一级标题 → 用这个标题", () => {
+    expect(rantSummary("# 侧栏顺序\n\n## 要什么\n正文")).toBe("侧栏顺序");
   });
-  it("空 → —", () => {
-    expect(rantFirstLine(null)).toBe("—");
-    expect(rantFirstLine("")).toBe("—");
-    expect(rantFirstLine("  \n ")).toBe("—");
+  it("没有一级标题 → 跳过二级及更深的节标题，取第一段正文", () => {
+    expect(rantSummary("## 要什么\n\n正文第一段\n\n## 为什么\n更多")).toBe("正文第一段");
+    expect(rantSummary("## 标题\n正文第二行")).toBe("正文第二行");
+  });
+  it("行内 markdown 与列表/引用记号都不留", () => {
+    expect(rantSummary("## 要什么\n\n把 **列表** 的 `rantFirstLine` 改掉")).toBe(
+      "把 列表 的 rantFirstLine 改掉",
+    );
+    expect(rantSummary("- 见 [文档](https://example.com) 第 3 节")).toBe("见 文档 第 3 节");
+    expect(rantSummary("> 引用一句")).toBe("引用一句");
+  });
+  it("超过 60 字 → 截断并加省略号", () => {
+    expect(rantSummary(`## 要什么\n\n${"字".repeat(70)}`)).toBe(`${"字".repeat(60)}…`);
+  });
+  it("正好 60 字 → 不加省略号", () => {
+    expect(rantSummary(`## 要什么\n\n${"字".repeat(60)}`)).toBe("字".repeat(60));
+  });
+  it("只有节标题没有正文 → 退回第一个节标题的文字", () => {
+    expect(rantSummary("## 要什么\n\n### 为什么")).toBe("要什么");
+  });
+  it("正文为空 → —", () => {
+    expect(rantSummary(null)).toBe("—");
+    expect(rantSummary("")).toBe("—");
+    expect(rantSummary("  \n ")).toBe("—");
   });
 });
 
