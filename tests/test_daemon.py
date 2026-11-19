@@ -394,6 +394,25 @@ def test_system_prompt_temp_file_rules_section(tmp_path):
     assert "the config root" in rendered
 
 
+def test_system_prompt_daily_history_line_names_the_subfolder(tmp_path):
+    """The rendered prompt hands the agent a path that resolves (issue #3048).
+
+    The per-day archive moved under `history/`, and the reader of this line is an agent
+    that will read the file it was told about. Asserted on the render rather than on the
+    template: the template could carry the prefix and lose it to a conditional, and the
+    render is the artifact a session actually receives.
+    """
+    server = _make_server()
+    session = Session.create_with_id("daily-line-test", tmp_path)
+    rendered = server._build_system_prompt(session)
+
+    expected = f"history/history_{datetime.now().strftime('%y%m%d')}.jsonl"
+    assert expected in rendered, (
+        f"the session section must name the daily archive under history/: expected {expected!r} "
+        f"in the rendered prompt; the top-level name points at a file that is not there"
+    )
+
+
 def test_system_prompt_temp_file_rules_absent_without_session():
     """Without a session the session section is skipped (no path to anchor it to), and the
     temp-file rule goes with it — it lives inside that section."""
