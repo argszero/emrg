@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useI18n } from "../lib/i18n";
 import { useSnapshotStore } from "../hooks/useSnapshotStore";
 import { useDaemonBridge } from "./DaemonBridgeProvider";
@@ -34,7 +34,6 @@ import {
   type SidebarViewId,
 } from "../lib/cockpit";
 import { InspectorPanel } from "./InspectorPanel";
-import { turnActions, turnFiles } from "../lib/inspector";
 import { WorkspaceView, type WorkspaceViewId } from "./WorkspaceView";
 import { TranscriptView } from "./TranscriptView";
 import { Composer, type CommandRouting } from "./Composer";
@@ -590,17 +589,37 @@ export function Shell() {
   const turnTokens = activeSid ? (appState.turnTokensBySid[activeSid] ?? null) : null;
 
   /**
-   * What the inspector's first two tabs read: this turn's tool calls and the files they
-   * named. Both come from the transcript, not from a counter kept beside it — the tool
-   * rows are already the record, and a second tally would drift from the one on screen.
+   * Where the inspector's two trees are rooted (issue #3026).
+   *
+   * Both roots come from the main process, because it is the only layer holding the
+   * open-session ledger, the global session index and the daemon's own reading of a
+   * session's working directory. `null` means "not measured" — no session, or a build
+   * that cannot answer — and the tree says so rather than rooting at a guess.
+   *
+   * The turn's tool calls are no longer this column's business: they are already on
+   * screen as transcript rows, with the duration the daemon measured, and a second list
+   * of them here was a copy that could disagree with the one being watched.
    */
-  const transcriptVersion = useSyncExternalStore(transcript.subscribe, transcript.getStructureVersion);
-  const turnEntries = useMemo(() => {
-    void transcriptVersion;
-    return activeSid ? transcript.getEntries(activeSid) : [];
-  }, [transcript, activeSid, transcriptVersion]);
-  const inspectorActions = useMemo(() => turnActions(turnEntries), [turnEntries]);
-  const inspectorFiles = useMemo(() => turnFiles(turnEntries), [turnEntries]);
+  const [roots, setRoots] = useState<{ agentRoot: string | null; sessionRoot: string | null }>({
+    agentRoot: null,
+    sessionRoot: null,
+  });
+  useEffect(() => {
+    let live = true;
+    if (!activeSid) {
+      setRoots({ agentRoot: null, sessionRoot: null });
+      return () => {
+        live = false;
+      };
+    }
+    void bridge.sessionRoots(activeSid).then((r) => {
+      if (live && r) setRoots(r);
+    });
+    return () => {
+      live = false;
+    };
+  }, [bridge, activeSid]);
+  const loadDir = useCallback((p: string) => bridge.listDir(p), [bridge]);
 
   /**
    * The whole register's sessions, fetched each time the overlay opens (issue #2978).
@@ -1205,8 +1224,9 @@ export function Shell() {
             >
               <InspectorPanel
                 sid={activeSid}
-                actions={inspectorActions}
-                files={inspectorFiles}
+                agentRoot={roots.agentRoot}
+                sessionRoot={roots.sessionRoot}
+                loadDir={loadDir}
                 onOpenMemory={() => dialogHost.current?.openMemory()}
               />
             </aside>

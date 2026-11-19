@@ -886,6 +886,25 @@ vision = false
       return { entries: frame.entries || [], truncated: !!frame.truncated };
     });
 
+    // issue #3026：右栏两个文件树的两个根。agent 根 = 该会话所属 agent 的工作目录；
+    // 会话根 = 该会话自己的会话目录。两者都在主进程解析，因为只有它同时握着 openSessions
+    // 簿记、全局 sessions_index.json 与 daemon 的 resolve_session_cwd。
+    //
+    // 会话目录可能建在项目里（<cwd>/.emrg/sessions/<sid>），也可能是 home 级会话
+    // （~/.emrg/sessions/<sid>）——先看哪个真实存在，都不存在时给项目里的那个，
+    // 让树去说「路径不存在」而不是由这里假装知道。
+    ipcMain.handle("emrg:sessionRoots", async (_e, { sessionId } = {}) => {
+      if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
+      let cwd = resolveSessionCwd(sessionId);
+      if (!cwd) cwd = await askSessionCwd(sessionId, DEFAULT_CWD);
+      if (!cwd) return { agentRoot: null, sessionRoot: null };
+      const inProject = path.join(cwd, ".emrg", "sessions", sessionId);
+      const inHome = path.join(os.homedir(), ".emrg", "sessions", sessionId);
+      let sessionRoot = inProject;
+      if (!fs.existsSync(inProject) && fs.existsSync(inHome)) sessionRoot = inHome;
+      return { agentRoot: cwd, sessionRoot };
+    });
+
     ipcMain.handle("emrg:readFile", async (_e, { path: p, startLine, lineLimit } = {}) => {
       if (typeof p !== "string" || !p.trim()) throw new Error("invalid path");
       const params = { path: p.trim() };

@@ -36,6 +36,12 @@ function mockEmrg() {
   // Issue #2349 part 2/2: the prompts the host typed in this session, as the daemon
   // holds them (oldest first) — the list the composer's ↑ walks.
   const listInputHistory = vi.fn().mockResolvedValue({ entries: ["first", "second"], hasMore: false });
+  // issue #3026：右栏两个文件树 —— 两个根由主进程解析，目录一层一层问 daemon
+  const listFiles = vi.fn().mockResolvedValue({ entries: [], truncated: false });
+  const sessionRoots = vi.fn().mockResolvedValue({
+    agentRoot: "/p/emrg",
+    sessionRoot: "/p/emrg/.emrg/sessions/s1",
+  });
   // Batch 5 slice 8：任务 CRUD + Rant 提交（window.emrg 桥已暴露，main.js IPC 在列）
   const taskCreate = vi.fn().mockResolvedValue({ ok: true });
   const taskUpdate = vi.fn().mockResolvedValue({ ok: true });
@@ -70,6 +76,8 @@ function mockEmrg() {
     listSkills,
     listHistory,
     listInputHistory,
+    listFiles,
+    sessionRoots,
     taskCreate,
     taskUpdate,
     taskDelete,
@@ -96,6 +104,8 @@ function mockEmrg() {
     listRants,
     listHistory,
     listInputHistory,
+    listFiles,
+    sessionRoots,
     taskCreate,
     taskUpdate,
     taskDelete,

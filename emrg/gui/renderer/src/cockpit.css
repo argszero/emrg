@@ -945,3 +945,139 @@ body.col-resizing * {
   white-space: normal;
   flex: none;
 }
+
+/* ── The inspector's two directory trees (issue #3026) ──────── */
+.ft {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+.ft-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  flex: none;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ft-root {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-small);
+  color: var(--text-3);
+}
+
+.ft-tool {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+.ft-tool:hover:not(:disabled) {
+  background: var(--bg-soft);
+  color: var(--text-1);
+}
+
+.ft-tool:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.ft-body {
+  flex: 1;
+  min-height: 0;
+  /* No horizontal scrolling: a long name is ellipsized, never pushed sideways. */
+  overflow-x: hidden;
+  overflow-y: auto;
+  outline: none;
+  padding: 2px 0;
+}
+
+.ft-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  /* Height, indent and icon size are written by the component from lib/fileTree's
+     constants, so a test reads them off the row rather than trusting this sheet. */
+  padding-right: 8px;
+  font-size: var(--fs-small);
+  color: var(--text-1);
+  cursor: default;
+  user-select: none;
+}
+
+/* Selection is a whole-row band, not a text colour change. */
+.ft-row.selected {
+  background: var(--bg-soft);
+}
+
+.ft-row:hover {
+  background: var(--bg-soft);
+}
+
+/* One 1px guide per level: what makes a deep row's parentage readable. */
+.ft-guide {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border);
+}
+
+.ft-caret {
+  flex: none;
+  width: 10px;
+  color: var(--text-3);
+  font-size: 9px;
+  text-align: center;
+}
+
+.ft-glyph {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-3);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.ft-glyph[data-kind="dir"],
+.ft-glyph[data-kind="dir-open"] {
+  color: var(--accent);
+}
+
+.ft-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ft-note {
+  margin: 6px 10px;
+  font-size: var(--fs-small);
+  color: var(--text-3);
+}
+
+.ft-note-error {
+  color: var(--text-2);
+  word-break: break-word;
+}

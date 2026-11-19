@@ -23,7 +23,7 @@ const path = require("node:path");
 
 const PRELOAD = fs.readFileSync(path.join(__dirname, "..", "preload.js"), "utf8");
 
-/** 冻结的期望 API 面：58 invoke 方法（按 preload.js 实际顺序）+ onEvent */
+/** 冻结的期望 API 面：68 invoke 方法（按 preload.js 实际顺序）+ onEvent */
 const EXPECTED_INVOKE_METHODS = [
   "init",
   "sendMessage",
@@ -50,6 +50,9 @@ const EXPECTED_INVOKE_METHODS = [
   "listMemories",
   "readMemory",
   "listFiles",
+  // issue #3026：右栏两个文件树的两个根（agent 工作目录 / 该会话的会话目录），
+  // 由主进程解析——只有它同时握着 openSessions、全局会话索引与 daemon 的 cwd 判定。
+  "sessionRoots",
   "readFile",
   "previewHtml",
   "closePreview",
@@ -136,8 +139,8 @@ function parseApiBlock(block) {
 
 const api = parseApiBlock(extractApiBlock());
 
-test("window.emrg exposes the full contract (66 invoke + onEvent)", () => {
-  // 60 invoke 方法全部存在（防误删/改名）
+test("window.emrg exposes the full contract (68 invoke + onEvent)", () => {
+  // 68 invoke 方法全部存在（防误删/改名）
   for (const name of EXPECTED_INVOKE_METHODS) {
     assert.ok(api.invoke.has(name), `缺少 invoke 方法 ${name}`);
   }

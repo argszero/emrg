@@ -78,6 +78,16 @@ interface EmrgWindow {
      * build that ships the whole recall path.
      */
     listInputHistory?: (p: { sessionId: string }) => Promise<{ entries?: unknown[]; hasMore?: boolean }>;
+    /**
+     * The inspector's two trees (issue #3026): one directory level, and the two roots.
+     * Named in *this* literal for the same reason as the four above — a channel missing
+     * here reaches the bridge as `undefined`, which it reads as "this build cannot do
+     * it", so the column would say it cannot list directories in a build that can.
+     */
+    listFiles?: (p: { path: string }) => Promise<{ entries?: unknown[]; truncated?: boolean }>;
+    sessionRoots?: (p: {
+      sessionId: string;
+    }) => Promise<{ agentRoot?: string | null; sessionRoot?: string | null }>;
   };
 }
 
@@ -145,6 +155,20 @@ export function DaemonBridgeProvider({ children }: { children: ReactNode }) {
           const emrg = (window as unknown as EmrgWindow).emrg;
           if (!emrg?.listInputHistory) throw new Error("listInputHistory unavailable");
           return emrg.listInputHistory(p);
+        },
+        // The inspector's two trees (issue #3026), on the same terms again: read
+        // `window.emrg` per call, and throw when the channel is missing so the bridge's
+        // `null` keeps meaning "this build cannot ask" rather than "the directory is
+        // empty" — the two render as different sentences on purpose.
+        listFiles: async (p) => {
+          const emrg = (window as unknown as EmrgWindow).emrg;
+          if (!emrg?.listFiles) throw new Error("listFiles unavailable");
+          return emrg.listFiles(p);
+        },
+        sessionRoots: async (p) => {
+          const emrg = (window as unknown as EmrgWindow).emrg;
+          if (!emrg?.sessionRoots) throw new Error("sessionRoots unavailable");
+          return emrg.sessionRoots(p);
         },
       },
       transcript,
