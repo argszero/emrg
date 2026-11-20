@@ -76,11 +76,14 @@
 }
 
 /* P4 slice 2：打开会话区（跨项目 tab）——紧贴新对话按钮，视觉轻量 */
+/* 这一条不定高度，也不做滚动容器（issue #3087）。会话栏是 flex 列，列表与下半的两段树
+   各拿 `flex: 1`，按 0 基准平分整栏；这条规则原先还写着 `max-height: 40%`，而
+   `#open-sessions` 是 id 选择器，压得过 `cockpit.css` 里写高度的 `.session-list`
+   （与两张样式表谁先加载无关），于是窗口越高，列表被截得越早，栏底空出来的那条也越来越高。
+   滚动本来就归 `.session-list` 的 `overflow-y` 管，两个滚动容器是第二个毛病。 */
 #open-sessions {
   padding-bottom: var(--sp-1);
   margin-bottom: var(--sp-1);
-  max-height: 40%;
-  overflow-y: auto;
 }
 /* 输入区（宿主 2026-08-20 17:50:30：状态栏/输入框 100% 全宽，不再 808px 居中） */
 #composer-wrap {

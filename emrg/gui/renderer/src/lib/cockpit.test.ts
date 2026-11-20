@@ -362,18 +362,34 @@ describe("findBodyWidthCaps", () => {
   });
 });
 
+/* ── Slicing one rule out of a stylesheet ───────────────────── */
+
+/**
+ * One rule's declarations, sliced out of a sheet the bundler read as text.
+ *
+ * `?raw` rather than `node:fs` (the renderer typechecks with `vite/client` alone —
+ * `tests/test_renderer_node_types.py` pins that), and the file's text rather than a
+ * rendered assertion, because jsdom computes no layout: a rule that caps a height is
+ * invisible to the DOM and plainly there in the source.
+ *
+ * The opening newline anchors the selector to the start of a line, so this cannot
+ * answer with a rule that merely ends in the same name.
+ */
+function blockIn(source: string, selector: string): string {
+  const at = source.indexOf(`\n${selector} {`);
+  expect(at, `${selector} 在样式表里找不到`).toBeGreaterThan(-1);
+  const start = source.indexOf("{", at) + 1;
+  const end = source.indexOf("}", start);
+  return source.slice(start, end);
+}
+
+/** The same read, for the sheet that describes the cockpit itself. */
+const block = (selector: string) => blockIn(cssSource, selector);
+
 describe("图标轨与设置页的数值就是原型的数值（issue #2986）", () => {
   // 这些数值是宿主一眼能看出「不是同一个东西」的地方，所以它们必须被钉住，而不能只写在
   // 注释里。读的是样式表本身：`?raw` 拿的是文件文本，不经过 CSS 管线，也不会被 jsdom 的
   // 「不算布局」变成空话，前提是下面第一条先证明读到的不是空串。
-  function blockIn(source: string, selector: string): string {
-    const at = source.indexOf(`\n${selector} {`);
-    expect(at, `${selector} 在样式表里找不到`).toBeGreaterThan(-1);
-    const start = source.indexOf("{", at) + 1;
-    const end = source.indexOf("}", start);
-    return source.slice(start, end);
-  }
-  const block = (selector: string) => blockIn(cssSource, selector);
 
   it("样式表真的读到了（空串会让下面每一条断言都白白通过）", () => {
     expect(cssSource.length).toBeGreaterThan(2000);
@@ -512,5 +528,47 @@ describe("图标轨与设置页的数值就是原型的数值（issue #2986）",
     // 表头与行必须同一套列宽：只有一处对，列名就会和内容错位，而错位正是这张表要修的东西。
     expect(blockIn(componentsSource, ".rant-head")).toContain(six);
     expect(blockIn(componentsSource, ".rant-row")).toContain(six);
+  });
+});
+
+/* ── One owner for the session column's height (issue #3087) ─── */
+
+describe("会话栏的高度只有一处说了算（issue #3087）", () => {
+  // 会话栏（`shell.css` 的 `.react-shell-session`）是 flex 列，里面只有两个子项：打开中的
+  // 会话列表（`.session-list`）和下半的两段目录树（`.left-trees`）。两者都是 `flex: 1`，
+  // 也就是按 0 基准平分整栏——除非有人在别处给其中一个再写一个高度上限。
+  //
+  // `css/layout.css` 的 `#open-sessions` 曾经写着 `max-height: 40%`。这个元素今天由
+  // `SessionColumn.tsx` 渲染，同时带着 id 和 `.session-list` 类，而 id 选择器压得过类选择器，
+  // 与两张样式表谁先加载无关：于是高度写在 `cockpit.css` 上、赢的却是旧规则，窗口越高，
+  // 列表被截得越早，栏底空出来的那条也跟着变高。
+  //
+  // 规则因此不是「把 40% 调大」而是「一个元素的高度只有一处写」，三条断言各钉一个环节：
+  // 旧规则不再写高度、高度写在类规则上、类规则也没有把上限换个地方重写一遍。
+  // jsdom 不算布局，所以读的是样式表文本本身（`?raw`），第一条先证明读到的不为空串。
+
+  it("旧规则不再定高：`#open-sessions` 没有高度上限，也不再自建滚动容器", () => {
+    expect(layoutSource.length).toBeGreaterThan(1000);
+    const old = blockIn(layoutSource, "#open-sessions");
+    // 先确认拿到的是那条规则本身，而不是一段空文本——空片段会让下面每条 not 都白白通过
+    expect(old).toContain("padding-bottom: var(--sp-1)");
+    // 删掉的那个上限一旦回来，这里就红
+    expect(old).not.toMatch(/max-height/);
+    // 第二个毛病：滚动归 `.session-list` 管，两个滚动容器不是备份而是两层套子
+    expect(old).not.toMatch(/overflow/);
+    // 删的是高度，不是间距——间距被顺手带走也是回归
+    expect(old).toContain("margin-bottom: var(--sp-1)");
+  });
+
+  it("高度写在类规则上，且没有换个选择器重写一遍：`.session-list` 是 flex: 1、无上限", () => {
+    const list = block(".session-list");
+    // 列表自己涨满整栏、并且仍然是那个滚动容器
+    expect(list).toContain("flex: 1");
+    expect(list).toContain("min-height: 0");
+    expect(list).toContain("overflow-y: auto");
+    // 把 40% 搬到这条类规则上不是修好，是换个文件名写同一件事
+    expect(list).not.toMatch(/max-height/);
+    // 列表涨上去就等于把两段树挤没：下半仍然要拿它那一半
+    expect(block(".left-trees")).toContain("flex: 1");
   });
 });
