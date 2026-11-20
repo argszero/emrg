@@ -71,3 +71,87 @@ describe("NewSessionDialog", () => {
     expect(onDismiss).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * 搜索框（新建会话支持搜索 agent）。上面的固定装置与用例保持原样不动：新增的一半
+ * 自带一份列表，三行各占一种命中口径——名字命中、只在路径里命中、都不命中。
+ */
+const searchAgents: AgentRow[] = [
+  { name: "aitokenpool", path: "/x/aitokenpool", latest_session_at: null },
+  { name: "emrg", path: "/x/emrg", latest_session_at: null },
+  { name: "deepnest", path: "/work/deepnest-two", latest_session_at: null },
+];
+
+function searchSetup(props: Partial<Parameters<typeof NewSessionDialog>[0]> = {}) {
+  return render(
+    <I18nProvider lang="zh">
+      <NewSessionDialog open agents={searchAgents} {...props} />
+    </I18nProvider>,
+  );
+}
+
+const rowCount = () => screen.queryAllByTestId("new-session-agent").length;
+
+describe("NewSessionDialog 搜索", () => {
+  it("打开时搜索框为空、有焦点，占位文案与打开会话一致", () => {
+    searchSetup();
+    const box = screen.getByTestId("new-session-search");
+    expect(box).toHaveValue("");
+    expect(box).toHaveFocus();
+    expect(box).toHaveAttribute("placeholder", "按名字或路径筛选");
+    expect(rowCount()).toBe(3);
+  });
+
+  it("首尾空格 + 大小写混写：只剩命中行，不需要回车", async () => {
+    searchSetup();
+    await userEvent.type(screen.getByTestId("new-session-search"), "  AITOKEN  ");
+    expect(rowCount()).toBe(1);
+    expect(screen.getByTestId("new-session-agent")).toHaveTextContent("aitokenpool");
+  });
+
+  it("只出现在路径里的串也能命中", async () => {
+    searchSetup();
+    await userEvent.type(screen.getByTestId("new-session-search"), "nest-two");
+    expect(rowCount()).toBe(1);
+    expect(screen.getByTestId("new-session-agent")).toHaveTextContent("/work/deepnest-two");
+  });
+
+  it("清空搜索框即恢复完整列表", async () => {
+    searchSetup();
+    const box = screen.getByTestId("new-session-search");
+    await userEvent.type(box, "deep");
+    expect(rowCount()).toBe(1);
+    await userEvent.clear(box);
+    expect(rowCount()).toBe(3);
+  });
+
+  it("无命中显示「没有匹配的结果」，不显示「还没有 agent」", async () => {
+    searchSetup();
+    await userEvent.type(screen.getByTestId("new-session-search"), "zzz");
+    expect(rowCount()).toBe(0);
+    expect(screen.getByTestId("new-session-no-matches")).toHaveTextContent("没有匹配的结果");
+    expect(screen.queryByTestId("new-session-empty")).toBeNull();
+  });
+
+  it("没有 agent 时仍显示「还没有 agent」，与查询无关", () => {
+    searchSetup({ agents: [] });
+    expect(screen.getByTestId("new-session-empty")).toHaveTextContent("还没有 agent");
+    expect(screen.queryByTestId("new-session-no-matches")).toBeNull();
+  });
+
+  it("关掉再打开：上一次的查询不带进这一次，焦点回搜索框", async () => {
+    const { rerender } = searchSetup();
+    await userEvent.type(screen.getByTestId("new-session-search"), "deep");
+    expect(rowCount()).toBe(1);
+    const view = (open: boolean) => (
+      <I18nProvider lang="zh">
+        <NewSessionDialog open={open} agents={searchAgents} />
+      </I18nProvider>
+    );
+    rerender(view(false));
+    rerender(view(true));
+    expect(screen.getByTestId("new-session-search")).toHaveValue("");
+    expect(screen.getByTestId("new-session-search")).toHaveFocus();
+    expect(rowCount()).toBe(3);
+  });
+});
