@@ -267,12 +267,23 @@ class TestTheClientAsksAboutASession:
         )
 
     def test_the_main_process_passes_the_session_through_to_the_daemon(self):
-        """The wire this change added, which no JavaScript test names.
+        r"""The two mappings in this wire, which no JavaScript test names.
 
-        Measured: ``grep -rn 'usageWindow' emrg/gui/*.test.js`` answers 0 hits, so the
-        ``{sessionId}`` → ``{session_id}`` mapping and the ``session`` → three-key mapping
-        read here or nowhere. A wrong key is answered ``session=None`` while every test
-        that exists stays green.
+        Four files under ``emrg/gui`` do name ``usageWindow``: ``test/preload-api.test.js``,
+        ``renderer/src/lib/daemonBridge.test.ts``,
+        ``renderer/src/components/DaemonBridgeProvider.test.tsx`` and
+        ``renderer/src/components/DialogHost.test.tsx``. They pin the method's name and the
+        channel it travels on, not what the call carries: over those same roots neither
+        ``session_id: sessionId`` nor ``input: session.``, ``cache: session.`` or
+        ``output: session.`` answers anything (measured on master ``2dd62801``).
+
+        So the ``{sessionId}`` → ``{session_id}`` mapping and the ``session`` → three-key
+        mapping read here or nowhere. A wrong key is answered ``session=None`` while every
+        test that exists stays green.
+
+        The roots are named one by one rather than globbed because a pattern that selects
+        no file answers nothing for the pattern's own reason, and that emptiness reads
+        exactly like a measurement of the tree.
         """
         from pathlib import Path
 
