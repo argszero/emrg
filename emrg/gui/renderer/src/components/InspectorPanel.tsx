@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useI18n } from "../lib/i18n";
-import { FileTree, type LoadDir } from "./FileTree";
+import { FileTree, FileTreeRoots, type LoadDir } from "./FileTree";
 
 /**
  * InspectorPanel — the page's fourth section, three tabs wide (issue #2969 / #3026).
@@ -35,6 +35,14 @@ export interface InspectorPanelProps {
   agentRoot?: string | null;
   /** 该会话自己的会话目录（绝对路径）；`null` = 不知道 */
   sessionRoot?: string | null;
+  /**
+   * 该会话的额外可写根（绝对路径，按加入顺序）；`null` = daemon 还没说。
+   *
+   * 与 `sessionRoot` 合起来才是「这个会话能写哪里」：会话目录只是其中一处，`/sandbox add`
+   * 加进来的每一处同样可写，而在这次改动之前它们在界面上完全不可见（issue #3063）。只列
+   * 会话自己加的根——安装级默认每个会话都一样，不属于某个会话。
+   */
+  sessionRoots?: string[] | null;
   /** 读一层目录；未接线时为 undefined，树会把原因说出来而不是画一棵空树 */
   loadDir?: LoadDir;
   /** 打开记忆面板（记忆列表归那个对话框，这里只给门） */
@@ -45,11 +53,18 @@ export function InspectorPanel({
   sid = null,
   agentRoot = null,
   sessionRoot = null,
+  sessionRoots = null,
   loadDir,
   onOpenMemory,
 }: InspectorPanelProps) {
   const { t } = useI18n();
   const [active, setActive] = useState<InspectorTabId>("agent");
+  // The open folders of the session tab live here rather than in the tree, because this
+  // panel outlives the tab: choosing another tab unmounts the tree, and choosing another
+  // session keeps this component. Keyed by absolute path, so switching away and back
+  // finds the same folders open, and a path belonging to another session simply
+  // contributes nothing (issue #3063, item 2).
+  const [openFolders, setOpenFolders] = useState<Set<string>>(() => new Set());
 
   return (
     <section className="inspector" data-testid="inspector-panel" data-sid={sid ?? ""}>
@@ -73,7 +88,13 @@ export function InspectorPanel({
           <FileTree testId="inspector-tree-agent" root={agentRoot} loadDir={loadDir} />
         ) : null}
         {active === "session" ? (
-          <FileTree testId="inspector-tree-session" root={sessionRoot} loadDir={loadDir} />
+          <FileTreeRoots
+            testId="inspector-tree-session"
+            roots={sessionRoot ? [sessionRoot, ...(sessionRoots ?? [])] : [null]}
+            loadDir={loadDir}
+            expanded={openFolders}
+            onExpandedChange={setOpenFolders}
+          />
         ) : null}
         {active === "memory" ? (
           <div className="inspector-memory" data-testid="inspector-memory">

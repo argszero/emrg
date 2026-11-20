@@ -52,6 +52,17 @@ export interface FileTreeProps {
   loadDir?: LoadDir;
   /** test-id prefix, so the two trees in one panel stay distinguishable. */
   testId: string;
+  /**
+   * The open folders, by absolute path; omitted = this tree keeps its own.
+   *
+   * Supplied by a caller that outlives the tree — the inspector unmounts a tab's tree
+   * when another tab is chosen, so a set held here would be folded away and lost. Keyed
+   * by path rather than by row, because a path means the same directory to every root
+   * that shows it (issue #3063).
+   */
+  expanded?: Set<string>;
+  /** The whole next set, whenever a folder is opened, closed, or all collapsed. */
+  onExpandedChange?: (next: Set<string>) => void;
 }
 
 /** The glyph each kind draws. The kind is the contract; the character is decoration. */
@@ -66,10 +77,22 @@ const GLYPHS: Record<string, string> = {
   file: "▤",
 };
 
-export function FileTree({ root, loadDir, testId }: FileTreeProps) {
+export function FileTree({ root, loadDir, testId, expanded, onExpandedChange }: FileTreeProps) {
   const { t } = useI18n();
   const [dirs, setDirs] = useState<DirMap>({});
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  // Open folders are the caller's when it supplies `expanded`, and this tree's own
+  // otherwise. Both readings go through `applyExpanded`, so the buttons, the rows and
+  // the arrow keys cannot disagree about which one is in force.
+  const [ownExpanded, setOwnExpanded] = useState<Set<string>>(() => new Set());
+  const controlled = expanded !== undefined;
+  const openSet = controlled ? expanded : ownExpanded;
+  const applyExpanded = useCallback(
+    (next: Set<string>): void => {
+      onExpandedChange?.(next);
+      if (!controlled) setOwnExpanded(next);
+    },
+    [controlled, onExpandedChange],
+  );
   const [selected, setSelected] = useState<string | null>(null);
   // A refresh re-reads; the counter is the effect's trigger, not a value it reads.
   const [refreshSeq, setRefreshSeq] = useState(0);
@@ -119,9 +142,11 @@ export function FileTree({ root, loadDir, testId }: FileTreeProps) {
   );
 
   // A new root is a different tree: the old levels and the old open folders mean nothing
-  // under it, so both are dropped rather than carried across.
+  // under it, so both are dropped rather than carried across — unless the caller owns the
+  // open folders, in which case they are its to keep (a path that does not sit under the
+  // new root simply contributes no rows).
   useEffect(() => {
-    setExpanded(new Set());
+    if (!controlled) setOwnExpanded(new Set());
     setSelected(null);
     // A menu opened on the old tree points at a path this root no longer shows.
     setMenu(null);
@@ -132,21 +157,34 @@ export function FileTree({ root, loadDir, testId }: FileTreeProps) {
     // refresh counter are the events this effect answers.
   }, [root, refreshSeq]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const rows = useMemo(() => rowsFor(root, dirs, expanded), [root, dirs, expanded]);
+  const rows = useMemo(() => rowsFor(root, dirs, openSet), [root, dirs, openSet]);
+
+  // An open folder is a promise that its children are drawn, and the listings behind
+  // them do not survive this component. So a tree that comes back with folders already
+  // open — the host switched tabs and returned — asks for those levels again, and only
+  // for paths under its own root, since the set is shared across a session's roots.
+  useEffect(() => {
+    if (!root) return;
+    if (dirs[root]?.status !== "loaded") return;
+    const sep = root.includes("\\") && !root.includes("/") ? "\\" : "/";
+    const prefix = root.endsWith(sep) ? root : `${root}${sep}`;
+    for (const path of openSet) {
+      if (!path.startsWith(prefix)) continue;
+      if (dirs[path] === undefined) void read(path);
+    }
+  }, [root, dirs, openSet, read]);
   const rootState = root ? dirs[root] : undefined;
 
   const open = useCallback(
     (row: TreeRow): void => {
       if (row.type !== "dir") return;
-      setExpanded((prev) => {
-        const next = new Set(prev);
-        if (next.has(row.path)) next.delete(row.path);
-        else next.add(row.path);
-        return next;
-      });
+      const next = new Set(openSet);
+      if (next.has(row.path)) next.delete(row.path);
+      else next.add(row.path);
+      applyExpanded(next);
       if (dirs[row.path] === undefined) void read(row.path);
     },
-    [dirs, read],
+    [dirs, read, openSet, applyExpanded],
   );
 
   const closeMenu = useCallback((): void => {
@@ -323,7 +361,7 @@ export function FileTree({ root, loadDir, testId }: FileTreeProps) {
           type="button"
           className="ft-tool"
           data-testid={`${testId}-collapse`}
-          onClick={() => setExpanded(new Set())}
+          onClick={() => applyExpanded(new Set())}
           disabled={!root}
           title={t("inspector.treeCollapse")}
         >
@@ -419,6 +457,84 @@ export function FileTree({ root, loadDir, testId }: FileTreeProps) {
           onHover={setMenuActive}
         />
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * FileTreeRoots — the same tree drawn once per root, for a session's writable places
+ * (issue #3063).
+ *
+ * A session writes under its own session directory and under every extra writable root
+ * the host has named for it (`/sandbox add`), and only the first of those had a surface.
+ * The roots are cells of one list rather than one tree with a synthetic top row, because
+ * they are unrelated directories: a session root and a checkout elsewhere share no parent
+ * to hang a common row under.
+ *
+ * The first root is drawn with the caller's `testId` unchanged and every later one as
+ * `<testId>-extra-<n>`, so a single-root call renders exactly the DOM it rendered before
+ * this component existed — no wrapper, no extra shell. One root is therefore the ordinary
+ * case, and `roots` with one entry is how a session with no extra roots is drawn.
+ *
+ * The open folders are shared by all the roots and keyed by path, so a path named twice
+ * is open once, and folding one root's folder never touches another's.
+ */
+export interface FileTreeRootsProps {
+  /** The roots, in drawing order; a repeated path is drawn once, and `null` = unknown. */
+  roots: (string | null)[];
+  loadDir?: LoadDir;
+  testId: string;
+  expanded?: Set<string>;
+  onExpandedChange?: (next: Set<string>) => void;
+}
+
+export function FileTreeRoots({ roots, loadDir, testId, expanded, onExpandedChange }: FileTreeRootsProps) {
+  const [own, setOwn] = useState<Set<string>>(() => new Set());
+  const openSet = expanded ?? own;
+  const setOpenSet = onExpandedChange ?? setOwn;
+  // Same path twice is one root: the session directory and an extra root that names it
+  // are the same place, and drawing both would show one directory as two rows that
+  // expand separately. A trailing separator is a spelling of the same path, not a
+  // different one.
+  const unique: (string | null)[] = [];
+  const seen = new Set<string>();
+  for (const root of roots) {
+    if (root === null || root === "") {
+      if (seen.has("")) continue;
+      seen.add("");
+      unique.push(null);
+      continue;
+    }
+    const key = root.replace(/[\\/]+$/, "");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(root);
+  }
+
+  if (unique.length <= 1) {
+    return (
+      <FileTree
+        testId={testId}
+        root={unique[0] ?? null}
+        loadDir={loadDir}
+        expanded={openSet}
+        onExpandedChange={setOpenSet}
+      />
+    );
+  }
+
+  return (
+    <div className="ft-roots" data-testid={`${testId}-roots`} data-root-count={unique.length}>
+      {unique.map((root, i) => (
+        <FileTree
+          key={root ?? `unknown-${i}`}
+          testId={i === 0 ? testId : `${testId}-extra-${i}`}
+          root={root}
+          loadDir={loadDir}
+          expanded={openSet}
+          onExpandedChange={setOpenSet}
+        />
+      ))}
     </div>
   );
 }

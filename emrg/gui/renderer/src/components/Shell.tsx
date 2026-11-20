@@ -1263,6 +1263,10 @@ export function Shell() {
                 sid={activeSid}
                 agentRoot={roots.agentRoot}
                 sessionRoot={roots.sessionRoot}
+                // 会话的额外可写根（issue #3063）：与上面那个对话框同一份权威——`sandbox_roots`
+                // 帧与 `resume_result.meta.sandbox_roots` 写它。会话目录只是这个会话能写的一处，
+                // 其余每一处都在这份列表里；`null` 表示 daemon 还没说，不是「没有」。
+                sessionRoots={activeSid ? (appState.sandboxRootsBySid[activeSid] ?? null) : null}
                 loadDir={loadDir}
                 onOpenMemory={() => dialogHost.current?.openMemory()}
               />
