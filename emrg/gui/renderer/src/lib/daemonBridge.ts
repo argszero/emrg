@@ -455,6 +455,19 @@ export interface UsageWindowReading {
   input: number | null;
   cache: number | null;
   output: number | null;
+  /**
+   * The same three segments for the session that was asked about (issue #3072).
+   *
+   * Two readings, and neither is derived from the other: the three above are the
+   * **machine's** last 24 hours — every session, every background round — and these are
+   * one conversation's share of the same window. Optional, because `null` for one of
+   * them means "not measured" and an absent field means the same: a request that names
+   * no session is answered with the machine figures and nothing on this side, and
+   * falling back to the machine number here would claim one session spent the day.
+   */
+  sessionInput?: number | null;
+  sessionCache?: number | null;
+  sessionOutput?: number | null;
   windowStart: number | null;
   windowEnd: number | null;
 }
@@ -497,10 +510,12 @@ export interface DaemonBridgeDeps {
      * usage it happened to see: a client's own total is a second ledger, and it is the
      * one that resets every time a window closes.
      */
-    usageWindow?(): Promise<{
+    usageWindow?(p?: { sessionId?: string | null }): Promise<{
       input?: unknown;
       cache?: unknown;
       output?: unknown;
+      /** The named session's share of the same window, or absent when none was named. */
+      session?: { input?: unknown; cache?: unknown; output?: unknown };
       windowStart?: unknown;
       windowEnd?: unknown;
     }>;
@@ -616,6 +631,16 @@ export interface DaemonBridge {
    * assuming it did.
    */
   reorderOpenSessions(sids: string[]): Promise<boolean>;
+  /**
+   * Tell the bridge which session the band is showing (issue #3072).
+   *
+   * The spend reading answers two questions at once — this conversation's last 24 hours
+   * and the machine's — so the poll has to name a session, and the shell is the only
+   * layer that knows which one is on screen. Switching clears the session side before
+   * the new request goes out, and asks again immediately: the figures of the session
+   * that was open must not stand under the new one's name.
+   */
+  setUsageSession(sid: string | null): void;
   /**
    * Read one session's input history from the daemon, and store it (issue #2349,
    * part 2/2).
@@ -1216,6 +1241,15 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
   const USAGE_WINDOW_POLL_MS = 15_000;
 
   /**
+   * The session the band is showing, or `null` before the shell says (issue #3072).
+   *
+   * Held here rather than passed to every refresh, because two of the three moments that
+   * re-read the window — the 15-second poll and the mount read — have no session argument
+   * of their own, and they still have to ask about the conversation on screen.
+   */
+  let usageSessionId: string | null = null;
+
+  /**
    * Ask the daemon for its 24-hour window and store the three segments.
    *
    * Armed only when the main process actually exposes the read: a renderer talking to an
@@ -1225,14 +1259,24 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
   async function refreshUsageWindow(): Promise<void> {
     const ask = emrg.usageWindow;
     if (typeof ask !== "function") return;
+    // The session this read is about, captured before the await: a switch during the
+    // read would otherwise land the old conversation's figures under the new one's name.
+    const asked = usageSessionId;
     try {
-      const answer = await ask();
+      const answer = await ask({ sessionId: asked });
+      if (asked !== usageSessionId) return;
+      const session = answer?.session;
       store.update((s) => ({
         ...s,
         usageWindow: {
           input: aReportedCount(answer?.input),
           cache: aReportedCount(answer?.cache),
           output: aReportedCount(answer?.output),
+          // Never the machine figure as a stand-in: a request that named no session has
+          // no session reading, and one conversation did not spend the whole day.
+          sessionInput: aReportedCount(session?.input),
+          sessionCache: aReportedCount(session?.cache),
+          sessionOutput: aReportedCount(session?.output),
           windowStart: typeof answer?.windowStart === "number" ? answer.windowStart : null,
           windowEnd: typeof answer?.windowEnd === "number" ? answer.windowEnd : null,
         },
@@ -1241,6 +1285,35 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
       // A read that failed is "not reported": the previous reading stands rather than
       // being replaced by zero, which would claim nothing was spent.
     }
+  }
+
+  /**
+   * Which session the band is showing (issue #3072).
+   *
+   * Called by the shell when the session on screen changes, and it does two things in
+   * this order: clear the session side, so the conversation that was open cannot stand
+   * under the new one's name while the request is in flight, then ask again at once
+   * rather than at the next poll (item 7). The machine side is untouched — it belongs to
+   * the window, not to a conversation.
+   */
+  function setUsageSession(sid: string | null): void {
+    const next = typeof sid === "string" && sid ? sid : null;
+    if (next === usageSessionId) return;
+    usageSessionId = next;
+    store.update((s) =>
+      s.usageWindow
+        ? {
+            ...s,
+            usageWindow: {
+              ...s.usageWindow,
+              sessionInput: null,
+              sessionCache: null,
+              sessionOutput: null,
+            },
+          }
+        : s,
+    );
+    void refreshUsageWindow();
   }
 
   const usageTimer: ReturnType<typeof setInterval> | null =
@@ -1516,6 +1589,7 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
     setSandboxRoots,
     closeSession,
     reorderOpenSessions,
+    setUsageSession,
     listInputHistory,
     notePromptSubmitted,
     listDir,

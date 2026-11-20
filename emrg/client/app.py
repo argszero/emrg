@@ -166,17 +166,30 @@ def format_usage_window(usage: dict | None) -> str:
     Three figures and never their sum: the host reads this to see where the spend went,
     and a total cannot say whether it went into the prompt or into the answer.
 
+    Each figure is a pair since issue #3072 — **this session's** first, the **machine's**
+    second — because the two answer different questions and one number cannot be read as
+    both. The order is stated in the text itself, not only in a hover: a terminal line
+    has no title attribute, so a bare `15.2M/262.6M` would be a puzzle. The pair is
+    worded exactly as the GUI's English band says it, so the two clients do not describe
+    one reading in two dialects.
+
     An empty string when the daemon has not answered — the line then stays exactly as it
     was, the same rule `vision` and `sandbox` follow for an older daemon. A single field
-    no response reported prints `—` for that segment alone, never 0: nothing measured is
-    a different claim from nothing spent.
+    no response reported prints `—` for that side alone, never 0: nothing measured is a
+    different claim from nothing spent. A request that named no session has no session
+    side at all, and prints `—/…` rather than the machine figure on both sides.
     """
     if not isinstance(usage, dict):
         return ""
+    session = usage.get("session")
+    mine = session if isinstance(session, dict) else {}
     return (
-        f"24h in {_short_tokens(usage.get('input'))}"
-        f" · cache {_short_tokens(usage.get('cache'))}"
-        f" · out {_short_tokens(usage.get('output'))}"
+        f"24h this session/machine in {_short_tokens(mine.get('input'))}"
+        f"/{_short_tokens(usage.get('input'))}"
+        f" · cache {_short_tokens(mine.get('cache'))}"
+        f"/{_short_tokens(usage.get('cache'))}"
+        f" · out {_short_tokens(mine.get('output'))}"
+        f"/{_short_tokens(usage.get('output'))}"
     )
 
 
@@ -1244,7 +1257,10 @@ async def interactive(init_auto_evolve: bool = False, console=None):
     await conn.send_command("ping")
     # Rant 2026-11-19T09:31:00: the window is asked for once the connection is up, so
     # the first screen already carries it instead of waiting for a turn to finish.
-    await conn.send_command("usage_window")
+    # The session id rides along since issue #3072: without it the daemon answers the
+    # machine's figures and "not measured" for the session side, which is a reading of
+    # the machine on a line whose first number claims to be this conversation's.
+    await conn.send_command("usage_window", session_id=session_id)
     term = Terminal(); stdin_fd = sys.stdin.fileno()
     stdin_queue: asyncio.Queue = asyncio.Queue()
 
@@ -1792,17 +1808,24 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                         logger.info("turn_start aligned: _request_start=%.3f", _request_start)
                     # A turn starting means the one before it finished, so the 24-hour
                     # window has moved: re-read it (rant 2026-11-19T09:31:00). Same
-                    # source as the GUI's reading, and the same three segments.
-                    await conn.send_command("usage_window")
+                    # source as the GUI's reading, and the same three segments, each
+                    # with this session's share beside the machine's (issue #3072).
+                    await conn.send_command("usage_window", session_id=session_id)
                     continue
 
                 if data.get("type") == "usage_window":
                     # The daemon's answer (rant 2026-11-19T09:31:00), stored as it came:
-                    # this client shows the three segments and never adds them up.
+                    # this client shows the three segments and never adds them up. The
+                    # session's share rides beside them since issue #3072, kept under
+                    # the key the daemon used (`session`) so a reader cannot mistake one
+                    # reading for the other; `None` there is "not measured", never the
+                    # machine figure repeated.
+                    answer_session = data.get("session")
                     current_usage = {
                         "input": data.get("input"),
                         "cache": data.get("cache"),
                         "output": data.get("output"),
+                        "session": answer_session if isinstance(answer_session, dict) else None,
                     }
                     status.update(
                         left=_status_left(session_title, session_id, current_model, current_vision, current_sandbox),
@@ -1847,6 +1870,11 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     turn_ended_cancelled = data.get("cancelled") is True
                     busy = False
                     turn_running = False  # the session's turn is over, whoever started it
+                    # The round has just been recorded, so both readings moved — the
+                    # session's because this conversation is the one that spent, the
+                    # machine's because it always does. Re-read here and not only at the
+                    # next `turn_start`, which is a whole turn away (issue #3072 item 8).
+                    await conn.send_command("usage_window", session_id=session_id)
                     # The reply's own moment, written by the daemon into the record
                     # and sent on the frame that ends the turn — the live row must
                     # show what a reopen will read, and this client has no clock of
@@ -2614,6 +2642,15 @@ async def interactive(init_auto_evolve: bool = False, console=None):
 
                     # Switch session
                     session_id = new_sid
+                    # The figures on the status line were the session that was open a
+                    # moment ago (issue #3072): its share must not stand under the new
+                    # session's name, so that side is dropped — "not measured" is the
+                    # truth until the answer arrives — and the question is asked again
+                    # now rather than at the next turn. The machine's three figures are
+                    # the window's, not a conversation's, and they stay.
+                    if isinstance(current_usage, dict):
+                        current_usage = {**current_usage, "session": None}
+                    await conn.send_command("usage_window", session_id=session_id)
 
                     # The session's sandbox tier travels with the same snapshot and
                     # for the same reason `turn` does (rant 2026-09-30T09:30:16):

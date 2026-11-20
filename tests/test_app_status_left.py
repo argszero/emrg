@@ -105,37 +105,93 @@ class TestTheLast24Hours:
     went, and a total cannot say. The mutations this set exists to catch are the ones that
     look harmless — collapsing the three into one figure, deriving the cache segment as
     input minus hits, or printing 0 for a field no response ever reported.
+
+    Since issue #3072 each segment carries **two** figures — this session's first, the
+    machine's second — because a conversation's share and the machine's spend answer
+    different questions. The mutations here are the ones that look like a rendering
+    choice: putting the machine figure on both sides when no session was measured, or
+    dropping the order and leaving a bare `15.2M/262.6M` for the host to guess at.
     """
 
     def test_the_three_segments_are_shown_apart_with_k_and_m_abbreviations(self):
         from emrg.client.app import format_usage_window
 
-        out = format_usage_window({"input": 12_300_000, "cache": 11_100_000, "output": 245_000})
-        assert out == "24h in 12.3M · cache 11.1M · out 245.0k", out
+        out = format_usage_window({
+            "input": 262_600_000, "cache": 241_000_000, "output": 4_100_000,
+            "session": {"input": 15_200_000, "cache": 14_100_000, "output": 245_000},
+        })
+        assert out == (
+            "24h this session/machine in 15.2M/262.6M"
+            " · cache 14.1M/241.0M · out 245.0k/4.1M"
+        ), out
+
+    def test_the_order_is_stated_in_the_line_itself(self):
+        """A terminal has no hover text: the pair's order must be in the line (item 9)."""
+        from emrg.client.app import format_usage_window
+
+        out = format_usage_window({
+            "input": 100, "cache": 10, "output": 1,
+            "session": {"input": 50, "cache": 5, "output": 1},
+        })
+        assert out.startswith("24h this session/machine in 50/100"), out
 
     def test_nothing_is_totaled(self):
         from emrg.client.app import format_usage_window
 
-        out = format_usage_window({"input": 100, "cache": 40, "output": 7})
-        assert out == "24h in 100 · cache 40 · out 7", out
+        out = format_usage_window({
+            "input": 100, "cache": 40, "output": 7,
+            "session": {"input": 10, "cache": 4, "output": 1},
+        })
+        assert out == "24h this session/machine in 10/100 · cache 4/40 · out 1/7", out
         assert "total" not in out
 
     def test_the_cache_segment_is_the_reported_hit_not_the_difference(self):
-        """100 prompt tokens of which 80 were cache hits prints `cache 80`, not `20`."""
+        """100 prompt tokens of which 80 were cache hits prints `cache …/80`, not `…/20`."""
         from emrg.client.app import format_usage_window
 
-        assert "cache 80" in format_usage_window({"input": 100, "cache": 80, "output": 1})
+        out = format_usage_window({
+            "input": 100, "cache": 80, "output": 1,
+            "session": {"input": 90, "cache": 79, "output": 1},
+        })
+        assert "cache 79/80" in out, out
 
     def test_a_field_no_response_reported_is_a_dash_not_a_zero(self):
         """The absence of a measurement is `—`; a *reported* zero is `0`."""
         from emrg.client.app import format_usage_window
 
-        assert format_usage_window({"input": 1000, "cache": None, "output": 5}) == (
-            "24h in 1.0k · cache — · out 5"
-        )
-        assert format_usage_window({"input": 0, "cache": 0, "output": 0}) == (
-            "24h in 0 · cache 0 · out 0"
-        )
+        assert format_usage_window({
+            "input": 1000, "cache": None, "output": 5,
+            "session": {"input": None, "cache": None, "output": 5},
+        }) == "24h this session/machine in —/1.0k · cache —/— · out 5/5"
+        assert format_usage_window({
+            "input": 0, "cache": 0, "output": 0,
+            "session": {"input": 0, "cache": 0, "output": 0},
+        }) == "24h this session/machine in 0/0 · cache 0/0 · out 0/0"
+
+    def test_an_unnamed_request_never_shows_the_machine_figure_twice(self):
+        """Item 5: no session named ⇒ no session reading, not the machine's under a name."""
+        from emrg.client.app import format_usage_window
+
+        out = format_usage_window({"input": 100, "cache": 40, "output": 7})
+        assert out == "24h this session/machine in —/100 · cache —/40 · out —/7", out
+        assert "100/100" not in out, out
+
+        # and the same for an explicit null, which is what the daemon sends a request
+        # that named no session (item 5's "not measured", stated rather than omitted)
+        explicit = format_usage_window({
+            "input": 100, "cache": 40, "output": 7, "session": None,
+        })
+        assert explicit == out, explicit
+
+    def test_one_missing_session_segment_is_a_dash_on_that_segment_alone(self):
+        """Item 6: `—` on the side that was not measured, the other side still reads."""
+        from emrg.client.app import format_usage_window
+
+        out = format_usage_window({
+            "input": 100, "cache": 40, "output": 7,
+            "session": {"input": 5, "output": 7},
+        })
+        assert out == "24h this session/machine in 5/100 · cache —/40 · out 7/7", out
 
     def test_an_unanswered_window_leaves_the_line_byte_identical(self):
         """An older daemon never answers the request: the line must not change at all."""
@@ -148,6 +204,8 @@ class TestTheLast24Hours:
         from emrg.client.app import _format_status_left
 
         out = _format_status_left(
-            "main", "s_260727", "m", None, None, {"input": 1, "cache": 0, "output": 2}
+            "main", "s_260727", "m", None, None,
+            {"input": 1, "cache": 0, "output": 2,
+             "session": {"input": 1, "cache": 0, "output": 2}},
         )
-        assert out.endswith("24h in 1 · cache 0 · out 2"), out
+        assert out.endswith("24h this session/machine in 1/1 · cache 0/0 · out 2/2"), out

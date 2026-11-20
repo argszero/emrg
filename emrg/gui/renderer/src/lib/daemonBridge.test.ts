@@ -248,6 +248,93 @@ describe("createDaemonBridge", () => {
     expect(Number.isNaN(bad.input as unknown as number)).toBe(false);
   });
 
+  it("issue #3072：一次请求带回两个读数，本会话那份存在旁边，不顶替本机那份", async () => {
+    const { bridge, usageWindow } = setup();
+    usageWindow.mockResolvedValue({
+      input: 262_600_000, cache: 241_000_000, output: 4_100_000,
+      session: { input: 15_200_000, cache: 14_100_000, output: 245_000 },
+      windowStart: 1, windowEnd: 2,
+    });
+    bridge.setUsageSession("s1");
+    await vi.waitFor(() =>
+      expect(bridge.store.get().usageWindow?.sessionInput).toBe(15_200_000));
+
+    const reading = bridge.store.get().usageWindow!;
+    expect(reading.input).toBe(262_600_000);
+    expect(reading.sessionOutput).toBe(245_000);
+    // the question named the session it was asking about — a request that names none
+    // is answered with no session reading at all (item 5)
+    expect(usageWindow).toHaveBeenLastCalledWith({ sessionId: "s1" });
+  });
+
+  it("issue #3072 第 5 条：没点名会话时，本会话那份是「没测到」，不是本机那个数", async () => {
+    const { bridge, usageWindow, emit } = setup();
+    usageWindow.mockResolvedValue({ input: 100, cache: 40, output: 7, windowStart: 1, windowEnd: 2 });
+    // Nothing has told the bridge which session is on screen, which is a cold start's
+    // state; the frame drives a read through the same path the poll uses.
+    emit({ type: "turn_progress", data: {}, sid: "s1" });
+    await vi.waitFor(() => expect(bridge.store.get().usageWindow?.input).toBe(100));
+    // the question named no session, which is why the answer has no session side
+    expect(usageWindow).toHaveBeenLastCalledWith({ sessionId: null });
+    const reading = bridge.store.get().usageWindow!;
+    expect(reading.sessionInput).toBeNull();
+    expect(reading.sessionCache).toBeNull();
+    expect(reading.sessionOutput).toBeNull();
+  });
+
+  it("issue #3072 第 7 条：换会话先清掉上一份、立刻再问，不等下一次轮询", async () => {
+    const { bridge, usageWindow } = setup();
+    usageWindow.mockResolvedValue({
+      input: 262_600_000, cache: 1, output: 2,
+      session: { input: 15_200_000, cache: 3, output: 4 },
+      windowStart: 1, windowEnd: 2,
+    });
+    bridge.setUsageSession("s1");
+    await vi.waitFor(() =>
+      expect(bridge.store.get().usageWindow?.sessionInput).toBe(15_200_000));
+
+    // the next answer is held, so what is read below is the switch's own effect
+    let release: ((v: unknown) => void) | null = null;
+    usageWindow.mockImplementationOnce(
+      () => new Promise((res) => { release = res as (v: unknown) => void; }));
+    bridge.setUsageSession("s2");
+
+    const midSwitch = bridge.store.get().usageWindow!;
+    // the previous conversation's three figures are gone before any answer arrives…
+    expect(midSwitch.sessionInput).toBeNull();
+    expect(midSwitch.sessionCache).toBeNull();
+    expect(midSwitch.sessionOutput).toBeNull();
+    // …while the machine's three stay: they belong to the window, not to a conversation
+    expect(midSwitch.input).toBe(262_600_000);
+    // and the question went out at once rather than at the next 15-second tick
+    expect(usageWindow).toHaveBeenLastCalledWith({ sessionId: "s2" });
+
+    release!({ input: 300, cache: 5, output: 6, session: { input: 30, cache: 7, output: 8 },
+      windowStart: 1, windowEnd: 2 });
+    await vi.waitFor(() => expect(bridge.store.get().usageWindow?.sessionInput).toBe(30));
+  });
+
+  it("issue #3072：换会话后迟到的旧答案不落到新会话名下", async () => {
+    // A read in flight when the session changes answers about the conversation that was
+    // open when it was asked. Storing it now puts one session's figures under another's
+    // name — the same defect as not clearing, arriving one tick late.
+    const { bridge, usageWindow } = setup();
+    const held: Record<string, (v: unknown) => void> = {};
+    usageWindow.mockImplementation((p?: { sessionId?: string | null }) =>
+      new Promise((res) => { held[p?.sessionId ?? "none"] = res as (v: unknown) => void; }));
+
+    bridge.setUsageSession("s1");
+    bridge.setUsageSession("s2");
+    held["s2"]({ input: 200, output: 2, session: { input: 20, output: 2 }, windowStart: 1, windowEnd: 2 });
+    await vi.waitFor(() => expect(bridge.store.get().usageWindow?.sessionInput).toBe(20));
+
+    held["s1"]({ input: 100, output: 1, session: { input: 10, output: 1 }, windowStart: 1, windowEnd: 2 });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(bridge.store.get().usageWindow?.sessionInput).toBe(20);
+    expect(bridge.store.get().usageWindow?.input).toBe(200);
+  });
+
   it("rant 2026-11-20T09:54:50 第 2 条：打开即读一次，此后每 15 秒刷新一次", async () => {
     // 滚动窗口的远端跟着时钟走：只在下一次有事发生时才读的客户端，会显示一个不再缩小的
     // 数字。所以这里钉住两件事——挂载后立刻就有一读，以及之后是 15 秒而不是 15 分钟。

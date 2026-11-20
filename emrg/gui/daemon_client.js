@@ -975,8 +975,8 @@ class DaemonClient {
    * rather than adding up the usage frames it happened to see. The answer's frame type is
    * the command's own, which `sendCommandAndWait` already pairs by.
    */
-  usageWindow(timeoutMs = 10000) {
-    return this.sendCommandAndWait("usage_window", {}, timeoutMs);
+  usageWindow(payload = {}, timeoutMs = 10000) {
+    return this.sendCommandAndWait("usage_window", payload, timeoutMs);
   }
 
   sendCommandAndWait(commandType, payload = {}, timeoutMs = PENDING_TIMEOUT_MS) {

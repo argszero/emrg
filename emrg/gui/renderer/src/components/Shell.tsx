@@ -291,6 +291,17 @@ export function Shell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appState.reportedSid, appState.openSessions, activeSid]);
 
+  // ── The band's spend reading follows the session on screen (issue #3072) ──
+  //
+  // The daemon answers two readings from one question — this session's last 24 hours and
+  // the machine's — so the poll has to name a session, and this is the layer that knows
+  // which one is open. Telling the bridge here, rather than in the band, is what makes a
+  // switch clear the previous conversation's figures *before* the new request lands: the
+  // band only ever renders what the bridge holds.
+  useEffect(() => {
+    bridge.setUsageSession(activeSid);
+  }, [bridge, activeSid]);
+
   /** 重新装配一个会话的 transcript：丢掉分页状态与「已加载」标记，从头回放一次。 */
   async function reloadHistory(sid: string) {
     historyLoadedRef.current.delete(sid);

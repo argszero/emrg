@@ -110,10 +110,12 @@ interface EmrgWindow {
      * was undefined here, so the bridge took its "this build cannot ask" branch and never
      * armed the timer. A channel is only as present as this literal.
      */
-    usageWindow?: () => Promise<{
+    usageWindow?: (p?: { sessionId?: string | null }) => Promise<{
       input?: unknown;
       cache?: unknown;
       output?: unknown;
+      /** The named session's share of the same window (issue #3072). */
+      session?: { input?: unknown; cache?: unknown; output?: unknown };
       windowStart?: unknown;
       windowEnd?: unknown;
     }>;
@@ -224,10 +226,13 @@ export function DaemonBridgeProvider({ children }: { children: ReactNode }) {
         // in 24 hours" are different claims, and only the bridge may tell them apart.
         // The throw lands in `refreshUsageWindow`'s catch, which keeps the previous
         // reading, so a failed read shows the last number instead of a zero.
-        usageWindow: async () => {
+        // The session the bridge is asking about rides through unchanged (issue #3072):
+        // this wrapper's job is to be present and to throw, never to decide which
+        // conversation the reading describes.
+        usageWindow: async (p) => {
           const emrg = (window as unknown as EmrgWindow).emrg;
           if (!emrg?.usageWindow) throw new Error("usageWindow unavailable");
-          return emrg.usageWindow();
+          return emrg.usageWindow(p);
         },
         closeSession: async (p) => {
           const emrg = (window as unknown as EmrgWindow).emrg;
