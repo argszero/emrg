@@ -85,6 +85,14 @@ logger = logging.getLogger(__name__)
 # scheduled, which the task scheduler took over (`tasks.yml` owns scheduling now).
 _ROW_FIELDS = ("path", "name", "last_active")
 
+#: The life fields, read with the row and written only by the judge's tool.
+#:
+#: They are a separate tuple for one reason: a row that has never been judged must
+#: keep the shape it always had. Projecting them onto the row and then dropping the
+#: absent ones is what lets a reader ask ``row.get("life")`` without every existing
+#: row growing four null keys the first time anything rewrites the register.
+_LIFE_FIELDS = ("life", "life_at", "life_delta", "life_reason")
+
 
 def _unique_name(base_name: str, taken: set[str]) -> str:
     """``base_name``, or the first free ``base_name-N`` — the register's naming rule."""
@@ -158,7 +166,10 @@ class AgentRegistry:
         for entry in data:
             if not isinstance(entry, dict) or not entry.get("path"):
                 continue
-            row = {k: entry.get(k) for k in _ROW_FIELDS}
+            row = {k: entry.get(k) for k in _ROW_FIELDS + _LIFE_FIELDS}
+            for key in _LIFE_FIELDS:
+                if row[key] is None:
+                    del row[key]
             row["path"] = str(row["path"])
             row["name"] = str(row["name"]) if row["name"] else os.path.basename(
                 row["path"].rstrip(os.sep)
@@ -291,6 +302,50 @@ class AgentRegistry:
             )
             rows.remove(other)
         self._write(rows)
+        return row
+
+    def set_life(self, name: str, value: int, reason: str,
+                 at: datetime | None = None) -> dict | None:
+        """Write one agent's life value, and say what the write did.
+
+        The only writer of the four life fields, and the judge's tool is its only
+        caller — which is what makes "no agent can edit its own score" a property of
+        the tool list rather than a rule this method has to keep re-checking.
+
+        The change's size is **derived here, from the row**, never taken from the
+        caller: a delta the caller supplies is a second claim about the same fact, and
+        the two would eventually disagree. A first judgement has no previous value, so
+        it stores no delta — an absence, not a zero, because a jump from nothing to
+        something is not a change of nought.
+
+        :returns: the rewritten row, or ``None`` when nothing was decided — the
+            register could not be read, or no row carries ``name``. The two are
+            different situations and this method refuses to answer ``{}`` for both,
+            because a caller that cannot tell them apart reports "no such agent" about
+            a file it never read.
+        """
+        rows = self._read()
+        if rows is None:
+            return None
+        row = next((r for r in rows if r.get("name") == name), None)
+        if row is None:
+            return None
+        previous = row.get("life")
+        moment = at or datetime.now().astimezone()
+        row["life"] = int(value)
+        row["life_at"] = moment.isoformat()
+        row["life_reason"] = reason
+        if isinstance(previous, int) and not isinstance(previous, bool):
+            row["life_delta"] = row["life"] - previous
+        else:
+            row.pop("life_delta", None)
+        self._write(rows)
+        logger.info(
+            "register: life of %r set to %d (%s) — %s",
+            name, row["life"],
+            "first judgement" if row.get("life_delta") is None else f"{row['life_delta']:+d}",
+            reason,
+        )
         return row
 
     def remove(self, name: str) -> bool | None:

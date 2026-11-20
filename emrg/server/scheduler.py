@@ -55,6 +55,18 @@ from emrg.sandbox.policy import SANDBOX_MODES
 from websockets.exceptions import ConnectionClosed
 from emrg.protocol import EvolutionLog, InstanceIdentity
 from emrg.server.agents import AgentRegistry
+# The judge's round (`emrg/server/life_review.py`): who is on the roster, how much
+# each one presents, and whether the round may start at all. Imported as pure
+# functions so the gate can be asked without building a handler.
+from emrg.server.life_review import (
+    LIFE_REVIEW_TASK_TYPE,
+    read_watermark,
+    render_roster,
+    roster,
+    skip_reason,
+    watermark_path,
+    write_watermark,
+)
 from emrg.server.atomic import atomic_write_yaml
 # The credential rule, imported rather than restated: this module logs text it did not
 # author — an error string off the daemon's wire, and an abort reason built from an
@@ -206,6 +218,10 @@ TASK_TEMPLATES: dict[str, str] = {
     "ios-app": "ios_app_prompt.md",
     "feishu": "feishu_prompt.md",
     "self-media": "self_media_prompt.md",
+    # The judge's own round (`emrg/server/life_review.py`). Registered like every
+    # other built-in type; the task *record* that runs it is the host's to add,
+    # because a schedule spends tokens and that decision is not this table's.
+    "life-review": "life_review_prompt.md",
 }
 
 # ── Task CRUD constants (rant 2026-08-12T18:23:15 P2) ─────────────
@@ -1088,6 +1104,7 @@ def evolution_context(
     session_id: str,
     task: dict,
     agent: dict,
+    life_roster: str = "",
     now: datetime | None = None,
 ) -> dict:
     """The one definition of the context a prompt template is rendered with.
@@ -1122,6 +1139,11 @@ def evolution_context(
         "current_time_human": stamp.strftime("%Y-%m-%d %H:%M"),
         "task": task,
         "agent": agent,
+        # `life_roster` is the one name only the judge's template reads. It is stated
+        # here rather than passed as an extra variable for the reason this function
+        # exists: a template name supplied by a second, hand-written mapping is the
+        # drift measured in issue #2752.
+        "life_roster": life_roster,
     }
 
 
@@ -1149,6 +1171,12 @@ class TaskHandler:
     EMRG_REPO_URL = "https://github.com/argszero/emrg.git"
     OWNER = "argszero"
     REPO = "emrg"
+
+    #: The roster this round is about, rendered for the judge's template. Empty for
+    #: every type but `life-review`, whose gate fills it after admitting a round —
+    #: a class-level default rather than a constructor field, because a handler that
+    #: has not run a review yet is the same handler as one that never will.
+    _life_roster_text: str = ""
 
     def __init__(
         self,
@@ -2643,6 +2671,42 @@ class TaskHandler:
                     "TaskHandler[%s]: could not remove %s: %s", self.name, path, exc,
                 )
 
+    def _life_review_gate(self) -> str | None:
+        """Why this round must not start, or ``None`` once it is admitted.
+
+        The question is asked here, between "the wait ended" and "the cycle is
+        dispatched", because a cycle that starts and then finds no subject has already
+        spent the request — and the whole point of the empty-roster rule is that such a
+        window costs nothing.
+
+        Admitting a round does two things and both are why this is a method rather than
+        a predicate: it hands the judge its roster, and it **advances the window**. The
+        window is written before the round runs, so a round that dies mid-way has
+        consumed it — and that is not a loss, because the agents it was about still
+        carry their old `life_at`, so their spans are presented again by the next
+        roster. Writing it afterwards would leave a crashed round's window to be
+        presented for ever.
+
+        A skipped round advances nothing: the gap carries to the next wake, which is
+        what makes "nobody was active this half hour" cost no request rather than lose
+        the half hour.
+        """
+        if self._task.get("type") != LIFE_REVIEW_TASK_TYPE:
+            # A handler whose record changed type must not carry the previous type's
+            # roster into its prompt.
+            self._life_roster_text = ""
+            return None
+        path = watermark_path(self.name)
+        since = read_watermark(path)
+        rows = AgentRegistry(agents_file()).entries()
+        now = datetime.now().astimezone()
+        reason = skip_reason(rows, since, now)
+        if reason is not None:
+            return reason
+        self._life_roster_text = render_roster(roster(rows, since, now))
+        write_watermark(path, now)
+        return None
+
     async def run(self) -> None:
         """Run evolution cycles at configured interval.
 
@@ -2768,6 +2832,18 @@ class TaskHandler:
             # (issue #2592).
             natural_due = None
             self._logger.debug("TaskHandler[%s] tick", self.name)
+            _no_round = self._life_review_gate()
+            if _no_round is not None:
+                # The cadence is consumed and nothing is spent. The persisted slot is
+                # cleared like a running cycle's, so a daemon restart inside this
+                # window does not read a past instant as "run immediately" and start
+                # the round this skip just declined.
+                self._logger.info(
+                    "TaskHandler[%s] no round: %s", self.name, _no_round,
+                )
+                self._next_run_at = None
+                self._save_next_run_state()
+                continue
             self._cycle_running = True
             self._cycle_start_time = time.time()  # per-cycle elapsed base (rant 2026-08-22T07:18:35)
             self._next_run_at = None  # running — no next time yet
@@ -3599,6 +3675,7 @@ class TaskHandler:
             session_id=self._session_id,
             task=_template_task_context(self._config, self._task),
             agent=_load_agent_config(self._agent_name, str(self._source_dir)),
+            life_roster=self._life_roster_text,
         )
 
         env = jinja2.Environment(undefined=jinja2.Undefined)

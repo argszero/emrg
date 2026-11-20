@@ -167,6 +167,7 @@ INSTRUCTION_FILES = (
     "emrg/server/free_open_source_prompt.md",  # a task template added 2026-11-17 (#2929)
     "emrg/server/ios_app_prompt.md",       # a task template added 2026-10-14 (#2251)
     "emrg/server/journal_prompt.md",
+    "emrg/server/life_review_prompt.md",     # a task template (life-review)
     "emrg/server/open_source_prompt.md",
     "emrg/server/promote_prompt.md",
     "emrg/server/self_media_prompt.md",      # a task template (#2714)

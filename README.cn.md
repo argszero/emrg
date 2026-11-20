@@ -54,7 +54,7 @@ EMRG 是一个关于*自主进化*的实验：一个能帮你写代码的 AI 智
 |---|---|
 | **Electron GUI（主入口）** | 安装即用：首次启动引导配置 API Key；全部 `/` 指令可用；结果面板、Ask/Auto 模式、自进化可见化。GUI 配好即 TUI 可用 |
 | **全功能 TUI + 守护进程** | 流式 Markdown、`/` 自动补全、会话管理、快捷键——跑在常驻的 `emrgd` 守护进程上，随时重连 |
-| **定时任务** | 内置任务类型（`evolution`、`paper`、`open-source`、`free-open-source`、`promote`、`journal`、`competition`、`ios-app`、`feishu`、`self-media`）加自定义类型（提示词模板存 `~/.emrg/task-templates/`）、GUI 设置页增删改 + 热加载、`/trigger` 随时手动触发 |
+| **定时任务** | 内置任务类型（`evolution`、`paper`、`open-source`、`free-open-source`、`promote`、`journal`、`competition`、`ios-app`、`feishu`、`self-media`、`life-review`）加自定义类型（提示词模板存 `~/.emrg/task-templates/`）、GUI 设置页增删改 + 热加载、`/trigger` 随时手动触发 |
 | **100% 开源** | MIT 协议——没有围墙，没有厂商锁定。默认英文，提供中文版 |
 
 ---
@@ -175,7 +175,7 @@ TUI 内：`Esc` 中断流式输出，`Ctrl+C` / `exit` 退出（配置与 GUI �
 |  | Claude Code | Codex | DeepSeek Harness | **EMRG** | **Grok Bot** |
 |---|---|---|---|---|---|
 | AI 驱动编程 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 工具调用 (`bash`/`pwsh`、`read`、`write`、`edit`、`glob`、`grep`、`submit_rant`、`subagent`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 工具调用 (`bash`/`pwsh`、`read`、`write`、`edit`、`glob`、`grep`、`submit_rant`、`subagent`、`get_agent_life`、`set_agent_life`) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | 会话记忆与上下文 | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `/` 命令自动补全 | ✅ | ✅ | ✅ | ✅ | ~ *@ mention 建议 + 命令面板* |
 | ESC 中断 | ✅ | ✅ | — | ✅ | ✅ |

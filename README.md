@@ -54,7 +54,7 @@ EMRG is an experiment in *autonomous self-improvement*: an AI agent that helps y
 |---|---|
 | **Electron GUI (main entry)** | Install & go: first-run wizard, all slash commands, results panel, Ask/Auto modes, visible self-evolution. GUI configured = TUI ready |
 | **Full-featured TUI + daemon** | Streaming markdown, `/` autocomplete, sessions, shortcuts — on a persistent `emrgd` daemon you can reconnect to anytime |
-| **Scheduled tasks** | Built-in task types (`evolution`, `paper`, `open-source`, `free-open-source`, `promote`, `journal`, `competition`, `ios-app`, `feishu`, `self-media`) plus custom ones with prompt templates in `~/.emrg/task-templates/`, CRUD + hot reload from the GUI settings, `/trigger` any task on demand |
+| **Scheduled tasks** | Built-in task types (`evolution`, `paper`, `open-source`, `free-open-source`, `promote`, `journal`, `competition`, `ios-app`, `feishu`, `self-media`, `life-review`) plus custom ones with prompt templates in `~/.emrg/task-templates/`, CRUD + hot reload from the GUI settings, `/trigger` any task on demand |
 | **100% open source** | MIT — no walled garden, no vendor lock-in. English default, Chinese version available |
 
 ---
@@ -177,7 +177,7 @@ In the TUI: `Esc` interrupts streaming, `Ctrl+C` / `exit` quits (config is share
 |  | Claude Code | Codex | DeepSeek Harness | **EMRG** | **Grok Bot** |
 |---|---|---|---|---|---|
 | AI-powered coding | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Tool-calling (`bash`/`pwsh`, `read`, `write`, `edit`, `glob`, `grep`, `submit_rant`, `subagent`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Tool-calling (`bash`/`pwsh`, `read`, `write`, `edit`, `glob`, `grep`, `submit_rant`, `subagent`, `get_agent_life`, `set_agent_life`) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Session memory & context | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `/` command autocomplete | ✅ | ✅ | ✅ | ✅ | ~ *@ mention + command palette* |
 | ESC interrupt | ✅ | ✅ | — | ✅ | ✅ |

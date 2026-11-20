@@ -172,6 +172,12 @@ from emrg.tools.edit_tool import EditTool
 from emrg.tools.glob_tool import GlobTool
 from emrg.tools.grep_tool import GrepTool
 from emrg.tools.submit_rant_tool import SubmitRantTool
+from emrg.tools.life_tools import GetAgentLifeTool, SetAgentLifeTool
+from emrg.server.life import (
+    JUDGE_AGENT_NAME,
+    judge_dir,
+    life_section,
+)
 from emrg.tools.subagent_tool import SubagentTool
 from emrg.skills.loader import load_skills, load_skills_with_shadows
 from emrg.skills.registry import ensure_catalog_file, load_catalog_skills, skill_is_managed
@@ -229,6 +235,11 @@ def default_tool_names(platform_name: str | None = None) -> list[str]:
     return [
         shell_tool_name(platform_name), "read", "write", "edit", "glob", "grep",
         "submit_rant", "subagent",
+        # Reading a life value is not a privilege: the register is a file every
+        # session can open, so the tool spares a turn the round trip rather than
+        # guarding anything. `set_agent_life` is absent here on purpose and is
+        # added to one agent's turn alone — see `judge_tool_names`.
+        "get_agent_life",
     ]
 
 
@@ -275,6 +286,35 @@ def effective_tool_names(
         if registry.get(name) is not None:
             out.append(name)
     return out
+
+#: The one tool whose reach is decided by *who is asking* rather than by what the
+#: build carries. It is registered like every other tool and offered to one agent.
+LIFE_JUDGE_TOOL = "set_agent_life"
+
+
+def judge_tool_names(names: list[str], cwd: str | os.PathLike[str]) -> list[str]:
+    """``names``, plus the judge's write tool when this session *is* the judge.
+
+    The write is the judge's alone, and this is the whole of that rule. It is a
+    pure function over a list and a directory so that the question can be asked
+    without building a turn — and so that "every other agent's tool schema lacks
+    it" is a statement some test can hold, rather than a property nobody can see.
+
+    Directory, not name: a session's working directory is what an agent row's
+    ``path`` points at, so it is the same fact the register states, read from the
+    side that is already here. Matching on a registered name would mean asking the
+    register what this session is called, and the register is the thing the tool
+    writes.
+
+    Appended last and skipped when already present: the caller's order is what the
+    model sees, and a duplicated schema is a payload the provider may reject.
+    """
+    if LIFE_JUDGE_TOOL in names:
+        return list(names)
+    if str(cwd) == str(judge_dir()):
+        return [*names, LIFE_JUDGE_TOOL]
+    return list(names)
+
 
 #: How much of a child session's final answer a `subagent` call returns, in
 #: characters (issue #2451). The answer is the one thing the parent gets back, so it
@@ -819,6 +859,14 @@ def build_tool_registry(
     # The runner is the daemon's own method, so the tool has no path to the
     # session machinery of its own: everything that owns state stays there.
     tools.register(SubagentTool(run_subagent_cb))
+    # Registered last, and the position is load-bearing: `to_openai_tools` emits
+    # in *registry* order while `default_tool_names` states the turn's order, so
+    # the two have to agree. A life tool registered above `subagent` made the
+    # offered table read `get_agent_life, subagent` where the default set reads
+    # `subagent, get_agent_life`, and three tests reported that as a missing tool
+    # rather than a moved one.
+    tools.register(GetAgentLifeTool())
+    tools.register(SetAgentLifeTool())
     return tools
 
 
@@ -1010,6 +1058,11 @@ class EmrgServer:
     async def serve(self) -> None:
         """Start listening for IPC connections (fixed-port, platform-adaptive)."""
         self._running = True
+        # The judge agent is installed by the daemon that actually serves, not by
+        # every `EmrgServer(...)`: construction happens in dozens of tests that build
+        # a prompt and never serve, and a constructor that writes the agent register
+        # would make each of them touch the host's file.
+        self._install_life_judge()
 
         # ── Single-instance admission: fixed-port bind exclusivity (ONLY) ───
         # (host rant 2026-08-19T08:05:21) PID files are unreliable (plain
@@ -4673,7 +4726,9 @@ class EmrgServer:
         # read by all three enforcement points — the table the model is offered,
         # the lookup that runs a named tool, and the memory-reflection loop —
         # because a filter at only one of them is a gate in name only.
-        turn_tool_names = effective_tool_names(self.tools, req.tools)
+        turn_tool_names = judge_tool_names(
+            effective_tool_names(self.tools, req.tools), session.cwd,
+        )
         turn_tool_set = set(turn_tool_names)
         tools_base = (
             self.tools.to_openai_tools(turn_tool_names) if allow_tools else []
@@ -5604,10 +5659,82 @@ class EmrgServer:
         # The memory indexes ride here for the reason the clock does, and *after* the
         # freeze for the reason the boundary line is: a memory written inside the
         # refresh window must be visible in the very next round, not at its end.
+        # The life section rides here for both of the reasons the two lines above
+        # it ride here: it changes while a session works (a judge writes a score at
+        # any moment), so rendering it into the system prefix would make every write
+        # a cache miss; and it is appended *outside* the freeze, so a value written
+        # inside the refresh window is readable in the very next round rather than
+        # at the window's end.
+        life = self._life_context_block(session)
+        if life:
+            text = f"{text}\n{life}"
         memory = self._memory_context_block(session)
         if memory:
             text = f"{text}\n\n{memory}"
         return {"role": "user", "content": text}
+
+    def _install_life_judge(self) -> None:
+        """Give the judge agent a directory and a row, once.
+
+        The judge is an agent like any other — a directory the register points at —
+        so "add a built-in agent" is a directory plus a row, and nothing else. It is
+        written here rather than seeded into the register's file because the register
+        is a record of directories that exist on *this* host, and an installed copy of
+        it would name a path for one installation everywhere.
+
+        Idempotent by the row's name, not by the directory: ``mkdir`` on an existing
+        directory is a no-op, while a second ``upsert`` would move an existing judge
+        row's path and restamp its ``last_active`` on every boot — which is the one
+        field that answers "has this agent been doing anything".
+
+        The register is the one the daemon **reads** — ``register_for_reading`` — and
+        not the name it belongs at. Two reasons, and the second is the one CI found:
+        a host whose register still carries its pre-rename name would get a second
+        file that no reader ever opens, and the suite redirects *that* seam, so a test
+        reaching ``serve()`` writes a throwaway register of its own. The name-based
+        call resolved past the redirect into the host's ``~/.emrg/agents.yml``, where
+        the config guard refused the write — killing the serve task before it
+        published its token, so fifteen serving tests across three files failed on
+        the aftermath instead of on a message naming this line.
+
+        A failure is logged and nothing else: a host whose config directory cannot be
+        written loses the judge, not the daemon.
+        """
+        directory = judge_dir()
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            registry = AgentRegistry(register_for_reading())
+            if any(r.get("name") == JUDGE_AGENT_NAME for r in registry.entries()):
+                return
+            registry.upsert(JUDGE_AGENT_NAME, str(directory))
+            logger.info("life: registered the judge agent %r at %s",
+                        JUDGE_AGENT_NAME, directory)
+        except OSError:
+            logger.warning("life: could not install the judge agent at %s",
+                           directory, exc_info=True)
+
+    def _life_context_block(self, session: Session) -> str:
+        """This session's agent's life value as the per-round context carries it.
+
+        The session's own agent is the row whose ``path`` is this session's working
+        directory — the same join the register itself states, read from the side
+        that is already in hand. A session in a directory no row names (a sub-agent
+        runs in its own) answers ``""``: there is no agent there to have a life, and
+        inventing a section for it would report a value about nothing.
+
+        Read fresh every round rather than cached with the clock. A cache is what
+        the freeze above is, and the whole point of this section is that a score
+        written a second ago is visible now.
+        """
+        try:
+            rows = AgentRegistry(register_for_reading()).entries()
+        except OSError:  # pragma: no cover - a path that cannot be read is no agent
+            return ""
+        cwd = str(session.cwd)
+        row = next((r for r in rows if str(r.get("path")) == cwd), None)
+        if row is None:
+            return ""
+        return life_section(row)
 
     def _memory_context_block(self, session: Session) -> str:
         """The memory indexes as the per-round context carries them, or ``""``.
