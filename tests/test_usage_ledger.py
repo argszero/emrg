@@ -262,3 +262,85 @@ class TestOneSessionsShare:
         window = ledger.window(session_id="s-one")
         assert window["input"] is None
         assert window["session"]["input"] is None
+
+
+class TestTheWindowGroupedBySession:
+    """Rant 2026-11-20T17:30:50: one window, three rankings, and rows that reconcile.
+
+    A ranking needs each session's three segments and its call count, and the panel prints
+    a total beside them. The properties pinned here are the ones that make that total an
+    identity rather than a second measurement:
+
+    * **the rows are the window.** Every named group plus the unnamed row sums to the
+      machine's three figures; folding the unnamed volume into a session, or dropping it,
+      reddens the sum.
+    * **an unnamed record is a row nobody can open.** Its session is None — not an empty
+      string, not the first session's id — so a client cannot render it as a conversation.
+    * **calls count records.** It is the denominator of output per call, so deriving it
+      from a segment that may be missing reddens the count.
+    """
+
+    def test_the_rows_add_up_to_the_machine_totals(self, tmp_path):
+        ledger, _clock = _ledger(tmp_path)
+        ledger.record({"prompt_tokens": 100, "cache_hit_tokens": 80, "completion_tokens": 20}, "s-a")
+        ledger.record({"prompt_tokens": 50, "completion_tokens": 10}, "s-b")
+        ledger.record({"prompt_tokens": 7})
+
+        reading = ledger.reading()
+
+        rows = {row["session"]: row for row in reading["groups"]}
+        assert rows["s-a"]["input"] == 100
+        assert rows["s-b"]["output"] == 10
+        assert rows[None]["input"] == 7, "the record with no session is its own row"
+        for segment in ("input", "cache", "output"):
+            measured = [row[segment] for row in reading["groups"] if row[segment] is not None]
+            assert reading[segment] == (sum(measured) if measured else None), (
+                f"the {segment} rows do not add up to the machine figure beside them"
+            )
+
+    def test_the_unnamed_volume_is_not_folded_into_any_session(self, tmp_path):
+        """Item 5. Mutating the grouping to reuse the last session id reddens this."""
+        path = tmp_path / "usage-ledger.jsonl"
+        path.write_text(
+            json.dumps({"ts": NOW - 60, "prompt_tokens": 7, "completion_tokens": 3}) + "\n",
+            encoding="utf-8",
+        )
+        ledger, _clock = _ledger(tmp_path)
+        ledger.record({"prompt_tokens": 10, "completion_tokens": 1}, "s-a")
+
+        rows = {row["session"]: row for row in ledger.reading()["groups"]}
+
+        assert rows["s-a"]["input"] == 10, "the older row was attributed to a session"
+        assert rows[None]["input"] == 7
+        assert rows[None]["calls"] == 1
+
+    def test_calls_count_the_records_not_a_segment(self, tmp_path):
+        """Item 5's denominator: a call with no output still counts as a call."""
+        ledger, _clock = _ledger(tmp_path)
+        ledger.record({"prompt_tokens": 10, "completion_tokens": 5}, "s-a")
+        ledger.record({"prompt_tokens": 20}, "s-a")
+
+        row = next(r for r in ledger.reading()["groups"] if r["session"] == "s-a")
+
+        assert row["calls"] == 2
+        assert row["output"] == 5, "a call that measured no output must not lower the sum"
+
+    def test_a_segment_a_session_never_measured_is_none_rather_than_zero(self, tmp_path):
+        ledger, _clock = _ledger(tmp_path)
+        ledger.record({"completion_tokens": 4}, "s-a")
+
+        row = next(r for r in ledger.reading()["groups"] if r["session"] == "s-a")
+
+        assert (row["input"], row["cache"]) == (None, None)
+        assert row["output"] == 4
+
+    def test_the_grouped_read_keeps_the_window_edge(self, tmp_path):
+        """Item 10: the ranking and the band show one window, not two."""
+        ledger, clock = _ledger(tmp_path)
+        ledger.record({"prompt_tokens": 100, "completion_tokens": 10}, "s-a")
+
+        clock[0] = NOW + WINDOW_SECONDS  # exactly the near edge: still inside
+        assert any(r["session"] == "s-a" for r in ledger.reading()["groups"])
+
+        clock[0] = NOW + WINDOW_SECONDS + 1  # one second past it
+        assert not any(r["session"] == "s-a" for r in ledger.reading()["groups"])

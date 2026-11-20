@@ -31,6 +31,7 @@ function setup(props: Partial<Parameters<typeof StatusBand>[0]> = {}) {
   const handlers = {
     onToggleLeft: vi.fn(),
     onToggleRight: vi.fn(),
+    onOpenRanking: vi.fn(),
   };
   render(
     <I18nProvider lang="en">
@@ -59,7 +60,7 @@ describe("StatusBand", () => {
     expect(screen.getByTestId("band-state")).toHaveClass("idle");
   });
 
-  it("运行中 + 有窗口：两个格子都报读数", () => {
+  it("运行中 + 有窗口：三段各一个格子，各报自己的读数", () => {
     setup({
       running: true,
       usage: {
@@ -69,9 +70,10 @@ describe("StatusBand", () => {
       },
     });
     expect(screen.getByTestId("band-state")).toHaveTextContent("Running");
-    expect(screen.getByTestId("band-usage")).toHaveTextContent(
-      "24h this session/machine in 1.5M/12.3M · cache 1.4M/11.1M · out 25.0k/245.0k",
-    );
+    // 三段不是一个总数（rant 2026-11-19T09:31:00）：一段一个格子，各读各的
+    expect(screen.getByTestId("band-usage-input")).toHaveTextContent("in 1.5M/12.3M");
+    expect(screen.getByTestId("band-usage-cache")).toHaveTextContent("cache 1.4M/11.1M");
+    expect(screen.getByTestId("band-usage-output")).toHaveTextContent("out 25.0k/245.0k");
   });
 
   it("一段没测定就画 —，不画 0：三段各自独立", () => {
@@ -79,9 +81,9 @@ describe("StatusBand", () => {
       running: true,
       usage: { input: 1000, cache: null, output: 5, windowStart: 0, windowEnd: 1 },
     });
-    expect(screen.getByTestId("band-usage")).toHaveTextContent(
-      "24h this session/machine in —/1.0k · cache —/— · out —/5",
-    );
+    expect(screen.getByTestId("band-usage-input")).toHaveTextContent("in —/1.0k");
+    expect(screen.getByTestId("band-usage-cache")).toHaveTextContent("cache —/—");
+    expect(screen.getByTestId("band-usage-output")).toHaveTextContent("out —/5");
   });
 
   it("issue #3072：本会话在前、本机在后，一格两个数", () => {
@@ -95,9 +97,9 @@ describe("StatusBand", () => {
         windowStart: 0, windowEnd: 1,
       },
     });
-    expect(screen.getByTestId("band-usage")).toHaveTextContent(
-      "24h this session/machine in 15.2M/262.6M · cache 14.1M/241.0M · out 245.0k/4.1M",
-    );
+    expect(screen.getByTestId("band-usage-input")).toHaveTextContent("in 15.2M/262.6M");
+    expect(screen.getByTestId("band-usage-cache")).toHaveTextContent("cache 14.1M/241.0M");
+    expect(screen.getByTestId("band-usage-output")).toHaveTextContent("out 245.0k/4.1M");
   });
 
   it("issue #3072：没测到本会话那一段就画 —，绝不拿本机数顶上", () => {
@@ -110,17 +112,21 @@ describe("StatusBand", () => {
         windowStart: 0, windowEnd: 1,
       },
     });
-    const band = screen.getByTestId("band-usage");
-    expect(band).toHaveTextContent("24h this session/machine in 5/100 · cache —/40 · out 7/7");
-    expect(band.textContent).not.toContain("40/40");
+    const cache = screen.getByTestId("band-usage-cache");
+    expect(cache).toHaveTextContent("cache —/40");
+    expect(cache.textContent).not.toContain("40/40");
+    expect(screen.getByTestId("band-usage-input")).toHaveTextContent("in 5/100");
+    expect(screen.getByTestId("band-usage-output")).toHaveTextContent("out 7/7");
   });
 
   it("issue #3072：悬停文字说出顺序，并保留「缓存是输入子集、不显示合计」", () => {
     setup({ running: true });
-    const title = screen.getByTestId("band-usage").getAttribute("title") ?? "";
-    expect(title).toContain("this session first and the machine second");
-    expect(title).toContain("subset of input");
-    expect(title).toContain("no total");
+    for (const segment of ["input", "cache", "output"] as const) {
+      const title = screen.getByTestId(`band-usage-${segment}`).getAttribute("title") ?? "";
+      expect(title).toContain("this session first and the machine second");
+      expect(title).toContain("subset of input");
+      expect(title).toContain("no total");
+    }
   });
 
   it("状态带不再说「累计」：窗口是三个独立段，不是一个当轮总数", () => {
@@ -138,20 +144,38 @@ describe("StatusBand", () => {
           rightOpen
           onToggleLeft={vi.fn()}
           onToggleRight={vi.fn()}
+          onOpenRanking={() => {}}
         />
       </I18nProvider>,
     );
     expect(screen.getByTestId("status-band").textContent).not.toContain("累计");
-    expect(screen.getByTestId("band-usage")).toHaveTextContent(
-      "24h 本会话/本机 输入 500/1.0k · 缓存 450/900 · 输出 10/10",
-    );
+    expect(screen.getByTestId("band-usage-input")).toHaveTextContent("输入 500/1.0k");
+    expect(screen.getByTestId("band-usage-cache")).toHaveTextContent("缓存 450/900");
+    expect(screen.getByTestId("band-usage-output")).toHaveTextContent("输出 10/10");
   });
 
   it("daemon 还没报 → 画 —，不画 0 token", () => {
     setup({ running: true, usage: null });
-    expect(screen.getByTestId("band-usage")).toHaveTextContent(
-      "24h this session/machine in —/— · cache —/— · out —/—",
-    );
+    for (const segment of ["input", "cache", "output"] as const) {
+      expect(screen.getByTestId(`band-usage-${segment}`).textContent).toContain("—/—");
+    }
+  });
+
+  it("三段各是一个控件：点哪一段，报的就是哪一段（rant 2026-11-20T17:30:50）", () => {
+    // 一段的排名只有一张表、一个尺度，所以选择必须在状态带上做：读数点下去，
+    // 传出的就是被点的那一段——不是「打开排名」再让面板自己猜。
+    const h = setup({ running: true, usage: null });
+    for (const segment of ["input", "cache", "output"] as const) {
+      const cell = screen.getByTestId(`band-usage-${segment}`);
+      expect(cell.tagName).toBe("BUTTON");
+      expect(cell).toHaveAttribute("type", "button");
+      fireEvent.click(cell);
+    }
+    expect(h.onOpenRanking.mock.calls.map((call) => call[0])).toEqual([
+      "input",
+      "cache",
+      "output",
+    ]);
   });
 
   it("计时来自 daemon 的轮开始时刻：中途打开也显示已过去的时间", () => {
@@ -165,7 +189,7 @@ describe("StatusBand", () => {
     expect(screen.getByTestId("band-elapsed")).toHaveTextContent("—");
   });
 
-  it("只有三项读数与两个栏开关：模型与消息条数不在这行里（issue #2969、#3089）", () => {
+  it("读数只有三格（状态、计时、24 小时三段），模型与消息条数不在这行里（issue #2969、#3089）", () => {
     setup({
       running: true,
       usage: { input: 3000, cache: 2000, output: 400, windowStart: 0, windowEnd: 1 },
@@ -174,15 +198,18 @@ describe("StatusBand", () => {
       sessionName: "Alpha",
     });
     const band = screen.getByTestId("status-band");
-    // 三个变的读数：状态、计时、最近 24 小时。轮数那一格连同它右边的分隔符一起没了
-    // （issue #3039）——这一行已经说了在跑、跑了多久，轮数没有第二个用处。
+    // 三个变的读数：状态、计时、最近 24 小时——最后这一个由三段组成，一段一个按钮
+    // （rant 2026-11-20T17:30:50：点哪一段，开的就是哪一段的排名）。轮数那一格连同它
+    // 右边的分隔符一起没了（issue #3039）——这一行已经说了在跑、跑了多久，轮数没有第
+    // 二个用处。
     //
     // 会话名与 id 不是第四个读数（issue #3089）：它不随时间变，它是**能拖走、能复制**
-    // 的那段文字，所以它不占 `.band-item`，这一行的读数仍然只有三个。
-    expect(band.querySelectorAll(".band-state, .band-item")).toHaveLength(3);
+    // 的那段文字，所以它不占 `.band-item`。
+    expect(band.querySelectorAll(".band-state, .band-item")).toHaveLength(5);
+    expect(band.querySelectorAll(".band-usage")).toHaveLength(3);
     expect(band.querySelectorAll(".band-session")).toHaveLength(1);
-    // ……两个按钮，一个不多：搜索与新建会话的入口在会话栏（issue #3028）
-    expect(band.querySelectorAll("button")).toHaveLength(2);
+    // ……三段读数 + 两个开关按钮，一个不多：搜索与新建会话的入口在会话栏（issue #3028）
+    expect(band.querySelectorAll("button")).toHaveLength(5);
     // 一个不动的值出现在这一行，就是把状态带变回了顶栏：这两样仍是宿主点名移出的
     for (const gone of ["session-info", "conn-status", "conn-vision"]) {
       expect(screen.queryByTestId(gone)).not.toBeInTheDocument();
@@ -200,6 +227,7 @@ describe("StatusBand", () => {
           rightOpen
           onToggleLeft={vi.fn()}
           onToggleRight={vi.fn()}
+          onOpenRanking={() => {}}
         />
       </I18nProvider>,
     );
@@ -209,6 +237,23 @@ describe("StatusBand", () => {
     const band = screen.getByTestId("status-band");
     expect(band.textContent).not.toContain("轮");
     expect(band.textContent).not.toContain("round");
+  });
+
+  it("item 11：窄窗先让「正在运行」「用时」让位，三段读数一格都不裁（rant 2026-11-20T17:30:50）", () => {
+    // jsdom 没有排版，读声明是唯一能变红的读法：收的是哪几个类、读数有没有 flex: none。
+    setup({ running: true, usage: null });
+    for (const segment of ["input", "cache", "output"] as const) {
+      expect(screen.getByTestId(`band-usage-${segment}`)).not.toHaveClass("band-yield");
+    }
+    expect(screen.getByTestId("band-state")).toHaveClass("band-yield");
+    expect(screen.getByTestId("band-elapsed")).toHaveClass("band-yield");
+    // 窄窗规则收的正好是 .band-yield 那一类，读数不在其中
+    const narrow = mediaBlock("@media (max-width: 1200px)");
+    expect(narrow).toContain(".band-yield");
+    expect(narrow).toContain("display: none");
+    expect(narrow).not.toContain(".band-usage");
+    // 读数自己不缩：行有 overflow: hidden，缩进去的数就是被裁掉的数
+    expect(cssRule(".band-usage")).toMatch(/flex:\s*none/);
   });
 
   it("两个按钮：两个栏开关，各自回自己的回调；搜索与新建不在状态带上（issue #3028）", () => {
@@ -235,6 +280,16 @@ describe("StatusBand", () => {
  * 逻辑断言在这一层；「窄窗先截名字、id 一个字都不截」只能读样式表——jsdom 没有排版，
  * 拿不到真实的截断结果，读声明是唯一能变红的读法。
  */
+
+/** 从样式表里取出一个 `@media` 块。取不到就断言失败，绝不让空串把断言放过去。 */
+function mediaBlock(query: string): string {
+  const start = cockpitCss.indexOf(query);
+  expect(start).toBeGreaterThanOrEqual(0);
+  const end = cockpitCss.indexOf("\n}\n", start);
+  const body = cockpitCss.slice(start, end);
+  expect(body.length).toBeGreaterThan(20);
+  return body;
+}
 
 /** 从样式表里取出一个选择器的声明块。取不到就断言失败，绝不让空串把断言放过去。 */
 function cssRule(selector: string): string {
@@ -282,6 +337,7 @@ describe("状态带上的当前会话（issue #3089）", () => {
           rightOpen
           onToggleLeft={vi.fn()}
           onToggleRight={vi.fn()}
+          onOpenRanking={() => {}}
         />
       </I18nProvider>,
     );
@@ -305,6 +361,7 @@ describe("状态带上的当前会话（issue #3089）", () => {
       rightOpen: true,
       onToggleLeft: vi.fn(),
       onToggleRight: vi.fn(),
+      onOpenRanking: vi.fn(),
     };
     const bare = render(
       <I18nProvider lang="en">
@@ -320,10 +377,11 @@ describe("状态带上的当前会话（issue #3089）", () => {
     );
     expect(withNull.container.innerHTML).toBe(withoutSessionProps);
     expect(screen.queryByTestId("band-session")).toBeNull();
-    // 三个读数、两个开关按钮——没有第四个格子
+    // 三个读数（24 小时那一个分三段）、两个开关按钮——没有第四个格子
     const band = screen.getByTestId("status-band");
-    expect(band.querySelectorAll(".band-state, .band-item")).toHaveLength(3);
-    expect(band.querySelectorAll("button")).toHaveLength(2);
+    expect(band.querySelectorAll(".band-state, .band-item")).toHaveLength(5);
+    expect(band.querySelectorAll(".band-usage")).toHaveLength(3);
+    expect(band.querySelectorAll("button")).toHaveLength(5);
   });
 
   it("悬停提示只有一条：「当前会话」/ Current session", () => {
@@ -340,6 +398,7 @@ describe("状态带上的当前会话（issue #3089）", () => {
           rightOpen
           onToggleLeft={vi.fn()}
           onToggleRight={vi.fn()}
+          onOpenRanking={() => {}}
         />
       </I18nProvider>,
     );
@@ -356,6 +415,7 @@ describe("状态带上的当前会话（issue #3089）", () => {
       rightOpen: true,
       onToggleLeft: vi.fn(),
       onToggleRight: vi.fn(),
+      onOpenRanking: vi.fn(),
     };
     const { rerender } = render(
       <I18nProvider lang="en">

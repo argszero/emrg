@@ -116,11 +116,13 @@ describe("词典完整性守卫（防漂移）", () => {
   // 2026-11-20 issue #3089：状态带上那一格的悬停提示「当前会话」中英各 1 条 → 505 + 1 = 506。
   // 2026-11-20 issue #3091：目录那一段的段名、额外根目录、没有根时的「没有」各 1 条
   // → 506 + 3 = 509。
-  it("zh/en 各 509 个 key 且完全对齐", () => {
+  // 2026-11-20 issue #3093：状态带那一条合起来的读数换成三段各一条（+4），并加上按段排名的
+  // 面板文案 14 条，同时删掉原来那一条（-1）→ 509 + 4 + 14 - 1 = 526。
+  it("zh/en 各 526 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(509);
-    expect(enKeys.length).toBe(509);
+    expect(zhKeys.length).toBe(526);
+    expect(enKeys.length).toBe(526);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);

@@ -1364,3 +1364,149 @@ body.col-resizing * {
   gap: 6px;
   align-items: flex-start;
 }
+
+/* ── The band's three readings and the ranking they open ─────────────────────
+   Rant 2026-11-20T17:30:50. Three readings answer three questions and one table can be
+   sorted by one scale, so each reading is a control and each opens its own ranking. */
+
+.band-usage {
+  background: none;
+  border: 0;
+  padding: 0 2px;
+  font: inherit;
+  color: var(--text-2);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  /* Item 11: a reading never shrinks. The row's own overflow would clip it, and a clipped
+     number is a wrong number — the state and the elapsed time give way instead. */
+  flex: none;
+}
+
+.band-usage:hover {
+  color: var(--text-1);
+  background: var(--bg-hover);
+}
+
+.band-usage:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Item 11: the three readings never give way. The turn's state and its elapsed time go
+   first — both are already on screen in the transcript — so a narrow window still shows
+   all three segments in full rather than clipping the numbers it was narrowed to hide. */
+@media (max-width: 1200px) {
+  .status-band .band-yield {
+    display: none;
+  }
+}
+
+.usage-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 520px;
+  max-width: 720px;
+}
+
+.usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-3);
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.usage-table td {
+  padding: 5px 6px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-2);
+}
+
+.usage-row {
+  cursor: pointer;
+}
+
+.usage-row:hover td {
+  background: var(--bg-hover);
+  color: var(--text-1);
+}
+
+.usage-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.usage-name {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-1);
+}
+
+.usage-bar {
+  display: inline-block;
+  width: 96px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+  vertical-align: middle;
+  overflow: hidden;
+}
+
+.usage-bar i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.usage-share {
+  margin-left: 6px;
+  color: var(--text-3);
+}
+
+.usage-tokens,
+.usage-fourth,
+.usage-calls {
+  color: var(--text-1);
+}
+
+/* The volume no session names: reported beside the ranking, never a row in it. The amber
+   is the same one the rest of the cockpit uses for "true, but not what you assumed". */
+.usage-unnamed {
+  border: 1px solid var(--amber);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  background: var(--amber-soft);
+  color: var(--text-1);
+  font-size: var(--fs-secondary);
+}
+
+.usage-unnamed .usage-why {
+  margin-top: 4px;
+  color: var(--text-2);
+}
+
+.usage-footer {
+  color: var(--text-2);
+  font-size: var(--fs-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-note {
+  color: var(--text-3);
+  font-size: var(--fs-secondary);
+}
+
+.usage-empty {
+  color: var(--text-2);
+}
