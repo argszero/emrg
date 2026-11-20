@@ -2251,3 +2251,76 @@ test("pickSessionCwd：只有 index 答案是事实，其余一律退回调用�
   assert.strictEqual(pickSessionCwd({ source: "unknown", cwd: null }), null);
   assert.strictEqual(pickSessionCwd({ source: "index", cwd: "/proj/real" }), "/proj/real");
 });
+
+// ── issue #3103：命令名与回包名的配对是两个方向一条规则 ────────────────────────
+//
+// `sendCommandAndWait` 里那行 `RESPONSE_TYPES[commandType] || commandType` 是唯一规则：
+// 表里没有的命令按**命令名**等回包。所以一个命令缺配对、或一个配对指向 daemon 从不发的
+// 名字，症状完全一样——帧到了没人认领，落进兜底日志，调用方等满超时。五个命令就是这样
+// 各等了 5～30 秒然后报失败，而 daemon 那边早就做完了。
+//
+// 这两半必须都在，缺一半就有一半的错法看不见：
+//   ① 源码配对：枚举调用点（不是手写清单——清单是同一份代码的第二个读法，会跟着漂），
+//      逐个问 daemon 是否真的发这个帧名。覆盖全部命令，两个方向一起管。
+//   ② 运行时认领：帧到了，真的被那个调用方拿到——配对表写对了但 `_classify` 先把帧
+//      转到别处去，只有这一半看得见。
+test("issue #3103：每个等待回包的命令名都配到一个 daemon 真的会发的帧", async () => {
+  const guiDir = path.resolve(__dirname, "..");
+  const mainSrc = fs.readFileSync(path.join(guiDir, "main.js"), "utf8");
+  const clientSrc = fs.readFileSync(path.join(guiDir, "daemon_client.js"), "utf8");
+  const daemonSrc = fs.readFileSync(path.resolve(guiDir, "..", "server", "daemon.py"), "utf8");
+
+  // 跨行写法必须算进来：`delete_rant` 就是三行写的，单行模式会漏掉它，
+  // 而漏掉一个调用点等于给这条规则开一个后门。
+  const commands = [
+    ...new Set([...mainSrc.matchAll(/sendCommandAndWait\(\s*["']([a-z_]+)["']/g)].map((m) => m[1])),
+  ].sort();
+  assert.ok(
+    commands.length >= 30,
+    `枚举到的命令只有 ${commands.length} 个——空集合或过小的集合会让下面每条断言白过`,
+  );
+
+  const block = clientSrc.slice(clientSrc.indexOf("const RESPONSE_TYPES = {"));
+  assert.ok(clientSrc.includes("const RESPONSE_TYPES = {"), "找不到配对表 const RESPONSE_TYPES");
+  const tableSrc = block.slice(0, block.indexOf("\n};"));
+  const table = new Map(
+    [...tableSrc.matchAll(/^\s+([a-z_]+):\s*"([a-z_]+)"/gm)].map((m) => [m[1], m[2]]),
+  );
+  assert.ok(table.size >= 30, `配对表只读到 ${table.size} 条——读法失效时不能当通过`);
+
+  const sent = new Set([...daemonSrc.matchAll(/"type":\s*"([a-z_]+)"/g)].map((m) => m[1]));
+  assert.ok(sent.size >= 30, `daemon 侧只读到 ${sent.size} 个帧名——读法失效时不能当通过`);
+
+  const faults = [];
+  for (const cmd of commands) {
+    // 与 `sendCommandAndWait` 同一行规则，不另立一套
+    const frame = table.get(cmd) || cmd;
+    if (sent.has(frame)) continue;
+    faults.push(
+      table.has(cmd)
+        ? `${cmd}: 配对表指向 "${frame}"，而 daemon 从不发这个帧名`
+        : `${cmd}: 不在配对表里，回落到命令名 "${cmd}"，而 daemon 也不发这个名字的帧`,
+    );
+  }
+  assert.deepStrictEqual(faults, [], `命令与回包名对不上（issue #3103）：\n${faults.join("\n")}`);
+});
+
+test("issue #3103：五条回包真的被等待它的调用方认领", async () => {
+  const client = new DaemonClient();
+  await connectClient(client);
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  const cases = [
+    ["stat_file", { path: "/tmp/x" }, { type: "file_stat", path: "/tmp/x", exists: true, mtime: 1, size: 2 }],
+    ["write_file", { path: "/tmp/x", content: "hi", session_id: "s1", cwd: tmpHome }, { type: "file_written", path: "/tmp/x", mtime: 3, size: 2 }],
+    ["delete_rant", { timestamp: "2026-01-01T00:00:00" }, { type: "rant_deleted", ok: true, notice: "", timestamp: "2026-01-01T00:00:00" }],
+    ["remove_agent", { name: "x" }, { type: "agent_removed", removed: true, name: "x" }],
+    ["rant", { message: "m", agent: "emrg" }, { type: "rant_recorded", ok: true, count: 7 }],
+  ];
+  for (const [cmd, payload, frame] of cases) {
+    const p = client.sendCommandAndWait(cmd, payload, 2000);
+    await new Promise((r) => setTimeout(r, 10));
+    send(frame);
+    const got = await p; // 认领不到就在这里等到 2000 ms 后 reject
+    assert.strictEqual(got.type, frame.type, `${cmd} 等的是 ${frame.type}`);
+  }
+});

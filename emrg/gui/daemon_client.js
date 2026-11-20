@@ -127,6 +127,7 @@ const RESPONSE_TYPES = {
   list_all_sessions: "all_sessions",
   list_models: "models_list",
   list_agents: "agents_list",
+  remove_agent: "agent_removed", // issue #3103：daemon 用 `agent_removed` 回答（daemon.py remove_agent）
   list_history: "history_list",
   // The prompts the host typed in one session (issue #2349, part 2/2): the daemon
   // answers a `list_input_history` command with an `input_history` frame, so the
@@ -134,6 +135,10 @@ const RESPONSE_TYPES = {
   list_input_history: "input_history",
   list_tasks: "tasks_list",
   list_rants: "rants_list",
+  // issue #3103：rant 面板的三个写操作。`delete_rant` 与 `rant` 此前都不在表里，于是客户端按
+  // 命令名等 `delete_rant` / `rant` 两个帧——前者 daemon 从不发，后者连 `type` 都没有。
+  delete_rant: "rant_deleted",
+  rant: "rant_recorded", // daemon.py `rant` 命令的回执（本次给它加上了名字）
   list_memories: "memories_list",
   // issue #2569 criterion 2：/skills 由 daemon 回答（list_skills → skills_list），
   // 技能与「被同名声明顶替的那一份」在同一帧里回来。
@@ -156,6 +161,11 @@ const RESPONSE_TYPES = {
   github_connect_web: "github_connect_web_result", // Stage 2b：device flow（daemon.py github_connect_web）
   list_files: "files_list", // 右栏工作区面板 P1：目录树（daemon.py list_files）
   read_file: "file_content", // 右栏工作区面板 P1：文件查看器（daemon.py read_file）
+  // issue #3103：编辑器的另外两条通道。缺这两行，客户端按命令名等回包，而 daemon 用的是
+  // `file_stat` / `file_written` —— 帧到了没人认领，探测等满 10 秒、保存等满 30 秒后报失败，
+  // 而文件其实已经读出来 / 写进去了。
+  stat_file: "file_stat", // 右栏编辑器：磁盘是否变动（daemon.py stat_file）
+  write_file: "file_written", // 右栏编辑器：写回（daemon.py write_file）
   // rant 2026-08-12T18:23:15 P2/P3：任务 + 自定义类型 CRUD（daemon.py task_create 等）
   task_create: "task_result",
   task_update: "task_result",
