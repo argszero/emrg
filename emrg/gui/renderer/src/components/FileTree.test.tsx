@@ -33,12 +33,22 @@ function renderTree(loadDir: ReturnType<typeof tree>, root: string | null = "/r"
 }
 
 describe("FileTree", () => {
-  it("顶部一行根名 + 刷新 / 全部收起两个按钮", async () => {
+  it("根是一行，不是工具条：根名占一行，刷新 / 全部收起没有了（rant 2026-11-20T21:27:29）", async () => {
     const load = tree([e("a.md")]);
     renderTree(load);
-    expect(screen.getByTestId("t-root")).toHaveTextContent("r");
-    expect(screen.getByTestId("t-refresh")).toBeInTheDocument();
-    expect(screen.getByTestId("t-collapse")).toBeInTheDocument();
+    const root = screen.getByTestId("t-root");
+    expect(root).toHaveTextContent("r");
+    // 根名从表头搬进了树：读屏也把它读成一行，行高与图标跟别的行同一套
+    expect(root).toHaveAttribute("role", "treeitem");
+    expect(root).toHaveClass("ft-line", "ft-row");
+    expect(root).toHaveAttribute("data-depth", "0");
+    expect(root.style.height).toBe(`${ROW_HEIGHT}px`);
+    const glyph = root.querySelector(".ft-glyph") as HTMLElement;
+    expect(glyph.style.width).toBe(`${ICON_PX}px`);
+    // 那两个按钮连同装它们的工具条一起没了
+    expect(screen.queryByTestId("t-refresh")).toBeNull();
+    expect(screen.queryByTestId("t-collapse")).toBeNull();
+    expect(screen.getByTestId("t").querySelectorAll("button, .ft-toolbar, .ft-tool")).toHaveLength(0);
     await waitFor(() => expect(screen.getAllByTestId("t-row")).toHaveLength(1));
   });
 
@@ -69,12 +79,18 @@ describe("FileTree", () => {
     expect(load).toHaveBeenCalledWith("/r/src");
 
     const rows = screen.getAllByTestId("t-row");
-    expect(rows[1]).toHaveAttribute("data-depth", "1");
-    // 子行缩进一层，并有一条 1px 引导线；根行两者都没有
-    expect(rows[1].querySelectorAll("[data-testid='t-guide']")).toHaveLength(1);
-    expect(rows[0].querySelectorAll("[data-testid='t-guide']")).toHaveLength(0);
+    // 根自己占一层，所以第一级在 1、它的子级在 2（根还是表头时，第一级在 0）
+    const root = screen.getByTestId("t-root");
+    expect(root).toHaveAttribute("data-depth", "0");
+    expect(rows[0]).toHaveAttribute("data-depth", "1");
+    expect(rows[1]).toHaveAttribute("data-depth", "2");
+    // 每一层一条 1px 引导线：行的深度就是引导线的条数，根行没有
+    expect(rows[1].querySelectorAll("[data-testid='t-guide']")).toHaveLength(2);
+    expect(rows[0].querySelectorAll("[data-testid='t-guide']")).toHaveLength(1);
+    expect(root.querySelectorAll("[data-testid='t-guide']")).toHaveLength(0);
     // 每层缩进 8px：比的是层间步长，不是行首那点固定内边距
     const pad = (el: HTMLElement) => parseFloat(el.style.paddingLeft);
+    expect(pad(rows[0] as HTMLElement) - pad(root)).toBe(INDENT_PX);
     expect(pad(rows[1] as HTMLElement) - pad(rows[0] as HTMLElement)).toBe(INDENT_PX);
   });
 
@@ -120,7 +136,7 @@ describe("FileTree", () => {
     await waitFor(() => expect(screen.getByTestId("t-error")).toHaveTextContent("cannot list directories"));
   });
 
-  it("键盘：↓ 移动选中，→ 展开，← 收起，全部收起回到一行", async () => {
+  it("键盘：↓ 移动选中，→ 展开，← 收起，点根行收起整棵树", async () => {
     const load = vi.fn(async (p: string) =>
       p === "/r"
         ? { entries: [e("src", "dir")], truncated: false }
@@ -143,8 +159,14 @@ describe("FileTree", () => {
 
     fireEvent.click(screen.getAllByTestId("t-row")[0]);
     await waitFor(() => expect(screen.getAllByTestId("t-row")).toHaveLength(2));
-    fireEvent.click(screen.getByTestId("t-collapse"));
-    await waitFor(() => expect(screen.getAllByTestId("t-row")).toHaveLength(1));
+    // 根行自己一折就是整棵树收起——以前这是「全部收起」按钮的活
+    const root = screen.getByTestId("t-root");
+    fireEvent.click(root);
+    expect(screen.queryAllByTestId("t-row")).toHaveLength(0);
+    expect(root).toHaveAttribute("aria-expanded", "false");
+    // 再点开，刚才那个打开着的文件夹还在：收起根不等于忘掉展开状态
+    fireEvent.click(root);
+    await waitFor(() => expect(screen.getAllByTestId("t-row")).toHaveLength(2));
   });
 
   /**
@@ -403,6 +425,20 @@ describe("FileTreeRoots", () => {
     fireEvent.click(screen.getAllByTestId("s-extra-1-row")[0]);
     await waitFor(() => expect(screen.getAllByTestId("s-extra-1-row")).toHaveLength(2));
     expect(screen.getAllByTestId("s-row")).toHaveLength(2);
+  });
+
+  it("调用方给的层数转发给每一棵树：两个根都从那一层开始（rant 2026-11-20T21:27:29）", async () => {
+    render(
+      <I18nProvider lang="en">
+        <FileTreeRoots testId="s" roots={["/s", "/x"]} loadDir={rootsLoad()} depthOffset={1} />
+      </I18nProvider>,
+    );
+    await waitFor(() => expect(screen.getAllByTestId("s-row")).toHaveLength(2));
+    // 两个根都在第 1 层、行都在第 2 层：少转发一次，第二个根就会爬回第 0 层
+    expect(screen.getByTestId("s-root")).toHaveAttribute("data-depth", "1");
+    expect(screen.getByTestId("s-extra-1-root")).toHaveAttribute("data-depth", "1");
+    expect(screen.getAllByTestId("s-row")[0]).toHaveAttribute("data-depth", "2");
+    expect(screen.getAllByTestId("s-extra-1-row")[0]).toHaveAttribute("data-depth", "2");
   });
 
   it("同一路径只画一次，尾部分隔符是同一个路径", () => {

@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { I18nProvider } from "../lib/i18n";
+import { ICON_PX, INDENT_PX, ROW_HEIGHT } from "../lib/fileTree";
+// 样式表走 Vite 的 `?raw`，不走 `node:fs`（`tests/test_renderer_node_types.py`）。
+import cockpitCss from "../cockpit.css?raw";
 import { SessionColumn } from "./SessionColumn";
 import { LeftTrees } from "./LeftTrees";
 import { StatusBand } from "./StatusBand";
@@ -88,9 +91,9 @@ describe("LeftTrees — 一棵树、三个分组（rant 2026-11-20T17:56:07）",
     expect(groups[0]).toBe(screen.getByTestId("left-group-agent"));
     expect(groups[1]).toBe(screen.getByTestId("left-group-session"));
     expect(groups[2]).toBe(screen.getByTestId("left-group-extra"));
-    expect(screen.getByTestId("left-group-agent-header")).toHaveTextContent("Agent directory");
-    expect(screen.getByTestId("left-group-session-header")).toHaveTextContent("Session directory");
-    expect(screen.getByTestId("left-group-extra-header")).toHaveTextContent("Extra roots");
+    expect(screen.getByTestId("left-group-agent-row")).toHaveTextContent("Agent directory");
+    expect(screen.getByTestId("left-group-session-row")).toHaveTextContent("Session directory");
+    expect(screen.getByTestId("left-group-extra-row")).toHaveTextContent("Extra roots");
   });
 
   it("默认收放：agent 目录收起，会话目录与额外根目录展开", () => {
@@ -107,7 +110,7 @@ describe("LeftTrees — 一棵树、三个分组（rant 2026-11-20T17:56:07）",
 
   it("收起的分组只占一行：表头留在原处，树整个卸掉，三组都还在", () => {
     renderTrees();
-    const header = screen.getByTestId("left-group-session-header");
+    const header = screen.getByTestId("left-group-session-row");
     const parent = header.parentElement;
     const indexBefore = Array.from(parent?.children ?? []).indexOf(header);
     expect(screen.getByTestId("left-tree-session")).toBeInTheDocument();
@@ -126,7 +129,7 @@ describe("LeftTrees — 一棵树、三个分组（rant 2026-11-20T17:56:07）",
   it("点分组节点只收放：不给右栏换文件，也不选会话", () => {
     const onOpenFile = vi.fn();
     renderTrees({ onOpenFile });
-    fireEvent.click(screen.getByTestId("left-group-agent-header"));
+    fireEvent.click(screen.getByTestId("left-group-agent-row"));
     expect(screen.getByTestId("left-group-agent")).toHaveAttribute("data-collapsed", "false");
     expect(screen.getByTestId("left-tree-agent")).toBeInTheDocument();
     // 分组节点不是文件行：右栏当前打开的文件一个都没变
@@ -167,8 +170,133 @@ describe("LeftTrees — 一棵树、三个分组（rant 2026-11-20T17:56:07）",
       </I18nProvider>,
     );
     // agent 目录默认收起，展开之后才看得到那句话
-    fireEvent.click(screen.getByTestId("left-group-agent-header"));
+    fireEvent.click(screen.getByTestId("left-group-agent-row"));
     expect(screen.getByTestId("left-tree-agent-no-session")).toHaveTextContent("Select a session");
+  });
+});
+
+/**
+ * 分组节点就是树里的第一行（rant 2026-11-20T21:27:29）：清单逐条对应一个 it。
+ *
+ * 之前它是树体上面的一行表头：更高的行、没有缩进、没有图标，名字底下还挂着一个工具条
+ * （刷新 + 全部收起），而真实目录的名字反倒没有行来写。现在分组值一行的高度，下一层就是
+ * 真实目录那一行。每一条要求都有自己的一条断言：一条断言守两条要求，改坏其中一条时
+ * 另一条会替它挡住。
+ */
+describe("LeftTrees — 分组节点是树里的第一行（rant 2026-11-20T21:27:29）", () => {
+  const SESSION = "/p/emrg/.emrg/sessions/s1";
+
+  const loadDir = async (p: string) => ({
+    entries: p === SESSION ? [{ name: "notes.md", path: `${SESSION}/notes.md`, type: "file" as const }] : [],
+    truncated: false,
+  });
+
+  const renderTrees = (props: Partial<Parameters<typeof LeftTrees>[0]> = {}) =>
+    render(
+      <I18nProvider lang="en">
+        <LeftTrees agentRoot="/p/emrg" sessionRoot={SESSION} loadDir={loadDir} {...props} />
+      </I18nProvider>,
+    );
+
+  /** 一条规则的声明块；选择器不在文件里就是红，不是「没找到就跳过」。 */
+  const rule = (selector: string): string => {
+    const start = cockpitCss.indexOf(`\n${selector} {`);
+    expect(start, `${selector} 不在 cockpit.css 里`).toBeGreaterThan(-1);
+    return cockpitCss.slice(start, cockpitCss.indexOf("}", start));
+  };
+
+  const pad = (el: HTMLElement): number => parseFloat(el.style.paddingLeft);
+
+  it("清单 2：左边三角、16px 文件夹图标、再是名字，顺序固定", async () => {
+    renderTrees();
+    const row = screen.getByTestId("left-group-session-row");
+    // 行内三件东西的顺序就是要求本身：三角最左，图标其次，名字最后
+    const parts = Array.from(row.children).map((c) => (c as HTMLElement).className);
+    expect(parts).toEqual(["ft-caret", "ft-glyph", "ft-name"]);
+    expect(row.querySelector(".ft-caret")?.textContent).toBe("▾");
+    const glyph = row.querySelector(".ft-glyph") as HTMLElement;
+    expect(glyph.style.width).toBe(`${ICON_PX}px`);
+    expect(glyph.style.height).toBe(`${ICON_PX}px`);
+    expect(glyph).toHaveAttribute("data-kind", "dir-open");
+    expect(row.querySelector(".ft-name")?.textContent).toBe("Session directory");
+    await waitFor(() => expect(screen.getAllByTestId("left-tree-session-row")).toHaveLength(1));
+  });
+
+  it("清单 2：每行 22px，按层缩进一个步长，三层都量到", async () => {
+    renderTrees();
+    await waitFor(() => expect(screen.getAllByTestId("left-tree-session-row")).toHaveLength(1));
+    const group = screen.getByTestId("left-group-session-row");
+    const root = screen.getByTestId("left-tree-session-root");
+    const file = screen.getAllByTestId("left-tree-session-row")[0];
+    for (const el of [group, root, file]) expect(el.style.height).toBe(`${ROW_HEIGHT}px`);
+    expect(group).toHaveAttribute("data-depth", "0");
+    expect(root).toHaveAttribute("data-depth", "1");
+    expect(file).toHaveAttribute("data-depth", "2");
+    // 分组行就在面板左边缘，目录行比它多一个步长，文件行再多一个
+    expect(pad(group)).toBeLessThan(pad(root));
+    expect(pad(root) - pad(group)).toBe(INDENT_PX);
+    expect(pad(file) - pad(root)).toBe(INDENT_PX);
+  });
+
+  it("清单 3：与普通行同一套结构，只多一个 left-group-row 类；整行浅底共用 ft-row", async () => {
+    renderTrees();
+    await waitFor(() => expect(screen.getAllByTestId("left-tree-session-row")).toHaveLength(1));
+    const group = screen.getByTestId("left-group-session-row");
+    const ordinary = screen.getAllByTestId("left-tree-session-row")[0];
+    expect(group.tagName).toBe(ordinary.tagName);
+    expect(group).toHaveAttribute("role", "treeitem");
+    expect(ordinary).toHaveAttribute("role", "treeitem");
+    // 悬停整行浅底来自 `.ft-row`：分组行与普通行都有它，谁也不多一层底色
+    expect(group).toHaveClass("ft-row");
+    expect(ordinary).toHaveClass("ft-row");
+    // 只有分组行多这一个类，字体全在它身上
+    expect(group).toHaveClass("left-group-row");
+    expect(ordinary).not.toHaveClass("left-group-row");
+    const type = rule(".left-group-row");
+    expect(type).toContain("font-size: 11.5px");
+    expect(type).toContain("font-weight: 700");
+    expect(type).toContain("color: var(--text-2)");
+    // 几何不在这条规则里重写：行高、缩进、图标仍只有 TreeLine 内联样式那一处
+    expect(type).not.toContain("height:");
+    expect(type).not.toContain("padding");
+    expect(type).not.toContain("width:");
+  });
+
+  it("清单 4：分组的下一层就是真实目录，行上写目录名，内容挂在它下面", async () => {
+    renderTrees();
+    await waitFor(() => expect(screen.getAllByTestId("left-tree-session-row")).toHaveLength(1));
+    const body = screen.getByTestId("left-group-session-body");
+    const root = screen.getByTestId("left-tree-session-root");
+    expect(body).toContainElement(root);
+    // 行上写的是目录名，全路径只在提示里
+    expect(root.textContent).toContain("s1");
+    expect(root).toHaveAttribute("title", SESSION);
+    expect(body).toContainElement(screen.getAllByTestId("left-tree-session-row")[0]);
+  });
+
+  it("清单 5：分组工具条删除——面板里没有刷新、没有全部收起，一个按钮都没有", () => {
+    renderTrees({ sessionRoots: ["/p/other"] });
+    const panel = screen.getByTestId("left-trees");
+    expect(panel.querySelectorAll(".ft-toolbar, .ft-tool, .left-group-header")).toHaveLength(0);
+    expect(panel.querySelectorAll("button")).toHaveLength(0);
+  });
+
+  it("清单 6：「没有」也是一行 22px：斜体、次要字色、按不动", () => {
+    renderTrees({ sessionRoots: [] });
+    const empty = screen.getByTestId("left-group-extra-empty");
+    expect(empty.style.height).toBe(`${ROW_HEIGHT}px`);
+    expect(empty).toHaveClass("left-group-empty");
+    expect(empty).toHaveTextContent("None");
+    // 它是一行说明，不是一行可点的行：没有悬停浅底、没有三角可点、点不动。
+    // 三角的元素还在（每一行都由同一个 TreeLine 画），但它里面是空的——没有东西可折。
+    expect(empty).not.toHaveClass("ft-row");
+    expect(empty.querySelector(".ft-caret")?.textContent).toBe("");
+    expect(empty.querySelectorAll("button, [tabindex]")).toHaveLength(0);
+    const style = rule(".left-group-empty");
+    expect(style).toContain("font-style: italic");
+    expect(style).toContain("color: var(--text-3)");
+    // 行高来自 TreeLine，不在这条规则里另写一个数
+    expect(style).not.toContain("height:");
   });
 });
 
