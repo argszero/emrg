@@ -1017,7 +1017,26 @@ export function Composer({
           onMouseDown={(e) => e.preventDefault()} // 防失焦——插入要落在原光标处
           onClick={() => fileInputRef.current?.click()}
         >
-          📎
+          {/* 内联矢量，不是 `📎`（issue #3109）。emoji 字形画多大、笔画落在盒子的哪个
+              高度，由各平台的 emoji 字体决定：盒子居中的是字体给的行高而不是笔画本身，所以
+              看着偏上；字号又是正文那一档，比发送按钮里的图标小一截。Windows 那套字体字形
+              更高、字身更低，同一份样式在那里歪得更多。`currentColor` 让 `.attach-btn:hover`
+              现有的字色规则直接管住它，不需要第二条规则。 */}
+          <svg
+            viewBox="0 0 16 16"
+            width="16"
+            height="16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            {/* 回形针：外圈从底部沿左边上去、翻过顶、沿右边下来、从底下绕回中线再上去。
+                三段弧都是整半圆（弦长等于直径），所以形状不靠渲染器猜。 */}
+            <path d="M5 11.5V5.5a3 3 0 0 1 6 0v6.5a1.5 1.5 0 0 1-3 0V7.5" />
+          </svg>
         </button>
         <input
           ref={fileInputRef}

@@ -12,6 +12,7 @@ import { createTranscriptStore, type TranscriptStore } from "../lib/transcript";
 import { COMMANDS } from "../lib/commands";
 import shellCss from "../shell.css?raw";
 import componentsCss from "../../css/components.css?raw";
+import layoutCss from "../../css/layout.css?raw";
 import { I18nProvider } from "../lib/i18n";
 
 /**
@@ -1336,5 +1337,55 @@ describe("Composer — /rewind 回填（issue #2384）", () => {
       m.rerenderWith({ id: 1, text: LONG });
     });
     expect(m.input().value).toContain("追加");
+  });
+});
+
+describe("Composer — 附件按钮的图标是矢量（issue #3109）", () => {
+  /** 切出第一条以 `selector` 开头的规则（`.send-btn,` 那种共享盒子也要认）。 */
+  function firstRule(css: string, selector: string): string {
+    const at = css.indexOf(selector);
+    expect(at, `${selector} 不在样式表里`).toBeGreaterThanOrEqual(0);
+    return css.slice(at, css.indexOf("}", at));
+  }
+
+  /** 一条规则里那个精确的 `height`（不认 `line-height`、`min-height`）。 */
+  function heightOf(rule: string): number {
+    return Number(/(?<![\w-])height:\s*(\d+)px/.exec(rule)?.[1]);
+  }
+
+  it("按钮里是 svg，不是 emoji 字形；尺寸由属性给，颜色走 currentColor", () => {
+    setup(createTranscriptStore());
+    const btn = screen.getByTestId("composer-attach");
+    const svg = btn.querySelector("svg");
+    // 字形回归就是这条：`📎` 正是这次要删掉的那一份载体
+    expect(svg, "按钮里没有 svg——图标又变回字体字形了").not.toBeNull();
+    expect(svg!.getAttribute("viewBox")).toBe("0 0 16 16");
+    expect(svg!.getAttribute("width")).toBe("16");
+    expect(svg!.getAttribute("height")).toBe("16");
+    expect(svg!.getAttribute("stroke")).toBe("currentColor");
+    expect(svg!.getAttribute("aria-hidden")).toBe("true");
+    // 一个字符也不许留：字形与 svg 同时在场时，占位的还是那个字形
+    expect(btn.textContent?.trim()).toBe("");
+  });
+
+  it("样式表不让字体决定图标大小，竖直位置由两个按钮的高度算出来", () => {
+    const attach = firstRule(layoutCss, ".attach-btn");
+    const send = firstRule(componentsCss, ".send-btn");
+    // 字号与行高就是把图标交给字体的那两个声明：留一条，平台就又能改它的大小与基线
+    expect(attach).not.toMatch(/font-size/);
+    expect(attach).not.toMatch(/line-height/);
+
+    const attachH = heightOf(attach);
+    const sendH = heightOf(send);
+    // 两个高度都必须真读到：读不到说明切错了规则，下面的比较会白过
+    expect(attachH, ".attach-btn 的高度没读到").toBeGreaterThan(0);
+    expect(sendH, ".send-btn 的高度没读到").toBeGreaterThan(0);
+
+    const m = /margin-bottom:\s*calc\(\(\s*(\d+)px\s*-\s*(\d+)px\s*\)\s*\/\s*2\s*\)/.exec(attach);
+    expect(m, "margin-bottom 不是由两个高度算出来的派生式（改回固定偏移就会红）").not.toBeNull();
+    // 式子里那两个数必须就是这两个盒子的高度：只改其中一个盒子，这条立刻红
+    expect([Number(m![1]), Number(m![2])].sort((a, b) => a - b)).toEqual(
+      [attachH, sendH].sort((a, b) => a - b),
+    );
   });
 });

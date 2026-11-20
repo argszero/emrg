@@ -161,7 +161,11 @@
   flex: none;
   min-width: 28px;
   height: 28px;
-  margin-bottom: var(--sp-2);
+  /* 与 38px 的发送按钮同中心（issue #3109）：`.composer-card` 按底边对齐
+     （`align-items: flex-end`），所以两个盒子的高度差的一半就是这个偏移。写成派生式
+     而不是一个固定偏移——`var(--sp-2)` 只是碰巧接近，改任何一个盒子的高度它都不会跟着变，
+     图标就又偏了。 */
+  margin-bottom: calc((38px - 28px) / 2);
   padding: 0;
   display: inline-flex;
   align-items: center;
@@ -170,8 +174,6 @@
   border-radius: var(--radius-input);
   background: transparent;
   color: var(--text-2);
-  font-size: var(--fs-secondary);
-  line-height: 1;
   cursor: pointer;
   transition:
     background var(--dur-fast) var(--ease),
