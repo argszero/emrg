@@ -118,11 +118,13 @@ describe("词典完整性守卫（防漂移）", () => {
   // → 506 + 3 = 509。
   // 2026-11-20 issue #3093：状态带那一条合起来的读数换成三段各一条（+4），并加上按段排名的
   // 面板文案 14 条，同时删掉原来那一条（-1）→ 509 + 4 + 14 - 1 = 526。
-  it("zh/en 各 526 个 key 且完全对齐", () => {
+  // 2026-11-20 issue #3095：右栏从只读预览改成编辑器，保存 / 脏点 / 关闭三选一 / 磁盘
+  // 改动 / 只读说明 / 两个开关 / 语言与光标角标 +18 → 526 + 18 = 544。
+  it("zh/en 各 544 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(526);
-    expect(enKeys.length).toBe(526);
+    expect(zhKeys.length).toBe(544);
+    expect(enKeys.length).toBe(544);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);

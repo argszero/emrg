@@ -1,6 +1,8 @@
 import { createRef } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { EditorView } from "@codemirror/view";
+import { EditorSelection, EditorState } from "@codemirror/state";
 import { I18nProvider } from "../lib/i18n";
 import { EditorPanel, type EditorPanelHandle } from "./EditorPanel";
 import { LeftTrees } from "./LeftTrees";
@@ -17,25 +19,78 @@ const FILES: Record<string, string> = {
   "/p/emrg/a.txt": "alpha\nbeta\ngamma",
   "/p/emrg/b.txt": "one\ntwo",
   "/p/emrg/sub/c.txt": "c",
+  "/p/emrg/a.py": "alpha\nbeta\ngamma",
+  "/p/emrg/notes.zzz": "plain words",
 };
 
-function renderPanel(onOpenMemory = vi.fn()) {
+interface PanelOptions {
+  onOpenMemory?: () => void;
+  sid?: string | null;
+  /** What the reader answers about one path: a binary frame, or a window instead of a file. */
+  shape?: Record<string, { binary?: boolean; truncated?: boolean }>;
+  saveFile?: (
+    path: string,
+    content: string,
+    sid: string,
+  ) => Promise<{ mtime: number; size: number } | null>;
+  statFile?: (
+    path: string,
+  ) => Promise<{ exists: boolean; mtime: number | null; size: number | null } | null>;
+}
+
+function renderPanel(options: PanelOptions = {}) {
+  const onOpenMemory = options.onOpenMemory ?? vi.fn();
   const ref = createRef<EditorPanelHandle>();
   const loadFile = vi.fn(async (p: string) => ({
     content: FILES[p] ?? "",
-    binary: false,
-    truncated: false,
+    binary: options.shape?.[p]?.binary ?? false,
+    truncated: options.shape?.[p]?.truncated ?? false,
     totalLines: null,
   }));
+  const saveFile = options.saveFile ?? vi.fn(async () => ({ mtime: 200, size: 20 }));
+  const statFile =
+    options.statFile ?? vi.fn(async () => ({ exists: true, mtime: 100, size: 10 }));
   render(
     <I18nProvider lang="en">
-      <EditorPanel ref={ref} loadFile={loadFile} onOpenMemory={onOpenMemory} />
+      <EditorPanel
+        ref={ref}
+        sid={options.sid ?? "s1"}
+        loadFile={loadFile}
+        saveFile={saveFile}
+        statFile={statFile}
+        onOpenMemory={onOpenMemory}
+      />
     </I18nProvider>,
   );
   const open = (path: string, root = "/p/emrg", preview = true) => {
     act(() => ref.current?.openFile({ path, root, preview }));
   };
-  return { ref, loadFile, open, onOpenMemory };
+  return { ref, loadFile, saveFile, statFile, open, onOpenMemory };
+}
+
+/** The editor's own root, and the live CodeMirror view inside it. */
+function surface(): HTMLElement {
+  return screen.getByTestId("editor-surface");
+}
+
+function editor(): EditorView {
+  const dom = surface().querySelector(".cm-editor") as HTMLElement | null;
+  const found = dom ? EditorView.findFromDOM(dom) : null;
+  if (!found) throw new Error("the panel did not mount an editor");
+  return found;
+}
+
+/** Type at the end of the buffer, the way a keystroke reaches the document. */
+function typeInto(text: string): void {
+  act(() => {
+    const view = editor();
+    view.dispatch({ changes: { from: view.state.doc.length, insert: text } });
+  });
+}
+
+/** `Mod-s`, sent with the modifier CodeMirror resolves `Mod` to under jsdom. */
+function pressSave(): void {
+  fireEvent.keyDown(editor().contentDOM, { key: "s", ctrlKey: true });
 }
 
 describe("EditorPanel tabs (issue #3068)", () => {
@@ -137,15 +192,20 @@ describe("EditorPanel tabs (issue #3068)", () => {
   it("每个标签自己记住滚动位置：A 滚过之后去 B 再回来，位置不变", async () => {
     const { open } = renderPanel();
     open("/p/emrg/a.txt", "/p/emrg", false);
-    await screen.findByText(/alpha/);
-    const code = screen.getByTestId("editor-code");
-    code.scrollTop = 120;
-    fireEvent.scroll(code);
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+    // The scroller is CodeMirror's own `.cm-scroller`: the panel's wrapper no longer holds
+    // the offset. It is also a **new** element after a tab switch — an unread tab has no
+    // editor for one render — so each reading re-queries it instead of holding the node.
+    const scroller = (): HTMLElement =>
+      surface().querySelector(".cm-scroller") as HTMLElement;
+    scroller().scrollTop = 120;
+    fireEvent.scroll(scroller());
     open("/p/emrg/b.txt", "/p/emrg", false);
-    await screen.findByText(/one/);
-    expect(screen.getByTestId("editor-code").scrollTop).not.toBe(120);
+    await waitFor(() => expect(surface()).toHaveTextContent("one"));
+    expect(scroller().scrollTop).toBe(0);
     fireEvent.click(screen.getAllByTestId("editor-tab")[0]);
-    expect(screen.getByTestId("editor-code").scrollTop).toBe(120);
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+    expect(scroller().scrollTop).toBe(120);
   });
 
   it("标签条在自己宽度内横向滚，不换行、不撑宽面板，也不引起整页横滚", () => {
@@ -167,16 +227,18 @@ describe("EditorPanel tabs (issue #3068)", () => {
     expect(strip.scrollLeft).toBe(90);
   });
 
-  it("行号是固定列，横向滚动时钉在左边", async () => {
+  it("行号是编辑器自己的固定列：与正文同一个滚动容器，横向滚动时钉在左边", async () => {
     const { open } = renderPanel();
     open("/p/emrg/a.txt");
-    await screen.findByText(/alpha/);
-    const gutter = screen.getByTestId("editor-gutter");
-    expect(gutter.style.position).toBe("sticky");
-    expect(gutter.style.left).toBe("0px");
-    // 行号与正文同在一个滚动容器里，所以两者一起纵向滚
-    expect(screen.getByTestId("editor-code").contains(gutter)).toBe(true);
-    expect(gutter.textContent).toBe("123");
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+    // 行号不再由面板手写：CodeMirror 的 `.cm-gutters` 就是它自己的固定列，钉在滚动容器
+    // 第一列。面板要做的是不把它拿掉，也不另造一套行号。
+    const scroller = surface().querySelector(".cm-scroller");
+    const gutters = surface().querySelector(".cm-gutters");
+    expect(gutters).not.toBeNull();
+    expect(scroller?.contains(gutters as Node)).toBe(true);
+    expect(gutters?.textContent).toContain("1");
+    expect(gutters?.textContent).toContain("3");
   });
 
   it("记忆门的按钮仍然打开记忆面板", () => {
@@ -226,5 +288,317 @@ describe("LeftTrees → editor (issue #3068)", () => {
     const file = row.find((el) => el.getAttribute("data-kind") === "text");
     fireEvent.doubleClick(file as HTMLElement);
     expect(onOpenFile).toHaveBeenCalledWith({ path: "/p/emrg/a.txt", root: "/p/emrg", pin: true });
+  });
+});
+
+/**
+ * The right column as an editor (rant 2026-11-20T18:01:52).
+ *
+ * Each test drives the surface the host drives: a keystroke becomes a CodeMirror
+ * transaction, a save is `Mod-s`, a close is the tab's own button. Nothing here hands the
+ * panel a buffer directly — a test that did would pass on a panel that never wires the
+ * editor to the save path, which is the defect this work exists to remove.
+ */
+describe("EditorPanel as an editor (rant 2026-11-20T18:01:52)", () => {
+  it("打个字就有脏点，保存把它写回原文件，脏点随之消失", async () => {
+    const { open, saveFile } = renderPanel();
+    open("/p/emrg/a.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+    expect(screen.getByTestId("editor-tab")).toHaveAttribute("data-dirty", "false");
+    expect(screen.queryByTestId("editor-tab-dirty")).toBeNull();
+
+    typeInto("X");
+    expect(screen.getByTestId("editor-tab")).toHaveAttribute("data-dirty", "true");
+    expect(screen.getByTestId("editor-tab-dirty")).toBeInTheDocument();
+
+    pressSave();
+    await waitFor(() => expect(saveFile).toHaveBeenCalledTimes(1));
+    // 写的是改完的全文、写回的是这个文件、会话 id 一起交上去
+    expect(saveFile).toHaveBeenCalledWith("/p/emrg/a.txt", "alpha\nbeta\ngammaX", "s1");
+    await waitFor(() =>
+      expect(screen.getByTestId("editor-tab")).toHaveAttribute("data-dirty", "false"),
+    );
+    expect(screen.queryByTestId("editor-tab-dirty")).toBeNull();
+  });
+
+  it("保存失败：脏点留着，提示看得见，而且写着失败的原因", async () => {
+    const saveFile = vi.fn(async () => {
+      throw new Error("path outside the session boundary");
+    });
+    const { open } = renderPanel({ saveFile });
+    open("/p/emrg/a.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+    typeInto("X");
+    pressSave();
+
+    const failed = await screen.findByTestId("editor-save-failed");
+    expect(failed).toHaveTextContent("Could not save");
+    // 拒绝的理由是守护给出的那一句，不是一句笼统的「保存失败」
+    expect(failed).toHaveTextContent("path outside the session boundary");
+    // 没写成就不能说存好了
+    expect(screen.getByTestId("editor-tab")).toHaveAttribute("data-dirty", "true");
+  });
+
+  it("没改过的标签直接关，不问", async () => {
+    const { open } = renderPanel();
+    open("/p/emrg/a.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+    fireEvent.click(screen.getByTestId("editor-tab-close"));
+    expect(screen.queryByTestId("editor-close-ask")).toBeNull();
+    expect(screen.queryAllByTestId("editor-tab")).toHaveLength(0);
+  });
+
+  it("关有未保存改动的标签先问，选取消之后标签和文字原样都在", async () => {
+    const { open, saveFile } = renderPanel();
+    open("/p/emrg/a.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+    typeInto("X");
+
+    fireEvent.click(screen.getByTestId("editor-tab-close"));
+    const ask = await screen.findByTestId("editor-close-ask");
+    expect(ask).toHaveTextContent("a.txt");
+    // 问的时候什么都没做：没写盘，也没关
+    expect(saveFile).not.toHaveBeenCalled();
+    expect(screen.getByTestId("editor-tab")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("editor-close-cancel"));
+    expect(screen.queryByTestId("editor-close-ask")).toBeNull();
+    expect(screen.getByTestId("editor-tab")).toHaveAttribute("data-dirty", "true");
+    expect(surface()).toHaveTextContent("gammaX");
+  });
+
+  it("关闭时选「不保存」：标签关掉，一个字也不写盘", async () => {
+    const { open, saveFile } = renderPanel();
+    open("/p/emrg/a.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+    typeInto("X");
+    fireEvent.click(screen.getByTestId("editor-tab-close"));
+    await screen.findByTestId("editor-close-ask");
+
+    fireEvent.click(screen.getByTestId("editor-close-discard"));
+    await waitFor(() => expect(screen.queryAllByTestId("editor-tab")).toHaveLength(0));
+    expect(saveFile).not.toHaveBeenCalled();
+  });
+
+  it("关闭时选「保存」：先写盘，写成了才关", async () => {
+    const { open, saveFile } = renderPanel();
+    open("/p/emrg/a.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+    typeInto("X");
+    fireEvent.click(screen.getByTestId("editor-tab-close"));
+    await screen.findByTestId("editor-close-ask");
+
+    fireEvent.click(screen.getByTestId("editor-close-save"));
+    await waitFor(() => expect(saveFile).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.queryAllByTestId("editor-tab")).toHaveLength(0));
+  });
+
+  it("关闭时选「保存」但保存失败：标签留下，因为关掉就只剩一份了", async () => {
+    const saveFile = vi.fn(async () => {
+      throw new Error("disk is full");
+    });
+    const { open } = renderPanel({ saveFile });
+    open("/p/emrg/a.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+    typeInto("X");
+    fireEvent.click(screen.getByTestId("editor-tab-close"));
+    await screen.findByTestId("editor-close-ask");
+
+    fireEvent.click(screen.getByTestId("editor-close-save"));
+    await screen.findByTestId("editor-save-failed");
+    expect(screen.getByTestId("editor-tab")).toHaveAttribute("data-dirty", "true");
+  });
+
+  it("磁盘上改过而我没动过：静默重载，不拿问题打扰", async () => {
+    let mtime = 100;
+    const statFile = vi.fn(async () => ({ exists: true, mtime, size: 10 }));
+    const { open, loadFile } = renderPanel({ statFile });
+    open("/p/emrg/a.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+
+    loadFile.mockResolvedValue({
+      content: "changed on disk",
+      binary: false,
+      truncated: false,
+      totalLines: null,
+    });
+    mtime = 200;
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+
+    await waitFor(() => expect(surface()).toHaveTextContent("changed on disk"));
+    expect(screen.queryByTestId("editor-disk-conflict")).toBeNull();
+    // 静默重载不是改动：重载之后文件不该显示成脏的
+    expect(screen.getByTestId("editor-tab")).toHaveAttribute("data-dirty", "false");
+  });
+
+  it("磁盘上改过而我也改过：问一句，「保留我的」保住我的文字", async () => {
+    let mtime = 100;
+    const statFile = vi.fn(async () => ({ exists: true, mtime, size: 10 }));
+    const { open, loadFile } = renderPanel({ statFile });
+    open("/p/emrg/a.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+    typeInto("X");
+
+    loadFile.mockResolvedValue({
+      content: "theirs",
+      binary: false,
+      truncated: false,
+      totalLines: null,
+    });
+    mtime = 200;
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+
+    const bar = await screen.findByTestId("editor-disk-conflict");
+    expect(bar).toHaveTextContent("changed on disk");
+    expect(screen.getByTestId("editor-conflict-reload")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("editor-conflict-keep"));
+    expect(screen.queryByTestId("editor-disk-conflict")).toBeNull();
+    expect(surface()).toHaveTextContent("gammaX");
+    expect(screen.getByTestId("editor-tab")).toHaveAttribute("data-dirty", "true");
+
+    // 保留过的这一次不再重复问：再探一次不该又弹出同一句
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(screen.queryByTestId("editor-disk-conflict")).toBeNull();
+  });
+
+  it("磁盘上改过而我也改过：选「重载」就换成磁盘上的那一份", async () => {
+    let mtime = 100;
+    const statFile = vi.fn(async () => ({ exists: true, mtime, size: 10 }));
+    const { open, loadFile } = renderPanel({ statFile });
+    open("/p/emrg/a.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+    typeInto("X");
+
+    loadFile.mockResolvedValue({
+      content: "theirs",
+      binary: false,
+      truncated: false,
+      totalLines: null,
+    });
+    mtime = 200;
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await screen.findByTestId("editor-disk-conflict");
+
+    fireEvent.click(screen.getByTestId("editor-conflict-reload"));
+    await waitFor(() => expect(surface()).toHaveTextContent("theirs"));
+    expect(screen.queryByTestId("editor-disk-conflict")).toBeNull();
+    expect(screen.getByTestId("editor-tab")).toHaveAttribute("data-dirty", "false");
+  });
+
+  it("折行与缩略图两个开关都点得动，换标签再回来还在", async () => {
+    const { open } = renderPanel({ sid: "s1" });
+    open("/p/emrg/a.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+    // 默认：折行开、缩略图关
+    expect(screen.getByTestId("editor-toggle-wrap")).toHaveAttribute("aria-pressed", "true");
+    expect(surface()).toHaveAttribute("data-wrap", "true");
+    expect(screen.queryByTestId("editor-minimap")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("editor-toggle-wrap"));
+    expect(screen.getByTestId("editor-toggle-wrap")).toHaveAttribute("aria-pressed", "false");
+    expect(surface()).toHaveAttribute("data-wrap", "false");
+    fireEvent.click(screen.getByTestId("editor-toggle-minimap"));
+    expect(screen.getByTestId("editor-toggle-minimap")).toHaveAttribute("aria-pressed", "true");
+
+    // 同一会话里换个标签再回来，两个开关都还记着
+    open("/p/emrg/b.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("one"));
+    expect(surface()).toHaveAttribute("data-wrap", "false");
+    expect(screen.getByTestId("editor-minimap")).toBeInTheDocument();
+  });
+
+  it("缩略图把整份文件收成一列条，不按文件长度变长", async () => {
+    const { open } = renderPanel();
+    open("/p/emrg/a.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+    fireEvent.click(screen.getByTestId("editor-toggle-minimap"));
+    const map = screen.getByTestId("editor-minimap");
+    // 三行的文件，三条；每一条都不是按钮
+    expect(map.querySelectorAll(".editor-minimap-bar")).toHaveLength(3);
+    expect(within(map).queryByRole("button")).toBeNull();
+  });
+
+  it("状态角标写着语言与光标行列，光标一动就跟着变", async () => {
+    const { open } = renderPanel();
+    open("/p/emrg/a.py", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+    expect(screen.getByTestId("editor-status-language")).toHaveTextContent("Python");
+    expect(screen.getByTestId("editor-status-cursor")).toHaveTextContent("Ln 1, Col 1");
+
+    // 偏移 8 = 第二行第三列（alpha\n 之后是 beta 的第二个字符之后）
+    act(() => {
+      editor().dispatch({ selection: { anchor: 8 } });
+    });
+    expect(screen.getByTestId("editor-status-cursor")).toHaveTextContent("Ln 2, Col 3");
+  });
+
+  it("认不出的扩展名按纯文本显示，而且照样能改", async () => {
+    const { open } = renderPanel();
+    open("/p/emrg/notes.zzz", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("plain words"));
+    expect(screen.getByTestId("editor-status-language")).toHaveTextContent("Plain text");
+    // 认不出不等于不能编辑：降级成只读是清单里点名要避免的那一种
+    expect(surface()).toHaveAttribute("data-readonly", "false");
+    expect(screen.queryByTestId("editor-readonly-note")).toBeNull();
+    typeInto("!");
+    expect(screen.getByTestId("editor-tab")).toHaveAttribute("data-dirty", "true");
+  });
+
+  it("超过阈值的大文件以只读打开，并在界面上说明是只读", async () => {
+    const statFile = vi.fn(async () => ({ exists: true, mtime: 100, size: 5 * 1024 * 1024 }));
+    const { open } = renderPanel({ statFile });
+    open("/p/emrg/a.txt", "/p/emrg", false);
+
+    const note = await screen.findByTestId("editor-readonly-note");
+    expect(note).toHaveTextContent("read only");
+    expect(surface()).toHaveAttribute("data-readonly", "true");
+    expect(editor().state.readOnly).toBe(true);
+  });
+
+  it("只读到开头的文件也是只读：把它整份存回去会删掉后面全部", async () => {
+    const { open } = renderPanel({
+      shape: { "/p/emrg/a.txt": { truncated: true } },
+    });
+    open("/p/emrg/a.txt", "/p/emrg", false);
+
+    const note = await screen.findByTestId("editor-readonly-note");
+    expect(note).toHaveTextContent("beginning");
+    expect(surface()).toHaveAttribute("data-readonly", "true");
+  });
+
+  it("二进制文件以只读打开，不把字节当文字显示", async () => {
+    const { open } = renderPanel({ shape: { "/p/emrg/a.txt": { binary: true } } });
+    open("/p/emrg/a.txt", "/p/emrg", false);
+
+    const note = await screen.findByTestId("editor-readonly-note");
+    expect(note).toHaveTextContent("Binary");
+    expect(surface()).toHaveAttribute("data-readonly", "true");
+  });
+
+  it("多光标与列选是开着的：它们不是一层可以悄悄关掉的东西", async () => {
+    const { open } = renderPanel();
+    open("/p/emrg/a.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+    // 列选与 Option+点击都落在这个开关上：关掉它，两个手势各自静默失效
+    expect(editor().state.facet(EditorState.allowMultipleSelections)).toBe(true);
+    // 多个选区在同一个文档里同时存在
+    act(() => {
+      editor().dispatch({
+        selection: EditorSelection.create(
+          [EditorSelection.range(0, 5), EditorSelection.range(6, 10)],
+          0,
+        ),
+      });
+    });
+    expect(editor().state.selection.ranges).toHaveLength(2);
   });
 });

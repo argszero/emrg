@@ -986,6 +986,42 @@ vision = false
     // ── P2.3 + P3.4（rant 12:20:35）：HTML 预览 WebContentsView ──────────
     // 混合模型：非 HTML 走 renderer DOM 查看器；.html/.htm 走内嵌浏览器预览。
     // 懒创建（R7-⑤）+ 单实例复用（一次只显示一个预览，切换 = 重新加载 R7-⑥）。
+    // Rant 2026-11-20T18:01:52: the editor's two file channels.
+    //
+    // A probe, not a read: the panel already holds the text, so the only thing it cannot
+    // know is whether the bytes under it moved. mtime and size answer that and cost no
+    // content, which is what lets the probe run on every focus.
+    ipcMain.handle("emrg:statFile", async (_e, { path: p } = {}) => {
+      if (typeof p !== "string" || !p.trim()) throw new Error("invalid path");
+      const frame = await requireConn().sendCommandAndWait("stat_file", { path: p.trim() }, 10000);
+      if (frame.error) throw new Error(frame.error);
+      return {
+        exists: frame.exists !== false,
+        mtime: typeof frame.mtime === "number" ? frame.mtime : null,
+        size: typeof frame.size === "number" ? frame.size : null,
+      };
+    });
+
+    // The save. The daemon judges it against the session's own policy — the same
+    // boundary the agent's `write` tool honours — so this handler resolves the session's
+    // cwd rather than accepting a caller-supplied root to write under.
+    ipcMain.handle("emrg:writeFile", async (_e, { path: p, content, sessionId, cwd } = {}) => {
+      if (typeof p !== "string" || !p.trim()) throw new Error("invalid path");
+      if (typeof content !== "string") throw new Error("content must be a string");
+      if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
+      const frame = await requireConn().sendCommandAndWait("write_file", {
+        path: p.trim(),
+        content,
+        session_id: sessionId,
+        cwd: cwd || resolveSessionCwd(sessionId) || DEFAULT_CWD,
+      }, 30000);
+      if (frame.error) throw new Error(frame.error);
+      return {
+        mtime: typeof frame.mtime === "number" ? frame.mtime : null,
+        size: typeof frame.size === "number" ? frame.size : null,
+      };
+    });
+
     ipcMain.handle("emrg:previewHtml", async (_e, { path: p } = {}) => showPreview(p));
 
     ipcMain.handle("emrg:closePreview", async (_e, { path: p } = {}) => {

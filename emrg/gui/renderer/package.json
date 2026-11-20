@@ -12,6 +12,8 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@codemirror/language-data": "^6.5.2",
+    "codemirror": "^6.0.2",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

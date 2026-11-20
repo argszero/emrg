@@ -612,6 +612,27 @@ export interface DaemonBridgeDeps {
       totalLines?: number | null;
     }>;
     /**
+     * Ask whether the file under the panel moved on disk (preload.statFile；未接线时
+     * 为 undefined）。mtime and size only — a probe runs on every focus, and reading the
+     * whole file to answer a yes/no question would cost the file each time.
+     */
+    statFile?(p: { path: string }): Promise<{
+      exists?: boolean;
+      mtime?: number | null;
+      size?: number | null;
+    }>;
+    /**
+     * Write the editor's buffer back to its file (preload.writeFile；未接线时为
+     * undefined）。The main process resolves the session's cwd and the daemon judges the
+     * target against that session's policy, so no root travels from here.
+     */
+    writeFile?(p: {
+      path: string;
+      content: string;
+      sessionId: string;
+      cwd?: string;
+    }): Promise<{ mtime?: number | null; size?: number | null }>;
+    /**
      * The two roots the inspector's trees hang from (preload.sessionRoots；未接线时为
      * undefined）。Only the main process can answer: it holds the open-session ledger,
      * the global session index and the daemon's own `resolve_session_cwd`.
@@ -735,6 +756,29 @@ export interface DaemonBridge {
     truncated: boolean;
     totalLines: number | null;
   } | null>;
+  /**
+   * Whether the file moved on disk since the panel read it.
+   *
+   * Three answers, not two: `exists: false` is the file being deleted under the panel,
+   * which the editor reports as its own sentence rather than as "cannot tell". `null`
+   * means this build has no channel for the probe at all.
+   */
+  statFile(
+    path: string,
+  ): Promise<{ exists: boolean; mtime: number | null; size: number | null } | null>;
+  /**
+   * Save one file's text, judged by the daemon against the session's own policy.
+   *
+   * Answers with the file's new mtime and size so the panel can record what it wrote: a
+   * save whose stamp the panel forgets comes straight back as somebody else's external
+   * change. `null` = this build has no channel; a refusal **throws**, because a save
+   * that quietly did nothing is the one outcome an editor must never have.
+   */
+  saveFile(
+    path: string,
+    content: string,
+    sid: string,
+  ): Promise<{ mtime: number | null; size: number | null } | null>;
   /**
    * The two roots the inspector's trees hang from, for one session.
    *
@@ -1592,6 +1636,33 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
     };
   }
 
+  /** Ask whether the file moved; `null` = this build has no probe. */
+  async function statFile(
+    p: string,
+  ): Promise<{ exists: boolean; mtime: number | null; size: number | null } | null> {
+    if (!emrg.statFile) return null;
+    const answer = await emrg.statFile({ path: p });
+    return {
+      exists: answer?.exists !== false,
+      mtime: typeof answer?.mtime === "number" ? answer.mtime : null,
+      size: typeof answer?.size === "number" ? answer.size : null,
+    };
+  }
+
+  /** Save one file; `null` = this build has no channel, a refusal throws. */
+  async function saveFile(
+    p: string,
+    content: string,
+    sid: string,
+  ): Promise<{ mtime: number | null; size: number | null } | null> {
+    if (!emrg.writeFile) return null;
+    const answer = await emrg.writeFile({ path: p, content, sessionId: sid });
+    return {
+      mtime: typeof answer?.mtime === "number" ? answer.mtime : null,
+      size: typeof answer?.size === "number" ? answer.size : null,
+    };
+  }
+
   /** The two roots for one session; `null` = nothing was measured. */
   async function sessionRoots(
     sid: string | null,
@@ -1633,6 +1704,8 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
     notePromptSubmitted,
     listDir,
     readFile,
+    statFile,
+    saveFile,
     sessionRoots,
   };
 }

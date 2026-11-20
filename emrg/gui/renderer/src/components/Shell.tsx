@@ -676,6 +676,13 @@ export function Shell() {
   }, [bridge, activeSid]);
   const loadDir = useCallback((p: string) => bridge.listDir(p), [bridge]);
   const loadFile = useCallback((p: string) => bridge.readFile(p), [bridge]);
+  // The editor's other two channels (issue #3095): what it needs to write a buffer back,
+  // and to answer whether the file under an open tab moved on disk.
+  const saveFile = useCallback(
+    (p: string, content: string, sid: string) => bridge.saveFile(p, content, sid),
+    [bridge],
+  );
+  const statFile = useCallback((p: string) => bridge.statFile(p), [bridge]);
   // The editor's tabs are opened from the session column's trees, so this column needs a
   // handle on the panel that owns them (issue #3068).
   const editorRef = useRef<EditorPanelHandle | null>(null);
@@ -1338,6 +1345,8 @@ export function Shell() {
                 ref={editorRef}
                 sid={activeSid}
                 loadFile={loadFile}
+                saveFile={saveFile}
+                statFile={statFile}
                 onOpenMemory={() => dialogHost.current?.openMemory()}
               />
             </aside>

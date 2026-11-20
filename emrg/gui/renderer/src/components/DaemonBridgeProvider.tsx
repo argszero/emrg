@@ -97,6 +97,22 @@ interface EmrgWindow {
       truncated?: boolean;
       totalLines?: number | null;
     }>;
+    /**
+     * The right-hand editor's disk probe and its write-back (preload.statFile /
+     * preload.writeFile), for the same reason `usageWindow` below carries its own note: a
+     * channel missing from this literal reaches the bridge as `undefined`, its `saveFile`
+     * answers `null`, and every layer under it is complete while nothing is ever written.
+     */
+    statFile?: (p: { path: string }) => Promise<{
+      exists?: boolean;
+      mtime?: number | null;
+      size?: number | null;
+    }>;
+    writeFile?: (p: {
+      path: string;
+      content: string;
+      sessionId: string;
+    }) => Promise<{ mtime?: number | null; size?: number | null }>;
     sessionRoots?: (p: {
       sessionId: string;
     }) => Promise<{ agentRoot?: string | null; sessionRoot?: string | null }>;
@@ -214,6 +230,20 @@ export function DaemonBridgeProvider({ children }: { children: ReactNode }) {
           const emrg = (window as unknown as EmrgWindow).emrg;
           if (!emrg?.readFile) throw new Error("readFile unavailable");
           return emrg.readFile(p);
+        },
+        // Both throw rather than resolve a hollow answer. A missing write channel resolved
+        // as `null` reaches the panel as "saved, and the disk reported nothing", which
+        // takes the dirty dot off a file nobody wrote; the panel's own catch keeps the dot
+        // and prints the reason, which is the promise item 3 makes.
+        statFile: async (p) => {
+          const emrg = (window as unknown as EmrgWindow).emrg;
+          if (!emrg?.statFile) throw new Error("statFile unavailable");
+          return emrg.statFile(p);
+        },
+        writeFile: async (p) => {
+          const emrg = (window as unknown as EmrgWindow).emrg;
+          if (!emrg?.writeFile) throw new Error("writeFile unavailable");
+          return emrg.writeFile(p);
         },
         sessionRoots: async (p) => {
           const emrg = (window as unknown as EmrgWindow).emrg;
