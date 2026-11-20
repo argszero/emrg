@@ -165,6 +165,17 @@ export function imagePlaceholder(display: string): string {
 }
 
 /**
+ * 构建文件标记（issue #3111）：与 `imagePlaceholder` 并列，同一个「标记即附件」的形状。
+ *
+ * `display` 取 `File.name`——它本身就是 basename，不带目录；文件名清洗与落盘路径仍归
+ * main 侧，这里不复制第二套规则。中括号是边界：`[📄 a][📄 b]` 连着写也分得开，
+ * 所以标记后面不需要换行来分隔。
+ */
+export function filePlaceholder(display: string): string {
+  return `[📄 ${display}]`;
+}
+
+/**
  * 文件名/展示标签清洗（镜像 TUI safe_label 规则）：非 [a-zA-Z0-9._-] → "_"，
  * 截 40 字符、去尾 ._、空则回落 "image"。
  */
@@ -252,15 +263,86 @@ export function declaresImageOrFile(types: readonly string[]): boolean {
 }
 
 /**
+ * 待发附件：图片与文件**同形**（issue #3111 要求 7）。
+ * - `label` 是正文里那个标记的原文（`[📷 …]` / `[📄 …]`）；
+ * - `position` 发送时算，等于标记在**将要发出的正文**里的字符偏移。
+ */
+export interface PendingAttachment {
+  path: string;
+  label: string;
+  position?: number;
+  mime?: string;
+}
+
+/** `label` 在 `text` 里第 `nth` 次出现的位置（0 起算）；没有则 -1。 */
+function nthOccurrence(text: string, label: string, nth: number): number {
+  let from = 0;
+  for (let i = 0; i <= nth; i += 1) {
+    const pos = text.indexOf(label, from);
+    if (pos < 0) return -1;
+    if (i === nth) return pos;
+    from = pos + label.length;
+  }
+  return -1;
+}
+
+/**
+ * 标记 ↔ 记录的配对：**按出现顺序一对一**，图片与文件共用这一条规则。
+ *
+ * 同名附件是这里的全部要点：两个 `screenshot.png` 的标记原文完全相同，按「标记找
+ * 记录」或按「记录的第一次出现」都会让两条记录指向同一处，于是第二张图跟着第一次
+ * 的位置发出去。所以每条记录认领的是它这个标记的**第 k 次**出现，k 是同类记录里
+ * 它自己的序号——同名不代表同一处。
+ *
+ * 正文里已经找不到标记的记录直接丢掉：删掉标记即不再附这个附件，图片与文件同一套。
+ * 返回按 position 升序（daemon 按 position 切块）。
+ */
+export function resolveSendAttachments<T extends PendingAttachment>(
+  pending: T[],
+  text: string,
+): (T & { position: number })[] {
+  const claimed = new Map<string, number>();
+  const out: (T & { position: number })[] = [];
+  for (const item of pending) {
+    const nth = claimed.get(item.label) ?? 0;
+    claimed.set(item.label, nth + 1);
+    const pos = nthOccurrence(text, item.label, nth);
+    if (pos < 0) continue;
+    out.push({ ...item, position: pos });
+  }
+  return out.sort((a, b) => a.position - b.position);
+}
+
+/**
  * 发送前收敛 pending 图片：占位符仍在文本中的保留（删了占位符即丢弃，TUI 同语义），
  * position = 字面占位符在文本中的字符偏移；返回按 position 升序的新数组。
  */
 export function resolveSendImages(pending: ImageAttach[], text: string): ImageAttach[] {
-  const out: ImageAttach[] = [];
-  for (const img of pending) {
-    const pos = text.indexOf(img.label);
-    if (pos >= 0) out.push({ ...img, position: pos });
+  return resolveSendAttachments(pending, text);
+}
+
+/**
+ * 把文件标记换成它的绝对路径（issue #3111 要求 7）：模型没有「文件附件」这条通道，
+ * 它拿到的必须是路径本身，而且必须**落在标记原来的位置**——顺序就是它与正文的对应关系。
+ *
+ * 两个标记紧挨着时（`[📄 a][📄 b]`），换成两个路径后中间补**一个空格**：不留空格就拼成
+ * `/…/a.txt/…/b.txt` 一个谁也不是的字面量，模型按它去读，两个文件一个都打不开——那正是
+ * 旧行为用换行想解决的问题。空格把它解决掉，而编辑器里仍然没有换行。
+ *
+ * 被删掉的标记不在结果里，那个文件也就不出现。
+ */
+export function expandFileMarkers(text: string, files: PendingAttachment[]): string {
+  const resolved = resolveSendAttachments(files, text);
+  let out = "";
+  let cursor = 0;
+  let prevEnd = -1;
+  for (const f of resolved) {
+    out += text.slice(cursor, f.position);
+    if (prevEnd === f.position) out += " ";
+    out += f.path;
+    cursor = f.position + f.label.length;
+    prevEnd = cursor;
   }
-  return out.sort((a, b) => (a.position ?? -1) - (b.position ?? -1));
+  return out + text.slice(cursor);
 }
 
