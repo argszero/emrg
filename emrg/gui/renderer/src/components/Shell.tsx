@@ -506,7 +506,8 @@ export function Shell() {
       try {
         const tpls = await b.taskTemplateList();
         const names = (tpls || []).map((tp) => tp.name);
-        // 内置类型兜底（taskTemplateList 只返回自定义；vanilla 用 taskTypes=内置+自定义）
+        // 类型清单来自 daemon 的 list_templates()，它回的是内置 + 自定义（issue #3113）。
+        // 这里的 unshift 只是兜底：回包若连 evolution 都没有，下拉仍能选到一个能跑的类型。
         if (!names.includes("evolution")) names.unshift("evolution");
         setTaskTypes(names);
       } catch {

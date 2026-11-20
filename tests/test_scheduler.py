@@ -213,16 +213,190 @@ def test_read_table_seeds_the_default_when_the_file_is_missing(tmp_path):
     """A missing file is seeded with the default table, not reported as empty.
 
     This is a general rule about the file, not an install step (host principle):
-    deleting tasks.yml re-seeds `emrg-task`.
+    deleting tasks.yml re-seeds `emrg-task`. The review record is seeded beside it —
+    the table this code writes is a table whose judge is scheduled (issue #3113).
     """
     from emrg.server.scheduler import DEFAULT_TASK_RECORD, read_table
 
     tasks_yml = tmp_path / "tasks.yml"
     table = read_table(tasks_yml)
 
-    assert [r["name"] for r in table] == ["emrg-task"]
+    assert [r["name"] for r in table] == ["emrg-task", "life-review"]
     assert table[0] == DEFAULT_TASK_RECORD
     assert yaml.safe_load(tasks_yml.read_text())[0]["name"] == "emrg-task"
+
+
+# ── the review record: seeded, topped up, never a second copy (issue #3113) ──
+
+
+def test_a_missing_table_seeds_the_review_record_its_judge_runs(tmp_path):
+    """Checklist 1 and 2: two records, and the subject is the constant, not a literal."""
+    from emrg.server.life import JUDGE_AGENT_NAME
+    from emrg.server.scheduler import (
+        LIFE_REVIEW_TASK_TYPE,
+        REVIEW_TASK_INTERVAL,
+        read_table,
+    )
+
+    tasks_yml = tmp_path / "tasks.yml"
+    table = read_table(tasks_yml)
+
+    assert [r["type"] for r in table] == ["evolution", LIFE_REVIEW_TASK_TYPE]
+    review = table[1]
+    assert review["config"] == {"agent": JUDGE_AGENT_NAME}
+    assert review["interval"] == REVIEW_TASK_INTERVAL
+    assert review["enabled"] is True
+    # The name is the type on purpose: `name` is also this task's session id and its
+    # log file's name, so one word names the record everywhere a reader looks.
+    assert review["name"] == LIFE_REVIEW_TASK_TYPE
+    # What the file holds is what was returned — the seed is written, not just answered.
+    #
+    # Read it back through the product's own reader rather than `Path.read_text()`: a
+    # bare `read_text()` decodes with the **platform locale**, so on Windows (cp1252) the
+    # judge's name came back as mojibake and this test failed on a seed that was correct.
+    # `read_table` is the reader the daemon itself uses, so the assertion is also the
+    # stronger one: the file the writer produced is the file the reader understands.
+    assert read_table(tasks_yml) == table
+    # And the bytes are UTF-8, spelled out — the claim a locale-dependent read cannot make.
+    assert JUDGE_AGENT_NAME in tasks_yml.read_bytes().decode("utf-8")
+
+
+def test_the_review_subject_follows_the_judge_constant(tmp_path, monkeypatch):
+    """Checklist 2: renaming the judge moves the seed, so no second copy of the string."""
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "JUDGE_AGENT_NAME", "judge-x")
+
+    assert mod.review_task_record()["config"] == {"agent": "judge-x"}
+
+
+def test_an_existing_table_without_the_review_record_is_topped_up(tmp_path):
+    """Checklist 3: an install that already has a table is completed, not rewritten."""
+    from emrg.server.scheduler import ensure_review_task, read_table, write_table
+
+    path = tmp_path / "tasks.yml"
+    write_table([
+        {"name": "emrg-task", "type": "evolution", "config": {"agent": "emrg"},
+         "interval": 600, "enabled": True},
+    ], path)
+
+    table = ensure_review_task(path)
+
+    assert [r["name"] for r in table] == ["emrg-task", "life-review"]
+    assert [r["name"] for r in read_table(path)] == ["emrg-task", "life-review"]
+    # Idempotent: a second pass adds nothing, so the reconcile tick cannot grow it.
+    assert [r["name"] for r in ensure_review_task(path)] == ["emrg-task", "life-review"]
+
+
+def test_a_host_written_review_record_is_left_byte_identical(tmp_path):
+    """Checklist 4: the host's own record survives the top-up untouched.
+
+    Different interval, an extra config key, a `when` window and `enabled: false` are
+    all read as "this record is here" — and the file is not rewritten at all, which is
+    a stronger claim than "the fields are equal afterwards".
+    """
+    from emrg.server.scheduler import ensure_review_task, write_table
+
+    path = tmp_path / "tasks.yml"
+    write_table([
+        {"name": "emrg-task", "type": "evolution", "config": {"agent": "emrg"},
+         "interval": 600, "enabled": True},
+        {"name": "life-review", "type": "life-review",
+         "config": {"agent": "命", "note": "mine"},
+         "interval": 120, "enabled": False, "when": "09:00"},
+    ], path)
+    # Bytes, because that is what "byte-identical" means: `read_text()` decodes with the
+    # platform locale, which would compare two lossy views of the file instead of the file.
+    before = path.read_bytes()
+
+    table = ensure_review_task(path)
+
+    assert path.read_bytes() == before, "the host's table was rewritten by the top-up"
+    assert len([r for r in table if r["type"] == "life-review"]) == 1, "a second copy"
+    assert table[1]["interval"] == 120
+    assert table[1]["config"] == {"agent": "命", "note": "mine"}
+    assert table[1]["enabled"] is False
+
+
+def test_a_stopped_review_record_is_present_not_missing(tmp_path):
+    """Checklist 5: `enabled: false` is how the review is stopped, so it is not a gap."""
+    from emrg.server.scheduler import ensure_review_task, write_table
+
+    path = tmp_path / "tasks.yml"
+    write_table([
+        {"name": "life-review", "type": "life-review", "config": {"agent": "命"},
+         "interval": 1800, "enabled": False},
+    ], path)
+
+    table = ensure_review_task(path)
+
+    assert len(table) == 1, "a stopped record was read as absent and re-seeded"
+    assert table[0]["enabled"] is False
+
+
+def test_a_record_that_names_the_review_by_type_only_is_a_review_record(tmp_path):
+    """Checklist 4's other spelling: a renamed record still stops the top-up.
+
+    A host who wrote `name: judge-run` with `type: life-review` has the round; seeding
+    beside it would run the judge twice per window.
+    """
+    from emrg.server.scheduler import ensure_review_task, write_table
+
+    path = tmp_path / "tasks.yml"
+    write_table([
+        {"name": "judge-run", "type": "life-review", "config": {"agent": "命"},
+         "interval": 1800, "enabled": True},
+    ], path)
+
+    table = ensure_review_task(path)
+
+    assert [r["name"] for r in table] == ["judge-run"]
+
+
+def test_an_unreadable_table_is_not_replaced_by_the_top_up(tmp_path):
+    """Checklist 7: no read, no write — and never an empty table in its place."""
+    from emrg.server.scheduler import TableUnreadable, ensure_review_task
+
+    path = tmp_path / "tasks.yml"
+    path.write_text("not: a list\n", encoding="utf-8")
+    before = path.read_bytes()
+
+    with pytest.raises(TableUnreadable):
+        ensure_review_task(path)
+
+    assert path.read_bytes() == before
+
+
+def test_load_and_start_tops_up_a_table_that_lacks_the_review_record(tmp_path):
+    """Checklist 3, end to end: a host's own table is completed without a restart."""
+    snapshot = asyncio.run(_boot(tmp_path, [
+        {"name": "emrg-task", "type": "evolution", "config": {"agent": "emrg"},
+         "interval": 600, "enabled": True},
+    ]))
+
+    assert snapshot["names"] == ["emrg-task", "life-review"]
+    assert snapshot["intervals"]["life-review"] == 1800
+
+
+def test_the_review_type_is_offered_to_the_gui(tmp_path):
+    """Checklist 6: the new-task dialog can pick `life-review`.
+
+    The dialog builds its options from `list_templates()`, so this names the type the
+    review record uses rather than a neighbour that merely happens to be built-in.
+    """
+    from emrg.server.scheduler import LIFE_REVIEW_TASK_TYPE
+
+    mod, orig = _p2_env(tmp_path)
+    try:
+        sched = TaskScheduler(InstanceIdentity())
+        sched._tasks_file = tmp_path / "tasks.yml"
+        rows = {row["name"]: row for row in sched.list_templates()}
+    finally:
+        mod.config_dir = orig
+
+    assert LIFE_REVIEW_TASK_TYPE in rows, "the GUI lists types from list_templates()"
+    assert rows[LIFE_REVIEW_TASK_TYPE]["builtin"] is True
+    assert rows[LIFE_REVIEW_TASK_TYPE]["prompt"].strip(), "an empty body cannot be viewed"
 
 
 def test_read_table_refuses_an_unparsable_file(tmp_path):
@@ -368,9 +542,11 @@ def test_load_and_start_no_file_seeds_the_default_table(tmp_path):
     """
     snapshot = asyncio.run(_boot(tmp_path))
 
-    assert snapshot["coros"] == 2, "the handler plus the reconcile loop"
-    assert snapshot["names"] == ["emrg-task"]
-    assert snapshot["intervals"] == {"emrg-task": 600}, "the seeded default, not 60"
+    assert snapshot["coros"] == 3, "two handlers plus the reconcile loop"
+    assert snapshot["names"] == ["emrg-task", "life-review"]
+    assert snapshot["intervals"] == {"emrg-task": 600, "life-review": 1800}, (
+        "the seeded defaults, not 60"
+    )
 
 
 def test_load_and_start_enabled_task(tmp_path):
@@ -380,11 +556,12 @@ def test_load_and_start_enabled_task(tmp_path):
          "interval": 99, "enabled": True},
     ]))
 
-    assert snapshot["coros"] == 2  # the handler plus the reconcile loop
-    assert snapshot["names"] == ["emrg"], (
-        "the file exists, so nothing is seeded on top of it (D2)"
+    assert snapshot["coros"] == 3  # two handlers plus the reconcile loop
+    assert snapshot["names"] == ["emrg", "life-review"], (
+        "the file exists, so `emrg-task` is not seeded on top of it (D2); the review "
+        "record is the one the top-up adds to a table that lacks it (#3113)"
     )
-    assert snapshot["intervals"] == {"emrg": 99}
+    assert snapshot["intervals"] == {"emrg": 99, "life-review": 1800}
 
 
 def test_load_and_start_skips_disabled(tmp_path):
@@ -394,8 +571,10 @@ def test_load_and_start_skips_disabled(tmp_path):
         {"name": "disabled", "type": "evolution", "config": {"path": "/tmp"}, "enabled": False},
     ]))
 
-    assert snapshot["coros"] == 2  # the handler plus the reconcile loop
-    assert snapshot["names"] == ["enabled"]
+    assert snapshot["coros"] == 3  # two handlers plus the reconcile loop
+    assert snapshot["names"] == ["enabled", "life-review"], (
+        "`disabled` is not started; `life-review` is the top-up's record"
+    )
 
 
 def test_load_and_start_skips_an_unknown_type_and_says_so(tmp_path, caplog):
@@ -411,7 +590,9 @@ def test_load_and_start_skips_an_unknown_type_and_says_so(tmp_path, caplog):
             {"name": "bad", "type": "nonexistent_handler", "config": {}, "enabled": True},
         ]))
 
-    assert snapshot["names"] == [], "an unknown type is not started"
+    assert snapshot["names"] == ["life-review"], (
+        "an unknown type is not started; `life-review` is the top-up's record (#3113)"
+    )
     assert "unknown type" in caplog.text
 
 
@@ -449,8 +630,11 @@ def test_load_and_start_competition_task(tmp_path):
          "interval": 3600, "enabled": True},
     ]))
 
-    assert snapshot["coros"] == 2  # the handler plus the reconcile loop
-    assert snapshot["templates"] == {"competition-task": "competition_prompt.md"}
+    assert snapshot["coros"] == 3  # two handlers plus the reconcile loop
+    assert snapshot["templates"] == {
+        "competition-task": "competition_prompt.md",
+        "life-review": "life_review_prompt.md",
+    }
 
 
 def test_load_and_start_free_open_source_task(tmp_path):
@@ -467,8 +651,11 @@ def test_load_and_start_free_open_source_task(tmp_path):
          "interval": 3600, "enabled": True},
     ]))
 
-    assert snapshot["coros"] == 2  # the handler plus the reconcile loop
-    assert snapshot["templates"] == {"free-os-task": "free_open_source_prompt.md"}
+    assert snapshot["coros"] == 3  # two handlers plus the reconcile loop
+    assert snapshot["templates"] == {
+        "free-os-task": "free_open_source_prompt.md",
+        "life-review": "life_review_prompt.md",
+    }
 
 
 def test_load_and_start_ios_app_task(tmp_path):
@@ -490,8 +677,11 @@ def test_load_and_start_ios_app_task(tmp_path):
          "interval": 3600, "enabled": True},
     ]))
 
-    assert snapshot["coros"] == 2  # the handler plus the reconcile loop
-    assert snapshot["templates"] == {"ios-app-task": "ios_app_prompt.md"}
+    assert snapshot["coros"] == 3  # two handlers plus the reconcile loop
+    assert snapshot["templates"] == {
+        "ios-app-task": "ios_app_prompt.md",
+        "life-review": "life_review_prompt.md",
+    }
 
     from emrg.server.scheduler import TASK_TEMPLATES
 
@@ -566,8 +756,11 @@ def test_load_and_start_feishu_task(tmp_path):
          "interval": 900, "enabled": True},
     ]))
 
-    assert snapshot["coros"] == 2  # the handler plus the reconcile loop
-    assert snapshot["templates"] == {"feishu-task": "feishu_prompt.md"}
+    assert snapshot["coros"] == 3  # two handlers plus the reconcile loop
+    assert snapshot["templates"] == {
+        "feishu-task": "feishu_prompt.md",
+        "life-review": "life_review_prompt.md",
+    }
 
     from emrg.server.scheduler import TASK_TEMPLATES
 
@@ -660,7 +853,10 @@ def test_load_and_start_promote_task(tmp_path):
          "interval": 3600, "enabled": True},
     ]))
 
-    assert snapshot["templates"] == {"olr-promote": "promote_prompt.md"}
+    assert snapshot["templates"] == {
+        "olr-promote": "promote_prompt.md",
+        "life-review": "life_review_prompt.md",
+    }
 
 
 def test_resolve_task_template_custom_user_file(tmp_path):
@@ -737,7 +933,10 @@ def test_load_and_start_journal_task(tmp_path):
          "interval": 3600, "enabled": True},
     ]))
 
-    assert snapshot["templates"] == {"journal-task": "journal_prompt.md"}
+    assert snapshot["templates"] == {
+        "journal-task": "journal_prompt.md",
+        "life-review": "life_review_prompt.md",
+    }
 
 
 def test_task_create_journal_without_custom_template(tmp_path):
@@ -2058,7 +2257,7 @@ def test_the_seed_returns_when_the_whole_file_is_deleted(tmp_path):
     finally:
         mod.config_dir = orig_config
 
-    assert names == ["emrg-task"]
+    assert names == ["emrg-task", "life-review"]
 
 
 def test_ensure_emrg_agent_entry_adds_agent_entry_when_missing(tmp_path):
@@ -3500,7 +3699,9 @@ def test_reconcile_starts_what_is_missing_and_cancels_nothing(tmp_path):
             return first, second, running_a, live_after, live
 
         first, second, running_a, live_after, live = asyncio.run(_run())
-        assert first["started"] == ["a", "b"]
+        assert first["started"] == ["a", "b", "life-review"], (
+            "the table's two records, plus the review record the tick tops up (#3113)"
+        )
         assert second["started"] == ["c"], "only the new record is started"
         assert live_after["a"] is running_a, (
             "an interval change must not rebuild the running handler — that was the "
@@ -3532,7 +3733,10 @@ def test_reconcile_is_idempotent(tmp_path):
 
         second, live = asyncio.run(_run())
         assert second == {"started": []}
-        assert live == ["a"]
+        assert live == ["a", "life-review"], (
+            "the second tick starts nothing: the review record the first tick added is "
+            "now in the table, so there is no gap left to fill (#3113)"
+        )
     finally:
         mod.config_dir = orig
 
