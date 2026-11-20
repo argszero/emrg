@@ -250,7 +250,15 @@ def test_a_missing_table_seeds_the_review_record_its_judge_runs(tmp_path):
     # log file's name, so one word names the record everywhere a reader looks.
     assert review["name"] == LIFE_REVIEW_TASK_TYPE
     # What the file holds is what was returned — the seed is written, not just answered.
-    assert yaml.safe_load(tasks_yml.read_text()) == table
+    #
+    # Read it back through the product's own reader rather than `Path.read_text()`: a
+    # bare `read_text()` decodes with the **platform locale**, so on Windows (cp1252) the
+    # judge's name came back as mojibake and this test failed on a seed that was correct.
+    # `read_table` is the reader the daemon itself uses, so the assertion is also the
+    # stronger one: the file the writer produced is the file the reader understands.
+    assert read_table(tasks_yml) == table
+    # And the bytes are UTF-8, spelled out — the claim a locale-dependent read cannot make.
+    assert JUDGE_AGENT_NAME in tasks_yml.read_bytes().decode("utf-8")
 
 
 def test_the_review_subject_follows_the_judge_constant(tmp_path, monkeypatch):
@@ -297,11 +305,13 @@ def test_a_host_written_review_record_is_left_byte_identical(tmp_path):
          "config": {"agent": "命", "note": "mine"},
          "interval": 120, "enabled": False, "when": "09:00"},
     ], path)
-    before = path.read_text()
+    # Bytes, because that is what "byte-identical" means: `read_text()` decodes with the
+    # platform locale, which would compare two lossy views of the file instead of the file.
+    before = path.read_bytes()
 
     table = ensure_review_task(path)
 
-    assert path.read_text() == before, "the host's table was rewritten by the top-up"
+    assert path.read_bytes() == before, "the host's table was rewritten by the top-up"
     assert len([r for r in table if r["type"] == "life-review"]) == 1, "a second copy"
     assert table[1]["interval"] == 120
     assert table[1]["config"] == {"agent": "命", "note": "mine"}
@@ -348,13 +358,13 @@ def test_an_unreadable_table_is_not_replaced_by_the_top_up(tmp_path):
     from emrg.server.scheduler import TableUnreadable, ensure_review_task
 
     path = tmp_path / "tasks.yml"
-    path.write_text("not: a list\n")
-    before = path.read_text()
+    path.write_text("not: a list\n", encoding="utf-8")
+    before = path.read_bytes()
 
     with pytest.raises(TableUnreadable):
         ensure_review_task(path)
 
-    assert path.read_text() == before
+    assert path.read_bytes() == before
 
 
 def test_load_and_start_tops_up_a_table_that_lacks_the_review_record(tmp_path):
