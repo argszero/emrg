@@ -56,6 +56,10 @@ const EXPECTED_INVOKE_METHODS = [
   // 由主进程解析——只有它同时握着 openSessions、全局会话索引与 daemon 的 cwd 判定。
   "sessionRoots",
   "readFile",
+  // issue #3095：右栏当编辑器——保存要把正文写回磁盘，大文件判定要先问文件大小。
+  // 两者都由 main 执行（renderer 没有直接写盘权限），所以各占一个 invoke 通道。
+  "statFile",
+  "writeFile",
   "previewHtml",
   "closePreview",
   "panelResized",
