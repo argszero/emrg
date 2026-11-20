@@ -691,6 +691,11 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
             onSave={() => void save(activeFile.path)}
             // Written through on every scroll, so a silent reload can put the reader back.
             onScrollTop={(top) => scrollByTab.current.set(activeFile.path, top)}
+            // A tab whose file was not read yet has no editor for one render, so switching
+            // to it **mounts** this component fresh — and a mount is not a change of
+            // `state.active`, so the restore effect above has already run by then. The
+            // offset therefore has to arrive as a prop, or a returning tab opens at the top.
+            initialScrollTop={scrollByTab.current.get(activeFile.path) ?? 0}
             uiLang={lang}
             testId="editor-surface"
           />
