@@ -14,6 +14,8 @@ import {
   minimapBars,
   readOnlyReason,
 } from "./editorDoc";
+import { EditorState } from "@codemirror/state";
+import { Language } from "@codemirror/language";
 
 /**
  * The editor's rules, one test per rule that has a wrong-but-plausible neighbour
@@ -66,6 +68,18 @@ describe("languageSupportFor", () => {
 
   it("认识的语言能取到扩展", async () => {
     await expect(languageSupportFor({ name: "Python" })).resolves.not.toBeNull();
+  });
+
+  it("拿到的扩展真的装上语法：文档被解析，注释与缩进都在", async () => {
+    // 非空不足以说明什么 —— `LanguageSupport.support` 也是非空的对象，装上去却什么也不解析。
+    // 所以这里把扩展真装进一个 state，问的是「这份文档解析了吗」，不是「拿到了东西吗」。
+    const support = await languageSupportFor({ name: "Python" });
+    const state = EditorState.create({
+      doc: "if True:\n    pass",
+      extensions: support ? [support] : [],
+    });
+    expect(state.languageDataAt("commentTokens", 0).length).toBeGreaterThan(0);
+    expect(state.tree.toString()).toContain("IfStatement");
   });
 });
 

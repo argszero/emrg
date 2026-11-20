@@ -11,6 +11,7 @@ import {
   keymap,
   lineNumbers,
   rectangularSelection,
+  ViewPlugin,
 } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import {
@@ -21,6 +22,7 @@ import {
 } from "@codemirror/language";
 import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
 import {
+  getSearchQuery,
   gotoLine,
   highlightSelectionMatches,
   openSearchPanel,
@@ -156,6 +158,85 @@ function phrasesFor(uiLang: string | undefined): Record<string, string> {
   return uiLang === "en" ? {} : SEARCH_PHRASES_ZH;
 }
 
+/**
+ * Counting stops here. A one-letter search in a large file would otherwise re-scan the
+ * document on every keystroke the *editor* takes, not only on every keystroke the *panel*
+ * takes, and the difference between 1000 and 12000 hits is not a difference anyone reads.
+ */
+const SEARCH_COUNT_CAP = 1000;
+
+/**
+ * `current / total` for the open find panel (item 6).
+ *
+ * CodeMirror's panel carries the query field, the case toggle and the two arrows, and stops
+ * there: it announces a match to assistive technology but prints no number. "How many, and
+ * which one am I on" is the one question a person looking for a hit cannot read off it, so
+ * the count is walked here instead — `current` is the first match that ends at or after the
+ * caret, which is the match the caret is on or the next one it can reach.
+ */
+export function searchMatchCountText(state: EditorState): string {
+  const query = getSearchQuery(state);
+  if (!query.valid || !query.search) return "";
+  const caret = state.selection.main.head;
+  let total = 0;
+  let current = 0;
+  let capped = false;
+  for (const match of query.getCursor(state.doc)) {
+    total += 1;
+    if (!current && match.to >= caret) current = total;
+    if (total >= SEARCH_COUNT_CAP) {
+      capped = true;
+      break;
+    }
+  }
+  // The caret past the last match is on the last one, not on none.
+  if (total && !current) current = total;
+  return `${current} / ${total}${capped ? "+" : ""}`;
+}
+
+/**
+ * The count, written into CodeMirror's own panel.
+ *
+ * The panel is CodeMirror's, so its DOM is where the number has to go: a separate box beside
+ * it would be a second place to look. The panel is rebuilt every time it opens, so the span
+ * is re-parented rather than assumed to have survived.
+ */
+const matchCount = ViewPlugin.fromClass(
+  class {
+    private readonly dom: HTMLElement;
+    /** One retry per view update: without the bound, a closed panel reschedules for ever. */
+    private retried = false;
+    constructor(private readonly view: EditorView) {
+      this.dom = document.createElement("span");
+      this.dom.className = "cm-search-count";
+      this.dom.setAttribute("data-testid", "editor-search-count");
+      this.sync();
+    }
+    update(): void {
+      this.retried = false;
+      this.sync();
+    }
+    private sync(): void {
+      const panel = this.view.dom.querySelector<HTMLElement>(".cm-panel.cm-search");
+      if (!panel) {
+        this.dom.remove();
+        // On the turn that opens the panel, this plugin's update runs before the panel's DOM
+        // is written, so a panel opened with a query already in hand would show no number
+        // until the next keystroke. One microtask later it is there — once, not repeatedly.
+        if (!this.retried) {
+          this.retried = true;
+          queueMicrotask(() => this.sync());
+        }
+        return;
+      }
+      if (this.dom.parentElement !== panel) {
+        panel.insertBefore(this.dom, panel.querySelector('button[name="close"]') ?? null);
+      }
+      this.dom.textContent = searchMatchCountText(this.view.state);
+    }
+  },
+);
+
 export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function CodeEditor(
   {
     text,
@@ -246,6 +327,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function
           crosshairCursor(),
           highlightActiveLine(),
           highlightSelectionMatches(),
+          matchCount,
           syntaxHighlighting(highlightStyle),
           phrasesCompartment.current.of(EditorState.phrases.of(phrasesFor(uiLang))),
           languageCompartment.current.of([]),

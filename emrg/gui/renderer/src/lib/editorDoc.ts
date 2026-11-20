@@ -103,7 +103,11 @@ export async function languageSupportFor(choice: LanguageChoice): Promise<Extens
   if (!choice.name) return null;
   const description = languages.find((language) => language.name === choice.name);
   if (!description) return null;
-  const support = description.support ?? (await description.load()).support;
+  // `load()` answers a `LanguageSupport` — the grammar together with its extras — and its
+  // `support` property is only the extras half. Configuring a view with that half alone
+  // leaves the document unparsed: no colouring, no indentation, no comment tokens, and
+  // nothing in the props to show for it, because the props carry the name we asked for.
+  const support = description.support ?? (await description.load());
   return support ?? null;
 }
 

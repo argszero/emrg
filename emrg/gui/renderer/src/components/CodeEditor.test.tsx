@@ -1,6 +1,6 @@
 import { createRef } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { EditorView } from "@codemirror/view";
 import { CodeEditor, type CodeEditorHandle } from "./CodeEditor";
 import { PLAIN_TEXT, type CursorPosition } from "../lib/editorDoc";
@@ -48,7 +48,49 @@ function mountEditor(props: Partial<Parameters<typeof CodeEditor>[0]> = {}) {
     // reports no platform, so `Mod` is Ctrl here — which is why this is the modifier sent.
     fireEvent.keyDown(content(), { key, ctrlKey: true, ...mods });
   };
-  return { ref, onChange, onSave, onCursor, surface, editor, content, press, ...view };
+  // The keys the platform sends as themselves — Enter, Backspace — with no modifier, which
+  // is the only way `insertNewlineAndIndent` and `deleteBracketPair` are ever reached.
+  const pressPlain = (key: string): void => {
+    fireEvent.keyDown(content(), { key });
+  };
+  return {
+    ref,
+    onChange,
+    onSave,
+    onCursor,
+    surface,
+    editor,
+    content,
+    press,
+    pressPlain,
+    ...view,
+  };
+}
+
+/**
+ * Type one character the way the browser does.
+ *
+ * jsdom mutates nothing for a keystroke, so the DOM insert that a real key triggers never
+ * happens here — and CodeMirror's `inputHandler` facet is exactly what the view calls when
+ * it does. Calling the facet directly is the closest a jsdom test gets to a real key: the
+ * pairing rule that answers is CodeMirror's own, not a model of it.
+ */
+function typeText(editor: EditorView, text: string): void {
+  const main = editor.state.selection.main;
+  const insert = (from: number, to: number, content: string) =>
+    editor.state.update({
+      changes: { from, to, insert: content },
+      selection: { anchor: from + content.length },
+      userEvent: "input.type",
+    });
+  for (const handler of editor.state.facet(EditorView.inputHandler)) {
+    const transaction = handler(editor, main.from, main.to, text, insert);
+    if (transaction) {
+      editor.dispatch(transaction);
+      return;
+    }
+  }
+  editor.dispatch(insert(main.from, main.to, text));
 }
 
 describe("CodeEditor surface", () => {
@@ -191,5 +233,175 @@ describe("CodeEditor props follow changes without remounting", () => {
     rerender(<CodeEditor text={"alpha\nbeta"} language={PLAIN_TEXT} readOnly={false} wrap />);
     expect(editor()).toBe(before);
     expect(screen.getByTestId("code-editor")).toHaveAttribute("data-wrap", "true");
+  });
+});
+
+/**
+ * Item 6: the find panel has to answer "how many, and which one am I on".
+ *
+ * CodeMirror's panel gives the field, the case toggle and the arrows, and no count at all —
+ * so this is the one item of the rant that needed code as well as a test, and the arm that
+ * deletes the count has nothing else to redden.
+ */
+describe("CodeEditor find panel (item 6)", () => {
+  const setQuery = (value: string): void => {
+    const field = document.querySelector<HTMLInputElement>('input[name="search"]');
+    if (!field) throw new Error("the find field is not on screen");
+    fireEvent.change(field, { target: { value } });
+  };
+  const count = (): string => screen.getByTestId("editor-search-count").textContent ?? "";
+
+  it("显示命中总数与当前位置，光标一动就跟着走", async () => {
+    const { press, editor } = mountEditor({ text: "foo bar foo baz foo", uiLang: "zh" });
+    press("f");
+    // The count goes into CodeMirror's panel, and the panel's DOM is written after the
+    // update that opens it — so the first number of a fresh panel arrives a microtask late.
+    await waitFor(() => expect(count()).toBe(""));
+
+    setQuery("foo");
+    expect(count()).toBe("1 / 3");
+    act(() => {
+      editor().dispatch({ selection: { anchor: 8 } });
+    });
+    expect(count()).toBe("2 / 3");
+    act(() => {
+      editor().dispatch({ selection: { anchor: 16 } });
+    });
+    expect(count()).toBe("3 / 3");
+  });
+
+  it("一处也没有时是 0 / 0，不是一个空框", async () => {
+    const { press } = mountEditor({ text: "foo bar", uiLang: "zh" });
+    press("f");
+    await waitFor(() => expect(count()).toBe(""));
+    setQuery("zzz");
+    expect(count()).toBe("0 / 0");
+  });
+
+  it("区分大小写开关一按，命中总数跟着变", () => {
+    const { press } = mountEditor({ text: "foo Foo foo", uiLang: "zh" });
+    press("f");
+    setQuery("foo");
+    expect(count()).toBe("1 / 3");
+
+    const box = document.querySelector<HTMLInputElement>('input[name="case"]');
+    if (!box) throw new Error("the case toggle is not on screen");
+    box.checked = true;
+    fireEvent.change(box);
+    expect(count()).toBe("1 / 2");
+  });
+
+  it("下一个把选区挪到下一处命中，不是原地不动", () => {
+    const { press, editor, surface } = mountEditor({ text: "foo bar foo baz foo", uiLang: "zh" });
+    press("f");
+    setQuery("foo");
+    const next = surface().querySelector<HTMLButtonElement>('button[name="next"]');
+    if (!next) throw new Error("the next button is not on screen");
+
+    fireEvent.click(next);
+    const first = editor().state.selection.main;
+    expect(editor().state.doc.sliceString(first.from, first.to)).toBe("foo");
+    fireEvent.click(next);
+    const second = editor().state.selection.main;
+    expect(second.from).not.toBe(first.from);
+    expect(editor().state.doc.sliceString(second.from, second.to)).toBe("foo");
+  });
+
+  it("Cmd+G 打开跳到行，填一个行号提交就跳过去", async () => {
+    const { press, editor, surface } = mountEditor({ text: "one\ntwo\nthree", uiLang: "zh" });
+    press("g");
+    const dialog = surface().querySelector<HTMLElement>(".cm-dialog");
+    expect(dialog).not.toBeNull();
+    // 对话框的标题是「跳到行」，输入框是它的 line 字段（label 不是 placeholder）
+    expect(dialog).toHaveTextContent("跳到行");
+    const field = dialog?.querySelector<HTMLInputElement>('input[name="line"]');
+    expect(field).not.toBeNull();
+
+    fireEvent.change(field as HTMLInputElement, { target: { value: "3" } });
+    fireEvent.submit(dialog?.querySelector("form") as HTMLFormElement);
+    await waitFor(() =>
+      expect(editor().state.doc.lineAt(editor().state.selection.main.head).number).toBe(3),
+    );
+  });
+});
+
+/** Item 9: the rules that make typing feel like an editor rather than a text box. */
+describe("CodeEditor editing rules (item 9)", () => {
+  it("打一个左括号，右括号自己补上，光标落在中间", () => {
+    const { editor } = mountEditor({ text: "" });
+    act(() => {
+      typeText(editor(), "(");
+    });
+    expect(editor().state.doc.toString()).toBe("()");
+    expect(editor().state.selection.main.head).toBe(1);
+  });
+
+  it("引号也成对补上，同一个键再打一次是穿过去而不是又补一个", () => {
+    const { editor } = mountEditor({ text: "" });
+    act(() => {
+      typeText(editor(), '"');
+    });
+    expect(editor().state.doc.toString()).toBe('""');
+    act(() => {
+      typeText(editor(), '"');
+    });
+    expect(editor().state.doc.toString()).toBe('""');
+    expect(editor().state.selection.main.head).toBe(2);
+  });
+
+  it("Backspace 在两个半括号之间把它们一起删掉", () => {
+    const { editor, pressPlain } = mountEditor({ text: "" });
+    act(() => {
+      typeText(editor(), "(");
+    });
+    expect(editor().state.doc.toString()).toBe("()");
+    pressPlain("Backspace");
+    expect(editor().state.doc.toString()).toBe("");
+  });
+
+  it("回车按语言缩进：Python 的块里回车自动进一层", async () => {
+    const { editor, pressPlain } = mountEditor({
+      text: "if True:\n    pass",
+      language: { name: "Python" },
+    });
+    // 语言支持是异步装上的：没有它，回车就没有缩进规则可问。语言数据是它真装上的证据 ——
+    // 只等一个字段身份，会等到一份装错的扩展也照样绿的假象。
+    await waitFor(() =>
+      expect(editor().state.languageDataAt("commentTokens", 0).length).toBeGreaterThan(0),
+    );
+    act(() => {
+      editor().dispatch({ selection: { anchor: editor().state.doc.length } });
+    });
+    pressPlain("Enter");
+    const newLine = editor().state.doc.line(3).text;
+    // 进了一层：整行是缩进，不是顶格。具体几个空格是 CodeMirror 的缩进单位（默认 2），
+    // 这里问的是「进了没有」，不是「进了几个」。
+    expect(newLine).toMatch(/^ +$/);
+    expect(newLine.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+/**
+ * Item 11: an input method has to be able to work here.
+ *
+ * jsdom cannot compose — there is no candidate window and no platform IME — so what is
+ * checked is what the composition path rests on: a real editing host for the IME to attach
+ * to, and one composed insertion that undo takes back whole. Character-by-character undo of
+ * a composed word is what "撤销吞字" looks like in practice.
+ */
+describe("CodeEditor input method (item 11)", () => {
+  it("编辑面是真正的可编辑宿主，输入法才有地方挂候选框", () => {
+    const { content } = mountEditor();
+    expect(content()).toHaveAttribute("contenteditable", "true");
+  });
+
+  it("一次输入的中文是一个整体：撤销一次整段回去，不留半个字", () => {
+    const { editor, press } = mountEditor({ text: "alpha" });
+    act(() => {
+      typeText(editor(), "中文");
+    });
+    expect(editor().state.doc.toString()).toBe("中文alpha");
+    press("z");
+    expect(editor().state.doc.toString()).toBe("alpha");
   });
 });
