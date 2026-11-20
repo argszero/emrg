@@ -94,14 +94,6 @@ export function usageText(cmd: string, t: TranslateFn): string {
   }
 }
 
-/**
- * 指令名是否已经打全。打全之后回车该交给执行——补全清单不许截住它
- * （issue #3078：那条「`/rename` 按回车什么都不发生」就是这个清单吃掉了回车）。
- */
-export function isCompleteCommand(text: unknown): boolean {
-  return Boolean(COMMANDS[String(text ?? "").trim().toLowerCase()]);
-}
-
 /** / 前缀补全：返回匹配的指令（含 hint 与参数用法），供补全菜单过滤 */
 export function getCompletions(
   prefix: string,
