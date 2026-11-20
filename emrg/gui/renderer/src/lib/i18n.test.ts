@@ -111,15 +111,31 @@ describe("词典完整性守卫（防漂移）", () => {
   // 2026-11-20 issue #3064：额外可写根对话框加「选择…」按钮 → 493 + 1 = 494。
   // 2026-11-20 issue #3068：右栏变编辑器——删掉左栏两张树原来的两个标签键（-2），补两段表头
   // 与编辑器五条文案（+7）→ 494 + 5 = 499。
-it("zh/en 各 499 个 key 且完全对齐", () => {
+  // 2026-11-20 issue #3078：六条带参数的指令（/delete /rename /resume /model /memory
+  // /sandbox）各补一条参数用法，中英各 6 条 → 499 + 6 = 505。
+  it("zh/en 各 505 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(499);
-    expect(enKeys.length).toBe(499);
+    expect(zhKeys.length).toBe(505);
+    expect(enKeys.length).toBe(505);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);
   });
+  /**
+   * issue #3078 第 8 条：打错的指令要说「没有这条指令」并指出 `/` 能看全部——旧措辞
+   * 「暂未开放」读起来像「以后会有」，把一个打错的字说成一条没做完的功能。两个语言
+   * 各测一遍，因为这条文案是两个 key。
+   */
+  it("app.cmdUnknown 说的是「没有这条」并指向 /，不是「暂未开放」", () => {
+    expect(ZH_DICT["app.cmdUnknown"]).toContain("没有");
+    expect(ZH_DICT["app.cmdUnknown"]).toContain("/");
+    expect(ZH_DICT["app.cmdUnknown"]).not.toContain("暂未开放");
+    expect(EN_DICT["app.cmdUnknown"]).toContain("no");
+    expect(EN_DICT["app.cmdUnknown"]).toContain("/");
+    expect(EN_DICT["app.cmdUnknown"]).not.toContain("not available yet");
+  });
+
   it("关键分区 key 存在（侧边栏/输入区/设置/工具/聊天/错误边界）", () => {
     for (const key of [
       "sidebar.newChat",

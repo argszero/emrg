@@ -7,6 +7,7 @@ import {
   declaresImageOrFile,
   imagePlaceholder,
   menuForPrefix,
+  menuForInput,
   menuNavigate,
   partitionRequeue,
   queueSend,
@@ -45,6 +46,36 @@ describe("menuForPrefix", () => {
     const t = (k: string): string => `[${k}]`;
     const m = menuForPrefix("/clear", t);
     expect(m.items[0].hint).toBe("[cmd.clear.hint]");
+  });
+});
+
+/**
+ * 「什么时候该有清单」只有这一处判断（issue #3078 第 3、4 条）：三条界线各自是一条测试，
+ * 因为三条里任何一条漏掉，症状都不同——漏掉空格是清单死不走开，漏掉打全是回车被吞。
+ */
+describe("menuForInput", () => {
+  it("不在指令词上就没有清单：不以 / 开头", () => {
+    expect(menuForInput("hello", identity)).toBe(CMD_MENU_CLOSED);
+    expect(menuForInput("", identity)).toBe(CMD_MENU_CLOSED);
+    expect(menuForInput("   ", identity)).toBe(CMD_MENU_CLOSED);
+  });
+
+  it("出现空白就没有清单——判的是原文，不是去掉空白后的文本", () => {
+    // `/help ` 去空白之后还是 `/help`，拿它去判会把清单重新弹出来
+    expect(menuForInput("/help ", identity)).toBe(CMD_MENU_CLOSED);
+    expect(menuForInput("/help x", identity)).toBe(CMD_MENU_CLOSED);
+  });
+
+  it("指令名打全就没有清单（回车要交给执行，不许被清单截住）", () => {
+    expect(menuForInput("/clear", identity)).toBe(CMD_MENU_CLOSED);
+    expect(menuForInput("/CLEAR", identity)).toBe(CMD_MENU_CLOSED);
+  });
+
+  it("前缀没打全时按前缀过滤，选中第 0 项", () => {
+    const m = menuForInput("/c", identity);
+    expect(m.items.length).toBeGreaterThan(0);
+    expect(m.index).toBe(0);
+    expect(m.items.every((it) => it.cmd.startsWith("/c"))).toBe(true);
   });
 });
 

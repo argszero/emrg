@@ -978,11 +978,16 @@ export function Shell() {
       case "/rewind":
         h.openRewind();
         break;
-      case "/rename":
-        h.openRename();
+      // 带参数就当场做，不带参数才问人（issue #3078 第 5、6 条）。多词标题由
+      // parseInput 切成多段后再 join 回来，原样保留，不取第一个词。
+      case "/rename": {
+        const title = (routing.args ?? []).join(" ").trim();
+        if (title) void h.renameNow(title);
+        else h.openRename();
         break;
+      }
       case "/delete":
-        h.openDelete();
+        h.openDelete(routing.args?.[0] || undefined);
         break;
       case "/sessions":
       case "/open":

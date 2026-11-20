@@ -66,12 +66,26 @@ describe("skillRowView", () => {
 });
 
 describe("helpRows", () => {
-  it("COMMANDS 条目 → {cmd, hint}（hint 经 hintOf 解析）", () => {
+  it("COMMANDS 条目 → {cmd, hint, usage}（hint 经 hintOf 解析）", () => {
     const commands = { "/help": {}, "/clear": {} };
     const hintOf = (cmd: string) => `hint:${cmd}`;
     expect(helpRows(commands, hintOf)).toEqual([
-      { cmd: "/help", hint: "hint:/help" },
-      { cmd: "/clear", hint: "hint:/clear" },
+      { cmd: "/help", hint: "hint:/help", usage: "" },
+      { cmd: "/clear", hint: "hint:/clear", usage: "" },
+    ]);
+  });
+
+  /**
+   * 参数用法走 usageOf（issue #3078 第 7 条）：`/help` 里看到的用法串必须与补全清单里
+   * 是同一串，否则「`/rename` 还能带标题」这件事只有一处说得出。不传 usageOf 时为空串。
+   */
+  it("usage 经 usageOf 解析，缺省为空串", () => {
+    const commands = { "/rename": {}, "/help": {} };
+    const hintOf = () => "";
+    const usageOf = (cmd: string) => (cmd === "/rename" ? "<新标题>" : "");
+    expect(helpRows(commands, hintOf, usageOf)).toEqual([
+      { cmd: "/rename", hint: "", usage: "<新标题>" },
+      { cmd: "/help", hint: "", usage: "" },
     ]);
   });
 });

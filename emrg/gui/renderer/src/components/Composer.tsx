@@ -3,6 +3,7 @@ import { parseInput } from "../lib/commands";
 import {
   CMD_MENU_CLOSED,
   menuForPrefix,
+  menuForInput,
   menuNavigate,
   queueSend,
   imagePlaceholder,
@@ -409,10 +410,9 @@ export function Composer({
     textRef.current = next;
     setText(next);
     setHasText(next.trim().length > 0);
-    const trimmed = next.trim();
-    // / 指令补全：以 / 开头且无空格（仍处于指令词）→ 弹出菜单
-    if (trimmed.startsWith("/") && !trimmed.includes(" ")) setMenu(menuForPrefix(trimmed, tRef.current));
-    else setMenu(CMD_MENU_CLOSED);
+    // / 指令补全：什么时候该有清单只由 menuForInput 一处判断——指令词边界、指令名
+    // 是否已经打全、补全之后那个空格，三条都在那里（issue #3078）
+    setMenu(menuForInput(next, tRef.current));
     // 草稿持久化（rant 2026-09-01T20:28:31）：实时写 store，切视图（组件卸载）不丢
     storeRef.current.setComposerDraft(next, sidRef.current);
     if (caret != null) caretAfterRenderRef.current = caret;
@@ -514,6 +514,14 @@ export function Composer({
         if (item) selectCmdRef.current(item.cmd);
         return;
       }
+      // Tab 与 Enter 同义：补全这一项（issue #3078 第 2 条）。Shift+Tab 不是补全，
+      // 放行给浏览器做焦点反向移动。
+      if (e.key === "Tab" && !e.shiftKey) {
+        e.preventDefault();
+        const item = m.items[m.index];
+        if (item) selectCmdRef.current(item.cmd);
+        return;
+      }
       if (e.key === "Escape") {
         e.preventDefault();
         setMenu(CMD_MENU_CLOSED);
@@ -577,7 +585,10 @@ export function Composer({
 
   /** 选择补全项：填充输入框 + 关菜单（用户可继续回车执行，vanilla selectCmd） */
   function selectCmd(cmd: string): void {
-    applyText(cmd, cmd.length);
+    // 补全成「指令名 + 一个空格」，光标落在参数位，接着就能写参数（issue #3078）。
+    // 那个空格同时让 applyText 判定已经离开指令词，清单随之收起。
+    const completed = `${cmd} `;
+    applyText(completed, completed.length);
     // applyText 会按前缀重新算菜单；选完这一项就该收起（vanilla selectCmd 同行为），
     // 否则同一次回车既选了项又把菜单原样留在屏幕上。
     setMenu(CMD_MENU_CLOSED);
@@ -900,6 +911,7 @@ export function Composer({
         onTakeFiles(list);
       }}
     >
+      {/* 选中项滚进可视区：条数超过菜单高度而不滚时，键盘选到的那一行就在屏幕外 */}
       {menu.items.length > 0 ? (
         <div className="cmd-menu" role="menu" data-testid="cmd-menu">
           {menu.items.map((it, i) => (
@@ -909,12 +921,20 @@ export function Composer({
               className={`cmd-menu-item${i === menu.index ? " selected" : ""}`}
               role="menuitem"
               data-testid={`cmd-item-${it.cmd}`}
+              ref={
+                i === menu.index
+                  ? (el) => {
+                      el?.scrollIntoView?.({ block: "nearest" });
+                    }
+                  : undefined
+              }
               onMouseDown={(e) => {
                 e.preventDefault(); // 防输入框失焦（vanilla mousedown + preventDefault）
                 selectCmd(it.cmd);
               }}
             >
               <span className="cmd-menu-name">{it.cmd}</span>
+              {it.usage ? <span className="cmd-menu-usage">{it.usage}</span> : null}
               <span className="cmd-menu-hint">{it.hint}</span>
             </button>
           ))}

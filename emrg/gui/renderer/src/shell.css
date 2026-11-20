@@ -124,6 +124,10 @@
 .react-shell-main .composer {
   padding: 8px 16px 16px;
   border-top: 1px solid var(--border);
+  /* 补全清单靠这一行定位（issue #3078）。`position: absolute` 锚在最近的定位祖先上，
+     而输入框从前没有声明——于是锚退到了 `position: relative` 的 `.react-shell`（整窗
+     100vh），`bottom: calc(100% + 8px)` 把整块清单推到窗口上沿之外，屏幕上什么都不出现。 */
+  position: relative;
 }
 
 /* 沙箱三档切换器（rant 2026-08-30T16:34:29 重构回归恢复；vanilla components.css .mode-switcher 对等） */

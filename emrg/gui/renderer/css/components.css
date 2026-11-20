@@ -1328,7 +1328,8 @@ dialog::backdrop {
   bottom: calc(100% + 8px);
   left: 0;
   right: 0;
-  max-height: 240px;
+  /* 45vh：窗口矮的时候清单按窗口收，整块仍落在窗口内（issue #3078） */
+  max-height: min(240px, 45vh);
   overflow-y: auto;
   background: var(--bg-panel);
   border: 1px solid var(--border);
@@ -1357,6 +1358,8 @@ dialog::backdrop {
 .cmd-menu-item:hover { background-color: var(--bg-soft); }
 .cmd-menu-item.selected { background-color: var(--accent-soft); color: var(--accent); }
 .cmd-menu-name { font-family: var(--font-mono, monospace); font-weight: 600; }
+/* 参数用法与说明同色不同位：一眼能看出后面还能写什么 */
+.cmd-menu-usage { color: var(--text-2); font-size: var(--fs-aux); font-family: var(--font-mono, monospace); }
 .cmd-menu-hint { color: var(--text-2); font-size: var(--fs-aux); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cmd-menu-item.selected .cmd-menu-hint { color: var(--accent); }
 
