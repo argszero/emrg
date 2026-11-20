@@ -975,6 +975,21 @@ body.col-resizing * {
   flex: 1;
 }
 
+.ft-roots {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 2px;
+}
+
+/* One root among several shares the column and scrolls on its own; a lone root keeps
+   the flex behaviour it had before the composer existed (issue #3063). */
+.ft-roots > .ft {
+  flex: 1 1 0;
+  min-height: 0;
+}
+
 .ft-toolbar {
   display: flex;
   align-items: center;

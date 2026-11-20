@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { I18nProvider } from "../lib/i18n";
-import { FileTree } from "./FileTree";
+import { FileTree, FileTreeRoots } from "./FileTree";
 import { ICON_PX, INDENT_PX, ROW_HEIGHT, type TreeEntry } from "../lib/fileTree";
 
 /**
@@ -371,5 +371,91 @@ describe("FileTree", () => {
         Object.defineProperty(window, "innerHeight", { value: before.h, configurable: true });
       }
     });
+  });
+});
+
+describe("FileTreeRoots", () => {
+  const ent = (path: string, name: string, type: "dir" | "file" = "file"): TreeEntry => ({ path, name, type });
+
+  const rootsLoad = () =>
+    vi.fn(async (p: string) => {
+      if (p === "/s") return { entries: [ent("/s/sub", "sub", "dir"), ent("/s/notes.md", "notes.md")], truncated: false };
+      if (p === "/s/sub") return { entries: [ent("/s/sub/leaf.md", "leaf.md")], truncated: false };
+      if (p === "/x") return { entries: [ent("/x/deep", "deep", "dir")], truncated: false };
+      if (p === "/x/deep") return { entries: [ent("/x/deep/xleaf.md", "xleaf.md")], truncated: false };
+      return { entries: [], truncated: false };
+    });
+
+  it("会话目录第一行，额外可写根依次在下，各自独立展开", async () => {
+    const load = rootsLoad();
+    render(
+      <I18nProvider lang="en">
+        <FileTreeRoots testId="s" roots={["/s", "/x"]} loadDir={load} />
+      </I18nProvider>,
+    );
+    expect(screen.getByTestId("s-roots")).toHaveAttribute("data-root-count", "2");
+    expect(screen.getByTestId("s-root")).toHaveTextContent("s");
+    expect(screen.getByTestId("s-extra-1-root")).toHaveTextContent("x");
+    await waitFor(() => expect(screen.getAllByTestId("s-row")).toHaveLength(2));
+    await waitFor(() => expect(screen.getAllByTestId("s-extra-1-row")).toHaveLength(1));
+
+    // 展开额外根下的目录只影响那一棵树
+    fireEvent.click(screen.getAllByTestId("s-extra-1-row")[0]);
+    await waitFor(() => expect(screen.getAllByTestId("s-extra-1-row")).toHaveLength(2));
+    expect(screen.getAllByTestId("s-row")).toHaveLength(2);
+  });
+
+  it("同一路径只画一次，尾部分隔符是同一个路径", () => {
+    render(
+      <I18nProvider lang="en">
+        <FileTreeRoots testId="s" roots={["/s", "/s/", "/x"]} loadDir={rootsLoad()} />
+      </I18nProvider>,
+    );
+    expect(screen.getByTestId("s-roots")).toHaveAttribute("data-root-count", "2");
+    expect(screen.getByTestId("s-extra-1-root")).toHaveTextContent("x");
+    expect(screen.queryByTestId("s-extra-2-root")).toBeNull();
+  });
+
+  it("读不出的根把原因写在自己下面，另一棵树照常显示", async () => {
+    const load = vi.fn(async (p: string) => {
+      if (p === "/s") return { entries: [ent("/s/notes.md", "notes.md")], truncated: false };
+      throw new Error("no such directory");
+    });
+    render(
+      <I18nProvider lang="en">
+        <FileTreeRoots testId="s" roots={["/s", "/gone"]} loadDir={load} />
+      </I18nProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId("s-extra-1-error")).toHaveTextContent("no such directory"));
+    await waitFor(() => expect(screen.getAllByTestId("s-row")).toHaveLength(1));
+  });
+
+  it("没有额外根时就是原来那一棵树，不多出壳", () => {
+    render(
+      <I18nProvider lang="en">
+        <FileTreeRoots testId="s" roots={["/s"]} loadDir={rootsLoad()} />
+      </I18nProvider>,
+    );
+    expect(screen.queryByTestId("s-roots")).toBeNull();
+    expect(screen.getByTestId("s-root")).toBeInTheDocument();
+  });
+
+  it("调用方交来的展开集合决定哪些目录是开的，并把它们的下一层重新读出来", async () => {
+    const load = rootsLoad();
+    render(
+      <I18nProvider lang="en">
+        <FileTreeRoots
+          testId="s"
+          roots={["/s"]}
+          loadDir={load}
+          expanded={new Set(["/s/sub"])}
+          onExpandedChange={() => {}}
+        />
+      </I18nProvider>,
+    );
+    await waitFor(() => expect(screen.getAllByTestId("s-row")).toHaveLength(3));
+    const names = screen.getAllByTestId("s-row").map((r) => r.textContent);
+    expect(names[1]).toContain("leaf.md");
+    expect(load).toHaveBeenCalledWith("/s/sub");
   });
 });
