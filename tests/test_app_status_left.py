@@ -209,3 +209,88 @@ class TestTheLast24Hours:
              "session": {"input": 1, "cache": 0, "output": 2}},
         )
         assert out.endswith("24h this session/machine in 1/1 · cache 0/0 · out 2/2"), out
+
+
+class TestTheClientAsksAboutASession:
+    """Items 6, 7 and 8 of issue #3072: both clients name the session they ask about.
+
+    A source-level guard, with its limit stated: what it proves is that every
+    ``usage_window`` request the TUI sends carries the id, and that a session switch drops
+    the previous session's side before asking again. It does not prove the daemon reads
+    that id — ``tests/test_usage_window_request.py`` reads the answer — and it does not
+    prove the line renders the pair, which the class above reads.
+
+    The shape is ``tests/test_session_sandbox.py``'s, which counts the two ``set_sandbox``
+    send sites the same way. Green without this is exactly what a dropped ``session_id=``
+    looks like: every existing test still passes, and the session side of the band then
+    reads ``—`` for ever.
+    """
+
+    def test_every_usage_window_request_names_the_session_it_asks_about(self):
+        import inspect
+
+        from emrg.client import app as app_mod
+
+        source = inspect.getsource(app_mod)
+        assert source.count('send_command("usage_window"') == 4, (
+            "one send site per moment that re-reads the window: the connect, a turn's "
+            "start, a turn's end, and a session switch"
+        )
+        assert source.count('send_command("usage_window", session_id=session_id)') == 4, (
+            "all four must name the session: an unnamed request is answered with no "
+            "session reading at all, and the band then has nothing to show on this side"
+        )
+
+    def test_a_session_switch_drops_the_last_sessions_figures_before_asking_again(self):
+        """The TUI half of the GUI's clear-and-re-ask pair (items 7 and 8)."""
+        import inspect
+
+        from emrg.client import app as app_mod
+
+        source = inspect.getsource(app_mod)
+        # `session_id = new_sid` also starts the new-session block 39,452 chars earlier,
+        # so the anchor is the comment that opens *this* block; measured unique.
+        assert source.count("# Switch session") == 1
+        start = source.index("# Switch session")
+        # a real bound, not a slice to EOF: the switch block ends where the next one
+        # begins, and a reading that widened silently would assert about other code
+        end = source.index(
+            "# The session's sandbox tier travels with the same snapshot", start
+        )
+        block = source[start:end]
+        assert len(block) < 1200, f"the switch block grew to {len(block)} chars - re-read it"
+        assert 'current_usage = {**current_usage, "session": None}' in block, (
+            "the figures of the session that was open must not stand under the new one"
+        )
+        assert 'await conn.send_command("usage_window", session_id=session_id)' in block, (
+            "and the question goes out now, not at the next turn"
+        )
+
+    def test_the_main_process_passes_the_session_through_to_the_daemon(self):
+        """The wire this change added, which no JavaScript test names.
+
+        Measured: ``grep -rn 'usageWindow' emrg/gui/*.test.js`` answers 0 hits, so the
+        ``{sessionId}`` → ``{session_id}`` mapping and the ``session`` → three-key mapping
+        read here or nowhere. A wrong key is answered ``session=None`` while every test
+        that exists stays green.
+        """
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        main = (root / "emrg" / "gui" / "main.js").read_text(encoding="utf-8")
+        start = main.index('ipcMain.handle("emrg:usageWindow"')
+        end = main.index('ipcMain.handle("emrg:listFiles"', start)
+        handler = main[start:end]
+        assert 'sendCommandAndWait("usage_window", payload, 10000)' in handler
+        assert "session_id: sessionId" in handler, (
+            "the daemon reads `session_id` at the message's top level and the renderer "
+            "spells it `sessionId`, so this line is the only place the two meet"
+        )
+        for key in ("input", "cache", "output"):
+            assert f"{key}: session.{key}" in handler, key
+
+        preload = (root / "emrg" / "gui" / "preload.js").read_text(encoding="utf-8")
+        assert (
+            'usageWindow: (payload) => ipcRenderer.invoke("emrg:usageWindow", payload)'
+            in preload
+        ), "a preload that drops the argument answers about no session, and reads as measured"
