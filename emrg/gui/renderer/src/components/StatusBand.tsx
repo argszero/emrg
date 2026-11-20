@@ -29,6 +29,12 @@ export interface StatusBandProps {
    * Three segments, never a total (rant 2026-11-19T09:31:00): the host reads this to
    * answer "what have I spent today", and a single figure cannot say whether the spend
    * went into the prompt or into the answer.
+   *
+   * Each segment shows two numbers since issue #3072 — **this session's** and then the
+   * **machine's**, separated by a slash — because the two answer different questions
+   * ("what did this conversation cost" and "what did the machine spend"), and one
+   * figure cannot be read as both. The session side is `—` whenever nothing measured it:
+   * there is no session, or the daemon has not answered the narrowed question yet.
    */
   usage: UsageWindowReading | null;
   leftOpen: boolean;
@@ -71,9 +77,12 @@ export function StatusBand({
       <span className="band-sep" />
       <span className="band-item" data-testid="band-usage" title={t("band.usageTitle")}>
         {t("band.usage", {
-          input: formatTokens(usage?.input),
-          cache: formatTokens(usage?.cache),
-          output: formatTokens(usage?.output),
+          input: formatTokens(usage?.sessionInput),
+          machineInput: formatTokens(usage?.input),
+          cache: formatTokens(usage?.sessionCache),
+          machineCache: formatTokens(usage?.cache),
+          output: formatTokens(usage?.sessionOutput),
+          machineOutput: formatTokens(usage?.output),
         })}
       </span>
       <span className="band-right">

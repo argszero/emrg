@@ -54,11 +54,15 @@ describe("StatusBand", () => {
   it("运行中 + 有窗口：两个格子都报读数", () => {
     setup({
       running: true,
-      usage: { input: 12_300_000, cache: 11_100_000, output: 245_000, windowStart: 0, windowEnd: 1 },
+      usage: {
+        input: 12_300_000, cache: 11_100_000, output: 245_000,
+        sessionInput: 1_500_000, sessionCache: 1_400_000, sessionOutput: 25_000,
+        windowStart: 0, windowEnd: 1,
+      },
     });
     expect(screen.getByTestId("band-state")).toHaveTextContent("Running");
     expect(screen.getByTestId("band-usage")).toHaveTextContent(
-      "24h in 12.3M · cache 11.1M · out 245.0k",
+      "24h this session/machine in 1.5M/12.3M · cache 1.4M/11.1M · out 25.0k/245.0k",
     );
   });
 
@@ -67,7 +71,48 @@ describe("StatusBand", () => {
       running: true,
       usage: { input: 1000, cache: null, output: 5, windowStart: 0, windowEnd: 1 },
     });
-    expect(screen.getByTestId("band-usage")).toHaveTextContent("24h in 1.0k · cache — · out 5");
+    expect(screen.getByTestId("band-usage")).toHaveTextContent(
+      "24h this session/machine in —/1.0k · cache —/— · out —/5",
+    );
+  });
+
+  it("issue #3072：本会话在前、本机在后，一格两个数", () => {
+    // 宿主读的是两个问题：「这次对话花了多少」和「这台机器花了多少」。一格只给一个数，
+    // 两个问题都答不了，而只换个说法、仍然只回本机那个数，正是这条要挡的改动。
+    setup({
+      running: true,
+      usage: {
+        input: 262_600_000, cache: 241_000_000, output: 4_100_000,
+        sessionInput: 15_200_000, sessionCache: 14_100_000, sessionOutput: 245_000,
+        windowStart: 0, windowEnd: 1,
+      },
+    });
+    expect(screen.getByTestId("band-usage")).toHaveTextContent(
+      "24h this session/machine in 15.2M/262.6M · cache 14.1M/241.0M · out 245.0k/4.1M",
+    );
+  });
+
+  it("issue #3072：没测到本会话那一段就画 —，绝不拿本机数顶上", () => {
+    // 本机那个数顶上去，等于替一个会话报出整台机器的花销。
+    setup({
+      running: true,
+      usage: {
+        input: 100, cache: 40, output: 7,
+        sessionInput: 5, sessionCache: null, sessionOutput: 7,
+        windowStart: 0, windowEnd: 1,
+      },
+    });
+    const band = screen.getByTestId("band-usage");
+    expect(band).toHaveTextContent("24h this session/machine in 5/100 · cache —/40 · out 7/7");
+    expect(band.textContent).not.toContain("40/40");
+  });
+
+  it("issue #3072：悬停文字说出顺序，并保留「缓存是输入子集、不显示合计」", () => {
+    setup({ running: true });
+    const title = screen.getByTestId("band-usage").getAttribute("title") ?? "";
+    expect(title).toContain("this session first and the machine second");
+    expect(title).toContain("subset of input");
+    expect(title).toContain("no total");
   });
 
   it("状态带不再说「累计」：窗口是三个独立段，不是一个当轮总数", () => {
@@ -76,7 +121,11 @@ describe("StatusBand", () => {
       <I18nProvider lang="zh">
         <StatusBand
           running
-          usage={{ input: 1000, cache: 900, output: 10, windowStart: 0, windowEnd: 1 }}
+          usage={{
+            input: 1000, cache: 900, output: 10,
+            sessionInput: 500, sessionCache: 450, sessionOutput: 10,
+            windowStart: 0, windowEnd: 1,
+          }}
           leftOpen
           rightOpen
           onToggleLeft={vi.fn()}
@@ -85,12 +134,16 @@ describe("StatusBand", () => {
       </I18nProvider>,
     );
     expect(screen.getByTestId("status-band").textContent).not.toContain("累计");
-    expect(screen.getByTestId("band-usage")).toHaveTextContent("24h 输入 1.0k · 缓存 900 · 输出 10");
+    expect(screen.getByTestId("band-usage")).toHaveTextContent(
+      "24h 本会话/本机 输入 500/1.0k · 缓存 450/900 · 输出 10/10",
+    );
   });
 
   it("daemon 还没报 → 画 —，不画 0 token", () => {
     setup({ running: true, usage: null });
-    expect(screen.getByTestId("band-usage")).toHaveTextContent("24h in — · cache — · out —");
+    expect(screen.getByTestId("band-usage")).toHaveTextContent(
+      "24h this session/machine in —/— · cache —/— · out —/—",
+    );
   });
 
   it("计时来自 daemon 的轮开始时刻：中途打开也显示已过去的时间", () => {

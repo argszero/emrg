@@ -3206,11 +3206,18 @@ class EmrgServer:
             await self._handle_list_all_sessions(ws)
 
         elif msg_type == "usage_window":
-            # Rant 2026-11-19T09:31:00: the host-wide last-24-hours totals. No session and
-            # no `cwd` -- the window is the subject, so there is no directory a caller
-            # could name to narrow it to whichever session it happens to have open, which
-            # is exactly the reading the host rejected.
-            await self._send(ws, {"type": "usage_window", **self._usage_ledger.window()})
+            # Rant 2026-11-19T09:31:00: the host-wide last-24-hours totals. The window is
+            # still the subject — no `cwd`, and the machine's three segments answer every
+            # caller identically whichever session it happens to have open.
+            #
+            # Rant 2026-11-20T12:22:49 adds a second reading beside that one, never in
+            # place of it: `session_id` asks for the same three segments narrowed to one
+            # conversation, and a message that names none gets `None` for those three
+            # rather than the machine's figures under a session's name (issue #3072).
+            await self._send(ws, {
+                "type": "usage_window",
+                **self._usage_ledger.window(session_id=msg.get("session_id")),
+            })
 
         elif msg_type == "resolve_session_cwd":
             session_id = msg.get("session_id", "")
@@ -5063,7 +5070,7 @@ class EmrgServer:
             # is its only writer. A per-turn counter used to sit here; it reset with every
             # session switch and GUI restart, which is why a day's spend could not be read
             # from it.
-            self._usage_ledger.record(final_usage)
+            self._usage_ledger.record(final_usage, session.session_id)
             self._refresh_usage_anchor(
                 session, final_usage, request_messages, tools_openai
             )

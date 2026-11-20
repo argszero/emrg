@@ -105,37 +105,93 @@ class TestTheLast24Hours:
     went, and a total cannot say. The mutations this set exists to catch are the ones that
     look harmless — collapsing the three into one figure, deriving the cache segment as
     input minus hits, or printing 0 for a field no response ever reported.
+
+    Since issue #3072 each segment carries **two** figures — this session's first, the
+    machine's second — because a conversation's share and the machine's spend answer
+    different questions. The mutations here are the ones that look like a rendering
+    choice: putting the machine figure on both sides when no session was measured, or
+    dropping the order and leaving a bare `15.2M/262.6M` for the host to guess at.
     """
 
     def test_the_three_segments_are_shown_apart_with_k_and_m_abbreviations(self):
         from emrg.client.app import format_usage_window
 
-        out = format_usage_window({"input": 12_300_000, "cache": 11_100_000, "output": 245_000})
-        assert out == "24h in 12.3M · cache 11.1M · out 245.0k", out
+        out = format_usage_window({
+            "input": 262_600_000, "cache": 241_000_000, "output": 4_100_000,
+            "session": {"input": 15_200_000, "cache": 14_100_000, "output": 245_000},
+        })
+        assert out == (
+            "24h this session/machine in 15.2M/262.6M"
+            " · cache 14.1M/241.0M · out 245.0k/4.1M"
+        ), out
+
+    def test_the_order_is_stated_in_the_line_itself(self):
+        """A terminal has no hover text: the pair's order must be in the line (item 9)."""
+        from emrg.client.app import format_usage_window
+
+        out = format_usage_window({
+            "input": 100, "cache": 10, "output": 1,
+            "session": {"input": 50, "cache": 5, "output": 1},
+        })
+        assert out.startswith("24h this session/machine in 50/100"), out
 
     def test_nothing_is_totaled(self):
         from emrg.client.app import format_usage_window
 
-        out = format_usage_window({"input": 100, "cache": 40, "output": 7})
-        assert out == "24h in 100 · cache 40 · out 7", out
+        out = format_usage_window({
+            "input": 100, "cache": 40, "output": 7,
+            "session": {"input": 10, "cache": 4, "output": 1},
+        })
+        assert out == "24h this session/machine in 10/100 · cache 4/40 · out 1/7", out
         assert "total" not in out
 
     def test_the_cache_segment_is_the_reported_hit_not_the_difference(self):
-        """100 prompt tokens of which 80 were cache hits prints `cache 80`, not `20`."""
+        """100 prompt tokens of which 80 were cache hits prints `cache …/80`, not `…/20`."""
         from emrg.client.app import format_usage_window
 
-        assert "cache 80" in format_usage_window({"input": 100, "cache": 80, "output": 1})
+        out = format_usage_window({
+            "input": 100, "cache": 80, "output": 1,
+            "session": {"input": 90, "cache": 79, "output": 1},
+        })
+        assert "cache 79/80" in out, out
 
     def test_a_field_no_response_reported_is_a_dash_not_a_zero(self):
         """The absence of a measurement is `—`; a *reported* zero is `0`."""
         from emrg.client.app import format_usage_window
 
-        assert format_usage_window({"input": 1000, "cache": None, "output": 5}) == (
-            "24h in 1.0k · cache — · out 5"
-        )
-        assert format_usage_window({"input": 0, "cache": 0, "output": 0}) == (
-            "24h in 0 · cache 0 · out 0"
-        )
+        assert format_usage_window({
+            "input": 1000, "cache": None, "output": 5,
+            "session": {"input": None, "cache": None, "output": 5},
+        }) == "24h this session/machine in —/1.0k · cache —/— · out 5/5"
+        assert format_usage_window({
+            "input": 0, "cache": 0, "output": 0,
+            "session": {"input": 0, "cache": 0, "output": 0},
+        }) == "24h this session/machine in 0/0 · cache 0/0 · out 0/0"
+
+    def test_an_unnamed_request_never_shows_the_machine_figure_twice(self):
+        """Item 5: no session named ⇒ no session reading, not the machine's under a name."""
+        from emrg.client.app import format_usage_window
+
+        out = format_usage_window({"input": 100, "cache": 40, "output": 7})
+        assert out == "24h this session/machine in —/100 · cache —/40 · out —/7", out
+        assert "100/100" not in out, out
+
+        # and the same for an explicit null, which is what the daemon sends a request
+        # that named no session (item 5's "not measured", stated rather than omitted)
+        explicit = format_usage_window({
+            "input": 100, "cache": 40, "output": 7, "session": None,
+        })
+        assert explicit == out, explicit
+
+    def test_one_missing_session_segment_is_a_dash_on_that_segment_alone(self):
+        """Item 6: `—` on the side that was not measured, the other side still reads."""
+        from emrg.client.app import format_usage_window
+
+        out = format_usage_window({
+            "input": 100, "cache": 40, "output": 7,
+            "session": {"input": 5, "output": 7},
+        })
+        assert out == "24h this session/machine in 5/100 · cache —/40 · out 7/7", out
 
     def test_an_unanswered_window_leaves_the_line_byte_identical(self):
         """An older daemon never answers the request: the line must not change at all."""
@@ -148,6 +204,93 @@ class TestTheLast24Hours:
         from emrg.client.app import _format_status_left
 
         out = _format_status_left(
-            "main", "s_260727", "m", None, None, {"input": 1, "cache": 0, "output": 2}
+            "main", "s_260727", "m", None, None,
+            {"input": 1, "cache": 0, "output": 2,
+             "session": {"input": 1, "cache": 0, "output": 2}},
         )
-        assert out.endswith("24h in 1 · cache 0 · out 2"), out
+        assert out.endswith("24h this session/machine in 1/1 · cache 0/0 · out 2/2"), out
+
+
+class TestTheClientAsksAboutASession:
+    """Items 6, 7 and 8 of issue #3072: both clients name the session they ask about.
+
+    A source-level guard, with its limit stated: what it proves is that every
+    ``usage_window`` request the TUI sends carries the id, and that a session switch drops
+    the previous session's side before asking again. It does not prove the daemon reads
+    that id — ``tests/test_usage_window_request.py`` reads the answer — and it does not
+    prove the line renders the pair, which the class above reads.
+
+    The shape is ``tests/test_session_sandbox.py``'s, which counts the two ``set_sandbox``
+    send sites the same way. Green without this is exactly what a dropped ``session_id=``
+    looks like: every existing test still passes, and the session side of the band then
+    reads ``—`` for ever.
+    """
+
+    def test_every_usage_window_request_names_the_session_it_asks_about(self):
+        import inspect
+
+        from emrg.client import app as app_mod
+
+        source = inspect.getsource(app_mod)
+        assert source.count('send_command("usage_window"') == 4, (
+            "one send site per moment that re-reads the window: the connect, a turn's "
+            "start, a turn's end, and a session switch"
+        )
+        assert source.count('send_command("usage_window", session_id=session_id)') == 4, (
+            "all four must name the session: an unnamed request is answered with no "
+            "session reading at all, and the band then has nothing to show on this side"
+        )
+
+    def test_a_session_switch_drops_the_last_sessions_figures_before_asking_again(self):
+        """The TUI half of the GUI's clear-and-re-ask pair (items 7 and 8)."""
+        import inspect
+
+        from emrg.client import app as app_mod
+
+        source = inspect.getsource(app_mod)
+        # `session_id = new_sid` also starts the new-session block 39,452 chars earlier,
+        # so the anchor is the comment that opens *this* block; measured unique.
+        assert source.count("# Switch session") == 1
+        start = source.index("# Switch session")
+        # a real bound, not a slice to EOF: the switch block ends where the next one
+        # begins, and a reading that widened silently would assert about other code
+        end = source.index(
+            "# The session's sandbox tier travels with the same snapshot", start
+        )
+        block = source[start:end]
+        assert len(block) < 1200, f"the switch block grew to {len(block)} chars - re-read it"
+        assert 'current_usage = {**current_usage, "session": None}' in block, (
+            "the figures of the session that was open must not stand under the new one"
+        )
+        assert 'await conn.send_command("usage_window", session_id=session_id)' in block, (
+            "and the question goes out now, not at the next turn"
+        )
+
+    def test_the_main_process_passes_the_session_through_to_the_daemon(self):
+        """The wire this change added, which no JavaScript test names.
+
+        Measured: ``grep -rn 'usageWindow' emrg/gui/*.test.js`` answers 0 hits, so the
+        ``{sessionId}`` → ``{session_id}`` mapping and the ``session`` → three-key mapping
+        read here or nowhere. A wrong key is answered ``session=None`` while every test
+        that exists stays green.
+        """
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        main = (root / "emrg" / "gui" / "main.js").read_text(encoding="utf-8")
+        start = main.index('ipcMain.handle("emrg:usageWindow"')
+        end = main.index('ipcMain.handle("emrg:listFiles"', start)
+        handler = main[start:end]
+        assert 'sendCommandAndWait("usage_window", payload, 10000)' in handler
+        assert "session_id: sessionId" in handler, (
+            "the daemon reads `session_id` at the message's top level and the renderer "
+            "spells it `sessionId`, so this line is the only place the two meet"
+        )
+        for key in ("input", "cache", "output"):
+            assert f"{key}: session.{key}" in handler, key
+
+        preload = (root / "emrg" / "gui" / "preload.js").read_text(encoding="utf-8")
+        assert (
+            'usageWindow: (payload) => ipcRenderer.invoke("emrg:usageWindow", payload)'
+            in preload
+        ), "a preload that drops the argument answers about no session, and reads as measured"

@@ -176,3 +176,89 @@ def test_a_fifo_at_the_ledger_path_is_neither_written_nor_read(tmp_path: Path) -
 
     window = ledger.window()
     assert (window["input"], window["cache"], window["output"]) == (None, None, None)
+
+
+class TestOneSessionsShare:
+    """The machine's 24 hours and one session's 24 hours, read side by side (issue #3072).
+
+    The machine's three segments stay exactly what they were, digit for digit: this set
+    exists to add a second reading, not to move the first. Each test names the mutation
+    that must redden it — a row that forgets its session, a session sum that quietly
+    widens to the machine's, or a request naming no session answered with the machine's
+    figures under a session's name.
+    """
+
+    def test_a_record_carries_the_session_it_belongs_to(self, tmp_path):
+        """Mutating `record` to drop the argument reddens this and nothing else."""
+        ledger, _clock = _ledger(tmp_path)
+        ledger.record({"prompt_tokens": 10, "completion_tokens": 1}, "s-one")
+        ledger.record({"prompt_tokens": 20, "completion_tokens": 2}, "s-two")
+
+        lines = _lines(tmp_path / "usage-ledger.jsonl")
+        assert [line.get("sid") for line in lines] == ["s-one", "s-two"]
+        assert (lines[0]["prompt_tokens"], lines[0]["completion_tokens"]) == (10, 1)
+
+    def test_a_record_with_no_session_named_writes_no_sid_at_all(self, tmp_path):
+        """An absent key, not an empty string: a blank id would match no session either
+        way, and inventing one puts a claim in the file that nothing measured."""
+        ledger, _clock = _ledger(tmp_path)
+        ledger.record({"prompt_tokens": 5, "completion_tokens": 1})
+
+        assert "sid" not in _lines(tmp_path / "usage-ledger.jsonl")[0]
+
+    def test_the_session_side_sums_only_that_session_while_the_machine_keeps_both(
+        self, tmp_path
+    ):
+        """Mutating the session sum to read `sums` instead of `mine` reddens this."""
+        ledger, _clock = _ledger(tmp_path)
+        ledger.record({"prompt_tokens": 10, "cache_hit_tokens": 4, "completion_tokens": 1}, "s-one")
+        ledger.record({"prompt_tokens": 20, "cache_hit_tokens": 6, "completion_tokens": 2}, "s-two")
+
+        window = ledger.window(session_id="s-one")
+        # the machine's, unchanged: both rounds
+        assert (window["input"], window["cache"], window["output"]) == (30, 10, 3)
+        # this session's alone: one round, and the other session's spend is not in it
+        assert window["session"] == {"input": 10, "cache": 4, "output": 1}
+
+    def test_a_row_written_before_rows_carried_a_session_counts_for_the_machine_only(
+        self, tmp_path
+    ):
+        """Item 4. Mutating the read to infer an owner from the timestamp reddens this."""
+        path = tmp_path / "usage-ledger.jsonl"
+        path.write_text(
+            json.dumps({"ts": NOW - 60, "prompt_tokens": 7, "completion_tokens": 3}) + "\n",
+            encoding="utf-8",
+        )
+        ledger, _clock = _ledger(tmp_path)
+        ledger.record({"prompt_tokens": 10, "completion_tokens": 1}, "s-one")
+
+        for named in ("s-one", "s-two"):
+            window = ledger.window(session_id=named)
+            assert (window["input"], window["output"]) == (17, 4)
+            assert window["session"]["input"] == (10 if named == "s-one" else None)
+
+    def test_an_unnamed_window_answers_none_for_the_session_not_the_machine_figure(
+        self, tmp_path
+    ):
+        """Item 5. The fallback this pins shut is the tempting one: reuse `sums`."""
+        ledger, _clock = _ledger(tmp_path)
+        ledger.record({"prompt_tokens": 10, "completion_tokens": 1}, "s-one")
+
+        window = ledger.window()
+        assert (window["input"], window["output"]) == (10, 1)
+        assert window["session"] == {"input": None, "cache": None, "output": None}
+        assert ledger.window(session_id="")["session"] == {
+            "input": None, "cache": None, "output": None
+        }
+
+    def test_the_window_edge_is_one_edge_for_both_answers(self, tmp_path):
+        """Item 2: the session side is not narrowed to a different window."""
+        ledger, clock = _ledger(tmp_path)
+        ledger.record({"prompt_tokens": 100, "completion_tokens": 10}, "s-one")
+        clock[0] = NOW + WINDOW_SECONDS  # exactly 24 hours later: still inside
+        assert ledger.window(session_id="s-one")["session"]["input"] == 100
+
+        clock[0] = NOW + WINDOW_SECONDS + 60  # a minute past it: out of both
+        window = ledger.window(session_id="s-one")
+        assert window["input"] is None
+        assert window["session"]["input"] is None

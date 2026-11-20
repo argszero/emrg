@@ -919,15 +919,25 @@ vision = false
     // Rant 2026-11-19T09:31:00：状态带的花费读数是最近 24 小时的滚动窗口，由 daemon
     // 记账（重启不归零）。渲染层只读这一份，不自己累加——否则窗口一关就从零开始，
     // 正是宿主不接受的那个口径。
-    ipcMain.handle("emrg:usageWindow", async () => {
-      const frame = await requireConn().sendCommandAndWait("usage_window", {}, 10000);
+    // Rant 2026-11-20T12:22:49 / issue #3072：同一个请求再带上当前会话，daemon 就在
+    // 本机三个数旁边多回这个会话的三个数。本机那份不变；没带会话时 daemon 回「没测到」，
+    // 渲染层不得拿本机数顶上。
+    ipcMain.handle("emrg:usageWindow", async (_e, { sessionId } = {}) => {
+      const payload = typeof sessionId === "string" && sessionId ? { session_id: sessionId } : {};
+      const frame = await requireConn().sendCommandAndWait("usage_window", payload, 10000);
       if (frame.error) throw new Error(frame.error);
+      const session = frame.session && typeof frame.session === "object" ? frame.session : {};
       return {
         input: frame.input ?? null,
         cache: frame.cache ?? null,
         output: frame.output ?? null,
         windowStart: frame.window_start ?? null,
         windowEnd: frame.window_end ?? null,
+        session: {
+          input: session.input ?? null,
+          cache: session.cache ?? null,
+          output: session.output ?? null,
+        },
       };
     });
 

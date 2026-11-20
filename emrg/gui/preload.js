@@ -19,7 +19,7 @@ const api = {
   readClipboardImage: () => ipcRenderer.invoke("emrg:readClipboardImage"),
   listSessions: () => ipcRenderer.invoke("emrg:listSessions"),
   // rant 2026-11-19T09:31:00：最近 24 小时的三段 token 读数（daemon 记账）
-  usageWindow: () => ipcRenderer.invoke("emrg:usageWindow"),
+  usageWindow: (payload) => ipcRenderer.invoke("emrg:usageWindow", payload),
   restartDaemon: () => ipcRenderer.invoke("emrg:restartDaemon"),
   relaunchGui: () => ipcRenderer.invoke("emrg:relaunchGui"),
   switchSession: (payload) => ipcRenderer.invoke("emrg:switchSession", payload),

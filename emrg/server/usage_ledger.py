@@ -95,16 +95,24 @@ class UsageLedger:
 
     # ── writing ───────────────────────────────────────────────
 
-    def record(self, usage: dict | None) -> None:
+    def record(self, usage: dict | None, session_id: str | None = None) -> None:
         """Append the provider's usage for one response, if it carries any count.
 
         Item 6 of the rant: a response with no usage is not an entry. An endpoint that
         reports only one of the three fields still records that one — a partial
         measurement is a measurement, and dropping the record would lose it.
+
+        ``session_id`` is the session the round belonged to, written beside the counts so
+        the window can answer one session's share as well as the machine's. It is
+        optional because the ledger outlives any caller that names one: a row without it
+        is a row from before this field existed, and it counts towards the machine and
+        towards no session (issue #3072).
         """
         if not isinstance(usage, dict):
             return
         entry: dict[str, object] = {"ts": round(float(self._clock()), 3)}
+        if isinstance(session_id, str) and session_id:
+            entry["sid"] = session_id
         measured = False
         for _, key in _SEGMENTS:
             count = _a_count(usage.get(key))
@@ -183,30 +191,45 @@ class UsageLedger:
                 records.append(entry)
         return records
 
-    def window(self, now: float | None = None) -> dict:
+    def window(self, now: float | None = None, session_id: str | None = None) -> dict:
         """The three sums over ``now``-24h … ``now``, each None when nothing reported it.
 
         The near edge is inclusive: a record stamped exactly 24 hours ago is still in the
         window, and one a minute older is not (the rant's boundary). ``window_start`` and
         ``window_end`` ride along so a client can say what it shows instead of assuming
         the daemon's clock agrees with its own.
+
+        Two readings come back, and neither is derived from the other: the top-level three
+        are the **machine's** last 24 hours — every session, every background round — and
+        ``session`` is the same three segments for ``session_id`` alone. Item 5 of issue
+        #3072: a call that names no session gets ``None`` for all three of its segments and
+        still gets the machine's, because answering the machine figure under a session's
+        name would claim that one conversation spent the whole day.
         """
         end = float(self._clock()) if now is None else float(now)
         start = end - WINDOW_SECONDS
+        named = session_id if isinstance(session_id, str) and session_id else None
         sums: dict[str, int] = {}
+        mine: dict[str, int] = {}
         for entry in self._read():
             ts = entry.get("ts")
             if not isinstance(ts, (int, float)) or ts < start or ts > end:
                 continue
+            # A row written before rows carried a session belongs to the machine and to
+            # nobody else (item 4): `entry.get("sid")` is None for it, and `named` never is.
+            is_mine = named is not None and entry.get("sid") == named
             for name, key in _SEGMENTS:
                 count = _a_count(entry.get(key))
                 if count is None:
                     continue
                 sums[name] = sums.get(name, 0) + count
+                if is_mine:
+                    mine[name] = mine.get(name, 0) + count
         return {
             "window_start": start,
             "window_end": end,
             "input": sums.get("input"),
             "cache": sums.get("cache"),
             "output": sums.get("output"),
+            "session": {name: mine.get(name) for name, _ in _SEGMENTS},
         }
