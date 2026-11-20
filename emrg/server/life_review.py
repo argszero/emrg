@@ -178,6 +178,17 @@ def skip_reason(
     return f"no agent has been active since {since.isoformat(timespec='seconds')}"
 
 
+def _counted(count: int, unit: str) -> str:
+    """A count with its unit, in the number the count calls for.
+
+    Two windows reach a count of one — a minute at 90 seconds and an hour at 90
+    minutes — so the plural alone would tell the judge "1 hours". Both windows are
+    asserted in `tests/test_life_review.py::test_a_span_of_one_unit_says_the_singular`,
+    which is what keeps a unit added later from shipping with the plural only.
+    """
+    return f"{count} {unit}" if count == 1 else f"{count} {unit}s"
+
+
 def describe_span(delta: datetime.timedelta) -> str:
     """A span in the words a reader uses, coarse on purpose.
 
@@ -185,21 +196,24 @@ def describe_span(delta: datetime.timedelta) -> str:
     against a table, so the span is stated at the coarseness a person would use and
     never as a number of seconds. A negative or zero span reads as "just now" rather
     than as a duration that has not happened.
+
+    Every unit word follows its count, singular included: this string is read as a
+    sentence ("the stretch to settle is …"), where the wrong number is a wrong word
+    rather than a rounding.
     """
     seconds = int(delta.total_seconds())
     if seconds < 90:
         return "just now"
     minutes = seconds // 60
     if minutes < 90:
-        return f"{minutes} minutes"
+        return _counted(minutes, "minute")
     hours = minutes // 60
     if hours < 48:
-        return f"{hours} hours"
+        return _counted(hours, "hour")
     days = hours // 24
     if days < 14:
-        return f"{days} days"
-    weeks = days // 7
-    return f"{weeks} weeks"
+        return _counted(days, "day")
+    return _counted(days // 7, "week")
 
 
 def render_roster(entries: list[dict]) -> str:

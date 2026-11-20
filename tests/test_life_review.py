@@ -131,6 +131,27 @@ def test_span_words_stay_coarse() -> None:
     assert describe_span(datetime.timedelta(days=15)) == "2 weeks"
 
 
+def test_a_span_of_one_unit_says_the_singular() -> None:
+    """"1 hours" is not a word, and two windows reach a count of one.
+
+    A minute at 90 seconds and an hour at 90 minutes are the only windows that do:
+    the day branch starts at two days and the week branch at two weeks, because the
+    branch above each has already taken every smaller count. Each window is asserted
+    at its own edges — the value that reaches the unit and the one just above it — so
+    a unit added later cannot ship with the plural alone.
+    """
+    assert describe_span(datetime.timedelta(seconds=89)) == "just now"
+    assert describe_span(datetime.timedelta(seconds=90)) == "1 minute"
+    assert describe_span(datetime.timedelta(seconds=119)) == "1 minute"
+    assert describe_span(datetime.timedelta(seconds=120)) == "2 minutes"
+    assert describe_span(datetime.timedelta(minutes=89)) == "89 minutes"
+    assert describe_span(datetime.timedelta(minutes=90)) == "1 hour"
+    assert describe_span(datetime.timedelta(minutes=119)) == "1 hour"
+    assert describe_span(datetime.timedelta(minutes=120)) == "2 hours"
+    assert describe_span(datetime.timedelta(hours=48)) == "2 days"
+    assert describe_span(datetime.timedelta(days=14)) == "2 weeks"
+
+
 # ── 3. the gate ──────────────────────────────────────────────────────
 
 

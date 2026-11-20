@@ -65,10 +65,13 @@ def _register_with(tmp_path: Path, *names: str) -> tuple[AgentRegistry, Path]:
 # ── 1. the bands ──────────────────────────────────────────────────────
 
 def test_the_bands_fall_where_the_boundaries_read() -> None:
-    """Below ten is dying, below a hundred is healthy, above a hundred thrives.
+    """Every floor is asserted on both sides of its edge.
 
-    Every edge is asserted, because an off-by-one here is invisible: the section
-    would print a band and nothing would disagree with it.
+    The numbers are `emrg/server/life.py::_BANDS` and are not restated as a sentence
+    here: a sentence can name the wrong boundary and stay readable, while these
+    assertions redden. Both sides of every edge are asserted because an off-by-one
+    is otherwise invisible — the section would print a band and nothing would
+    disagree with it.
     """
     assert tier_of(9) == "dying"
     assert tier_of(10) == "surviving"
