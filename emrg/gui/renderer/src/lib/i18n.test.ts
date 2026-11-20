@@ -109,11 +109,13 @@ describe("词典完整性守卫（防漂移）", () => {
   // 已复制 / 复制失败）→ 488 + 4 = 492。
   // 2026-11-19 issue #3050：快捷键页补一行换行键（Shift+Enter / Option+Enter）→ 492 + 1 = 493。
   // 2026-11-20 issue #3064：额外可写根对话框加「选择…」按钮 → 493 + 1 = 494。
-it("zh/en 各 494 个 key 且完全对齐", () => {
+  // 2026-11-20 issue #3068：右栏变编辑器——删掉左栏两张树原来的两个标签键（-2），补两段表头
+  // 与编辑器五条文案（+7）→ 494 + 5 = 499。
+it("zh/en 各 499 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(494);
-    expect(enKeys.length).toBe(494);
+    expect(zhKeys.length).toBe(499);
+    expect(enKeys.length).toBe(499);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);

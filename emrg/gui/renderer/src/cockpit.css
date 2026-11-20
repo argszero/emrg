@@ -1117,3 +1117,197 @@ body.col-resizing * {
   color: var(--text-2);
   word-break: break-word;
 }
+
+/* ── 会话栏下半：两段目录树（issue #3068）──────────────────────────────────
+   两张树从右栏搬到这里，所以会话栏从「一张列表」变成「列表 + 两段」。
+   段高由 `sectionFlex` 算，写成内联的 flex 值：收起只卸掉树，表头原地不动。 */
+.left-trees {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  border-top: 1px solid var(--border);
+}
+
+.left-section {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.left-section-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  height: 26px;
+  flex: none;
+  padding: 0 6px;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-3);
+  font-size: var(--fs-small);
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.left-section-header:hover {
+  color: var(--text-1);
+}
+
+.left-section-caret {
+  flex: none;
+  width: 10px;
+}
+
+.left-section-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* ── 右栏：编辑器（issue #3068）────────────────────────────────────────────
+   一条标签栏、一行面包屑、一块只读区。标签条自己在面板宽度内横向滚：
+   `nowrap` + `min-width: 0`，标签本身 `flex: 0 0 auto`，所以标签再多也不撑宽面板。 */
+.editor {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--bg-panel);
+}
+
+.editor-tabs {
+  display: flex;
+  align-items: stretch;
+  height: 30px;
+  flex: none;
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: thin;
+}
+
+.editor-tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 180px;
+  padding: 0 6px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-3);
+  font-size: var(--fs-small);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.editor-tab:hover {
+  color: var(--text-1);
+}
+
+.editor-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.editor-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.editor-tab-close {
+  flex: none;
+  padding: 0 2px;
+  border: none;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.editor-tab-close:hover {
+  color: var(--text-1);
+}
+
+.editor-crumbs {
+  display: flex;
+  align-items: center;
+  height: 24px;
+  flex: none;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-3);
+  font-size: var(--fs-small);
+  white-space: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.editor-crumb-sep {
+  padding: 0 2px;
+  opacity: 0.6;
+}
+
+.editor-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* 行号是本滚动容器的第一列，`position: sticky` 钉在左边：横向滚动时它不动。 */
+.editor-inner {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  min-width: min-content;
+}
+
+.editor-gutter {
+  padding: 4px 6px 4px 4px;
+  border-right: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text-3);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--fs-small);
+  line-height: 1.5;
+  text-align: right;
+  user-select: none;
+}
+
+.editor-text {
+  margin: 0;
+  padding: 4px 8px;
+  color: var(--text-1);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--fs-small);
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.editor-note {
+  margin: 0;
+  padding: 6px;
+  color: var(--text-3);
+  font-size: var(--fs-small);
+}
+
+.editor-note-error {
+  color: var(--danger, #c0392b);
+}
+
+.editor-memory {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}

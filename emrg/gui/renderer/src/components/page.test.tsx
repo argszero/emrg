@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { I18nProvider } from "../lib/i18n";
 import { SessionColumn } from "./SessionColumn";
-import { InspectorPanel } from "./InspectorPanel";
+import { LeftTrees } from "./LeftTrees";
 import { StatusBand } from "./StatusBand";
 import {
   BODY_MIN,
@@ -69,58 +69,69 @@ describe("SessionColumn", () => {
   });
 });
 
-describe("InspectorPanel", () => {
-  it("三个 tab：agent 目录 / 会话目录 / 记忆，默认选 agent 目录", () => {
+describe("LeftTrees (issue #3068)", () => {
+  const renderTrees = (props: Partial<Parameters<typeof LeftTrees>[0]> = {}) =>
     render(
       <I18nProvider lang="en">
-        <InspectorPanel agentRoot="/p/emrg" sessionRoot="/p/emrg/.emrg/sessions/s1" />
+        <LeftTrees agentRoot="/p/emrg" sessionRoot="/p/emrg/.emrg/sessions/s1" {...props} />
       </I18nProvider>,
     );
-    expect(screen.getByTestId("inspector-tab-agent")).toHaveTextContent("Agent dir");
-    expect(screen.getByTestId("inspector-tab-session")).toHaveTextContent("Session dir");
-    expect(screen.getByTestId("inspector-tab-memory")).toHaveTextContent("Memory");
-    expect(screen.getByTestId("inspector-panel").querySelectorAll("[role='tab']")).toHaveLength(3);
-    // 默认那一栏就是 agent 目录（issue #3026 第 1 条）
-    expect(screen.getByTestId("inspector-tab-agent")).toHaveAttribute("aria-selected", "true");
-    expect(screen.queryByTestId("inspector-tree-agent")).toBeInTheDocument();
-    expect(screen.queryByTestId("inspector-tree-session")).toBeNull();
+
+  it("两段按 agent 目录、会话目录的顺序排，表头各一行", () => {
+    renderTrees();
+    const sections = screen.getByTestId("left-trees").querySelectorAll("section");
+    expect(sections).toHaveLength(2);
+    expect(sections[0]).toBe(screen.getByTestId("left-section-agent"));
+    expect(sections[1]).toBe(screen.getByTestId("left-section-session"));
+    expect(screen.getByTestId("left-section-agent-header")).toHaveTextContent("Agent dir");
+    expect(screen.getByTestId("left-section-session-header")).toHaveTextContent("Session dir");
   });
 
-  it("会话目录列出会话目录与额外可写根，会话目录在第一行（issue #3063）", () => {
-    render(
-      <I18nProvider lang="en">
-        <InspectorPanel
-          agentRoot="/p/emrg"
-          sessionRoot="/p/emrg/.emrg/sessions/s1"
-          sessionRoots={["/p/other", "/p/third"]}
-        />
-      </I18nProvider>,
-    );
-    fireEvent.click(screen.getByTestId("inspector-tab-session"));
-    expect(screen.getByTestId("inspector-tree-session-roots")).toHaveAttribute("data-root-count", "3");
-    expect(screen.getByTestId("inspector-tree-session-root")).toHaveTextContent("s1");
-    expect(screen.getByTestId("inspector-tree-session-extra-1-root")).toHaveTextContent("other");
-    expect(screen.getByTestId("inspector-tree-session-extra-2-root")).toHaveTextContent("third");
+  it("点表头收起该段：树被卸掉，表头留在它原来的位置（同一父节点、同一序号）", () => {
+    renderTrees();
+    const header = screen.getByTestId("left-section-agent-header");
+    const parent = header.parentElement;
+    const indexBefore = Array.from(parent?.children ?? []).indexOf(header);
+    expect(screen.getByTestId("left-tree-agent")).toBeInTheDocument();
+    fireEvent.click(header);
+    // 收起只卸掉树本身：表头的父节点与序号都没变，所以它的纵向位置也没变。
+    expect(screen.queryByTestId("left-tree-agent")).toBeNull();
+    expect(header.parentElement).toBe(parent);
+    expect(Array.from(parent?.children ?? []).indexOf(header)).toBe(indexBefore);
+    // 腾出的高度给下面那段：下面那段保持可增长。
+    expect(screen.getByTestId("left-section-session").style.flex).toContain("1 1 50%");
+    expect(screen.getByTestId("left-section-agent").style.flex).toContain("0 0 auto");
   });
 
-  it("没有额外可写根时，会话目录就是原来那一棵树", () => {
-    render(
-      <I18nProvider lang="en">
-        <InspectorPanel agentRoot="/p/emrg" sessionRoot="/p/emrg/.emrg/sessions/s1" />
-      </I18nProvider>,
-    );
-    fireEvent.click(screen.getByTestId("inspector-tab-session"));
-    expect(screen.queryByTestId("inspector-tree-session-roots")).toBeNull();
-    expect(screen.getByTestId("inspector-tree-session-root")).toHaveTextContent("s1");
+  it("收起最下面那段时，让出的高度留在栏底：上面那段不再增长", () => {
+    renderTrees();
+    fireEvent.click(screen.getByTestId("left-section-session-header"));
+    expect(screen.queryByTestId("left-tree-session")).toBeNull();
+    expect(screen.getByTestId("left-section-session").style.flex).toContain("0 0 auto");
+    // `0 0 50%` 而不是 `1 1 50%`：增长的那一半不还给它，余高留在栏底。
+    expect(screen.getByTestId("left-section-agent").style.flex).toContain("0 0 50%");
   });
 
-  it("没有会话时两棵树都说先选会话，而不是画一棵空树", () => {
+  it("两段都展开时各占一半高", () => {
+    renderTrees();
+    expect(screen.getByTestId("left-section-agent").style.flex).toContain("1 1 50%");
+    expect(screen.getByTestId("left-section-session").style.flex).toContain("1 1 50%");
+  });
+
+  it("会话目录那段仍列出会话目录与额外可写根（issue #3063 的规格跟着搬过来）", () => {
+    renderTrees({ sessionRoots: ["/p/other", "/p/third"] });
+    expect(screen.getByTestId("left-tree-session-roots")).toHaveAttribute("data-root-count", "3");
+    expect(screen.getByTestId("left-tree-session-root")).toHaveTextContent("s1");
+    expect(screen.getByTestId("left-tree-session-extra-1-root")).toHaveTextContent("other");
+  });
+
+  it("没有会话时不画空树，而是说出来", () => {
     render(
       <I18nProvider lang="en">
-        <InspectorPanel />
+        <LeftTrees />
       </I18nProvider>,
     );
-    expect(screen.getByTestId("inspector-tree-agent-no-session")).toHaveTextContent("Select a session");
+    expect(screen.getByTestId("left-tree-agent-no-session")).toHaveTextContent("Select a session");
   });
 });
 

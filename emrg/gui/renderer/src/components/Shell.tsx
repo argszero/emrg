@@ -33,7 +33,8 @@ import {
   storedColumnWidth,
   type SidebarViewId,
 } from "../lib/cockpit";
-import { InspectorPanel } from "./InspectorPanel";
+import { EditorPanel, type EditorPanelHandle } from "./EditorPanel";
+import { LeftTrees } from "./LeftTrees";
 import { WorkspaceView, type WorkspaceViewId } from "./WorkspaceView";
 import { TranscriptView, type ScrollMemory } from "./TranscriptView";
 import { Composer, type CommandRouting } from "./Composer";
@@ -638,6 +639,13 @@ export function Shell() {
     };
   }, [bridge, activeSid]);
   const loadDir = useCallback((p: string) => bridge.listDir(p), [bridge]);
+  const loadFile = useCallback((p: string) => bridge.readFile(p), [bridge]);
+  // The editor's tabs are opened from the session column's trees, so this column needs a
+  // handle on the panel that owns them (issue #3068).
+  const editorRef = useRef<EditorPanelHandle | null>(null);
+  const openFileInEditor = useCallback((req: { path: string; root: string; pin: boolean }) => {
+    editorRef.current?.openFile({ path: req.path, root: req.root, preview: !req.pin });
+  }, []);
 
   /**
    * The whole register's sessions, fetched each time the overlay opens (issue #2978).
@@ -1134,6 +1142,15 @@ export function Shell() {
                 onSearch={() => setSearchOpen(true)}
                 onNew={() => dialogHost.current?.openNewSession()}
               />
+              {/* The two trees, under the session list (issue #3068): what is running
+                  above, what it is writing to below. */}
+              <LeftTrees
+                agentRoot={roots.agentRoot}
+                sessionRoot={roots.sessionRoot}
+                sessionRoots={activeSid ? (appState.sandboxRootsBySid[activeSid] ?? null) : null}
+                loadDir={loadDir}
+                onOpenFile={openFileInEditor}
+              />
             </aside>
             {/* Both handles are siblings of the columns they resize, never children: a
                 6px strip inside the thing it sizes cannot be hit once that thing is 0. */}
@@ -1259,15 +1276,10 @@ export function Shell() {
               data-testid="inspector-aside"
               style={{ width: effectiveRightWidth, flex: "none" }}
             >
-              <InspectorPanel
+              <EditorPanel
+                ref={editorRef}
                 sid={activeSid}
-                agentRoot={roots.agentRoot}
-                sessionRoot={roots.sessionRoot}
-                // 会话的额外可写根（issue #3063）：与上面那个对话框同一份权威——`sandbox_roots`
-                // 帧与 `resume_result.meta.sandbox_roots` 写它。会话目录只是这个会话能写的一处，
-                // 其余每一处都在这份列表里；`null` 表示 daemon 还没说，不是「没有」。
-                sessionRoots={activeSid ? (appState.sandboxRootsBySid[activeSid] ?? null) : null}
-                loadDir={loadDir}
+                loadFile={loadFile}
                 onOpenMemory={() => dialogHost.current?.openMemory()}
               />
             </aside>
