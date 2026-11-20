@@ -7,6 +7,10 @@ import { ErrorBoundary } from "./ErrorBoundary";
 import { I18nProvider } from "../lib/i18n";
 import { useSnapshotStore } from "../hooks/useSnapshotStore";
 import type { DaemonBridge, DaemonEventFrame } from "../lib/daemonBridge";
+// 源码走打包器自己的 `?raw`，不用 `node:fs`：渲染层的 tsconfig 只声明了 `vite/client`
+// 与 jest-dom，`node:fs` 在本机编译不过（与 cockpit.test.ts、conversationType.test.ts 同一约定）。
+import bridgeSource from "../lib/daemonBridge.ts?raw";
+import providerSource from "./DaemonBridgeProvider.tsx?raw";
 
 /**
  * DaemonBridgeProvider.test.tsx — Batch 5 slice 2：AppProviders daemon-event
@@ -60,6 +64,59 @@ function wrapper(children: ReactNode) {
       <DaemonBridgeProvider>{children}</DaemonBridgeProvider>
     </I18nProvider>
   );
+}
+
+/* ── The channel-registration guard (rant 2026-11-20T09:54:50, item 5) ────────
+ *
+ * The failure this file's tests could not see: `createDaemonBridge` takes its channels
+ * off the literal built here, so a name that preload exposes, main handles and the
+ * daemon answers still reaches the bridge as `undefined` when this literal omits it —
+ * and every layer keeps its own test green. One guard, comparing the two source texts:
+ * what the bridge declares it will use, against what this provider actually registers.
+ */
+
+/** Strip comments: a brace or a name inside prose is not part of the object. */
+function bare(text: string): string {
+  return text.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/^\s*\/\/.*$/gm, " ");
+}
+
+/** The inside of the object literal that starts at `opener`. */
+function objectBody(source: string, opener: RegExp): string {
+  const text = bare(source);
+  const hit = opener.exec(text);
+  if (!hit) throw new Error(`no block matching ${String(opener)}`);
+  const start = text.indexOf("{", hit.index);
+  let depth = 0;
+  for (let i = start; i < text.length; i++) {
+    if (text[i] === "{") depth += 1;
+    else if (text[i] === "}") {
+      depth -= 1;
+      if (depth === 0) return text.slice(start + 1, i);
+    }
+  }
+  throw new Error("unbalanced block");
+}
+
+/**
+ * Names declared at the block's own level — the members of an interface, or the keys of
+ * an object literal. A line is read only at depth 0, so a parameter or a nested field
+ * is never mistaken for a member, and only from its start, so `p:` inside a signature
+ * is not either.
+ */
+function memberNames(body: string): string[] {
+  const names: string[] = [];
+  let depth = 0;
+  for (const line of body.split("\n")) {
+    if (depth === 0) {
+      const m = /^\s*([A-Za-z_$][\w$]*)\s*\??\s*[:(<]/.exec(line);
+      if (m) names.push(m[1]);
+    }
+    for (const ch of line) {
+      if (ch === "{") depth += 1;
+      else if (ch === "}") depth -= 1;
+    }
+  }
+  return names;
 }
 
 describe("DaemonBridgeProvider (Batch 5 slice 2)", () => {
@@ -298,5 +355,21 @@ describe("DaemonBridgeProvider (Batch 5 slice 2)", () => {
     await waitFor(() => expect(api).not.toBeNull());
     await expect(api!.setSandbox("s1", "read-only")).resolves.toBe(false);
     await expect(api!.respondApproval(true)).resolves.toBe(false);
+  });
+
+  it("rant 2026-11-20T09:54:50 第 5 条：登记的通道少于桥声明要用的通道时必红", () => {
+    // 一个通道的完整链条是 preload → main → daemon → 桥 → 这里的对象字面量。前四段各有
+    // 自己的测试，唯独这一段没有：字面量漏掉一项时，桥拿到的是 undefined，于是它按
+    // 「这一版不会问」处理，而下面每一段都还是绿的。状态带的三个 `—` 就是这么来的。
+    const declared = memberNames(objectBody(bridgeSource, /^\s{2}emrg: \{/m));
+    const registered = memberNames(objectBody(providerSource, /^\s{6}emrg: \{/m));
+
+    // 先量主体：两个空集合相差为零，那是「什么都没比」，不是「全都登记了」。
+    expect(declared.length).toBeGreaterThan(5);
+    expect(registered.length).toBeGreaterThan(5);
+    expect(declared).toContain("usageWindow");
+
+    const missing = declared.filter((name) => !registered.includes(name));
+    expect(missing).toEqual([]);
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { I18nProvider } from "../lib/i18n";
 import { SessionColumn } from "./SessionColumn";
 import { InspectorPanel } from "./InspectorPanel";
@@ -84,6 +84,34 @@ describe("InspectorPanel", () => {
     expect(screen.getByTestId("inspector-tab-agent")).toHaveAttribute("aria-selected", "true");
     expect(screen.queryByTestId("inspector-tree-agent")).toBeInTheDocument();
     expect(screen.queryByTestId("inspector-tree-session")).toBeNull();
+  });
+
+  it("会话目录列出会话目录与额外可写根，会话目录在第一行（issue #3063）", () => {
+    render(
+      <I18nProvider lang="en">
+        <InspectorPanel
+          agentRoot="/p/emrg"
+          sessionRoot="/p/emrg/.emrg/sessions/s1"
+          sessionRoots={["/p/other", "/p/third"]}
+        />
+      </I18nProvider>,
+    );
+    fireEvent.click(screen.getByTestId("inspector-tab-session"));
+    expect(screen.getByTestId("inspector-tree-session-roots")).toHaveAttribute("data-root-count", "3");
+    expect(screen.getByTestId("inspector-tree-session-root")).toHaveTextContent("s1");
+    expect(screen.getByTestId("inspector-tree-session-extra-1-root")).toHaveTextContent("other");
+    expect(screen.getByTestId("inspector-tree-session-extra-2-root")).toHaveTextContent("third");
+  });
+
+  it("没有额外可写根时，会话目录就是原来那一棵树", () => {
+    render(
+      <I18nProvider lang="en">
+        <InspectorPanel agentRoot="/p/emrg" sessionRoot="/p/emrg/.emrg/sessions/s1" />
+      </I18nProvider>,
+    );
+    fireEvent.click(screen.getByTestId("inspector-tab-session"));
+    expect(screen.queryByTestId("inspector-tree-session-roots")).toBeNull();
+    expect(screen.getByTestId("inspector-tree-session-root")).toHaveTextContent("s1");
   });
 
   it("没有会话时两棵树都说先选会话，而不是画一棵空树", () => {

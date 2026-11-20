@@ -248,6 +248,46 @@ describe("createDaemonBridge", () => {
     expect(Number.isNaN(bad.input as unknown as number)).toBe(false);
   });
 
+  it("rant 2026-11-20T09:54:50 第 2 条：打开即读一次，此后每 15 秒刷新一次", async () => {
+    // 滚动窗口的远端跟着时钟走：只在下一次有事发生时才读的客户端，会显示一个不再缩小的
+    // 数字。所以这里钉住两件事——挂载后立刻就有一读，以及之后是 15 秒而不是 15 分钟。
+    vi.useFakeTimers();
+    try {
+      const { usageWindow } = setup();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(usageWindow).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(usageWindow).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(usageWindow).toHaveBeenCalledTimes(3);
+      // 没到点就不读：这条让「改慢」也红，而不是只让「改快」红。
+      await vi.advanceTimersByTimeAsync(14_000);
+      expect(usageWindow).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rant 2026-11-20T09:54:50 第 4 条：读失败保留上一次读数，不写 0", async () => {
+    // 0 是「这 24 小时没花钱」的断言。一次读失败只能说明没读到，所以上一次的读数必须
+    // 留在原处——把失败写成 0，等于替 daemon 报了一个它没报的数。
+    const { emit, bridge, usageWindow } = setup();
+    usageWindow.mockResolvedValue({
+      input: 100, cache: 10, output: 5, windowStart: 1, windowEnd: 2,
+    });
+    emit({ type: "turn_progress", data: {}, sid: "s1" });
+    await vi.waitFor(() => expect(bridge.store.get().usageWindow?.input).toBe(100));
+
+    usageWindow.mockRejectedValue(new Error("daemon down"));
+    const callsBefore = usageWindow.mock.calls.length;
+    emit({ type: "turn_progress", data: {}, sid: "s1" });
+    await vi.waitFor(() => expect(usageWindow.mock.calls.length).toBe(callsBefore + 1));
+    const kept = bridge.store.get().usageWindow!;
+    expect(kept.input).toBe(100);
+    expect(kept.cache).toBe(10);
+    expect(kept.output).toBe(5);
+  });
+
   it("turn_end → 清 busy + turnStartBySid（幂等，与 done 重复不炸）", () => {
     const { emit, bridge } = setup();
     emit({ type: "turn_start", data: { started_at: 1756785600.5 }, sid: "s1" });
