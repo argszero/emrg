@@ -1,10 +1,10 @@
 import { useState, type ReactNode } from "react";
 import { useI18n } from "../lib/i18n";
-import { FileTree, FileTreeRoots, type LoadDir, type OpenFile } from "./FileTree";
+import { FOLDER_GLYPH, FileTree, FileTreeRoots, TreeLine, type LoadDir, type OpenFile } from "./FileTree";
 
 /**
  * LeftTrees — the session column's lower half: one tree, three groups
- * (rant 2026-11-20T17:56:07).
+ * (rant 2026-11-20T17:56:07, then 2026-11-20T21:27:29).
  *
  * It used to be two sections, two trees and two scrollbars, each taking half the height,
  * so finding a file began with deciding which half it belonged to. Now there is one
@@ -12,22 +12,20 @@ import { FileTree, FileTreeRoots, type LoadDir, type OpenFile } from "./FileTree
  * fixed order: the agent's directory (folded at first), the session's own directory, and
  * the session's extra writable roots.
  *
- * Neither of the old sections was one thing either: the extra writable roots hung under
- * the session directory that owned them, so the second tree carried two subjects at once.
- * They are their own group now.
+ * The groups are the tree's *first level* (rant 2026-11-20T21:27:29). Each one used to be
+ * a header button above a body of its own — a taller line, no indent, no icon, and a
+ * toolbar the host never asked for. A group is now a `TreeLine` at depth 0: the same row
+ * height, indent step, caret and folder glyph an ordinary directory row draws, differing
+ * only in its type (11.5px, 700, secondary colour). Its next level is the real directory
+ * drawn as a row carrying its name — `depthOffset={1}` — and that directory's contents
+ * hang under it, so a group folds as a directory does rather than as a panel section.
  *
- * The height needs no arithmetic any more. A folded group is its header row and nothing
- * else — its body is not rendered, so there is no height to hide — and everything below
- * the heading belongs to the one scroll container, which is why `sectionFlex` and the two
- * inline flex values it produced are gone rather than ported.
- *
- * A group header is a grouping control, not a selection: it folds, and it does not touch
- * the session or the file the right-hand column is showing. Which groups are folded lives
- * in this component and nowhere else — no disk, no carry-over to the next session; the
- * defaults below are the first render's only.
- *
- * The tree itself is untouched (row height, indent, icons, guide lines, the shared set of
- * open folders): this file decides only what hangs under which group.
+ * A group row is a grouping control, not a selection: clicking it folds, and it touches
+ * neither the session nor the file the right-hand column is showing. Folding a group also
+ * folds the folders under it, so re-opening a group shows its roots rather than a
+ * screenful of levels opened an hour ago. Which groups are folded lives in this component
+ * and nowhere else — no disk, no carry-over to the next session; the defaults below are
+ * the first render's only.
  */
 export interface LeftTreesProps {
   /** The agent's working directory; `null` = unknown, and the tree says so. */
@@ -54,6 +52,16 @@ type GroupId = "agent" | "session" | "extra";
  */
 const DEFAULT_COLLAPSED: Record<GroupId, boolean> = { agent: true, session: false, extra: false };
 
+/** The separator a path uses, read off the path itself rather than off the platform. */
+const sepOf = (path: string): string => (path.includes("\\") && !path.includes("/") ? "\\" : "/");
+
+/** Whether `path` is `root` or sits under it. */
+function underOrEqual(path: string, root: string): boolean {
+  if (path === root) return true;
+  const sep = sepOf(root);
+  return path.startsWith(root.endsWith(sep) ? root : root + sep);
+}
+
 export function LeftTrees({
   agentRoot = null,
   sessionRoot = null,
@@ -71,7 +79,21 @@ export function LeftTrees({
   // list for a session that added no root, and there is no third thing to draw.
   const extras = sessionRoots ?? [];
 
-  const toggle = (id: GroupId): void => setCollapsed((c) => ({ ...c, [id]: !c[id] }));
+  const rootsOf = (id: GroupId): string[] =>
+    (id === "agent" ? [agentRoot] : id === "session" ? [sessionRoot] : extras).filter(
+      (r): r is string => typeof r === "string" && r !== "",
+    );
+
+  const toggle = (id: GroupId): void => {
+    const folding = !collapsed[id];
+    if (folding) {
+      // A folded group shows one row; the folders under it fold with it, so re-opening
+      // the group does not bring back levels opened in an earlier pass.
+      const roots = rootsOf(id);
+      setOpenFolders((set) => new Set([...set].filter((p) => !roots.some((r) => underOrEqual(p, r)))));
+    }
+    setCollapsed((c) => ({ ...c, [id]: folding }));
+  };
 
   const group = (id: GroupId, label: string, body: ReactNode): ReactNode => (
     <div
@@ -80,18 +102,18 @@ export function LeftTrees({
       data-testid={`left-group-${id}`}
       data-collapsed={collapsed[id] ? "true" : "false"}
     >
-      <button
-        type="button"
-        className="left-group-header"
-        data-testid={`left-group-${id}-header`}
-        aria-expanded={!collapsed[id]}
+      <TreeLine
+        testId={`left-group-${id}-row`}
+        guideTestId={`left-group-${id}-row`}
+        depth={0}
+        variant="group"
+        caret={collapsed[id] ? "▸" : "▾"}
+        glyph={collapsed[id] ? FOLDER_GLYPH.closed : FOLDER_GLYPH.open}
+        glyphKind={collapsed[id] ? "dir" : "dir-open"}
+        name={label}
+        ariaExpanded={!collapsed[id]}
         onClick={() => toggle(id)}
-      >
-        <span className="left-group-caret" aria-hidden="true">
-          {collapsed[id] ? "▸" : "▾"}
-        </span>
-        {label}
-      </button>
+      />
       {collapsed[id] ? null : (
         <div className="left-group-body" data-testid={`left-group-${id}-body`}>
           {body}
@@ -113,6 +135,7 @@ export function LeftTrees({
           <FileTree
             testId="left-tree-agent"
             root={agentRoot}
+            depthOffset={1}
             loadDir={loadDir}
             expanded={openFolders}
             onExpandedChange={setOpenFolders}
@@ -125,6 +148,7 @@ export function LeftTrees({
           <FileTree
             testId="left-tree-session"
             root={sessionRoot}
+            depthOffset={1}
             loadDir={loadDir}
             expanded={openFolders}
             onExpandedChange={setOpenFolders}
@@ -135,13 +159,18 @@ export function LeftTrees({
           "extra",
           t("leftTree.extraRoots"),
           extras.length === 0 ? (
-            <div className="left-group-empty" data-testid="left-group-extra-empty">
-              {t("leftTree.noExtraRoots")}
-            </div>
+            <TreeLine
+              testId="left-group-extra-empty"
+              guideTestId="left-group-extra-empty"
+              depth={1}
+              variant="empty"
+              name={t("leftTree.noExtraRoots")}
+            />
           ) : (
             <FileTreeRoots
               testId="left-tree-extra"
               roots={extras}
+              depthOffset={1}
               loadDir={loadDir}
               expanded={openFolders}
               onExpandedChange={setOpenFolders}

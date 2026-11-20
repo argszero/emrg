@@ -129,6 +129,18 @@ level "fallback"  it could not be read, and §5's readings say so
   renderer is available, the publish reading is `not attempted` and names the blocked step, as §5's
   table already provides: an image described in words and a placeholder file are both an image that
   does not exist, and the sourcing rule above applies to a picture as squarely as to a sentence.
+- **A reader who is not its author is asked twice before the piece ships.** Once on the plan, before
+  the piece is produced, and once on the draft, before it is published: the second is the one that
+  catches what the first cannot, because the drafted piece is what a reader can actually judge. Ask
+  a specific question
+  rather than for a verdict — where it does not land, which part is padding, what a reader who does
+  not know the subject would still be missing. **Adopt wording, structure and what to cut; never a
+  number, a quotation, a time or a fact** — a reader's rewrite of a figure is a claim with no
+  source, which the bullets above already forbid. Record each consultation in §5's `reader`
+  reading: what was asked, what was taken, what was rejected. **A round that consulted nobody
+  records `nobody` there**, in the same form as an unread trend: which reader the installation has
+  is its configuration to name, and silence about the step is a gap in the round rather than a
+  clean one.
 
 ### 4. Publish — through the session this machine already holds, once
 
@@ -178,6 +190,7 @@ level "fallback"  it could not be read, and §5's readings say so
 | `trend_data` | `live` (with what was read and when) or `no real-time data was obtained` (with why) |
 | `publish` | §4's outcome — `posted` with the platform, the posting time and the post's id or link; `failed` with the reason; `not attempted` with the reason |
 | `unread` | the fields §3 kept out of the piece because no source could be named, each with its reason (page unreadable, list not public, nothing stated by the subject) — an absence belongs in these readings, and never in the piece |
+| `reader` | who was consulted before the piece shipped and what they answered — what was asked, what was taken, what was rejected — or `nobody`, with which reader the installation has |
 | `platform`, `date`, `task` | the channel this file belongs to, the round's date, and this task's name |
 
 - **A measured number, not a guess**: an estimated word count is not a reading, and a readings block

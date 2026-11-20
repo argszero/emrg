@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useI18n } from "../lib/i18n";
 import {
   ICON_PX,
@@ -28,11 +28,19 @@ import { ContextMenu, type ContextMenuId } from "./ContextMenu";
  * before, because the two roots here are working directories and a recursive read of one
  * is exactly the cost this tree exists to avoid.
  *
- * Right-clicking a row — or the root name in the toolbar, for the root itself — offers
- * the two things a tree row is for: take its absolute path away, or hand it to the
- * system (issue #3041). The menu is the repository's existing `.ctx-menu` block, and the
- * notice rows that stand in for an empty, loading or unreadable directory answer no
- * menu at all, because there is no path behind them.
+ * The root is a row (rant 2026-11-20T21:27:29). It used to be a toolbar above the body:
+ * the directory's name on the left, a refresh button and a collapse-all button on the
+ * right. That made the name the one name in the panel that no row carried, and gave the
+ * panel two controls nothing asked for. Now the root is the body's first row, opening and
+ * folding like any other directory, and the caller may nest the whole tree under a level
+ * of its own (`depthOffset`) — which is how the left column puts each tree under its
+ * group's row.
+ *
+ * Right-clicking a row — the root row included — offers the two things a tree row is
+ * for: take its absolute path away, or hand it to the system (issue #3041). The menu is
+ * the repository's existing `.ctx-menu` block, and the notice rows that stand in for an
+ * empty, loading or unreadable directory answer no menu at all, because there is no path
+ * behind them.
  */
 
 /** How long «已复制 ✓» stays before the menu closes itself. */
@@ -66,6 +74,13 @@ export interface FileTreeProps {
   /** test-id prefix, so the two trees in one panel stay distinguishable. */
   testId: string;
   /**
+   * How many levels above this tree's own root the caller draws it (rant
+   * 2026-11-20T21:27:29): the left column nests every tree under its group's row, so the
+   * root row sits at this depth and its children one level below it. Omitted = the tree
+   * starts at the panel's first level.
+   */
+  depthOffset?: number;
+  /**
    * The open folders, by absolute path; omitted = this tree keeps its own.
    *
    * Supplied by a caller that outlives the tree — the inspector unmounts a tab's tree
@@ -90,7 +105,126 @@ const GLYPHS: Record<string, string> = {
   file: "▤",
 };
 
-export function FileTree({ root, loadDir, testId, expanded, onExpandedChange, onOpenFile }: FileTreeProps) {
+/**
+ * The two folder shapes, exported rather than respelled by a caller: the left column's
+ * group rows draw the same folder a directory row does, and a second copy of `■`/`□` is
+ * a second carrier of one decision.
+ */
+export const FOLDER_GLYPH = { closed: GLYPHS.dir, open: GLYPHS["dir-open"] };
+
+export interface TreeLineProps {
+  /** The row's own test id (`<tree>-row`, `<tree>-root`, `left-group-<id>-row`). */
+  testId: string;
+  /** Prefix the 1px level guides are named after; the tree passes its own. */
+  guideTestId: string;
+  /** Levels to indent by; 0 is the panel's left edge. */
+  depth: number;
+  caret?: string;
+  glyph?: string;
+  glyphKind?: string;
+  name: ReactNode;
+  title?: string;
+  /**
+   * What may differ between lines: a group's heavier type, an empty line's italic and
+   * the absence of hover. The geometry never varies — that is the rule this component
+   * exists to keep in one place.
+   */
+  variant?: "group" | "empty";
+  selected?: boolean;
+  ariaExpanded?: boolean;
+  dataPath?: string;
+  onClick?: () => void;
+  onDoubleClick?: () => void;
+  onContextMenu?: (e: React.MouseEvent) => void;
+}
+
+/**
+ * One line of the panel — the group level and the directory levels draw the same one
+ * (rant 2026-11-20T21:27:29).
+ *
+ * Height, indent step and icon size are written onto the element from `lib/fileTree`'s
+ * constants, so a test reads them off the DOM instead of trusting a stylesheet that may
+ * not have loaded: that is what makes a 24px group header or an iconless row fail rather
+ * than look fine in one theme.
+ */
+export function TreeLine({
+  testId,
+  guideTestId,
+  depth,
+  caret,
+  glyph,
+  glyphKind,
+  name,
+  title,
+  variant,
+  selected,
+  ariaExpanded,
+  dataPath,
+  onClick,
+  onDoubleClick,
+  onContextMenu,
+}: TreeLineProps) {
+  // A group row and an ordinary row share `.ft-row`, so the whole-row hover tint is the
+  // same; an empty line is a line without being a row — no hover, nothing to click.
+  const classes = ["ft-line"];
+  if (variant === "group") classes.push("ft-row", "left-group-row");
+  else if (variant === "empty") classes.push("left-group-empty");
+  else classes.push("ft-row");
+  if (selected) classes.push("selected");
+
+  return (
+    <div
+      className={classes.join(" ")}
+      data-testid={testId}
+      data-depth={depth}
+      data-kind={glyphKind}
+      data-path={dataPath}
+      role="treeitem"
+      aria-level={depth + 1}
+      aria-selected={selected ?? false}
+      aria-expanded={ariaExpanded}
+      style={{ height: ROW_HEIGHT, paddingLeft: depth * INDENT_PX + 6 }}
+      onClick={onClick}
+      onDoubleClick={onDoubleClick}
+      onContextMenu={onContextMenu}
+      title={title}
+    >
+      {/* One 1px guide per level above this one: what makes a deep row's parentage
+          readable without counting pixels (issue #3026, item 6). */}
+      {Array.from({ length: depth }, (_, i) => (
+        <span
+          key={i}
+          className="ft-guide"
+          data-testid={`${guideTestId}-guide`}
+          style={{ left: i * INDENT_PX + 4 }}
+          aria-hidden="true"
+        />
+      ))}
+      <span className="ft-caret" aria-hidden="true">
+        {caret ?? ""}
+      </span>
+      <span
+        className="ft-glyph"
+        data-kind={glyphKind}
+        style={{ width: ICON_PX, height: ICON_PX }}
+        aria-hidden="true"
+      >
+        {glyph ?? ""}
+      </span>
+      <span className="ft-name">{name}</span>
+    </div>
+  );
+}
+
+export function FileTree({
+  root,
+  loadDir,
+  testId,
+  depthOffset = 0,
+  expanded,
+  onExpandedChange,
+  onOpenFile,
+}: FileTreeProps) {
   const { t } = useI18n();
   const [dirs, setDirs] = useState<DirMap>({});
   // Open folders are the caller's when it supplies `expanded`, and this tree's own
@@ -107,8 +241,9 @@ export function FileTree({ root, loadDir, testId, expanded, onExpandedChange, on
     [controlled, onExpandedChange],
   );
   const [selected, setSelected] = useState<string | null>(null);
-  // A refresh re-reads; the counter is the effect's trigger, not a value it reads.
-  const [refreshSeq, setRefreshSeq] = useState(0);
+  // The root row's own fold, and it starts open: a tree that showed its top level on
+  // arrival keeps doing so now that the name has moved from a toolbar into a row.
+  const [rootOpen, setRootOpen] = useState(true);
   const bodyRef = useRef<HTMLDivElement | null>(null);
   // Right-click state: where the menu sits, which path it acts on, which item the arrow
   // keys light up, and what the copy item says once it has been tried.
@@ -166,9 +301,9 @@ export function FileTree({ root, loadDir, testId, expanded, onExpandedChange, on
     setCopyState(null);
     setDirs({});
     if (root) void read(root);
-    // `read` is re-created when the loader or the dictionary changes; the root and the
-    // refresh counter are the events this effect answers.
-  }, [root, refreshSeq]); // eslint-disable-line react-hooks/exhaustive-deps
+    // `read` is re-created when the loader or the dictionary changes; the root is the
+    // event this effect answers.
+  }, [root]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const rows = useMemo(() => rowsFor(root, dirs, openSet), [root, dirs, openSet]);
 
@@ -338,49 +473,8 @@ export function FileTree({ root, loadDir, testId, expanded, onExpandedChange, on
     }
   };
 
-  const refresh = (): void => {
-    // Every level already read is re-read: a refresh that only re-read the root would
-    // leave every open folder showing what it held before the button was pressed.
-    const loaded = Object.keys(dirs).filter((p) => dirs[p].status === "loaded");
-    for (const p of loaded) void read(p);
-    setRefreshSeq((n) => n + 1);
-  };
-
   return (
     <div className="ft" data-testid={testId} data-root={root ?? ""}>
-      <div className="ft-toolbar">
-        <span
-          className="ft-root"
-          data-testid={`${testId}-root`}
-          title={root ?? ""}
-          onContextMenu={(e) => {
-            // The toolbar's root name stands for the root directory itself.
-            if (root) openMenuAt(e, root);
-          }}
-        >
-          {root ? baseName(root) : "—"}
-        </span>
-        <button
-          type="button"
-          className="ft-tool"
-          data-testid={`${testId}-refresh`}
-          onClick={refresh}
-          disabled={!root}
-          title={t("inspector.treeRefresh")}
-        >
-          ⟳
-        </button>
-        <button
-          type="button"
-          className="ft-tool"
-          data-testid={`${testId}-collapse`}
-          onClick={() => applyExpanded(new Set())}
-          disabled={!root}
-          title={t("inspector.treeCollapse")}
-        >
-          ⊟
-        </button>
-      </div>
       <div
         className="ft-body"
         ref={bodyRef}
@@ -397,7 +491,22 @@ export function FileTree({ root, loadDir, testId, expanded, onExpandedChange, on
           <p className="ft-note" data-testid={`${testId}-no-session`}>
             {t("inspector.treeNoSession")}
           </p>
-        ) : rootState?.status === "error" ? (
+        ) : (
+          <TreeLine
+            testId={`${testId}-root`}
+            guideTestId={testId}
+            depth={depthOffset}
+            caret={rootOpen ? "▾" : "▸"}
+            glyph={rootOpen ? FOLDER_GLYPH.open : FOLDER_GLYPH.closed}
+            glyphKind={rootOpen ? "dir-open" : "dir"}
+            name={baseName(root)}
+            title={root}
+            ariaExpanded={rootOpen}
+            onClick={() => setRootOpen((o) => !o)}
+            onContextMenu={(e) => openMenuAt(e, root)}
+          />
+        )}
+        {!root || !rootOpen ? null : rootState?.status === "error" ? (
           <p className="ft-note ft-note-error" data-testid={`${testId}-error`}>
             {rootState.error}
           </p>
@@ -410,58 +519,42 @@ export function FileTree({ root, loadDir, testId, expanded, onExpandedChange, on
             {t("inspector.treeEmpty")}
           </p>
         ) : null}
-        {rows.map((row) => {
-          const kind = iconKind(row);
-          return (
-            <div
-              key={row.path}
-              className={`ft-row${selected === row.path ? " selected" : ""}`}
-              role="treeitem"
-              aria-level={row.depth + 1}
-              aria-selected={selected === row.path}
-              aria-expanded={row.type === "dir" ? row.expanded : undefined}
-              data-testid={`${testId}-row`}
-              data-depth={row.depth}
-              data-kind={kind}
-              data-path={row.path}
-              style={{ height: ROW_HEIGHT, paddingLeft: row.depth * INDENT_PX + 6 }}
-              onClick={() => {
-                setSelected(row.path);
-                open(row);
-                // A file row is also a request to see the file (issue #3068, item 6).
-                // `open` above does nothing for a file, so a directory click reports
-                // nothing and only expands.
-                if (row.type === "file" && root) onOpenFile?.({ path: row.path, root, pin: false });
-              }}
-              onDoubleClick={() => {
-                // A double click pins: the two single clicks before it opened a preview
-                // (the second one only re-focused that same tab), and this makes it stay.
-                if (row.type === "file" && root) onOpenFile?.({ path: row.path, root, pin: true });
-              }}
-              onContextMenu={(e) => openMenuAt(e, row.path)}
-              title={row.name}
-            >
-              {/* One 1px guide per level: what makes a deep row's parentage readable
-                  without counting pixels (issue #3026, item 6). */}
-              {Array.from({ length: row.depth }, (_, i) => (
-                <span
-                  key={i}
-                  className="ft-guide"
-                  data-testid={`${testId}-guide`}
-                  style={{ left: i * INDENT_PX + 4 }}
-                  aria-hidden="true"
+        {root && rootOpen
+          ? rows.map((row) => {
+              const kind = iconKind(row);
+              return (
+                <TreeLine
+                  key={row.path}
+                  testId={`${testId}-row`}
+                  guideTestId={testId}
+                  depth={depthOffset + 1 + row.depth}
+                  caret={row.type === "dir" ? (row.expanded ? "▾" : "▸") : ""}
+                  glyph={GLYPHS[kind] ?? GLYPHS.file}
+                  glyphKind={kind}
+                  name={row.name}
+                  title={row.name}
+                  dataPath={row.path}
+                  selected={selected === row.path}
+                  ariaExpanded={row.type === "dir" ? row.expanded : undefined}
+                  onClick={() => {
+                    setSelected(row.path);
+                    open(row);
+                    // A file row is also a request to see the file (issue #3068, item 6).
+                    // `open` above does nothing for a file, so a directory click reports
+                    // nothing and only expands.
+                    if (row.type === "file" && root) onOpenFile?.({ path: row.path, root, pin: false });
+                  }}
+                  onDoubleClick={() => {
+                    // A double click pins: the two single clicks before it opened a
+                    // preview (the second one only re-focused that same tab), and this
+                    // makes it stay.
+                    if (row.type === "file" && root) onOpenFile?.({ path: row.path, root, pin: true });
+                  }}
+                  onContextMenu={(e) => openMenuAt(e, row.path)}
                 />
-              ))}
-              <span className="ft-caret" aria-hidden="true">
-                {row.type === "dir" ? (row.expanded ? "▾" : "▸") : ""}
-              </span>
-              <span className="ft-glyph" data-kind={kind} style={{ width: ICON_PX, height: ICON_PX }} aria-hidden="true">
-                {GLYPHS[kind] ?? GLYPHS.file}
-              </span>
-              <span className="ft-name">{row.name}</span>
-            </div>
-          );
-        })}
+              );
+            })
+          : null}
         {rootState?.status === "loaded" && rootState.truncated ? (
           <p className="ft-note" data-testid={`${testId}-more`}>
             {t("inspector.treeMore")}
@@ -510,9 +603,19 @@ export interface FileTreeRootsProps {
   onExpandedChange?: (next: Set<string>) => void;
   /** A file row was clicked; forwarded to every root this wrapper draws. */
   onOpenFile?: OpenFile;
+  /** Forwarded to every tree it draws; see `FileTreeProps.depthOffset`. */
+  depthOffset?: number;
 }
 
-export function FileTreeRoots({ roots, loadDir, testId, expanded, onExpandedChange, onOpenFile }: FileTreeRootsProps) {
+export function FileTreeRoots({
+  roots,
+  loadDir,
+  testId,
+  expanded,
+  onExpandedChange,
+  onOpenFile,
+  depthOffset,
+}: FileTreeRootsProps) {
   const [own, setOwn] = useState<Set<string>>(() => new Set());
   const openSet = expanded ?? own;
   const setOpenSet = onExpandedChange ?? setOwn;
@@ -544,6 +647,7 @@ export function FileTreeRoots({ roots, loadDir, testId, expanded, onExpandedChan
         expanded={openSet}
         onExpandedChange={setOpenSet}
         onOpenFile={onOpenFile}
+        depthOffset={depthOffset}
       />
     );
   }
@@ -555,6 +659,7 @@ export function FileTreeRoots({ roots, loadDir, testId, expanded, onExpandedChan
           key={root ?? `unknown-${i}`}
           testId={i === 0 ? testId : `${testId}-extra-${i}`}
           root={root}
+          depthOffset={depthOffset}
           loadDir={loadDir}
           expanded={openSet}
           onExpandedChange={setOpenSet}

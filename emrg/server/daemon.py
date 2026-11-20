@@ -3433,7 +3433,11 @@ class EmrgServer:
 
             logger.info("rant recorded (%d total)%s: %s",
                 count, f" agent={agent}" if agent else "", redact_prefix(rant_message, 100))
-            await self._send(ws, {"ok": True, "count": count})
+            # The type is not decoration (issue #3103): a client that waits for this
+            # answer pairs frames *by name* (`sendCommandAndWait` / `RESPONSE_TYPES`), so
+            # a typeless frame reaches no waiter and the GUI reported a recorded rant as
+            # a 5 s failure. `ok` and `count` are unchanged.
+            await self._send(ws, {"type": "rant_recorded", "ok": True, "count": count})
 
         elif msg_type == "list_rants":
             # Rant panel (rant 2026-08-13T14:10:14 P4): read ~/.emrg/rants.jsonl,
