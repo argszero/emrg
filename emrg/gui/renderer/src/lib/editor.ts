@@ -93,21 +93,3 @@ export function closeTab(state: EditorState, id: string): EditorState {
   return { tabs, active: neighbour ? neighbour.id : MEMORY_TAB_ID };
 }
 
-/**
- * The flex a left-column section declares, from which sections are collapsed (issue
- * #3068, item 2).
- *
- * Two sections share the height. Collapsing the upper one gives its height to the lower
- * one, which is why the lower one keeps `flex-grow: 1`. Collapsing the **lower** one
- * must leave the freed height at the bottom of the column rather than handing it back
- * to the upper one, so the upper section stops growing (`0 0 50%`) the moment the lower
- * one collapses. A width is never involved: this is the vertical axis only.
- */
-export function sectionFlex(which: "upper" | "lower", upperCollapsed: boolean, lowerCollapsed: boolean): string {
-  if (which === "upper") {
-    if (upperCollapsed) return "0 0 auto";
-    return lowerCollapsed ? "0 0 50%" : "1 1 50%";
-  }
-  if (lowerCollapsed) return "0 0 auto";
-  return "1 1 50%";
-}

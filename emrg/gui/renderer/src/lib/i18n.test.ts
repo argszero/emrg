@@ -114,11 +114,13 @@ describe("词典完整性守卫（防漂移）", () => {
   // 2026-11-20 issue #3078：六条带参数的指令（/delete /rename /resume /model /memory
   // /sandbox）各补一条参数用法，中英各 6 条 → 499 + 6 = 505。
   // 2026-11-20 issue #3089：状态带上那一格的悬停提示「当前会话」中英各 1 条 → 505 + 1 = 506。
-  it("zh/en 各 506 个 key 且完全对齐", () => {
+  // 2026-11-20 issue #3091：目录那一段的段名、额外根目录、没有根时的「没有」各 1 条
+  // → 506 + 3 = 509。
+  it("zh/en 各 509 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(506);
-    expect(enKeys.length).toBe(506);
+    expect(zhKeys.length).toBe(509);
+    expect(enKeys.length).toBe(509);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);
