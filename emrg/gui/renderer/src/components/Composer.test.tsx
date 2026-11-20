@@ -948,7 +948,7 @@ describe("Composer — 任意文件附件（issue #2920 要求 4）", () => {
     expect(clickSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("粘贴一个非图片文件 → 落盘、正文里留一行路径，不当作图片", async () => {
+  it("粘贴一个非图片文件 → 落盘、正文里留 [📄 名字] 标记，不当作图片", async () => {
     const store = createTranscriptStore();
     const saveImage = vi.fn();
     const saveFile = vi.fn(async (_p: SaveFilePayload) => ({ path: "/tmp/notes.txt" }));
@@ -959,8 +959,9 @@ describe("Composer — 任意文件附件（issue #2920 要求 4）", () => {
 
     await waitFor(() => expect(saveFile).toHaveBeenCalledTimes(1));
     expect(saveFile.mock.calls[0][0]).toMatchObject({ sessionId: "s1", name: "notes.txt", mime: "text/plain" });
-    // 模型拿到的是一个路径，不是整份内容——它自己按需读
-    await waitFor(() => expect(s.value()).toBe("/tmp/notes.txt\n"));
+    // 正文里是标记（issue #3111），不是落盘路径：标记让它与手打的文字区分开，
+    // 真正的绝对路径在发送时填回这个位置——模型拿到的仍是路径，不是整份内容。
+    await waitFor(() => expect(s.value()).toBe("[📄 notes.txt]"));
     expect(saveImage).not.toHaveBeenCalled();
     expect(logLine).toHaveBeenCalledWith("info", expect.stringContaining("[composer:attach] file /tmp/notes.txt"));
   });
@@ -975,10 +976,10 @@ describe("Composer — 任意文件附件（issue #2920 要求 4）", () => {
 
     await waitFor(() => expect(saveFile).toHaveBeenCalledTimes(1));
     expect(saveFile.mock.calls[0][0]).toMatchObject({ name: "dropped.tiff" });
-    await waitFor(() => expect(s.value()).toBe("/tmp/dropped.tiff\n"));
+    await waitFor(() => expect(s.value()).toBe("[📄 dropped.tiff]"));
   });
 
-  it("一次拖入多个文件 → 每个都落盘，路径按顺序插进正文", async () => {
+  it("一次拖入多个文件 → 每个都落盘，标记按顺序连写在同一行", async () => {
     const store = createTranscriptStore();
     const paths = ["/tmp/a.txt", "/tmp/b.csv"];
     const saveFile = vi.fn(async (_p: SaveFilePayload) => ({ path: paths[saveFile.mock.calls.length - 1] }));
@@ -992,9 +993,9 @@ describe("Composer — 任意文件附件（issue #2920 要求 4）", () => {
     );
 
     await waitFor(() => expect(saveFile).toHaveBeenCalledTimes(2));
-    // 两个路径必须是两个路径。没有分隔符时它们拼成 `…/a.txt…/b.csv` —— 一个谁也不是的
-    // 字面量：模型拿它去读，两个文件一个都打不开（TUI 在插入处就补 `"\n"`，两端同形）。
-    await waitFor(() => expect(s.value()).toBe("/tmp/a.txt\n/tmp/b.csv\n"));
+    // 两个标记，不是一个把第二个名字接在第一个末尾的字面量——中括号就是边界（issue #3111）。
+    // 所以这里没有换行：换行解决的是分隔问题，而分隔已经由标记自己解决。
+    await waitFor(() => expect(s.value()).toBe("[📄 a.txt][📄 b.csv]"));
   });
 
   it("文件落盘被拒也出声（fileReasonSave），正文里不留路径", async () => {
@@ -1022,12 +1023,12 @@ describe("Composer — 任意文件附件（issue #2920 要求 4）", () => {
 
     await waitFor(() => expect(saveImage).toHaveBeenCalledTimes(1));
     expect(saveImage.mock.calls[0][0]).toMatchObject({ sessionId: "s1", mime: "image/png", label: "pick" });
-    await waitFor(() => expect(s.value()).toBe("[📷 pick]\n"));
+    await waitFor(() => expect(s.value()).toBe("[📷 pick]"));
     expect(saveFile).not.toHaveBeenCalled();
     expect(logLine).toHaveBeenCalledWith("info", expect.stringContaining("[composer:attach] image /tmp/pick.png"));
   });
 
-  it("选中的非图片文件走文件路径（saveFile），正文里是落盘路径", async () => {
+  it("选中的非图片文件走文件路径（saveFile），正文里是 [📄 名字] 标记", async () => {
     const store = createTranscriptStore();
     const saveImage = vi.fn();
     const saveFile = vi.fn(async (_p: SaveFilePayload) => ({ path: "/tmp/picked.csv" }));
@@ -1037,7 +1038,7 @@ describe("Composer — 任意文件附件（issue #2920 要求 4）", () => {
 
     await waitFor(() => expect(saveFile).toHaveBeenCalledTimes(1));
     expect(saveFile.mock.calls[0][0]).toMatchObject({ name: "picked.csv", mime: "text/csv" });
-    await waitFor(() => expect(s.value()).toBe("/tmp/picked.csv\n"));
+    await waitFor(() => expect(s.value()).toBe("[📄 picked.csv]"));
     expect(saveImage).not.toHaveBeenCalled();
   });
 
@@ -1053,7 +1054,7 @@ describe("Composer — 任意文件附件（issue #2920 要求 4）", () => {
     }
   });
 
-  it("一次选中图片与文件各一 → 两条路径各自到位（图片是标记、文件是路径）", async () => {
+  it("一次选中图片与文件各一 → 两个标记并排，同一行", async () => {
     const store = createTranscriptStore();
     const saveImage = vi.fn(async (_p: SaveImagePayload) => ({ path: "/tmp/two.png", mime: "image/png" }));
     const saveFile = vi.fn(async (_p: SaveFilePayload) => ({ path: "/tmp/two.txt" }));
@@ -1063,7 +1064,7 @@ describe("Composer — 任意文件附件（issue #2920 要求 4）", () => {
 
     await waitFor(() => expect(saveImage).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(saveFile).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(s.value()).toBe("[📷 two]\n/tmp/two.txt\n"));
+    await waitFor(() => expect(s.value()).toBe("[📷 two][📄 two.txt]"));
   });
 });
 
@@ -1113,7 +1114,7 @@ describe("Composer — 附件随消息发出（issue #2920 要求 3/4）", () =>
     expect(sent[0].images).toBeNull();
   });
 
-  it("文件：路径就是正文的一部分，没有 images 载荷（模型自己按路径去读）", async () => {
+  it("文件：标记在发出的正文里展开成绝对路径，没有 images 载荷（模型自己按路径去读）", async () => {
     const store = createTranscriptStore();
     const sent: SendOptions[] = [];
     const saveFile = vi.fn(async (_p: SaveFilePayload) => ({ path: "/tmp/notes.txt" }));
@@ -1126,7 +1127,7 @@ describe("Composer — 附件随消息发出（issue #2920 要求 3/4）", () =>
     });
 
     s.paste(makeCarrier({ files: [textFile()], types: ["Files"] }));
-    await waitFor(() => expect(s.value()).toBe("/tmp/notes.txt\n"));
+    await waitFor(() => expect(s.value()).toBe("[📄 notes.txt]"));
     s.press("Enter");
 
     await waitFor(() => expect(sent).toHaveLength(1));
@@ -1387,5 +1388,122 @@ describe("Composer — 附件按钮的图标是矢量（issue #3109）", () => {
     expect([Number(m![1]), Number(m![2])].sort((a, b) => a - b)).toEqual(
       [attachH, sendH].sort((a, b) => a - b),
     );
+  });
+});
+
+describe("Composer — 标记是边界，所以不需要换行（issue #3111）", () => {
+  it("图片：正文里只有标记，光标就在标记之后，不在下一行", async () => {
+    const saveImage = vi.fn(async (_p: SaveImagePayload) => ({ path: "/tmp/shot.png", mime: "image/png" }));
+    const s = setup(createTranscriptStore(), { saveImage });
+
+    s.paste(makeCarrier({ files: [pngFile()], types: ["Files"] }));
+
+    await waitFor(() => expect(s.value()).toBe("[📷 shot]"));
+    expect(s.value()).not.toContain("\n");
+    // 要求 5：接着打字不用先退格
+    expect(s.input().selectionStart).toBe("[📷 shot]".length);
+  });
+
+  it("文件：标记取文件名本身，不带目录、不带换行", async () => {
+    const saveFile = vi.fn(async (_p: SaveFilePayload) => ({ path: "/tmp/deep/dir/report.pdf" }));
+    const s = setup(createTranscriptStore(), { saveFile });
+
+    s.paste(
+      makeCarrier({
+        files: [new File(["x"], "report.pdf", { type: "application/pdf" })],
+        types: ["Files"],
+      }),
+    );
+
+    await waitFor(() => expect(s.value()).toBe("[📄 report.pdf]"));
+    expect(s.value()).not.toContain("/tmp");
+    expect(s.value()).not.toContain("\n");
+    expect(s.input().selectionStart).toBe("[📄 report.pdf]".length);
+  });
+
+  it("正文中间插入：标记落在光标处，前后不多出空行", async () => {
+    const saveFile = vi.fn(async (_p: SaveFilePayload) => ({ path: "/tmp/mid.txt" }));
+    const s = setup(createTranscriptStore(), { saveFile });
+
+    s.setText("前后");
+    const el = s.input();
+    el.selectionStart = 1;
+    el.selectionEnd = 1;
+    s.paste(makeCarrier({ files: [textFile("mid.txt")], types: ["Files"] }));
+
+    await waitFor(() => expect(s.value()).toBe("前[📄 mid.txt]后"));
+    expect(s.value()).not.toContain("\n");
+  });
+
+  it("两个同名文件：两个标记，按出现顺序配到各自的路径（不靠名字区分）", async () => {
+    const paths = ["/tmp/first/a.txt", "/tmp/second/a.txt"];
+    const saveFile = vi.fn(async (_p: SaveFilePayload) => ({ path: paths[saveFile.mock.calls.length - 1] }));
+    const sent: SendOptions[] = [];
+    const s = setup(createTranscriptStore(), {
+      saveFile,
+      sendMessage: async (o) => {
+        sent.push(o);
+        return { requestId: o.requestId };
+      },
+    });
+
+    s.drop(makeCarrier({ files: [textFile("a.txt"), textFile("a.txt")], types: ["Files"] }));
+    await waitFor(() => expect(s.value()).toBe("[📄 a.txt][📄 a.txt]"));
+    s.press("Enter");
+
+    await waitFor(() => expect(sent).toHaveLength(1));
+    // 两条路径都到位，顺序与标记一致；紧挨着展开的路径之间留一个空格，
+    // 否则拼接成一个谁都读不出来的字面量
+    expect(sent[0].text).toBe("/tmp/first/a.txt /tmp/second/a.txt");
+  });
+
+  it("标记被删掉：那个文件不随消息发出（与图片同一规则）", async () => {
+    const saveFile = vi.fn(async (_p: SaveFilePayload) => ({ path: "/tmp/gone.txt" }));
+    const sent: SendOptions[] = [];
+    const s = setup(createTranscriptStore(), {
+      saveFile,
+      sendMessage: async (o) => {
+        sent.push(o);
+        return { requestId: o.requestId };
+      },
+    });
+
+    s.paste(makeCarrier({ files: [textFile("gone.txt")], types: ["Files"] }));
+    await waitFor(() => expect(s.value()).toBe("[📄 gone.txt]"));
+    s.setText("这个文件我不要了");
+    s.press("Enter");
+
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0].text).toBe("这个文件我不要了");
+    expect(sent[0].text).not.toContain("/tmp/gone.txt");
+  });
+
+  it("文件标记在图片之前：图片 position 量的是展开后的正文（daemon 按它切块）", async () => {
+    const saveFile = vi.fn(async (_p: SaveFilePayload) => ({ path: "/tmp/deep/dir/f.txt" }));
+    const saveImage = vi.fn(async (_p: SaveImagePayload) => ({ path: "/tmp/i.png", mime: "image/png" }));
+    const sent: SendOptions[] = [];
+    const s = setup(createTranscriptStore(), {
+      saveFile,
+      saveImage,
+      sendMessage: async (o) => {
+        sent.push(o);
+        return { requestId: o.requestId };
+      },
+    });
+
+    // 图片先落盘、文件后落盘（`runAttach` 的顺序），然后把正文改成文件在前：
+    // 展开后的路径比标记长，所以旧实现（先量位置再展开）留下的偏移会短 7 个字符。
+    s.pick([pngFile("i.png"), textFile("f.txt")]);
+    await waitFor(() => expect(s.value()).toBe("[📷 i][📄 f.txt]"));
+    s.setText("[📄 f.txt][📷 i]");
+    s.press("Enter");
+
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0].text).toBe("/tmp/deep/dir/f.txt[📷 i]");
+    // 位置是**最终正文**里标记的偏移——这是 daemon 切块用的那个数
+    expect(sent[0].images?.[0]?.position).toBe(sent[0].text.indexOf("[📷 i]"));
+    expect(sent[0].images?.[0]?.position).toBe("/tmp/deep/dir/f.txt".length);
+    // 展开前它是 10（`[📄 f.txt]` 的长度）；先量后展开会留下这个短了的偏移
+    expect(sent[0].images?.[0]?.position).not.toBe("[📄 f.txt]".length);
   });
 });

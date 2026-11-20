@@ -13,6 +13,8 @@ import {
   declaredTypes,
   declaresImageOrFile,
   resolveSendImages,
+  filePlaceholder,
+  expandFileMarkers,
   type CmdMenuState,
   type ImageAttach,
   type ImageCarrier,
@@ -300,6 +302,10 @@ export function Composer({
   // 占位符删除即弃图（发送时 filter）；ref 是同步副本（异步落盘期间文本可能又被改动）
   const [pending, setPending] = useState<ImageAttach[]>([]);
   const pendingRef = useRef<ImageAttach[]>([]);
+  // 文件附件（issue #3111）：与图片**同形**的一条记录（path/label/position）。正文里留下的是
+  // 标记，发送时把标记换成绝对路径；删掉标记即不附这个文件——与图片同一条规则、同一个函数。
+  // 只留 ref：文件不像图片那样有自己的视觉状态，正文里的标记就是它全部的可见表现。
+  const filesPendingRef = useRef<ImageAttach[]>([]);
   const attachRef = useRef<(plan: AttachPlan, at?: number | null) => void>(() => {});
   /** 隐藏的附件入口（粘贴、拖拽之外的第三个）。issue #2920 起它不再只收图片：`accept`
    * 去掉了，图片与任意文件都从这里进来，落盘走两条 IPC、正文里留两种东西。 */
@@ -468,6 +474,8 @@ export function Composer({
     // 会话切换：pending 图片属旧会话输入（TUI 语义——占位符即图的生命周期），丢弃
     pendingRef.current = [];
     setPending([]);
+    // 文件同理（issue #3111）：记录的标记属旧会话的正文，换会话即不再成立
+    filesPendingRef.current = [];
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sid, store]);
 
@@ -640,10 +648,9 @@ export function Composer({
         continue;
       }
       const placeholder = imagePlaceholder(display);
-      // 分隔符收在插入里（TUI 同形：`inp.insert(placeholder + "\n")`，`emrg/client/app.py`）：
-      // 两个附件连着落盘时，没有它就拼成一个谁也不是的字面量（`…/a_1.txt…/b_2.txt`），
-      // 模型按这个「路径」去读，两个文件一个都打不开。
-      at = insertRaw(placeholder + "\n", at);
+      // 不补换行（issue #3111）：标记自带中括号边界，`[📷 a][📷 b]` 连着写也分得开，
+      // 所以一次附两张图就是一行里两个标记，光标停在最后一个之后，可以直接接着打字。
+      at = insertRaw(placeholder, at);
       pendingRef.current = [...pendingRef.current, { path: res.path, label: placeholder, mime: res.mime || mime }];
       setPending(pendingRef.current);
       logRef.current("info", `[composer:attach] image ${res.path}`);
@@ -680,9 +687,12 @@ export function Composer({
         continue;
       }
       logRef.current("info", `[composer:attach] file ${res.path}`);
-      // 同 `attachImages` 的分隔符：两个文件连着拖进来时，正文里必须是两个路径，
-      // 不是一个把第二个路径接在第一个末尾的字面量。
-      at = insertRaw(res.path + "\n", at);
+      // 正文里留标记，不是裸路径（issue #3111）：`[📄 名字]` 与图片标记同一个形状，于是
+      // 「这一处是附件」在正文里看得见，删掉标记就等于不附它。名字取 `File.name`——它本身
+      // 就是 basename，不带目录；绝对路径发送时由 `expandFileMarkers` 填回原位。
+      const marker = filePlaceholder(file.name || "file");
+      at = insertRaw(marker, at);
+      filesPendingRef.current = [...filesPendingRef.current, { path: res.path, label: marker }];
     }
     return at;
   }
@@ -817,9 +827,12 @@ export function Composer({
     // 已经随这条消息离手——留着它会在 ↓ 走到尽头时把上一条消息塞回空输入框。
     historyIndexRef.current = -1;
     historySavedRef.current = "";
+    // 文件标记先换成绝对路径（issue #3111），再算图片 position：换标记会改变它后面文字的
+    // 偏移，所以图片位置必须在**最终**正文上量，否则 daemon 按旧偏移切块就切错。
+    const sentText = expandFileMarkers(value, filesPendingRef.current);
     // 图片收敛（TUI 同语义）：占位符仍在文本中的保留（删了占位符即弃图）；
-    // position = 标记在文本中的字符偏移（daemon 按 position 切块）
-    const images = resolveSendImages(pendingRef.current, value);
+    // position = 标记在最终正文中的字符偏移（daemon 按 position 切块）
+    const images = resolveSendImages(pendingRef.current, sentText);
     const parsed = parseInput(value);
     if (parsed.type !== "message") {
       // 指令：清输入 + 关菜单 + 路由（vanilla rant 19:44 P1：/ 开头不进 sendMessage）
@@ -844,16 +857,16 @@ export function Composer({
     // 「自有流」标；那是客户端自持的“谁的消息”判定，已按 rant 2026-09-29T15:52:49 要求 3
     // 移除：daemon 是唯一状态源，客户端只是渲染器。）
     const requestId = genRequestId();
-    store.addUserMessage(value, sid, { requestId });
+    store.addUserMessage(sentText, sid, { requestId });
     // 消息已发送 → 清输入（输入框内容即草稿，发送即清）
     applyText("", 0);
     if (wasBusy) {
-      queueSend(queuedRef.current, sid, { requestId, text: value, sandbox: tier, images });
+      queueSend(queuedRef.current, sid, { requestId, text: sentText, sandbox: tier, images });
     }
     try {
       await sendFn({
         sessionId: sid,
-        text: value,
+        text: sentText,
         requestId,
         sandbox: tier,
         images: images.length ? images : null,
@@ -861,10 +874,11 @@ export function Composer({
       // 发送成功 → 清 pending（图片已随消息交给 daemon；失败保留以便重发）
       pendingRef.current = [];
       setPending([]);
+      filesPendingRef.current = [];
       // 召回列表跟上这一条（issue #2349 part 2/2）：daemon 刚接受了它，所以它的文件
       // 现在以这段文字结尾。只报**成功**的发送——失败时 daemon 什么都没收下，也就
       // 没有可翻回来的东西；列表的权威副本仍是 daemon 的，下次会话切换整份替换。
-      onPromptSentRef.current?.(sid, value);
+      onPromptSentRef.current?.(sid, sentText);
     } catch {
       setInternalBusy(false);
       // G49：失败恢复输入框，文案不责怪用户（copy.sendFailed）；原文回填
