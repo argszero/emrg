@@ -94,6 +94,7 @@ from emrg.memory import (
     INDEX_COUNT_WARN,
     INDEX_SIZE_WARN,
     INDEX_TITLE_MAX_CHARS,
+    MEMORY_INDEX_NAME,
     AgentMemoryStore,
     SessionMemoryStore,
     is_index_row,
@@ -2602,6 +2603,17 @@ class EmrgServer:
         # the trigger and the instruction an agent is given cannot disagree about where
         # the edge is: one number, one home, two readers.
         ctx["memory_index_row_cap"] = MEMORY_INDEX_ROW_CAP
+        # The index's *name*, which is the third thing the prompt and the loader
+        # must agree on. Same shape again, and the sharpest instance of it: the
+        # sentence that tells a session with no memory to create one named the file
+        # nowhere, and the only line that named it sat in the branch that renders
+        # after the file exists. Measured 2026-11-21 (issue #3117): an agent reading
+        # only the empty-branch sentence created `index.md`, which no reader here
+        # looks for, so its memory was invisible on that round and every round
+        # after. Injected from the constant `_collect_memory_data` builds its two
+        # paths from, so the name an agent is told to create is the name that will
+        # be read: one name, one home, two readers.
+        ctx["memory_index_name"] = MEMORY_INDEX_NAME
 
         # ── Working Directory ──
         if session:
@@ -2863,7 +2875,7 @@ class EmrgServer:
         data: dict[str, Any] = {"has_memories": False}
 
         agent_dir = session.agent.memory_dir
-        pindex_path = agent_dir / "MEMORY.md"
+        pindex_path = agent_dir / MEMORY_INDEX_NAME
         if pindex_path.exists():
             data["agent_memory_index"] = self._index_for_prompt(pindex_path)
             data["agent_memory_dir"] = str(agent_dir)
@@ -2871,7 +2883,7 @@ class EmrgServer:
             data["has_memories"] = True
 
         smem_dir = session.memory_dir
-        sindex_path = smem_dir / "MEMORY.md"
+        sindex_path = smem_dir / MEMORY_INDEX_NAME
         if sindex_path.exists():
             data["session_memory_index"] = self._index_for_prompt(sindex_path)
             data["session_memory_dir"] = str(smem_dir)
@@ -8646,7 +8658,7 @@ class EmrgServer:
                 # de-duplication that existed only to keep it from being named twice
                 # went with it.
                 subjects = [
-                    session.agent.memory_dir / "MEMORY.md",
+                    session.agent.memory_dir / MEMORY_INDEX_NAME,
                     store.index_path,
                 ]
                 hygiene_note += _memory_index_compaction_note(subjects)
