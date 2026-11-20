@@ -857,11 +857,17 @@ def build_tool_registry(
     tools.register(GlobTool())
     tools.register(GrepTool())
     tools.register(SubmitRantTool())
-    tools.register(GetAgentLifeTool())
-    tools.register(SetAgentLifeTool())
     # The runner is the daemon's own method, so the tool has no path to the
     # session machinery of its own: everything that owns state stays there.
     tools.register(SubagentTool(run_subagent_cb))
+    # Registered last, and the position is load-bearing: `to_openai_tools` emits
+    # in *registry* order while `default_tool_names` states the turn's order, so
+    # the two have to agree. A life tool registered above `subagent` made the
+    # offered table read `get_agent_life, subagent` where the default set reads
+    # `subagent, get_agent_life`, and three tests reported that as a missing tool
+    # rather than a moved one.
+    tools.register(GetAgentLifeTool())
+    tools.register(SetAgentLifeTool())
     return tools
 
 

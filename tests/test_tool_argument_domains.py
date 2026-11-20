@@ -44,6 +44,7 @@ from emrg.tools import (
     edit_tool,
     glob_tool,
     grep_tool,
+    life_tools,
     pwsh_tool_v2,
     read_tool,
     subagent_tool,
@@ -408,6 +409,8 @@ TOOL_SET = [
     # The runner is never called: this sweep reads `definition()` only, and the tool
     # is here so its declared parameters are asked about like every other tool's.
     subagent_tool.SubagentTool(lambda **kwargs: None),
+    life_tools.GetAgentLifeTool(),
+    life_tools.SetAgentLifeTool(),
 ]
 
 

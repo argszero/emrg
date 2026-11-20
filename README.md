@@ -177,7 +177,7 @@ In the TUI: `Esc` interrupts streaming, `Ctrl+C` / `exit` quits (config is share
 |  | Claude Code | Codex | DeepSeek Harness | **EMRG** | **Grok Bot** |
 |---|---|---|---|---|---|
 | AI-powered coding | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Tool-calling (`bash`/`pwsh`, `read`, `write`, `edit`, `glob`, `grep`, `submit_rant`, `subagent`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Tool-calling (`bash`/`pwsh`, `read`, `write`, `edit`, `glob`, `grep`, `submit_rant`, `subagent`, `get_agent_life`, `set_agent_life`) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Session memory & context | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `/` command autocomplete | ✅ | ✅ | ✅ | ✅ | ~ *@ mention + command palette* |
 | ESC interrupt | ✅ | ✅ | — | ✅ | ✅ |
