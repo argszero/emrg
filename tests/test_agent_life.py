@@ -275,3 +275,41 @@ def test_the_judge_name_is_the_one_the_installer_registers() -> None:
     """One constant for the name, so the installer and the turn cannot disagree."""
     assert JUDGE_AGENT_NAME == "命"
     assert str(judge_dir()).endswith("life-judge")
+
+
+# ── 4. the installer ──────────────────────────────────────────────────
+
+def test_the_installer_creates_the_judge_row_and_its_directory() -> None:
+    """``serve()`` gives the judge a directory and one row pointing at it.
+
+    Driven through the daemon's own seams — ``register_for_reading`` for the file and
+    ``life.judge_dir`` for the directory — so this measures the install as the daemon
+    performs it rather than a rewritten copy of it. Both are redirected by the autouse
+    fixture, which is also what keeps the host's register out of the run.
+
+    The assertion that matters is the path one: a writer addressing the *name* the
+    register belongs at instead of the file the daemon reads resolves past that
+    redirect into ``~/.emrg/agents.yml``, where the suite's config guard refuses the
+    write and every serving test fails on the aftermath.
+    """
+    server = _make_server()
+
+    server._install_life_judge()
+
+    path = daemon_module.register_for_reading()
+    rows = [r for r in AgentRegistry(path).entries() if r.get("name") == JUDGE_AGENT_NAME]
+    assert len(rows) == 1, "the installer left no judge row, or more than one"
+    assert rows[0]["path"] == str(judge_dir())
+    assert judge_dir().is_dir(), "the row points at a directory nobody created"
+
+
+def test_a_second_install_leaves_the_judge_row_where_it_was() -> None:
+    """A boot is not a judgement: the second call must not restamp the row it finds."""
+    server = _make_server()
+    server._install_life_judge()
+    path = daemon_module.register_for_reading()
+    first = AgentRegistry(path).entries()
+
+    server._install_life_judge()
+
+    assert AgentRegistry(path).entries() == first

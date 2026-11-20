@@ -44,7 +44,6 @@ from emrg.config import (
     find_model_entry,
     load_sandbox_config,
     load_update_config,
-    agents_file,
     register_for_reading,
     resolve_model_vision,
 )
@@ -5688,13 +5687,23 @@ class EmrgServer:
         row's path and restamp its ``last_active`` on every boot — which is the one
         field that answers "has this agent been doing anything".
 
+        The register is the one the daemon **reads** — ``register_for_reading`` — and
+        not the name it belongs at. Two reasons, and the second is the one CI found:
+        a host whose register still carries its pre-rename name would get a second
+        file that no reader ever opens, and the suite redirects *that* seam, so a test
+        reaching ``serve()`` writes a throwaway register of its own. The name-based
+        call resolved past the redirect into the host's ``~/.emrg/agents.yml``, where
+        the config guard refused the write — killing the serve task before it
+        published its token, so fifteen serving tests across three files failed on
+        the aftermath instead of on a message naming this line.
+
         A failure is logged and nothing else: a host whose config directory cannot be
         written loses the judge, not the daemon.
         """
         directory = judge_dir()
         try:
             directory.mkdir(parents=True, exist_ok=True)
-            registry = AgentRegistry(agents_file())
+            registry = AgentRegistry(register_for_reading())
             if any(r.get("name") == JUDGE_AGENT_NAME for r in registry.entries()):
                 return
             registry.upsert(JUDGE_AGENT_NAME, str(directory))

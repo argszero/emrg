@@ -180,13 +180,24 @@ def _redirect_the_agent_register(monkeypatch, tmp_path):
     lives — the file that is there, not the name it belongs at (#2549). A test that wants
     to inspect or steer the register sets ``server._agents_log`` afterwards, and that
     assignment wins: the registry is rebuilt from it.
+
+    ``life.config_dir`` is redirected with it because the judge agent's directory is a
+    **sibling of the register** (``life.judge_dir``): ``serve()`` creates that directory
+    before it writes the row, so a test that redirects the register alone still makes a
+    ``life-judge`` directory in the host's config dir on every run that serves. The two
+    are redirected together because they are one fact — where this installation's agent
+    bookkeeping lives — read through two names.
     """
     import emrg.server.daemon as daemon_mod
+    import emrg.server.life as life_mod
 
     monkeypatch.setattr(
         daemon_mod,
         "register_for_reading",
         lambda base=None: tmp_path / "agent-register" / "agents.yml",
+    )
+    monkeypatch.setattr(
+        life_mod, "config_dir", lambda: tmp_path / "agent-register",
     )
 
 
