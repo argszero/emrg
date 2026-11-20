@@ -172,6 +172,25 @@ MODULE_SKIP_ENTRY = re.compile(r"^\s*skip\(", re.M)
 # is plainly on stdout. `\x1b\[[0-9;]*m` is the SGR subset both emit.
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
+# A runner that cannot find a package says so in one of two measured shapes, and
+# both name the package and the file that imports it:
+#
+#   vite/rollup  Error: Failed to resolve import "@codemirror/state" from "src/lib/editorDoc.test.ts". Does the file exist?
+#   node (ESM)   Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@codemirror/state' imported from /tmp/p.mjs
+#
+# Measured 2026-11-20 (cycle cyc20261120-212219): the first is real renderer
+# output from a stale install at master `2bc68c17`, the second is `node p.mjs` on
+# this host importing a package that is not installed. A third shape exists -
+# Node's CommonJS `Cannot find module 'pkg'` - and it is deliberately absent: it
+# names no importing file, and the hint built from a match names one, so a match
+# without a file yields no hint rather than a guess about which file it was.
+_UNRESOLVED_IMPORT = re.compile(
+    r"(?:Failed to resolve import|Cannot find package)\s+"
+    r"[\"'](?P<package>[^\"']+)[\"']"
+    r"(?:\s+(?:imported\s+)?from\s+"
+    r"(?:[\"'](?P<file>[^\"']+)[\"']|(?P<bare_file>\S+)))?"
+)
+
 
 def _plain(text: str) -> str:
     """Runner output with colour escapes removed (parsers run on this)."""
@@ -180,6 +199,50 @@ def _plain(text: str) -> str:
 
 class NodeCountError(Exception):
     """The doc or the tree is not in a shape this tool can act on."""
+
+
+def _stale_install_hint(output: str, cwd: Path) -> str:
+    """The remedy for an install that is out of step with the code, or "".
+
+    `_run` already names a remedy for a `node_modules` that is *absent*; this
+    covers the case the absence check cannot see - a directory that is there and
+    is stale. Measured 2026-11-20 (cycle cyc20261120-212219) at master
+    `2bc68c17`: `package.json` declared the editor's dependency and the local
+    renderer install predated it, so every file importing the new module failed
+    to *load*. The guard handed back the raw vite dump, and
+    `tests/test_check_node_test_count.py` went red on a tree whose source was
+    fine; `npm ci` in that directory, and nothing else, took it back to green
+    (1100 renderer + 221 GUI). On a host that runs this suite between merges,
+    that diagnosis was paid for repeatedly.
+
+    Two things make the hint true rather than merely plausible:
+
+    * it is built from the runner's own words - the package and the importing
+      file both come out of the output and are never written into the message
+      here, so a reader is pointed at the file that actually failed;
+    * a *relative* specifier (`./missing`, `/abs/path`) is a source-level import
+      and installing cannot fix it, so the hint declines those and the raw
+      output stands alone.
+
+    The caller appends this to the failure, so the sentence "Nothing was
+    measured" travels with the remedy: exit 2 already means "could not
+    measure", and a reader who takes this dump for a red test draws the wrong
+    conclusion about the tree.
+    """
+    match = _UNRESOLVED_IMPORT.search(output)
+    if match is None:
+        return ""
+    package = match.group("package")
+    imported_by = match.group("file") or match.group("bare_file")
+    if imported_by is None or package.startswith((".", "/")):
+        return ""
+    return (
+        f"\n\nNothing was measured: this is not a test result. `{package}` is "
+        f"imported by `{imported_by}` in this tree and the install in {cwd} does "
+        "not carry it, so the runner stopped before running any test. Run "
+        f"`npm ci` in {cwd} - it installs exactly what package-lock.json pins, "
+        "rather than resolving a new set - and run this tool again."
+    )
 
 
 def _run(cmd: list[str], cwd: Path, env: dict[str, str] | None = None) -> str:
@@ -243,9 +306,13 @@ def _run(cmd: list[str], cwd: Path, env: dict[str, str] | None = None) -> str:
         )
     output = _plain(proc.stdout + proc.stderr)
     if proc.returncode != 0:
+        # A stale install reaches this line looking exactly like a broken test;
+        # `_stale_install_hint` is what tells the two apart, and its docstring
+        # says how that was measured.
         raise NodeCountError(
             f"`{' '.join(cmd)}` in {cwd} failed (rc={proc.returncode}):\n"
             + output[-2000:].strip()
+            + _stale_install_hint(output, cwd)
         )
     return output
 
