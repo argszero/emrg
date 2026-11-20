@@ -88,6 +88,36 @@ interface EmrgWindow {
     sessionRoots?: (p: {
       sessionId: string;
     }) => Promise<{ agentRoot?: string | null; sessionRoot?: string | null }>;
+    /**
+     * The daemon's rolling 24-hour token window (rant 2026-11-20T09:54:50).
+     *
+     * Same class of defect as the ones above, and the reason it went unnoticed for a
+     * whole release: every layer below this literal was complete — preload exposed
+     * `emrg:usageWindow`, main.js handled it, the daemon answered, the bridge polled it
+     * every 15 seconds — and the band still showed three `—`, because `emrg.usageWindow`
+     * was undefined here, so the bridge took its "this build cannot ask" branch and never
+     * armed the timer. A channel is only as present as this literal.
+     */
+    usageWindow?: () => Promise<{
+      input?: unknown;
+      cache?: unknown;
+      output?: unknown;
+      windowStart?: unknown;
+      windowEnd?: unknown;
+    }>;
+    /**
+     * Close an open session, and reorder that list (preload.closeSession /
+     * preload.reorderOpenSessions).
+     *
+     * The two the guard in DaemonBridgeProvider.test.tsx found beside `usageWindow`:
+     * `createDaemonBridge` takes both off the object it is handed, so with no entry here
+     * its own `closeSession` / `reorderOpenSessions` answered `false` — "this build
+     * cannot do it" — while the shell, reaching `window.emrg` directly, worked. One
+     * working caller hid a broken bridge method. They are named here so the bridge's
+     * answer is an answer rather than a shrug.
+     */
+    closeSession?: (p: { sessionId: string }) => Promise<{ ok?: boolean; closed?: boolean }>;
+    reorderOpenSessions?: (p: { sids: string[] }) => Promise<unknown>;
   };
 }
 
@@ -169,6 +199,27 @@ export function DaemonBridgeProvider({ children }: { children: ReactNode }) {
           const emrg = (window as unknown as EmrgWindow).emrg;
           if (!emrg?.sessionRoots) throw new Error("sessionRoots unavailable");
           return emrg.sessionRoots(p);
+        },
+        // The 24-hour window, on the same terms and for the same reason: read
+        // `window.emrg` per call, and throw when the channel is missing rather than
+        // resolve an empty reading — "the daemon did not answer" and "nothing was spent
+        // in 24 hours" are different claims, and only the bridge may tell them apart.
+        // The throw lands in `refreshUsageWindow`'s catch, which keeps the previous
+        // reading, so a failed read shows the last number instead of a zero.
+        usageWindow: async () => {
+          const emrg = (window as unknown as EmrgWindow).emrg;
+          if (!emrg?.usageWindow) throw new Error("usageWindow unavailable");
+          return emrg.usageWindow();
+        },
+        closeSession: async (p) => {
+          const emrg = (window as unknown as EmrgWindow).emrg;
+          if (!emrg?.closeSession) throw new Error("closeSession unavailable");
+          return emrg.closeSession(p);
+        },
+        reorderOpenSessions: async (p) => {
+          const emrg = (window as unknown as EmrgWindow).emrg;
+          if (!emrg?.reorderOpenSessions) throw new Error("reorderOpenSessions unavailable");
+          return emrg.reorderOpenSessions(p);
         },
       },
       transcript,
