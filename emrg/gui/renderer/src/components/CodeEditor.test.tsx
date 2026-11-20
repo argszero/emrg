@@ -77,20 +77,21 @@ function mountEditor(props: Partial<Parameters<typeof CodeEditor>[0]> = {}) {
  */
 function typeText(editor: EditorView, text: string): void {
   const main = editor.state.selection.main;
-  const insert = (from: number, to: number, content: string) =>
+  // CodeMirror's own signature: the handler is handed a function that builds the plain
+  // insert, so a handler that wants to pair a bracket builds its own transaction instead.
+  const insert = () =>
     editor.state.update({
-      changes: { from, to, insert: content },
-      selection: { anchor: from + content.length },
+      changes: { from: main.from, to: main.to, insert: text },
+      selection: { anchor: main.from + text.length },
       userEvent: "input.type",
     });
   for (const handler of editor.state.facet(EditorView.inputHandler)) {
-    const transaction = handler(editor, main.from, main.to, text, insert);
-    if (transaction) {
-      editor.dispatch(transaction);
-      return;
-    }
+    // The handler answers a boolean and dispatches its own transaction — CodeMirror's
+    // contract, not a returned transaction: a handler that paired a bracket has already
+    // put it in the document by the time it answers `true`.
+    if (handler(editor, main.from, main.to, text, insert)) return;
   }
-  editor.dispatch(insert(main.from, main.to, text));
+  editor.dispatch(insert());
 }
 
 describe("CodeEditor surface", () => {

@@ -181,9 +181,11 @@ export function searchMatchCountText(state: EditorState): string {
   let total = 0;
   let current = 0;
   let capped = false;
-  for (const match of query.getCursor(state.doc)) {
+  // `next()` rather than `for … of`: the cursor is an Iterator, not an Iterable.
+  const cursor = query.getCursor(state.doc);
+  for (let step = cursor.next(); !step.done; step = cursor.next()) {
     total += 1;
-    if (!current && match.to >= caret) current = total;
+    if (!current && step.value.to >= caret) current = total;
     if (total >= SEARCH_COUNT_CAP) {
       capped = true;
       break;

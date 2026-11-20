@@ -420,7 +420,7 @@ describe("EditorPanel as an editor (rant 2026-11-20T18:01:52)", () => {
       content: "changed on disk",
       binary: false,
       truncated: false,
-      totalLines: 1,
+      totalLines: null,
     });
     mtime = 200;
     await act(async () => {
@@ -445,7 +445,7 @@ describe("EditorPanel as an editor (rant 2026-11-20T18:01:52)", () => {
       content: "theirs",
       binary: false,
       truncated: false,
-      totalLines: 1,
+      totalLines: null,
     });
     mtime = 200;
     await act(async () => {
@@ -480,7 +480,7 @@ describe("EditorPanel as an editor (rant 2026-11-20T18:01:52)", () => {
       content: "theirs",
       binary: false,
       truncated: false,
-      totalLines: 1,
+      totalLines: null,
     });
     mtime = 200;
     await act(async () => {

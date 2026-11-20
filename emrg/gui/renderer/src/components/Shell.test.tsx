@@ -1681,7 +1681,7 @@ describe("the cockpit's file-row wire (issue #3070)", () => {
     // 交上去的是这一行的绝对路径，不是文件名、也不是根的相对路径。
     await waitFor(() => expect(m.readFile).toHaveBeenCalledWith({ path: "/p/emrg/notes.txt" }));
     // 正文从那条通道一路到了面板：真读到和「读出空」在界面上差着一个 dom。
-    await waitFor(() => expect(screen.getByTestId("editor-text")).toHaveTextContent("the seam"));
+    await waitFor(() => expect(screen.getByTestId("editor-surface")).toHaveTextContent("the seam"));
   });
 
   it("这个构建没有读文件通道时，面板说读不了，不装作读到了一个空文件", async () => {
@@ -1702,6 +1702,6 @@ describe("the cockpit's file-row wire (issue #3070)", () => {
 
     const failed = await screen.findByTestId("editor-failed");
     expect(failed).toBeInTheDocument();
-    expect(screen.queryByTestId("editor-text")).toBeNull();
+    expect(screen.queryByTestId("editor-surface")).toBeNull();
   });
 });

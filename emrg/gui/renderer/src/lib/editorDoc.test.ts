@@ -15,7 +15,7 @@ import {
   readOnlyReason,
 } from "./editorDoc";
 import { EditorState } from "@codemirror/state";
-import { Language } from "@codemirror/language";
+import { syntaxTree } from "@codemirror/language";
 
 /**
  * The editor's rules, one test per rule that has a wrong-but-plausible neighbour
@@ -79,7 +79,7 @@ describe("languageSupportFor", () => {
       extensions: support ? [support] : [],
     });
     expect(state.languageDataAt("commentTokens", 0).length).toBeGreaterThan(0);
-    expect(state.tree.toString()).toContain("IfStatement");
+    expect(syntaxTree(state).toString()).toContain("IfStatement");
   });
 });
 
