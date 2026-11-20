@@ -459,3 +459,51 @@ describe("FileTreeRoots", () => {
     expect(load).toHaveBeenCalledWith("/s/sub");
   });
 });
+
+describe("opening a file (issue #3068)", () => {
+  function renderWithOpen(loadDir: ReturnType<typeof tree>, onFileOpen: (r: unknown) => void, root = "/r") {
+    return render(
+      <I18nProvider lang="en">
+        <FileTree testId="t" root={root} loadDir={loadDir} onFileOpen={onFileOpen} />
+      </I18nProvider>,
+    );
+  }
+
+  it("a file row asks to be opened as a preview, naming the root it was found under", async () => {
+    const onFileOpen = vi.fn();
+    renderWithOpen(tree([e("a.md")]), onFileOpen);
+    await waitFor(() => expect(screen.getAllByTestId("t-row")).toHaveLength(1));
+    fireEvent.click(screen.getAllByTestId("t-row")[0]);
+    expect(onFileOpen).toHaveBeenCalledWith({ path: "/r/a.md", root: "/r", pin: false });
+  });
+
+  it("a double click asks for it pinned, so the next single click opens a second tab", async () => {
+    const onFileOpen = vi.fn();
+    renderWithOpen(tree([e("a.md")]), onFileOpen);
+    await waitFor(() => expect(screen.getAllByTestId("t-row")).toHaveLength(1));
+    fireEvent.doubleClick(screen.getAllByTestId("t-row")[0]);
+    expect(onFileOpen).toHaveBeenLastCalledWith({ path: "/r/a.md", root: "/r", pin: true });
+  });
+
+  it("a directory row opens nothing: it only expands", async () => {
+    const onFileOpen = vi.fn();
+    const load = vi.fn(async (p: string) =>
+      p === "/r" ? { entries: [e("src", "dir")], truncated: false } : { entries: [e("deep.md")], truncated: false },
+    );
+    renderWithOpen(load, onFileOpen);
+    await waitFor(() => expect(screen.getAllByTestId("t-row")).toHaveLength(1));
+    fireEvent.click(screen.getAllByTestId("t-row")[0]);
+    // the folder did expand — the click was not swallowed, it just meant something else
+    await waitFor(() => expect(screen.getAllByTestId("t-row")).toHaveLength(2));
+    expect(onFileOpen).not.toHaveBeenCalled();
+  });
+
+  it("a tree with no editor attached selects the row and calls nothing", async () => {
+    renderTree(tree([e("a.md")]));
+    await waitFor(() => expect(screen.getAllByTestId("t-row")).toHaveLength(1));
+    fireEvent.click(screen.getAllByTestId("t-row")[0]);
+    fireEvent.doubleClick(screen.getAllByTestId("t-row")[0]);
+    // no throw, and the row is still selected: a tree may stand on its own
+    expect(screen.getAllByTestId("t-row")[0]).toHaveAttribute("aria-selected", "true");
+  });
+});

@@ -33,7 +33,10 @@ import {
   storedColumnWidth,
   type SidebarViewId,
 } from "../lib/cockpit";
-import { InspectorPanel } from "./InspectorPanel";
+import { EditorPanel } from "./EditorPanel";
+import { LeftColumn } from "./LeftColumn";
+import { FileTree, FileTreeRoots, type FileOpenRequest } from "./FileTree";
+import { initialEditor, openFile, type EditorState } from "../lib/editor";
 import { WorkspaceView, type WorkspaceViewId } from "./WorkspaceView";
 import { TranscriptView, type ScrollMemory } from "./TranscriptView";
 import { Composer, type CommandRouting } from "./Composer";
@@ -640,6 +643,29 @@ export function Shell() {
   const loadDir = useCallback((p: string) => bridge.listDir(p), [bridge]);
 
   /**
+   * The right panel is an editor now (issue #3068), so which tabs are open is this
+   * component's state: the panel unmounts whenever the column is collapsed, and tabs
+   * kept inside it would be lost by hiding the column rather than by closing a file.
+   *
+   * The root each file was opened from is kept beside the tabs because only the tree
+   * that opened one knows it, and the breadcrumb names it — a file's own path cannot
+   * say which of the session's writable roots it was reached through.
+   */
+  const [editor, setEditor] = useState<EditorState>(initialEditor);
+  const editorRoots = useRef<Map<string, string | null>>(new Map());
+  const openEditorFile = useCallback((request: FileOpenRequest): void => {
+    editorRoots.current.set(request.path, request.root);
+    setEditor((state) => openFile(state, request.path, { pin: request.pin }));
+  }, []);
+  const editorRootOf = useCallback((path: string): string | null => editorRoots.current.get(path) ?? null, []);
+  // A session's files belong to that session: another session's directories in these
+  // tabs would be a breadcrumb pointing at a tree the host is no longer looking at.
+  useEffect(() => {
+    setEditor(initialEditor());
+    editorRoots.current.clear();
+  }, [activeSid]);
+
+  /**
    * The whole register's sessions, fetched each time the overlay opens (issue #2978).
    *
    * `appState.sessions` is the active agent's listing — what the left column shows —
@@ -1123,16 +1149,43 @@ export function Shell() {
               data-testid="session-column-aside"
               style={{ width: effectiveLeftWidth, flex: "none" }}
             >
-              <SessionColumn
-                openSessions={appState.openSessions}
-                knownSessions={appState.sessions}
-                activeSid={activeSid}
-                turnStartBySid={appState.turnStartBySid}
-                onSelect={selectSession}
-                onClose={(sid) => void closeOpenSession(sid)}
-                onReorder={(sids) => void reorderOpenSessionList(sids)}
-                onSearch={() => setSearchOpen(true)}
-                onNew={() => dialogHost.current?.openNewSession()}
+              <LeftColumn
+                sessions={
+                  <SessionColumn
+                    openSessions={appState.openSessions}
+                    knownSessions={appState.sessions}
+                    activeSid={activeSid}
+                    turnStartBySid={appState.turnStartBySid}
+                    onSelect={selectSession}
+                    onClose={(sid) => void closeOpenSession(sid)}
+                    onReorder={(sids) => void reorderOpenSessionList(sids)}
+                    onSearch={() => setSearchOpen(true)}
+                    onNew={() => dialogHost.current?.openNewSession()}
+                  />
+                }
+                agentTree={
+                  <FileTree
+                    testId="left-tree-agent"
+                    root={roots.agentRoot}
+                    loadDir={loadDir}
+                    onFileOpen={openEditorFile}
+                  />
+                }
+                sessionTree={
+                  <FileTreeRoots
+                    testId="left-tree-session"
+                    roots={
+                      roots.sessionRoot
+                        ? [
+                            roots.sessionRoot,
+                            ...(activeSid ? (appState.sandboxRootsBySid[activeSid] ?? []) : []),
+                          ]
+                        : [null]
+                    }
+                    loadDir={loadDir}
+                    onFileOpen={openEditorFile}
+                  />
+                }
               />
             </aside>
             {/* Both handles are siblings of the columns they resize, never children: a
@@ -1259,15 +1312,16 @@ export function Shell() {
               data-testid="inspector-aside"
               style={{ width: effectiveRightWidth, flex: "none" }}
             >
-              <InspectorPanel
-                sid={activeSid}
-                agentRoot={roots.agentRoot}
-                sessionRoot={roots.sessionRoot}
-                // 会话的额外可写根（issue #3063）：与上面那个对话框同一份权威——`sandbox_roots`
-                // 帧与 `resume_result.meta.sandbox_roots` 写它。会话目录只是这个会话能写的一处，
-                // 其余每一处都在这份列表里；`null` 表示 daemon 还没说，不是「没有」。
-                sessionRoots={activeSid ? (appState.sandboxRootsBySid[activeSid] ?? null) : null}
-                loadDir={loadDir}
+              <EditorPanel
+                // One panel per session: its content cache and each tab's reading
+                // position belong to the session that opened them, so switching
+                // sessions starts from the door rather than from another session's
+                // scroll offsets (issue #3068).
+                key={activeSid ?? "no-session"}
+                state={editor}
+                onChange={setEditor}
+                readFile={bridge.readFile}
+                rootOf={editorRootOf}
                 onOpenMemory={() => dialogHost.current?.openMemory()}
               />
             </aside>

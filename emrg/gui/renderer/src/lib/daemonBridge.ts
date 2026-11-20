@@ -546,6 +546,20 @@ export interface DaemonBridgeDeps {
      */
     listFiles?(p: { path: string }): Promise<{ entries?: unknown[]; truncated?: boolean }>;
     /**
+     * Read one file's text (preload.readFile；未接线时为 undefined）。
+     *
+     * The daemon answers `content`, `binary`, `truncated` and `total_lines`; a file it
+     * refuses (too large, not text, a named pipe) comes back as a `frame.error`, which
+     * main.js rethrows — so a refusal reaches the panel as a sentence rather than as an
+     * empty file (issue #3068).
+     */
+    readFile?(p: { path: string; startLine?: number; lineLimit?: number }): Promise<{
+      content?: string;
+      binary?: boolean;
+      truncated?: boolean;
+      totalLines?: number;
+    }>;
+    /**
      * The two roots the inspector's trees hang from (preload.sessionRoots；未接线时为
      * undefined）。Only the main process can answer: it holds the open-session ledger,
      * the global session index and the daemon's own `resolve_session_cwd`.
@@ -645,6 +659,16 @@ export interface DaemonBridge {
    * answer into the same blank as the unsupported case.
    */
   listDir(path: string): Promise<{ entries: TreeEntry[]; truncated: boolean } | null>;
+  /**
+   * Read one file for the editor's code area (issue #3068).
+   *
+   * `null` — not an empty string — when this build has no channel for it: an empty
+   * string is a file that is empty, and the two must not read alike. A refusal from the
+   * daemon still throws, so its reason is what the panel prints.
+   */
+  readFile(
+    p: { path: string; startLine?: number; lineLimit?: number },
+  ): Promise<{ content: string; binary: boolean; truncated: boolean; totalLines?: number } | null>;
   /**
    * The two roots the inspector's trees hang from, for one session.
    *
@@ -1436,6 +1460,22 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
     };
   }
 
+  /** One file's text for the editor (issue #3068); `null` = this build cannot read. */
+  async function readFile(p: {
+    path: string;
+    startLine?: number;
+    lineLimit?: number;
+  }): Promise<{ content: string; binary: boolean; truncated: boolean; totalLines?: number } | null> {
+    if (!emrg.readFile) return null;
+    const answer = await emrg.readFile(p);
+    return {
+      content: typeof answer?.content === "string" ? answer.content : "",
+      binary: answer?.binary === true,
+      truncated: answer?.truncated === true,
+      totalLines: typeof answer?.totalLines === "number" ? answer.totalLines : undefined,
+    };
+  }
+
   /** The two roots for one session; `null` = nothing was measured. */
   async function sessionRoots(
     sid: string | null,
@@ -1475,6 +1515,7 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
     listInputHistory,
     notePromptSubmitted,
     listDir,
+    readFile,
     sessionRoots,
   };
 }

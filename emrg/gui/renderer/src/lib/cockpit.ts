@@ -106,6 +106,83 @@ export function persistColumnWidth(key: string, px: number): void {
   }
 }
 
+/* ── The left column's three sections (issue #3068) ────────── */
+
+/**
+ * The header of one tree section, in pixels.
+ *
+ * A section's height includes its header: a collapsed section is exactly this tall, and
+ * keeping the number here rather than in the stylesheet is what lets the layout below
+ * hand a collapsed section's *body* to the section beneath it without measuring one.
+ */
+export const LEFT_TREE_HEADER_PX = 24;
+
+/**
+ * How much of the column one tree section takes when nothing is collapsed.
+ *
+ * Two of these are half the column, which is the reading the issue asks for: the two
+ * trees share the height the session list leaves, and the session list keeps the other
+ * half. It is a share of how much, not of which section, and the arithmetic below is
+ * what makes the collapse rule work on top of it.
+ */
+export const LEFT_TREE_SHARE = 0.25;
+
+export interface LeftTreeLayout {
+  /** Each tree section's height in pixels, header included. */
+  heights: [number, number];
+  /** Each tree section's share of the column: its allotment, or zero when collapsed. */
+  shares: [number, number];
+  /** The height standing empty at the bottom of the column. */
+  spacer: number;
+}
+
+/**
+ * The two tree sections' heights, from the column's height and which are collapsed.
+ *
+ * The rule (issue #3068): a collapsed section keeps its header where it is and gives its
+ * height to the section below it; when the bottom section collapses, the freed height
+ * stays at the bottom of the column rather than moving up into the sections above.
+ *
+ * The freed amount is therefore the collapsed section's *body* — its share less the
+ * header it keeps — and it travels downward only. That is why this is a loop over the
+ * sections in order rather than a proportional redistribution: `flex-grow` would spread
+ * the freed height over every remaining section, which is the behaviour the last clause
+ * rules out, and it would do so in a way no test could name.
+ *
+ * Measured on a 400px column with a 24px header, the four cases are
+ * `[100,100]`, `[24,176]`, `[100,24]` with 76 left standing, and `[24,24]` with 152 —
+ * each leaving the session list its 200px.
+ *
+ * A column that has not been measured (`total <= 0`) answers the shares and no heights;
+ * the caller then draws those as flex bases, which is the same proportions with no
+ * measurement to apply them to.
+ */
+export function leftTreeLayout(
+  total: number,
+  collapsed: [boolean, boolean],
+  header: number = LEFT_TREE_HEADER_PX,
+): LeftTreeLayout {
+  const bases: [number, number] = [LEFT_TREE_SHARE, LEFT_TREE_SHARE];
+  const bodyOf = (i: 0 | 1): number => Math.max(0, bases[i] * total - header);
+  const bodies = [collapsed[0] ? 0 : bodyOf(0), collapsed[1] ? 0 : bodyOf(1)];
+  let spacer = 0;
+  const freed0 = collapsed[0] ? bodyOf(0) : 0;
+  const freed1 = collapsed[1] ? bodyOf(1) : 0;
+  // Downward only. With the bottom section already collapsed there is nowhere below,
+  // so the height from above joins it at the bottom of the column.
+  if (freed0 > 0) {
+    if (collapsed[1]) spacer += freed0;
+    else bodies[1] += freed0;
+  }
+  if (freed1 > 0) spacer += freed1;
+  const heights: [number, number] = [
+    collapsed[0] ? header : header + Math.round(bodies[0]),
+    collapsed[1] ? header : header + Math.round(bodies[1]),
+  ];
+  const shares: [number, number] = [collapsed[0] ? 0 : bases[0], collapsed[1] ? 0 : bases[1]];
+  return { heights, shares, spacer: Math.round(spacer) };
+}
+
 /* ── The status band's readings ───────────────────────────── */
 
 /**

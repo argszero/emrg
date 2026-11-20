@@ -13,6 +13,9 @@ import {
   columnBounds,
   countLabel,
   filterByName,
+  LEFT_TREE_HEADER_PX,
+  LEFT_TREE_SHARE,
+  leftTreeLayout,
   findBodyWidthCaps,
   formatTokens,
   groupSize,
@@ -106,6 +109,82 @@ describe("column geometry", () => {
 });
 
 /* ── The band's readings ──────────────────────────────────── */
+
+describe("the left column's three sections (issue #3068)", () => {
+  // A 400px column with a 24px header: the case the issue's rule is written against.
+  const H = LEFT_TREE_HEADER_PX;
+
+  it("with nothing collapsed the two trees take half the column, a quarter each", () => {
+    const l = leftTreeLayout(400, [false, false], H);
+    expect(l.heights).toEqual([100, 100]);
+    expect(l.shares).toEqual([LEFT_TREE_SHARE, LEFT_TREE_SHARE]);
+    expect(l.spacer).toBe(0);
+    expect(400 - l.heights[0] - l.heights[1] - l.spacer).toBe(200); // the session list's half
+  });
+
+  it("a collapsed section gives its body to the section below it, and keeps its own header", () => {
+    const l = leftTreeLayout(400, [true, false], H);
+    expect(l.heights[0]).toBe(H); // header only: it stays where it was
+    expect(l.heights[1]).toBe(176); // 100 + the 76 the collapsed body gave up
+    expect(l.spacer).toBe(0);
+    // and the session list is untouched, because the height moved downward only
+    expect(400 - l.heights[0] - l.heights[1] - l.spacer).toBe(200);
+  });
+
+  it("the bottom section's collapse leaves its height standing at the bottom, not redistributed up", () => {
+    const l = leftTreeLayout(400, [false, true], H);
+    expect(l.heights).toEqual([100, H]); // the section above did not grow
+    expect(l.spacer).toBe(76); // the body it gave up, empty at the bottom
+    expect(400 - l.heights[0] - l.heights[1] - l.spacer).toBe(200);
+  });
+
+  it("both collapsed: both headers keep their place and everything else stands empty below", () => {
+    const l = leftTreeLayout(400, [true, true], H);
+    expect(l.heights).toEqual([H, H]);
+    expect(l.spacer).toBe(152); // 76 + 76: the height has nowhere below to go
+    expect(400 - l.heights[0] - l.heights[1] - l.spacer).toBe(200);
+  });
+
+  it("the shares of a collapsed section are zero, and a smaller column keeps the proportions", () => {
+    expect(leftTreeLayout(400, [true, false], H).shares).toEqual([0, 0.25]);
+    const small = leftTreeLayout(2000, [false, false], H);
+    expect(small.heights).toEqual([500, 500]);
+  });
+
+  it("an unmeasured column answers shares and no heights", () => {
+    const l = leftTreeLayout(0, [false, false], H);
+    expect(l.heights).toEqual([H, H]);
+    expect(l.shares).toEqual([LEFT_TREE_SHARE, LEFT_TREE_SHARE]);
+  });
+});
+
+describe("the section header's height has two carriers, and they agree", () => {
+  // The height is in TypeScript because the collapse arithmetic needs it, and in the
+  // stylesheet because that is what draws it. Two carriers of one number is how a
+  // derived value goes stale, so a reading connects them instead of trusting both.
+  const stripped = cssSource.replace(/\/\*[\s\S]*?\*\//g, "");
+
+  it("the stylesheet's header height is LEFT_TREE_HEADER_PX", () => {
+    const block = /\.left-section-header\s*\{([^}]*)\}/.exec(stripped);
+    expect(block).not.toBeNull();
+    const height = /height:\s*(\d+)px/.exec(block![1]);
+    expect(height).not.toBeNull();
+    expect(Number(height![1])).toBe(LEFT_TREE_HEADER_PX);
+  });
+
+  it("the editor's strip scrolls inside the panel instead of widening it (issue #3068, item 7)", () => {
+    const block = /\.editor-strip\s*\{([^}]*)\}/.exec(stripped);
+    expect(block).not.toBeNull();
+    // the two declarations that make a hundred tabs a scrollbar rather than a wider page
+    expect(block![1]).toMatch(/overflow-x:\s*auto/);
+    expect(block![1]).toMatch(/flex-wrap:\s*nowrap/);
+    // and nothing may cap the panel's width: a cap is what turns a narrow panel into a
+    // horizontal scrollbar on the page instead
+    const panel = /\.editor\s*\{([^}]*)\}/.exec(stripped);
+    expect(panel).not.toBeNull();
+    expect(panel![1]).not.toMatch(/max-width/);
+  });
+});
 
 describe("band readings", () => {
   it("formatTokens：未上报是 —，不是 0", () => {

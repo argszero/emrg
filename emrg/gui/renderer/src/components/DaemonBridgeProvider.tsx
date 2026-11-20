@@ -85,6 +85,12 @@ interface EmrgWindow {
      * it", so the column would say it cannot list directories in a build that can.
      */
     listFiles?: (p: { path: string }) => Promise<{ entries?: unknown[]; truncated?: boolean }>;
+    readFile?: (p: { path: string; startLine?: number; lineLimit?: number }) => Promise<{
+      content?: string;
+      binary?: boolean;
+      truncated?: boolean;
+      totalLines?: number;
+    }>;
     sessionRoots?: (p: {
       sessionId: string;
     }) => Promise<{ agentRoot?: string | null; sessionRoot?: string | null }>;
@@ -194,6 +200,16 @@ export function DaemonBridgeProvider({ children }: { children: ReactNode }) {
           const emrg = (window as unknown as EmrgWindow).emrg;
           if (!emrg?.listFiles) throw new Error("listFiles unavailable");
           return emrg.listFiles(p);
+        },
+        // One file's text for the editor (issue #3068), on exactly the terms above:
+        // read `window.emrg` per call and throw when the channel is missing. The panel
+        // distinguishes the two answers it can get — a thrown failure, which it prints,
+        // from a build whose bridge has no channel at all — and a wrapper that resolved
+        // an empty string here would collapse both into "this file is empty".
+        readFile: async (p) => {
+          const emrg = (window as unknown as EmrgWindow).emrg;
+          if (!emrg?.readFile) throw new Error("readFile unavailable");
+          return emrg.readFile(p);
         },
         sessionRoots: async (p) => {
           const emrg = (window as unknown as EmrgWindow).emrg;

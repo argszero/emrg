@@ -11,9 +11,9 @@ EMRG is a self-evolving AI agent architecture experiment: a **micro-kernel** —
 **The server is the living core; a client is only the interface.** Task understanding, tool scheduling, capability growth and self-evolution live there; one server serves many clients and outlives any of them.
 
 - `emrg/` — core: `__main__.py` (CLI), `protocol.py`, `config.py`, `connect.py` (WebSocket over loopback, token auth)
-- `emrg/server/` — the daemon: `daemon.py` (messages, the background thread running evolution, the tool loop), `llm.py`, `tool_types.py`, task templates
+- `emrg/server/` — the daemon: `daemon.py` (messages, the evolution background thread, the tool loop), `llm.py`, `tool_types.py`, task templates
 - `emrg/tools/` — bash, read, write, edit, glob, grep, base + registry
-- `emrg/skills/` — skills from `.emrg/skills/` (progressive disclosure) + the installable-skill catalog
+- `emrg/skills/` — skills from `.emrg/skills/` (progressive disclosure) + the installable catalog
 - `emrg/client/` — TUI: `daemon_manager.py` (daemon lifecycle + protocol client, shared with the GUI), `app.py`
 - `emrg/gui/` — Electron GUI (non-developer entry point): the main process owns the daemon connection, the renderer is sandboxed
 - `scripts/` — the guards · `tests/` — pytest suite · `packaging/` — installers
@@ -30,7 +30,7 @@ EMRG is a self-evolving AI agent architecture experiment: a **micro-kernel** —
 
 ## Terminology
 
-The execution model, in this repo's own terms (`emrg/server/daemon.py`):
+The execution model, in this repo's terms (`emrg/server/daemon.py`):
 
 - **Tool loop** — the whole process triggered by one user message: LLM requests and tool calls repeat until a round brings no new tool calls (`_run_tool_loop`).
 - **Round** — one iteration inside a tool loop: one LLM request + zero or more tool calls + their execution (`round_num`, bounded by `max_tool_rounds`).
@@ -38,7 +38,7 @@ The execution model, in this repo's own terms (`emrg/server/daemon.py`):
 
 ## Capabilities
 
-What EMRG does today — capabilities, not a changelog.
+What EMRG does today, not a changelog.
 
 - **TUI client** — markdown/diffs, slash commands, autocomplete, pickers, clipboard images (`vision` per model), ESC interrupt, CJK-aware input
 - **Electron GUI** — streaming chat, tool-status cards, sessions, models, settings, onboarding, reconnect, daemon respawn
@@ -55,7 +55,7 @@ One line each: what it answers. Foreground daemon: `python -m emrg`.
 
 - Python: `uv run pytest tests/ -v` — the number is **measured, never stored**: `uv run --no-sync python3 scripts/check-doc-count.py --measure`. Import check: `uv run python -c "from emrg.client.app import run_client"`
 GUI: `cd emrg/gui && npm test` (226: 102 daemon_client + 22 conn-manager + 7 integration + 7 nav-policy + 11 gui-state + 9 build-config + 11 boot-contract + 3 preload-api + 2 theme-guard + 2 image-hash + 8 switch-session + 19 atp_login + 4 gui-op-log + 9 theme-setting + 10 window-title) — syntax: `node --check main.js preload.js daemon_client.js`
-Renderer: `cd emrg/gui/renderer && npm run typecheck && npm test` (953: 5 snapshot-store + 13 utils + 3 ErrorBoundary + 2 App + 12 commands + 4 copywriting + 12 i18n + 31 markdown + 19 selection + 34 transcript + 11 conversationType + 55 TranscriptView + 22 history + 29 historyReplay + 36 composer + 76 Composer + 14 sidebar + 32 workspaceView + 15 WorkspaceView + 10 dialog + 6 Dialog + 9 ConfirmDialog + 9 RenameDialog + 12 dialogLists + 3 HelpDialog + 9 MemoryDialog + 8 SkillsDialog + 8 openSession + 6 WelcomeDialog + 20 OpenSessionDialog + 7 NewSessionDialog + 7 rewind + 8 RewindDialog + 7 GithubDeviceDialog + 70 daemonBridge + 13 DaemonBridgeProvider + 64 Shell + 8 page + 25 DialogHost + 36 SettingsPanel + 18 TaskFormDialog + 5 RantDialog + 8 vendorMarkdown + 10 highlightTheme + 6 ApprovalDialog + 20 SandboxRootsDialog + 39 cockpit + 9 fileTree + 21 FileTree + 5 contextMenu + 1 residue + 11 StatusBand + 6 SearchOverlay + 5 ResizeHandle + 8 IconRail + 6 SessionColumn + 5 EmrgMark)
+Renderer: `cd emrg/gui/renderer && npm run typecheck && npm test` (1001: 5 snapshot-store + 13 utils + 3 ErrorBoundary + 2 App + 12 commands + 4 copywriting + 12 i18n + 31 markdown + 19 selection + 34 transcript + 11 conversationType + 55 TranscriptView + 22 history + 29 historyReplay + 36 composer + 76 Composer + 14 sidebar + 32 workspaceView + 15 WorkspaceView + 10 dialog + 6 Dialog + 9 ConfirmDialog + 9 RenameDialog + 12 dialogLists + 3 HelpDialog + 9 MemoryDialog + 8 SkillsDialog + 8 openSession + 6 WelcomeDialog + 20 OpenSessionDialog + 7 NewSessionDialog + 7 rewind + 8 RewindDialog + 7 GithubDeviceDialog + 70 daemonBridge + 13 DaemonBridgeProvider + 64 Shell + 5 page + 25 DialogHost + 36 SettingsPanel + 18 TaskFormDialog + 5 RantDialog + 8 vendorMarkdown + 10 highlightTheme + 6 ApprovalDialog + 20 SandboxRootsDialog + 14 EditorPanel + 47 cockpit + 18 editor + 9 fileTree + 25 FileTree + 5 contextMenu + 1 residue + 11 StatusBand + 6 SearchOverlay + 5 ResizeHandle + 8 IconRail + 7 LeftColumn + 6 SessionColumn + 5 EmrgMark)
 - CI: pytest on ubuntu **and windows-2025**, the GUI suites, and an actionlint gate over `.github/workflows/`; re-trigger a dropped push with `scripts/re-trigger-ci.sh <branch>`, never an empty commit
 - Merge gates, run before merging — each asks what no other gate asks: `uv run --no-sync python3 scripts/check-vote-count.py` (approvals still valid) · `scripts/check-pr-base.py` (base reaches master) · `scripts/check-merge-freshness.py` (that green CI is about the landing tree) · `scripts/check-merge-order.py` (dirt and what it lands) · `scripts/check-merge-landing-diff.py` (what the landing changes) · `scripts/check-merge-pairs.py` / `scripts/check-merge-sequence.py` (a pair, or a whole order) · `scripts/check-merge-tree-health.py` (the merged tree passes one guard) · `scripts/check-merge-plan-suite.py` (the plan's final tree passes the suite) — all under `uv run --no-sync python3`
 - Post-merge audit: `uv run --no-sync python3 scripts/check-merge-landed.py <N>` (did it land the reviewed tree)
@@ -67,14 +67,14 @@ Every guard names the tree it reads before its verdict; what it cannot answer is
 
 1. **Bump** — `python3 scripts/bump-version.py <x.y.z>` rewrites every version declaration; `tests/test_version_sync.py` proves they agree. PR it, take three approvals from different cycles, squash merge — never self-merge a release PR.
 2. **Tag** — `git tag -a v<x.y.z> -m "emrg v<x.y.z>" && git push origin v<x.y.z>`. The tag is the **only** trigger of `build-release.yml`; Test never signs or notarizes.
-3. **Verify and confirm** — `scripts/check-release-published.py v<x.y.z>`: green across the platform matrix, published as Latest (not draft, not prerelease) with the full asset set.
+3. **Verify and confirm** — `scripts/check-release-published.py v<x.y.z>`: green across the platform matrix, published as Latest (not draft or prerelease) with the full asset set.
 
 `bump-version.py --check` and `scripts/check-release-tag.py v<x.y.z>` are the host-side counterparts: run both before pushing.
 
 ## Packaging
 
-Only `icon.svg` is committed; generated icon products are gitignored, built by CI (`bash packaging/gen-assets.sh` first; `.icns` needs macOS `iconutil`).
+Only `icon.svg` is committed; generated icons are gitignored, built by CI (`bash packaging/gen-assets.sh` first; `.icns` needs macOS `iconutil`).
 
 ## Configuration
 
-`~/.emrg/config.toml` — `[llm]` sets the default model (`base_url`, `api_key`, `model`, `context_window`, `vision`); each `[[llm.models]]` entry adds a model for `/model`. The GUI writes it on save; the full template is in `DEVELOPMENT.md`.
+`~/.emrg/config.toml` — `[llm]` sets the default model (`base_url`, `api_key`, `model`, `context_window`, `vision`); each `[[llm.models]]` entry adds a model for `/model`. The GUI writes it on save; the template is in `DEVELOPMENT.md`.

@@ -46,10 +46,27 @@ interface OpenFileBridge {
 /** What one directory's listing resolves to; `null` = this build cannot ask at all. */
 export type LoadDir = (path: string) => Promise<{ entries: TreeEntry[]; truncated: boolean } | null>;
 
+/** What a file row asks the panel to open (issue #3068). */
+export interface FileOpenRequest {
+  path: string;
+  /** The root this row was found under, so the breadcrumb can name it. */
+  root: string | null;
+  /** `true` = double click, or a tab the host has pinned; `false` = a preview. */
+  pin: boolean;
+}
+
 export interface FileTreeProps {
   /** Absolute path the tree is rooted at; `null` = no session to root at. */
   root: string | null;
   loadDir?: LoadDir;
+  /**
+   * A file row was clicked: open it in the right panel.
+   *
+   * Omitted = this tree is not attached to an editor, and a click only selects the row
+   * as it always did. A *directory* row never comes through here — expanding a folder
+   * opens nothing (issue #3068, item 8).
+   */
+  onFileOpen?: (request: FileOpenRequest) => void;
   /** test-id prefix, so the two trees in one panel stay distinguishable. */
   testId: string;
   /**
@@ -77,7 +94,7 @@ const GLYPHS: Record<string, string> = {
   file: "▤",
 };
 
-export function FileTree({ root, loadDir, testId, expanded, onExpandedChange }: FileTreeProps) {
+export function FileTree({ root, loadDir, testId, expanded, onExpandedChange, onFileOpen }: FileTreeProps) {
   const { t } = useI18n();
   const [dirs, setDirs] = useState<DirMap>({});
   // Open folders are the caller's when it supplies `expanded`, and this tree's own
@@ -414,7 +431,18 @@ export function FileTree({ root, loadDir, testId, expanded, onExpandedChange }: 
               style={{ height: ROW_HEIGHT, paddingLeft: row.depth * INDENT_PX + 6 }}
               onClick={() => {
                 setSelected(row.path);
-                open(row);
+                // A folder expands; a file opens in the right panel. The two are
+                // different verbs, and keeping them apart is what stops a host who is
+                // only opening a folder from finding a new tab (issue #3068, item 8).
+                if (row.type === "dir") {
+                  open(row);
+                  return;
+                }
+                onFileOpen?.({ path: row.path, root, pin: false });
+              }}
+              onDoubleClick={() => {
+                if (row.type === "dir") return;
+                onFileOpen?.({ path: row.path, root, pin: true });
               }}
               onContextMenu={(e) => openMenuAt(e, row.path)}
               title={row.name}
@@ -486,9 +514,11 @@ export interface FileTreeRootsProps {
   testId: string;
   expanded?: Set<string>;
   onExpandedChange?: (next: Set<string>) => void;
+  /** Every root's file rows report here, each naming the root it came from. */
+  onFileOpen?: (request: FileOpenRequest) => void;
 }
 
-export function FileTreeRoots({ roots, loadDir, testId, expanded, onExpandedChange }: FileTreeRootsProps) {
+export function FileTreeRoots({ roots, loadDir, testId, expanded, onExpandedChange, onFileOpen }: FileTreeRootsProps) {
   const [own, setOwn] = useState<Set<string>>(() => new Set());
   const openSet = expanded ?? own;
   const setOpenSet = onExpandedChange ?? setOwn;
@@ -519,6 +549,7 @@ export function FileTreeRoots({ roots, loadDir, testId, expanded, onExpandedChan
         loadDir={loadDir}
         expanded={openSet}
         onExpandedChange={setOpenSet}
+        onFileOpen={onFileOpen}
       />
     );
   }
@@ -533,6 +564,7 @@ export function FileTreeRoots({ roots, loadDir, testId, expanded, onExpandedChan
           loadDir={loadDir}
           expanded={openSet}
           onExpandedChange={setOpenSet}
+          onFileOpen={onFileOpen}
         />
       ))}
     </div>

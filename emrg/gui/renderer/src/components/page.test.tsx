@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { I18nProvider } from "../lib/i18n";
 import { SessionColumn } from "./SessionColumn";
-import { InspectorPanel } from "./InspectorPanel";
+import { EditorPanel } from "./EditorPanel";
+import { initialEditor } from "../lib/editor";
 import { StatusBand } from "./StatusBand";
 import {
   BODY_MIN,
@@ -69,58 +70,22 @@ describe("SessionColumn", () => {
   });
 });
 
-describe("InspectorPanel", () => {
-  it("三个 tab：agent 目录 / 会话目录 / 记忆，默认选 agent 目录", () => {
+describe("the right section", () => {
+  it("is the editor, and its first tab is the memory door (issue #3068)", () => {
+    // What the editor does with a tab — preview, pin, close, scroll, breadcrumb — is
+    // EditorPanel.test.tsx's subject; what belongs here is that the page's fourth
+    // section is the editor and that it opens on the door, not on a directory.
     render(
       <I18nProvider lang="en">
-        <InspectorPanel agentRoot="/p/emrg" sessionRoot="/p/emrg/.emrg/sessions/s1" />
+        <EditorPanel state={initialEditor()} onChange={() => {}} />
       </I18nProvider>,
     );
-    expect(screen.getByTestId("inspector-tab-agent")).toHaveTextContent("Agent dir");
-    expect(screen.getByTestId("inspector-tab-session")).toHaveTextContent("Session dir");
-    expect(screen.getByTestId("inspector-tab-memory")).toHaveTextContent("Memory");
-    expect(screen.getByTestId("inspector-panel").querySelectorAll("[role='tab']")).toHaveLength(3);
-    // 默认那一栏就是 agent 目录（issue #3026 第 1 条）
-    expect(screen.getByTestId("inspector-tab-agent")).toHaveAttribute("aria-selected", "true");
-    expect(screen.queryByTestId("inspector-tree-agent")).toBeInTheDocument();
-    expect(screen.queryByTestId("inspector-tree-session")).toBeNull();
-  });
-
-  it("会话目录列出会话目录与额外可写根，会话目录在第一行（issue #3063）", () => {
-    render(
-      <I18nProvider lang="en">
-        <InspectorPanel
-          agentRoot="/p/emrg"
-          sessionRoot="/p/emrg/.emrg/sessions/s1"
-          sessionRoots={["/p/other", "/p/third"]}
-        />
-      </I18nProvider>,
-    );
-    fireEvent.click(screen.getByTestId("inspector-tab-session"));
-    expect(screen.getByTestId("inspector-tree-session-roots")).toHaveAttribute("data-root-count", "3");
-    expect(screen.getByTestId("inspector-tree-session-root")).toHaveTextContent("s1");
-    expect(screen.getByTestId("inspector-tree-session-extra-1-root")).toHaveTextContent("other");
-    expect(screen.getByTestId("inspector-tree-session-extra-2-root")).toHaveTextContent("third");
-  });
-
-  it("没有额外可写根时，会话目录就是原来那一棵树", () => {
-    render(
-      <I18nProvider lang="en">
-        <InspectorPanel agentRoot="/p/emrg" sessionRoot="/p/emrg/.emrg/sessions/s1" />
-      </I18nProvider>,
-    );
-    fireEvent.click(screen.getByTestId("inspector-tab-session"));
-    expect(screen.queryByTestId("inspector-tree-session-roots")).toBeNull();
-    expect(screen.getByTestId("inspector-tree-session-root")).toHaveTextContent("s1");
-  });
-
-  it("没有会话时两棵树都说先选会话，而不是画一棵空树", () => {
-    render(
-      <I18nProvider lang="en">
-        <InspectorPanel />
-      </I18nProvider>,
-    );
-    expect(screen.getByTestId("inspector-tree-agent-no-session")).toHaveTextContent("Select a session");
+    const panel = screen.getByTestId("editor-panel");
+    const tabs = panel.querySelectorAll("[role='tab']");
+    expect(tabs).toHaveLength(1);
+    expect(tabs[0]).toHaveAttribute("data-kind", "memory");
+    expect(panel.textContent).not.toContain("Agent dir");
+    expect(panel.textContent).not.toContain("Session dir");
   });
 });
 
