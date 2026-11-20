@@ -38,6 +38,15 @@ function mockEmrg() {
   const listInputHistory = vi.fn().mockResolvedValue({ entries: ["first", "second"], hasMore: false });
   // issue #3026：右栏两个文件树 —— 两个根由主进程解析，目录一层一层问 daemon
   const listFiles = vi.fn().mockResolvedValue({ entries: [], truncated: false });
+  // issue #3070：右栏编辑器读文件的那条通道。它必须在这儿有一份，否则
+  // `DaemonBridgeProvider` 读到的 `window.emrg.readFile` 是 undefined，而桥把缺失当成
+  // 「这个构建读不了文件」——两种情况在界面上只差一行说明，在接线层必须分得开。
+  const readFile = vi.fn().mockResolvedValue({
+    content: "",
+    binary: false,
+    truncated: false,
+    totalLines: null,
+  });
   const sessionRoots = vi.fn().mockResolvedValue({
     agentRoot: "/p/emrg",
     sessionRoot: "/p/emrg/.emrg/sessions/s1",
@@ -79,6 +88,7 @@ function mockEmrg() {
     listHistory,
     listInputHistory,
     listFiles,
+    readFile,
     sessionRoots,
     taskCreate,
     taskUpdate,
@@ -107,6 +117,7 @@ function mockEmrg() {
     listRants,
     listHistory,
     listInputHistory,
+    readFile,
     listFiles,
     sessionRoots,
     taskCreate,
@@ -1593,5 +1604,67 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
       delete (HTMLElement.prototype as { clientHeight?: unknown }).clientHeight;
       delete (HTMLElement.prototype as { scrollTop?: unknown }).scrollTop;
     }
+  });
+});
+
+/**
+ * The cockpit's two wires (issue #3070).
+ *
+ * #3069 joined the session column's trees to the right-hand editor with two links that
+ * nothing measured: `LeftTrees.onOpenFile` → the panel handle, and `bridge.readFile` →
+ * the preload channel. Both components had tests of their own, and both of those tests
+ * hand the component the very thing the wire supplies — so cutting either wire left the
+ * suite green while a click on a file row silently opened nothing. These two tests drive
+ * the seam instead: a real `Shell`, a fake preload, a click on a row, and the panel's own
+ * DOM as the only witness.
+ */
+describe("the cockpit's file-row wire (issue #3070)", () => {
+  it("点左栏的文件行 → 右栏开一个标签，读的是这一行的绝对路径，正文真的到了面板上", async () => {
+    const m = mockEmrg();
+    m.listFiles.mockResolvedValue({
+      entries: [{ name: "notes.txt", path: "/p/emrg/notes.txt", type: "file" }],
+      truncated: false,
+    });
+    m.readFile.mockResolvedValue({
+      content: "the seam\nsecond line",
+      binary: false,
+      truncated: false,
+      totalLines: 2,
+    });
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }], "s1"));
+
+    const row = await screen.findByTestId("left-tree-agent-row");
+    expect(row).toHaveAttribute("data-kind", "text");
+    fireEvent.click(row);
+
+    // 标签出现了：把 onOpenFile 从 LeftTrees 上摘掉，或者 editorRef 不接，这里就红。
+    const tab = await screen.findByTestId("editor-tab");
+    expect(tab).toHaveAttribute("data-path", "/p/emrg/notes.txt");
+    // 交上去的是这一行的绝对路径，不是文件名、也不是根的相对路径。
+    await waitFor(() => expect(m.readFile).toHaveBeenCalledWith({ path: "/p/emrg/notes.txt" }));
+    // 正文从那条通道一路到了面板：真读到和「读出空」在界面上差着一个 dom。
+    await waitFor(() => expect(screen.getByTestId("editor-text")).toHaveTextContent("the seam"));
+  });
+
+  it("这个构建没有读文件通道时，面板说读不了，不装作读到了一个空文件", async () => {
+    const m = mockEmrg();
+    m.listFiles.mockResolvedValue({
+      entries: [{ name: "notes.txt", path: "/p/emrg/notes.txt", type: "file" }],
+      truncated: false,
+    });
+    // 通道缺席 —— 这正是 `DaemonBridgeProvider` 那个字面量漏写一个名字时的样子。
+    delete (m as { readFile?: unknown }).readFile;
+    delete ((window as unknown as { emrg: { readFile?: unknown } }).emrg).readFile;
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }], "s1"));
+
+    fireEvent.click(await screen.findByTestId("left-tree-agent-row"));
+
+    const failed = await screen.findByTestId("editor-failed");
+    expect(failed).toBeInTheDocument();
+    expect(screen.queryByTestId("editor-text")).toBeNull();
   });
 });

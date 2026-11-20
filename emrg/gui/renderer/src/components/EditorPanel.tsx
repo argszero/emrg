@@ -137,7 +137,15 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
     scrollByTab.current.set(state.active, el.scrollTop);
   }, [state.active]);
 
-  const activeContent = activeFile ? contents[activeFile.path] ?? undefined : undefined;
+  // A present key holds the answer — the file, or `null` for a read that failed — and only
+  // an absent key means nothing has come back yet. The `??` that used to sit here folded
+  // the stored `null` back into `undefined`, so the "cannot read" note below was
+  // unreachable and a failed read spun for ever.
+  const activeContent = activeFile
+    ? Object.hasOwn(contents, activeFile.path)
+      ? contents[activeFile.path]
+      : undefined
+    : undefined;
   const text = activeContent?.content ?? "";
   const lineCount = useMemo(() => (text === "" ? 1 : text.split("\n").length), [text]);
   // The gutter is as wide as the widest number it prints, so a 4-line and a 4000-line
