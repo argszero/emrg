@@ -1468,6 +1468,15 @@ vision = false
       const res = await dialog.showOpenDialog(win, { properties: ["openDirectory"] });
       return res.canceled ? null : res.filePaths[0];
     });
+
+    ipcMain.handle("emrg:pickSandboxRoot", async () => {
+      // 额外可写根要一条一字不差的绝对路径（rant 2026-11-20T10:13:12）：手打容易错，
+      // 错了只换来一句拒绝。系统选择器点两下就到。macOS 的对话框能同时列文件与目录；
+      // Windows/Linux 的对话框一次只能选一种，那里固定为选目录。
+      const properties = process.platform === "darwin" ? ["openFile", "openDirectory"] : ["openDirectory"];
+      const res = await dialog.showOpenDialog(win, { properties });
+      return res.canceled ? null : (res.filePaths[0] ?? null);
+    });
   }
 
   // ── daemon 生命周期（P2：connManager 为 daemon 唯一 owner）──────────

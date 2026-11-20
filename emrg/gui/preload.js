@@ -101,6 +101,9 @@ const api = {
   getSettings: () => ipcRenderer.invoke("emrg:getSettings"),
   cancel: (sessionId) => ipcRenderer.invoke("emrg:cancel", sessionId),
   pickAgentDir: () => ipcRenderer.invoke("emrg:pickAgentDir"),
+  // 额外可写根的系统选择器（rant 2026-11-20T10:13:12）：只开对话框取一条路径，
+  // 不写盘、不发命令——填进输入框不等于添加，那一跳仍由用户点「添加」。
+  pickSandboxRoot: () => ipcRenderer.invoke("emrg:pickSandboxRoot"),
   // 渲染进程日志桥（rant 2026-08-24：打开会话链路排障——renderer 点击/调用步骤
   // 经 emrg:log IPC 上报，由 main 写入 ~/.emrg/emrg-gui.log，与 main 日志同文件时序对齐）
   log: (level, msg) => ipcRenderer.invoke("emrg:log", { level, msg }),
