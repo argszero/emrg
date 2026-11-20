@@ -1669,6 +1669,8 @@ describe("the cockpit's file-row wire (issue #3070)", () => {
     await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
     m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }], "s1"));
 
+    // agent 目录默认收起（rant 2026-11-20T17:56:07 清单 2）：先展开再点行
+    fireEvent.click(await screen.findByTestId("left-group-agent-header"));
     const row = await screen.findByTestId("left-tree-agent-row");
     expect(row).toHaveAttribute("data-kind", "text");
     fireEvent.click(row);
@@ -1695,6 +1697,7 @@ describe("the cockpit's file-row wire (issue #3070)", () => {
     await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
     m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }], "s1"));
 
+    fireEvent.click(await screen.findByTestId("left-group-agent-header"));
     fireEvent.click(await screen.findByTestId("left-tree-agent-row"));
 
     const failed = await screen.findByTestId("editor-failed");

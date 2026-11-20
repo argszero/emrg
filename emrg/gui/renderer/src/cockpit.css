@@ -1147,9 +1147,10 @@ body.col-resizing * {
   word-break: break-word;
 }
 
-/* ── 会话栏下半：两段目录树（issue #3068）──────────────────────────────────
-   两张树从右栏搬到这里，所以会话栏从「一张列表」变成「列表 + 两段」。
-   段高由 `sectionFlex` 算，写成内联的 flex 值：收起只卸掉树，表头原地不动。 */
+/* ── 会话栏下半：一棵目录树，三个分组（rant 2026-11-20T17:56:07）──────────────
+   以前这里是两段、两棵树、两个滚动条，各占一半高，找文件先得判断它属于哪一段。
+   现在只有一个滚动容器：分组收起只占一行（body 根本不渲染，所以没有要藏的高度），
+   展开按内容占高，腾出的高度自然回到同一棵树里——`sectionFlex` 那套高度分配没有了。 */
 .left-trees {
   display: flex;
   flex-direction: column;
@@ -1158,23 +1159,41 @@ body.col-resizing * {
   border-top: 1px solid var(--border);
 }
 
-.left-section {
-  min-height: 0;
+.left-trees-header {
+  flex: none;
+  height: 24px;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-3);
+  font-size: var(--fs-small);
+  white-space: nowrap;
   overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.left-section-header {
+/* 唯一的滚动条在这里：三组共用一条，滚动时整棵树是一体的。 */
+.left-trees-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.left-group {
+  min-height: 0;
+}
+
+.left-group-header {
   display: flex;
   align-items: center;
   gap: 4px;
   width: 100%;
-  height: 26px;
-  flex: none;
+  height: 24px;
   padding: 0 6px;
   border: none;
-  border-bottom: 1px solid var(--border);
   background: transparent;
-  color: var(--text-3);
+  color: var(--text-2);
   font-size: var(--fs-small);
   text-align: left;
   cursor: pointer;
@@ -1183,19 +1202,24 @@ body.col-resizing * {
   text-overflow: ellipsis;
 }
 
-.left-section-header:hover {
+.left-group-header:hover {
   color: var(--text-1);
 }
 
-.left-section-caret {
+.left-group-caret {
   flex: none;
   width: 10px;
 }
 
-.left-section-body {
-  flex: 1;
+.left-group-body {
   min-height: 0;
-  overflow: auto;
+}
+
+/* 「没有」：一行说明，不是一行可以点开的空树。 */
+.left-group-empty {
+  padding: 4px 8px 6px 20px;
+  color: var(--text-3);
+  font-size: var(--fs-small);
 }
 
 /* ── 右栏：编辑器（issue #3068）────────────────────────────────────────────
