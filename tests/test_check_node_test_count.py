@@ -652,6 +652,122 @@ def test_unreadable_output_raises_the_tools_own_error(mod, monkeypatch, fake_cwd
         mod._run(["npm", "test"], fake_cwd)
 
 
+# --- a stale install must not read as a broken test --------------------------
+
+
+# Real renderer output, captured 2026-11-20 (cycle cyc20261120-212219) at master
+# `2bc68c17` on a host whose `emrg/gui/renderer/node_modules` predated the commit
+# that added the editor: the suite did not run at all, and the guard printed this
+# dump as the whole diagnosis.
+_VITE_STALE_INSTALL = (
+    " FAIL  src/lib/editorDoc.test.ts [ src/lib/editorDoc.test.ts ]\n"
+    'Error: Failed to resolve import "@codemirror/state" from '
+    '"src/lib/editorDoc.test.ts". Does the file exist?\n'
+    "\n"
+    " Test Files  1 failed (1)\n"
+)
+
+# `node p.mjs` on this host, importing a package that is not installed.
+_NODE_STALE_INSTALL = (
+    "Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@codemirror/state' "
+    "imported from /tmp/p.mjs\n"
+)
+
+
+def _failing_run(mod, monkeypatch, fake_cwd, output: str) -> str:
+    """Run `_run` against `output` as a rc=2 runner reply; return the message."""
+
+    class _Proc:
+        returncode = 2
+        stdout = output
+        stderr = ""
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda cmd, **kw: _Proc())
+    with pytest.raises(mod.NodeCountError) as excinfo:
+        mod._run(["npm", "test"], fake_cwd)
+    return str(excinfo.value)
+
+
+def test_a_stale_install_names_the_package_the_file_and_the_command(
+    mod, monkeypatch, fake_cwd
+) -> None:
+    """The measured defect: a remedy, built from the runner's own words.
+
+    Every one of the three facts is read out of the output rather than written
+    into the message, which is what makes the hint usable on a package nobody
+    anticipated.
+    """
+    message = _failing_run(mod, monkeypatch, fake_cwd, _VITE_STALE_INSTALL)
+
+    assert "@codemirror/state" in message, message
+    assert "src/lib/editorDoc.test.ts" in message, message
+    assert "npm ci" in message, message
+    assert str(fake_cwd) in message, message
+    assert "Nothing was measured" in message, (
+        "the dump must not be readable as a test verdict - exit 2 means the "
+        f"suite never ran; got {message!r}"
+    )
+
+
+def test_node_own_missing_package_shape_gets_the_same_remedy(
+    mod, monkeypatch, fake_cwd
+) -> None:
+    """The GUI runner's shape, measured separately: unquoted path, same remedy."""
+    message = _failing_run(mod, monkeypatch, fake_cwd, _NODE_STALE_INSTALL)
+
+    assert "@codemirror/state" in message, message
+    assert "/tmp/p.mjs" in message, message
+    assert "npm ci" in message, message
+
+
+def test_a_genuine_test_failure_gets_no_install_remedy(
+    mod, monkeypatch, fake_cwd
+) -> None:
+    """The other direction: a red assertion is not an install problem.
+
+    Without this arm the hint could fire on every failure and still pass the two
+    above - which is the shape of a clause that says nothing.
+    """
+    output = (
+        " FAIL  src/lib/ux.test.ts > adds two\n"
+        "AssertionError: expected 1 to be 2\n"
+        " Test Files  1 failed (1)\n"
+    )
+    message = _failing_run(mod, monkeypatch, fake_cwd, output)
+
+    assert "AssertionError" in message, message
+    assert "npm ci" not in message, message
+    assert "Nothing was measured" not in message, message
+
+
+def test_a_missing_relative_import_is_not_a_stale_install(
+    mod, monkeypatch, fake_cwd
+) -> None:
+    """A relative specifier is a source bug; installing cannot fix it."""
+    output = (
+        'Error: Failed to resolve import "./nope" from "src/lib/x.test.ts". '
+        "Does the file exist?\n"
+    )
+    message = _failing_run(mod, monkeypatch, fake_cwd, output)
+
+    assert "./nope" in message, message
+    assert "npm ci" not in message, message
+
+
+def test_a_shape_without_an_importing_file_gets_no_hint(
+    mod, monkeypatch, fake_cwd
+) -> None:
+    """No file in the output means no hint: guessing which file is a false claim.
+
+    Node's CommonJS `Cannot find module 'pkg'` is this shape - it names the
+    package only.
+    """
+    message = _failing_run(mod, monkeypatch, fake_cwd, "Cannot find package 'left-pad'\n")
+
+    assert "left-pad" in message, message
+    assert "npm ci" not in message, message
+
+
 def test_a_bare_name_starts_the_real_runner(mod, fake_cwd) -> None:
     """No stub: the argv half must work against a real runner, not a mock.
 
