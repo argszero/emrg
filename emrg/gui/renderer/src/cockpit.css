@@ -1019,50 +1019,6 @@ body.col-resizing * {
   min-height: 0;
 }
 
-.ft-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  height: 24px;
-  flex: none;
-  padding: 0 8px;
-  border-bottom: 1px solid var(--border);
-}
-
-.ft-root {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--fs-small);
-  color: var(--text-3);
-}
-
-.ft-tool {
-  flex: none;
-  width: 18px;
-  height: 18px;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-3);
-  font-size: 12px;
-  line-height: 1;
-  cursor: pointer;
-  padding: 0;
-}
-
-.ft-tool:hover:not(:disabled) {
-  background: var(--bg-soft);
-  color: var(--text-1);
-}
-
-.ft-tool:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-
 .ft-body {
   flex: 1;
   min-height: 0;
@@ -1073,6 +1029,11 @@ body.col-resizing * {
   padding: 2px 0;
 }
 
+/* The line itself: geometry only, shared by every line in the panel — a directory row,
+   a group row and the empty line are the same height and take the same indent. A group
+   row and an ordinary row also share `.ft-row`, which is what gives them the same
+   hover tint; the empty line is a line without being a row, so it has neither. */
+.ft-line,
 .ft-row {
   position: relative;
   display: flex;
@@ -1184,42 +1145,27 @@ body.col-resizing * {
   min-height: 0;
 }
 
-.left-group-header {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  width: 100%;
-  height: 24px;
-  padding: 0 6px;
-  border: none;
-  background: transparent;
+/* 分组节点：树里的第一行，与目录行只差字体（rant 2026-11-20T21:27:29）。
+   行高、缩进、三角、图标、hover 整行浅底都来自 `.ft-line` / `.ft-row`。 */
+.left-group-row {
+  font-size: 11.5px;
+  font-weight: 700;
   color: var(--text-2);
-  font-size: var(--fs-small);
-  text-align: left;
-  cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
-.left-group-header:hover {
+.left-group-row:hover {
   color: var(--text-1);
-}
-
-.left-group-caret {
-  flex: none;
-  width: 10px;
 }
 
 .left-group-body {
   min-height: 0;
 }
 
-/* 「没有」：一行说明，不是一行可以点开的空树。 */
+/* 「没有」也是一行 22px 的普通行：斜体、次要字色、不可点、hover 不变色。
+   它是行不是提示块，所以不带 `.ft-row`，也就没有那一条 hover 底色。 */
 .left-group-empty {
-  padding: 4px 8px 6px 20px;
+  font-style: italic;
   color: var(--text-3);
-  font-size: var(--fs-small);
 }
 
 /* ── 右栏：编辑器（issue #3068）────────────────────────────────────────────

@@ -268,7 +268,7 @@ describe("LeftTrees → editor (issue #3068)", () => {
   it("点文件行交上绝对路径与所在树；点目录行什么都不交", async () => {
     const { onOpenFile } = renderTrees();
     // agent 目录默认收起（rant 2026-11-20T17:56:07 清单 2）：先展开，它下面的行才存在
-    fireEvent.click(screen.getByTestId("left-group-agent-header"));
+    fireEvent.click(screen.getByTestId("left-group-agent-row"));
     const row = await screen.findAllByTestId("left-tree-agent-row");
     const file = row.find((el) => el.getAttribute("data-kind") === "text");
     const dir = row.find((el) => el.getAttribute("data-kind") !== "text");
@@ -283,7 +283,7 @@ describe("LeftTrees → editor (issue #3068)", () => {
   it("双击文件行是固定", async () => {
     const { onOpenFile } = renderTrees();
     // agent 目录默认收起（rant 2026-11-20T17:56:07 清单 2）：先展开，它下面的行才存在
-    fireEvent.click(screen.getByTestId("left-group-agent-header"));
+    fireEvent.click(screen.getByTestId("left-group-agent-row"));
     const row = await screen.findAllByTestId("left-tree-agent-row");
     const file = row.find((el) => el.getAttribute("data-kind") === "text");
     fireEvent.doubleClick(file as HTMLElement);
