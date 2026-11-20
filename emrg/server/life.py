@@ -10,10 +10,16 @@ moment a rule for "what is alive" is spelled as a formula, the judge stops
 judging and starts computing. What code owns is what a reader needs: which of the
 four bands a number falls in, and what the per-round context says about it.
 
-The bands, and the reason the edges read the way they do — *below* ten is dying,
-so a ten survives; *below* a hundred is healthy, so a hundred is healthy and the
-first value above it thrives. None of them is a cap: the value has no upper
-bound, and a number far above the top band is simply thriving.
+**The bands, and where the edges live.** Four words: dying, surviving, healthy,
+thriving — the four the per-round context prints and the read tool answers. The
+floors that separate them are `_BANDS` below and nowhere else: that table is the
+only place a boundary is written, and
+`tests/test_agent_life.py::test_the_bands_fall_where_the_boundaries_read` walks
+both sides of every one of them, so an off-by-one reddens a test instead of
+printing a band that nothing disagrees with. A sentence restating a floor is a
+second statement of a number the guard already holds, and it decays where the
+guard does not. None of the bands is a cap: the value has no upper bound, and a
+number far above the top band is simply thriving.
 
 **The judge is an agent like any other, and the one thing it does not share is
 the write.** It reads and writes any agent's value; every other agent reads its
@@ -61,11 +67,11 @@ def judge_dir():
 def tier_of(value: int) -> str:
     """The band a life value falls in — one word, the same word the context shows.
 
-    Exact at both edges and deliberately so: the boundaries read "below ten",
-    "below fifty", "below a hundred" and "above a hundred". A hundred is in neither
-    of the last two statements taken literally, so the table settles it the way the
-    sentence's own grammar points — a hundred is *not* above a hundred, so it is
-    healthy, and the first value that thrives is a hundred and one.
+    Walks `_BANDS` and adds nothing to it: each floor is the smallest value that
+    reaches its band, so the edge is exact on both sides — the value at a floor
+    takes the higher band, and the value below it does not. No floor is restated
+    here. The table is where a boundary is written, and the boundary test holds
+    both sides of every one of them.
     """
     for floor, name in _BANDS:
         if value >= floor:
