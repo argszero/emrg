@@ -9,6 +9,9 @@ import {
   type SendOptions,
 } from "./Composer";
 import { createTranscriptStore, type TranscriptStore } from "../lib/transcript";
+import { COMMANDS } from "../lib/commands";
+import shellCss from "../shell.css?raw";
+import componentsCss from "../../css/components.css?raw";
 import { I18nProvider } from "../lib/i18n";
 
 /**
@@ -179,17 +182,93 @@ describe("Composer — 补全菜单", () => {
 
   it("Enter 选择补全项 → 填充输入框并关闭菜单（用户可继续回车执行）", () => {
     const s = setup(createTranscriptStore());
+    // `/cle` 而不是 `/clear`：打全之后不再有清单（issue #3078 第 3 条），那条分支
+    // 由下面「指令名打全」那条测试看着。
+    s.setText("/cle");
+    s.press("Enter");
+    // 补全成「指令名 + 一个空格」：光标落在参数位（issue #3078），
+    // 那个空格同时让输入离开指令词，清单随之收起。
+    expect(s.value()).toBe("/clear ");
+    expect(screen.queryByTestId("cmd-menu")).not.toBeInTheDocument();
+  });
+
+  /**
+   * issue #3078 第 3 条：指令名打全之后不该再留一份只剩它自己的清单——那份清单在
+   * keydown 里 `preventDefault()` + `selectCmd()`，于是 `/clear` 按回车什么都不发生。
+   * 判的是「打全」，不是「有匹配」：`/cle` 仍有补全项，`/clear` 一条也没有。
+   */
+  it("指令名打全 → 不弹清单（回车交给执行）", () => {
+    const s = setup(createTranscriptStore());
+    s.setText("/cle");
+    expect(screen.getByTestId("cmd-menu")).toBeInTheDocument();
+    s.setText("/clear");
+    expect(screen.queryByTestId("cmd-menu")).not.toBeInTheDocument();
+  });
+
+  /**
+   * issue #3078 验收 1：`/` 列出的行数就是指令数。数字从 COMMANDS 现取，
+   * 不写死——写死的那一个会在下一条指令加进来时变成一句假话。
+   */
+  it("输入 / 列出全部指令（行数 = COMMANDS 条数）", () => {
+    const s = setup(createTranscriptStore());
+    s.setText("/");
+    expect(screen.getAllByRole("menuitem")).toHaveLength(Object.keys(COMMANDS).length);
+    // 前缀过滤忽略大小写（验收 1 后半）
+    s.setText("/R");
+    const r = screen.getAllByRole("menuitem").map((el) => el.getAttribute("data-testid"));
+    expect(r.every((id) => id?.replace("cmd-item-", "").startsWith("/r"))).toBe(true);
+  });
+
+  /** issue #3078 第 2 条：Tab 与 Enter 同义，都补成「名字 + 一个空格」并收起清单。 */
+  it("Tab 补全成「名字 + 一个空格」并收起清单", () => {
+    const s = setup(createTranscriptStore());
+    s.setText("/cle");
+    s.press("Tab");
+    expect(s.value()).toBe("/clear ");
+    expect(screen.queryByTestId("cmd-menu")).not.toBeInTheDocument();
+  });
+
+  /** issue #3078 第 3 条后半：打全之后回车走的是执行，不是再补全一次。 */
+  it("指令名打全后回车 → 交给路由执行（不再被清单截住）", () => {
+    const seen: { type: string; cmd: string; args?: string[] }[] = [];
+    const s = setup(createTranscriptStore(), { onCommand: (r) => seen.push(r) });
     s.setText("/clear");
     s.press("Enter");
-    expect(s.value()).toBe("/clear");
-    expect(screen.queryByTestId("cmd-menu")).not.toBeInTheDocument();
+    expect(seen).toEqual([{ type: "command", cmd: "/clear", args: [] }]);
+    expect(s.value()).toBe("");
+  });
+
+  /**
+   * issue #3078 第 1 条与验收 2：清单要落在窗口内。jsdom 不做布局，量不出矩形——能测的
+   * 是**产生那个矩形的两条规则**：输框自己是定位祖先（否则 `bottom: 100%` 量的是整窗），
+   * 以及清单高度按窗口收。
+   *
+   * 每条都把区域切到那一条规则的 `{}` 里再断言：从标记截到文件末尾的写法，会被后面任何
+   * 一条规则满足，等于什么都没测。
+   */
+  describe("补全清单落在窗口内（读样式表）", () => {
+    const ruleBody = (css: string, selector: string): string => {
+      const start = css.indexOf(`${selector} {`);
+      expect(start).toBeGreaterThan(-1); // 选择器改名了，这条守卫的下一句就会说谎
+      return css.slice(start, css.indexOf("}", start) + 1);
+    };
+
+    it("输入框自己是定位祖先", () => {
+      expect(shellCss.length).toBeGreaterThan(1000); // 读到的不是空串
+      expect(ruleBody(shellCss, ".react-shell-main .composer")).toContain("position: relative");
+    });
+
+    it("清单高度按窗口收（长清单一屏装不下时也留在窗口内）", () => {
+      expect(componentsCss.length).toBeGreaterThan(1000);
+      expect(ruleBody(componentsCss, ".cmd-menu")).toContain("max-height: min(240px, 45vh)");
+    });
   });
 
   it("mousedown 点击补全项 → 填充输入框（preventDefault 防失焦）", async () => {
     const s = setup(createTranscriptStore());
-    s.setText("/clear");
+    s.setText("/cle");
     await userEvent.click(screen.getByTestId("cmd-item-/clear"));
-    expect(s.value()).toBe("/clear");
+    expect(s.value()).toBe("/clear ");
   });
 
   it("Escape 关闭菜单", () => {

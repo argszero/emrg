@@ -1,6 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useReducer, useState } from "react";
 import { useI18n } from "../lib/i18n";
-import { COMMANDS, hintText } from "../lib/commands";
+import { COMMANDS, hintText, usageText } from "../lib/commands";
 import { helpRows, type MemoryRow, type SkillRow, type SkillShadowRow } from "../lib/dialogLists";
 import { rewindPointRow, type RewindPoint } from "../lib/rewind";
 import {
@@ -124,6 +124,8 @@ export interface DialogHostHandle {
   openSkills(): void;
   openRewind(): void;
   openRename(sid?: string): void;
+  /** `/rename <标题>`：有参数就地改名，不弹面板 */
+  renameNow(title: string): void | Promise<void>;
   openDelete(sid?: string): void;
   openSessions(): void;
   openNewSession(): void;
@@ -279,6 +281,25 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
     }
     const cur = sessions.find((s) => s.session_id === target);
     dispatch({ type: "open-rename", payload: { sessionId: target, currentTitle: cur?.title } });
+  }
+
+  /**
+   * `/rename <标题>`：有参数就地改名，不弹面板（issue #3078）。
+   * 只有不带参数时才该问人——那时人已经在面板里，预填当前标题并全选。
+   * 标题原样提交：多词标题在被 `Shell` 用 `join(" ")` 合回来之前没有被任何一层拆开。
+   */
+  async function renameNow(title: string): Promise<void> {
+    const trimmed = title.trim();
+    if (!sid) {
+      transcript.addSystemMessage(t("app.needSession"), sid);
+      return;
+    }
+    if (!trimmed) {
+      openRename();
+      return;
+    }
+    const b = bridge();
+    if (b) await b.renameSession({ sessionId: sid, title: trimmed });
   }
 
   /**
@@ -453,6 +474,7 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
       openDialog("rewind");
     },
     openRename,
+    renameNow,
     openDelete,
     openSessions: () => {
       setOpenStep("agents");
@@ -478,7 +500,7 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
       />
       <HelpDialog
         open={listDialog.help}
-        rows={helpRows(COMMANDS, (cmd) => hintText(cmd, t))}
+        rows={helpRows(COMMANDS, (cmd) => hintText(cmd, t), (cmd) => usageText(cmd, t))}
         onDismiss={() => closeDialog("help")}
       />
       <MemoryDialog

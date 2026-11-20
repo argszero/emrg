@@ -24,6 +24,8 @@ function mockEmrg() {
   const sendMessage = vi.fn().mockResolvedValue({ requestId: "req-9" });
   // DialogHost 用到的 IPC 通道（Batch 5 slice 4）：对话框数据加载 + 直接执行类指令
   const clearSession = vi.fn().mockResolvedValue({ ok: true });
+  // issue #3078：`/rename <标题>` 一步改名要走的通道（DialogHost.renameNow）
+  const renameSession = vi.fn().mockResolvedValue({ ok: true });
   const compactSession = vi.fn().mockResolvedValue({ ok: true });
   const listAgents = vi.fn().mockResolvedValue([{ name: "emrg", path: "/p/emrg" }]);
   // issue #2978：搜索浮层问「全部 agent 的全部会话」——一次请求，无参数
@@ -105,6 +107,7 @@ function mockEmrg() {
     closeSession,
     reorderOpenSessions,
     cancel,
+    renameSession,
   };
   return {
     listeners,
@@ -135,6 +138,7 @@ function mockEmrg() {
     closeSession,
     reorderOpenSessions,
     cancel,
+    renameSession,
     emit: (evt: DaemonEventFrame) => listeners.forEach((cb) => cb(evt)),
   };
 }
@@ -680,6 +684,26 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     await typeIntoComposer("/rename");
     fireEvent.click(screen.getByTestId("composer-send"));
     await waitFor(() => expect(screen.getByTestId("rename-dialog")).toBeInTheDocument());
+  });
+
+  /**
+   * issue #3078 第 6 条：带参数的 `/rename` 一步做完，不弹面板；多词标题原样保留。
+   * 参数先被切成多段再 join 回来——这条测试正是那个 join 的检验点：丢掉任何一段、
+   * 或者只取第一个词，这里的断言都会红。
+   */
+  it("/rename with a title renames in one step and opens no panel", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    m.emit(sessionsFrame([{ session_id: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(1));
+    await typeIntoComposer("/rename 十月 第三周 周报");
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await waitFor(() =>
+      expect(m.renameSession).toHaveBeenCalledWith({ sessionId: "s1", title: "十月 第三周 周报" }),
+    );
+    expect(screen.queryByTestId("rename-dialog")).toBeNull();
   });
 
   // The two entry points left the sidebar when it became the open-sessions list

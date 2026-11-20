@@ -1,4 +1,4 @@
-import { getCompletions } from "./commands";
+import { COMMANDS, getCompletions } from "./commands";
 import type { TranslateFn } from "./utils";
 
 /**
@@ -17,6 +17,8 @@ import type { TranslateFn } from "./utils";
 export interface CommandItem {
   cmd: string;
   hint: string;
+  /** 参数用法（与 `/help` 同一串，commands.usageText 解析） */
+  usage: string;
   phase: number;
 }
 
@@ -36,6 +38,25 @@ export const CMD_MENU_CLOSED: CmdMenuState = { items: [], index: -1 };
 export function menuForPrefix(prefix: string, t: TranslateFn): CmdMenuState {
   const items = getCompletions(prefix, t);
   return items.length ? { items, index: 0 } : CMD_MENU_CLOSED;
+}
+
+/**
+ * 输入框内容 → 补全菜单状态。两条界线在这一个函数里，因为它们是同一个判断：
+ * **什么时候该有清单**。
+ *
+ * - 不在指令词上（不以 `/` 开头）→ 没有清单。这里读的是**原文**，不做 trim：
+ *   `"/help "` 去掉空白之后是 `"/help"`，拿它去判就把补全之后敲的那个空格当成
+ *   「又回到指令词了」，清单重新弹回来（issue #3078 第 4 条）。
+ *   空白本身不必另判——没有指令名含空白，`"/cle "` 做前缀匹配本来就不命中。这里
+ *   曾经多一句 `/\s/` 的守卫，把它删掉之后全部测试仍然全绿，可见那句是多余的。
+ * - 指令名已经打全 → 没有清单，回车交给执行（第 3 条）。
+ * - 其余 → 按前缀过滤。
+ */
+export function menuForInput(raw: string, t: TranslateFn): CmdMenuState {
+  const lead = String(raw ?? "").replace(/^[ \t]*/, "");
+  if (!lead.startsWith("/")) return CMD_MENU_CLOSED;
+  if (COMMANDS[lead.toLowerCase()]) return CMD_MENU_CLOSED;
+  return menuForPrefix(lead, t);
 }
 
 /**

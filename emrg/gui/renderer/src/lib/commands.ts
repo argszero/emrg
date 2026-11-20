@@ -9,6 +9,11 @@ import type { TranslateFn } from "./utils";
 export interface CommandMeta {
   hint: string;
   phase: number;
+  /**
+   * 参数用法的 i18n 键。不吃参数的指令不写这一项：补全清单、`/help` 与指令卡读的
+   * 是同一串（issue #3078）——三处各写一套，就是三个会各自漂移的答案。
+   */
+  usage?: string;
 }
 
 /** 指令注册表：cmd → { hint, phase }（hint 为 i18n 词典键，显示时经 t() 解析） */
@@ -18,14 +23,14 @@ export const COMMANDS: Record<string, CommandMeta> = {
   "/version": { hint: "cmd.version.hint", phase: 1 },
   "/help": { hint: "cmd.help.hint", phase: 1 },
   "/image": { hint: "cmd.image.hint", phase: 1 },
-  "/delete": { hint: "cmd.delete.hint", phase: 2 },
-  "/rename": { hint: "cmd.rename.hint", phase: 2 },
-  "/resume": { hint: "cmd.resume.hint", phase: 2 },
+  "/delete": { hint: "cmd.delete.hint", phase: 2, usage: "cmd.delete.usage" },
+  "/rename": { hint: "cmd.rename.hint", phase: 2, usage: "cmd.rename.usage" },
+  "/resume": { hint: "cmd.resume.hint", phase: 2, usage: "cmd.resume.usage" },
   "/rewind": { hint: "cmd.rewind.hint", phase: 2 },
   "/sessions": { hint: "cmd.sessions.hint", phase: 2 },
   "/open": { hint: "cmd.open.hint", phase: 4 },
-  "/model": { hint: "cmd.model.hint", phase: 3 },
-  "/memory": { hint: "cmd.memory.hint", phase: 3 },
+  "/model": { hint: "cmd.model.hint", phase: 3, usage: "cmd.model.usage" },
+  "/memory": { hint: "cmd.memory.hint", phase: 3, usage: "cmd.memory.usage" },
   "/skills": { hint: "cmd.skills.hint", phase: 3 },
   "/rant": { hint: "cmd.rant.hint", phase: 4 },
   "/trigger": { hint: "cmd.trigger.hint", phase: 4 },
@@ -33,7 +38,7 @@ export const COMMANDS: Record<string, CommandMeta> = {
   // command the TUI gained in Part 1, and the same three sub-ops — the daemon
   // judges the path either way, so the two front ends differ only in where the
   // answer is rendered (TUI: a chat line; GUI: the dialog and its list).
-  "/sandbox": { hint: "cmd.sandbox.hint", phase: 4 },
+  "/sandbox": { hint: "cmd.sandbox.hint", phase: 4, usage: "cmd.sandbox.usage" },
 };
 
 export type ParseResult =
@@ -75,10 +80,40 @@ export function hintText(cmd: string, t: TranslateFn): string {
   }
 }
 
-/** / 前缀补全：返回匹配的指令（含 hint），供补全菜单过滤 */
-export function getCompletions(prefix: string, t: TranslateFn): Array<{ cmd: string; hint: string; phase: number }> {
+/**
+ * 参数用法：i18n 键 → 当前语言文案；没有参数可写的指令回空串。
+ * 补全清单、`/help`、指令卡三处都调这一个函数，所以它们不可能各说一套。
+ */
+export function usageText(cmd: string, t: TranslateFn): string {
+  const meta = COMMANDS[cmd];
+  if (!meta?.usage) return "";
+  try {
+    return t(meta.usage);
+  } catch {
+    return meta.usage;
+  }
+}
+
+/**
+ * 指令名是否已经打全。打全之后回车该交给执行——补全清单不许截住它
+ * （issue #3078：那条「`/rename` 按回车什么都不发生」就是这个清单吃掉了回车）。
+ */
+export function isCompleteCommand(text: unknown): boolean {
+  return Boolean(COMMANDS[String(text ?? "").trim().toLowerCase()]);
+}
+
+/** / 前缀补全：返回匹配的指令（含 hint 与参数用法），供补全菜单过滤 */
+export function getCompletions(
+  prefix: string,
+  t: TranslateFn,
+): Array<{ cmd: string; hint: string; usage: string; phase: number }> {
   const p = String(prefix ?? "").toLowerCase();
   return Object.entries(COMMANDS)
     .filter(([cmd]) => cmd.startsWith(p))
-    .map(([cmd, meta]) => ({ cmd, hint: hintText(cmd, t), phase: meta.phase }));
+    .map(([cmd, meta]) => ({
+      cmd,
+      hint: hintText(cmd, t),
+      usage: usageText(cmd, t),
+      phase: meta.phase,
+    }));
 }

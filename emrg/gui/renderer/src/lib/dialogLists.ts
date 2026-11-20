@@ -79,12 +79,23 @@ export function skillShadowView(s: SkillShadowRow, unnamedText: string): SkillSh
 export interface HelpRowView {
   cmd: string;
   hint: string;
+  /** 参数用法；与补全清单读同一个解析器，吃了参数的指令才有内容 */
+  usage: string;
 }
 
-/** 帮助行：COMMANDS 条目 → {cmd, hint}（hint 经 i18n 解析，vanilla hintText 语义） */
+/**
+ * 帮助行：COMMANDS 条目 → {cmd, hint, usage}。
+ * 参数用法与补全清单读同一个解析器（`commands.usageText`），两处不可能各说一套
+ * （issue #3078 第 7 条）。
+ */
 export function helpRows(
   commands: Record<string, unknown>,
   hintOf: (cmd: string) => string,
+  usageOf?: (cmd: string) => string,
 ): HelpRowView[] {
-  return Object.entries(commands).map(([cmd]) => ({ cmd, hint: hintOf(cmd) }));
+  return Object.entries(commands).map(([cmd]) => ({
+    cmd,
+    hint: hintOf(cmd),
+    usage: usageOf?.(cmd) ?? "",
+  }));
 }

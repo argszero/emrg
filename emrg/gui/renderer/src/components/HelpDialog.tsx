@@ -25,6 +25,7 @@ export function HelpDialog({ open, rows = [], onDismiss }: HelpDialogProps) {
         {rows.map((r) => (
           <div className="help-row" key={r.cmd} data-testid="help-row">
             <span className="help-cmd">{r.cmd}</span>
+            {r.usage ? <span className="help-usage">{r.usage}</span> : null}
             <span className="help-hint">{r.hint}</span>
           </div>
         ))}
