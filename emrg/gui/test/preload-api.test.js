@@ -99,6 +99,7 @@ const EXPECTED_INVOKE_METHODS = [
   "getSettings",
   "cancel",
   "pickAgentDir",
+  "pickSandboxRoot",
   "saveImage",
   "saveFile",
   "readClipboardImage",

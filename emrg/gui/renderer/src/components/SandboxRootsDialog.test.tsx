@@ -171,4 +171,52 @@ describe("SandboxRootsDialog", () => {
     expect(screen.getAllByTestId("sandbox-roots-row")).toHaveLength(1);
     expect(screen.queryAllByTestId("sandbox-roots-source")).toHaveLength(0);
   });
+
+  /* ── 「选择…」按钮（rant 2026-11-20T10:13:12）────────────────────────────────
+   *
+   * 三件事各自是这条需求的半边：选中**只回填**，取消**什么都不改**，没有会话时
+   * 按钮与输入框同一条禁用。第一件是「填进去 ≠ 添加」的全部内容——回填后如果还
+   * 顺手发一次 add，那宿主连反悔的机会都没有。
+   */
+  it("「选择…」只回填输入框，不发添加命令", async () => {
+    const onOp = vi.fn();
+    const onPick = vi.fn(async () => "/tmp/picked");
+    setup({ onOp, onPick, roots: [] });
+    onOp.mockClear(); // 打开时问过一次列表（op=list），那一次不算
+    await userEvent.click(screen.getByTestId("sandbox-roots-choose"));
+    expect(onPick).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("sandbox-roots-path")).toHaveValue("/tmp/picked");
+    expect(onOp).not.toHaveBeenCalled();
+  });
+
+  it("取消选择：输入框、命令数、提示三样都不变", async () => {
+    const onOp = vi.fn();
+    const onPick = vi.fn(async () => null);
+    setup({ onOp, onPick, roots: [] });
+    const input = screen.getByTestId("sandbox-roots-path");
+    await userEvent.type(input, "/tmp/typed");
+    onOp.mockClear();
+    await userEvent.click(screen.getByTestId("sandbox-roots-choose"));
+    expect(onPick).toHaveBeenCalledTimes(1);
+    expect(input).toHaveValue("/tmp/typed");
+    expect(onOp).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("sandbox-roots-notice")).toBeNull();
+  });
+
+  it("没有会话时「选择…」与输入框一样禁用", () => {
+    setup({ sid: null, onPick: vi.fn(async () => "/tmp/x") });
+    expect(screen.getByTestId("sandbox-roots-path")).toBeDisabled();
+    expect(screen.getByTestId("sandbox-roots-choose")).toBeDisabled();
+  });
+
+  it("按钮文案走词典：英文界面显示 Choose…", () => {
+    // 写死中文在这个文件里是看不出来的——上面每个用例都是中文界面，两条文案恰好同字。
+    // 所以这一条换成英文：只有真的走 t() 才画得出 Choose…。
+    render(
+      <I18nProvider lang="en">
+        <SandboxRootsDialog open sid="s1" roots={[]} onPick={vi.fn(async () => null)} />
+      </I18nProvider>,
+    );
+    expect(screen.getByTestId("sandbox-roots-choose")).toHaveTextContent("Choose…");
+  });
 });

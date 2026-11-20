@@ -45,6 +45,16 @@ export interface SandboxRootsDialogProps {
   /** What the daemon said about the last op for this session, if anything. */
   notice?: SandboxRootsNotice | null;
   onOp?: (op: "add" | "remove" | "list", path: string) => void;
+  /**
+   * Open the system picker and answer the chosen path, or null when the host cancelled
+   * (rant 2026-11-20T10:13:12).
+   *
+   * A callback rather than a call for the same reason the ops are: the picker lives in
+   * the main process, where the dialog surface does, so this component reports the click
+   * and receives a path — it never reaches for the window itself. A cancelled picker and
+   * a caller that wired nothing both answer null, and both change nothing.
+   */
+  onPick?: () => Promise<string | null>;
   onDismiss?: () => void;
 }
 
@@ -55,6 +65,7 @@ export function SandboxRootsDialog({
   grants = null,
   notice = null,
   onOp,
+  onPick,
   onDismiss,
 }: SandboxRootsDialogProps) {
   const { t } = useI18n();
@@ -91,6 +102,15 @@ export function SandboxRootsDialog({
     setPath("");
     addRef.current?.focus();
   };
+  // 填进输入框 ≠ 添加：选中只回填，仍然点「添加」才发命令。取消什么都不改——null 一早
+  // 返回，输入框、列表、提示三样都不动，焦点也不抢。
+  const choose = async (): Promise<void> => {
+    if (!onPick) return;
+    const picked = await onPick();
+    if (!picked) return;
+    setPath(picked);
+    addRef.current?.focus();
+  };
 
   return (
     <Dialog
@@ -107,24 +127,37 @@ export function SandboxRootsDialog({
       <p style={{ color: "var(--text-2)", fontSize: "var(--fs-secondary)", margin: "0 0 var(--sp-3)" }}>
         {t("sandboxRoots.desc")}
       </p>
-      <label>
-        <span>{t("sandboxRoots.pathLabel")}</span>
-        <input
-          ref={addRef}
-          type="text"
-          data-testid="sandbox-roots-path"
-          placeholder={t("sandboxRoots.pathPlaceholder")}
-          value={path}
-          disabled={!canWrite}
-          onChange={(e) => setPath(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              submitAdd();
-            }
-          }}
-        />
-      </label>
+      <div style={{ display: "flex", alignItems: "flex-end", gap: "var(--sp-2)" }}>
+        <label style={{ flex: 1 }}>
+          <span>{t("sandboxRoots.pathLabel")}</span>
+          <input
+            ref={addRef}
+            type="text"
+            data-testid="sandbox-roots-path"
+            placeholder={t("sandboxRoots.pathPlaceholder")}
+            value={path}
+            disabled={!canWrite}
+            onChange={(e) => setPath(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                submitAdd();
+              }
+            }}
+          />
+        </label>
+        {/* 按钮与输入框同一条禁用条件：没有会话时连路径都没有主语，选出来的东西无处可加；
+            没有接选择器时也不装作能点。 */}
+        <button
+          type="button"
+          className="btn btn-ghost"
+          data-testid="sandbox-roots-choose"
+          disabled={!canWrite || !onPick}
+          onClick={() => void choose()}
+        >
+          {t("sandboxRoots.choose")}
+        </button>
+      </div>
       <div style={{ margin: "var(--sp-2) 0" }}>
         <button
           type="button"

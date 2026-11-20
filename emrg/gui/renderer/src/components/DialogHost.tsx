@@ -46,6 +46,8 @@ interface EmrgBridge {
   listAgentSessions(p: { projectPath: string }): Promise<{ sessions: SessionRow[] }>;
   newSession(p: { projectPath: string }): Promise<{ session_id: string }>;
   pickAgentDir(): Promise<{ path?: string } | null>;
+  /** 额外可写根的系统选择器（rant 2026-11-20T10:13:12）：只取一条路径，不写盘、不发命令。 */
+  pickSandboxRoot(): Promise<string | null>;
   registerAgent(p: { path: string }): Promise<{ ok: boolean; path: string }>;
   switchSession(p: { sessionId: string }): Promise<unknown>;
   deleteSession(p: { sessionId: string }): Promise<unknown>;
@@ -572,6 +574,11 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
         grants={sid ? (appState.sandboxGrantsBySid[sid] ?? null) : null}
         notice={sid ? (appState.sandboxRootsNoticeBySid[sid] ?? null) : null}
         onOp={onSandboxRootsOp}
+        onPick={async () => {
+          const b = bridge();
+          if (!b?.pickSandboxRoot) return null;
+          return await b.pickSandboxRoot();
+        }}
         onDismiss={() => closeDialog("sandboxRoots")}
       />
     </>
