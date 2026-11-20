@@ -406,10 +406,12 @@ NOT_TREE_READERS = {
         "answered about host state a checkout does not carry (the tasks table is the "
         "host's, the rotation table is gitignored memory). Its unmeasurable answer (rc 2: "
         "no task table, no rotation table, YAML that does not parse, records that are not "
-        "a list, a table with no parsable row) and its classification states (rc 1: "
-        "changed, unclassified, gone) are pinned by "
+        "a list, a table with no parsable row) and its classification states are pinned by "
         "tests/test_check_extra_prompt_rotation.py - added by issue #2850, where section "
-        "1.7's rotation spent a round re-reading an unchanged block for the third time"
+        "1.7's rotation spent a round re-reading an unchanged block for the third time. "
+        "The states themselves are not listed here: their one home is the guard's own "
+        "docstring, and a copy in this cell is a second place to keep in step - this cell "
+        "named three of the seven when issue #3115 added another"
     ),
     "check-merge-freshness.py": "requires PR numbers; answers per head and its base",
     "check-merge-order.py": "requires PR numbers; names the base it plans against",

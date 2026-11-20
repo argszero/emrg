@@ -282,8 +282,17 @@ def test_init_writes_nothing(mod, tmp_path, capsys):
     assert not table.exists(), "the tool may not create the table it is asked to read"
 
 
-def test_what_init_prints_reads_back_clean(mod, tmp_path, capsys):
-    """The loop closes: the skeleton, written where the table belongs, is a table."""
+def test_what_init_prints_reads_back_as_unclassified(mod, tmp_path, capsys):
+    """The loop closes on a table that still owes its reading.
+
+    This test used to assert the opposite - that `--init`'s printed skeleton read back **clean**,
+    `2 render, 2 unchanged`, exit 0. That verdict was the defect: the skeleton carries a valid
+    fingerprint per row and no classification, so "unchanged" answered a question nobody had
+    asked and the table sat half-unclassified while the guard said there was nothing to do
+    (issue #3115; measured on this host, 12 of 25 rows). What survives from the old assertion is
+    its real subject - the skeleton is a table this file can read, naming every block - and the
+    verdict is now the one the rows earn.
+    """
     tasks = _tasks(tmp_path, [_record("zeta", text="x" * 40), _record("omega", top="y" * 9)])
 
     assert mod.main(["--tasks", str(tasks), "--init"]) == 0
@@ -291,8 +300,77 @@ def test_what_init_prints_reads_back_clean(mod, tmp_path, capsys):
 
     table = tmp_path / "rotation.md"
     table.write_text(printed, encoding="utf-8")
+    assert mod.main(["--tasks", str(tasks), "--table", str(table)]) == 1
+    out = capsys.readouterr().out
+    assert "2 render, 0 unchanged" in out, out
+    assert "2 need classifying" in out, out
+    assert "zeta" in out and "omega" in out, out
+
+
+def test_a_row_still_carrying_the_placeholder_needs_classifying(mod, tmp_path, capsys):
+    """The regression, at its smallest: one row, a fingerprint that matches, no classification."""
+    body = "x" * 40
+    tasks = _tasks(tmp_path, [_record("zeta", text=body)])
+    table = tmp_path / "rotation.md"
+    table.write_text(
+        "| task | chars | sha256 | class | evidence |\n|---|---|---|---|---|\n"
+        f"| `zeta` | {len(body)} | {_sha(body)} | **unclassified** | printed by --init |\n",
+        encoding="utf-8",
+    )
+
+    assert mod.main(["--tasks", str(tasks), "--table", str(table)]) == 1
+    out = capsys.readouterr().out
+    assert "placeholder" in out and "zeta" in out, out
+    assert "`--init`" in out, "the detail must say whose placeholder it is: " + out
+    assert "unchanged numbers are not evidence" in out, (
+        "the remedy must not read as 're-classify the drifted ones': " + out
+    )
+
+
+def test_a_real_class_is_clean_even_beside_an_init_evidence_cell(mod, tmp_path, capsys):
+    """The other direction: the class cell is read, and the evidence cell is not.
+
+    A row that says `printed by --init` as its *evidence* but carries a real classification is
+    a row someone did go back to. Reading the phrase anywhere in the line rather than in the
+    class cell would report it, which is why this arm names the string that would trip a
+    substring matcher.
+    """
+    body = "x" * 40
+    tasks = _tasks(tmp_path, [_record("zeta", text=body)])
+    table = tmp_path / "rotation.md"
+    table.write_text(
+        "| task | chars | sha256 | class | evidence |\n|---|---|---|---|---|\n"
+        f"| `zeta` | {len(body)} | {_sha(body)} | **instance configuration** | "
+        "printed by --init, then classified |\n",
+        encoding="utf-8",
+    )
+
     assert mod.main(["--tasks", str(tasks), "--table", str(table)]) == 0
-    assert "2 render, 2 unchanged" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "1 unchanged" in out, out
+    assert "placeholder" not in out, out
+
+
+def test_an_empty_class_cell_keeps_its_reading(mod, tmp_path, capsys):
+    """An absent marker is not a claim.
+
+    A table written before the class column existed, or a cell someone cleared, carries no
+    evidence either way. This file can see the marker `--init` prints and cannot see the absence
+    of a classification, so it reports what it can measure and does not invent the rest.
+    """
+    body = "x" * 40
+    tasks = _tasks(tmp_path, [_record("zeta", text=body)])
+    table = tmp_path / "rotation.md"
+    table.write_text(
+        "| task | chars | sha256 | class | evidence |\n|---|---|---|---|---|\n"
+        f"| `zeta` | {len(body)} | {_sha(body)} |  |  |\n",
+        encoding="utf-8",
+    )
+
+    assert mod.main(["--tasks", str(tasks), "--table", str(table)]) == 0
+    out = capsys.readouterr().out
+    assert "1 unchanged" in out, out
+    assert "placeholder" not in out, out
 
 
 def test_the_missing_table_remedy_names_init(mod, tmp_path, capsys):

@@ -61,17 +61,27 @@ Per block:
     duplicate      as `unchanged`, but the record carries a second copy the precedence hides
     changed        renders a non-empty block and its length is not that number
     rewritten      the length is the row's number and the sha256 is not: a same-length edit
+    placeholder    as `unchanged`, but the row's class cell is still `--init`'s
+                   `**unclassified**`, so the row records a fingerprint and no classification
     undigested     the row carries no sha256, so it cannot answer the question at all
     unclassified   renders a non-empty block and no row names its task
     gone           a row names it and it renders nothing (or its task is not in the table)
 
-`changed`, `rewritten`, `unclassified` and `gone` ask for a **reading** - a block has to be
-opened and classified, or a row whose block is gone has to be retired. `undigested` asks for a
-**row edit** and no reading at all: the row already says what that block turned out to be, and
-what it lacks is the digest the output prints beside it. The two are counted apart for that
-reason, and each is given its own remedy. `unchanged` is the ordinary answer and costs nothing.
+`changed`, `rewritten`, `placeholder`, `unclassified` and `gone` ask for a **reading** - a block
+has to be opened and classified, or a row whose block is gone has to be retired. `undigested`
+asks for a **row edit** and no reading at all: the row already says what that block turned out to
+be, and what it lacks is the digest the output prints beside it. The two are counted apart for
+that reason, and each is given its own remedy. `unchanged` is the ordinary answer and costs
+nothing.
 A `gone` row is not tidiness: a block deleted from
 `tasks.yml` and left in the table keeps a classification alive for text that no longer renders.
+
+**`placeholder` is a positive marker, and its absence is not a claim.** The only value this file
+recognises as "nobody classified this" is the exact string `--init` prints, because that string
+is written by the tool itself and cannot be a reader's paraphrase. A row whose class cell is
+empty - a table written before the column existed, or a cell someone cleared - keeps the reading
+it had: this instrument can see a marker, and it cannot see the absence of one, so reporting an
+empty cell as unclassified would be inventing a fact from silence.
 
 **`duplicate` is printed without `--all` even though its length is unchanged**, because what it
 reports is not a reading that moved but a record carrying two copies of a field where one
@@ -84,7 +94,8 @@ Exit codes
     0  every non-empty block has a row and its length and sha256 are unchanged - the section
        1.7 reading
     1  a block moved, a block's text moved under an unchanged length, a row carries no sha256
-       to compare, a block has no row, or a row's block is gone
+       to compare, a block has no row, a row's class cell is still `--init`'s placeholder, or a
+       row's block is gone
     2  nothing was measured: the task table, the rotation table, or the YAML inside it could
        not be read, or the table carries no row this file can parse
 
@@ -133,12 +144,25 @@ DEFAULT_TASKS = Path("~/.emrg/tasks.yml")
 
 #: One row of the rotation table: `| `task` | 6327 | <sha256> | class | evidence |`. The length is
 #: matched as a plain integer and the digest as 64 hex characters, because those two are what
-#: this file compares; the class and evidence cells are prose for a reader and are not parsed at
-#: all. The digest cell is optional so a table written before it existed still parses - and that
-#: row is then reported as `undigested`, never as `unchanged`.
+#: this file compares. The digest cell is optional so a table written before it existed still
+#: parses - and that row is then reported as `undigested`, never as `unchanged`.
+#:
+#: `rest` is everything after the digest, kept only so the **class** cell can be read out of it.
+#: The evidence cell stays prose: what a reader wrote as evidence answers whether *they* read the
+#: block, which is what the row claims, and a file that re-read their prose would be re-deciding
+#: their reading. The class cell is different - it is the one cell whose value this file has to
+#: understand, because `--init` writes a value there that is not a classification at all.
 TABLE_ROW = re.compile(
-    r"^\|\s*`(?P<task>[^`]+)`\s*\|\s*(?P<chars>\d+)\s*\|(?:\s*(?P<sha>[0-9a-fA-F]{64})\s*\|)?"
+    r"^\|\s*`(?P<task>[^`]+)`\s*\|\s*(?P<chars>\d+)\s*\|"
+    r"(?:\s*(?P<sha>[0-9a-fA-F]{64})\s*\|(?P<rest>[^\n]*))?"
 )
+
+#: What `--init` writes in the class cell of every row it prints, and what `init_table()` tells
+#: the reader to replace. One spelling, used by the writer that emits it and the reader that
+#: recognises it, so a row written by the tool can never read to the tool as a classification.
+#: Measured 2026-11-20 (cycle cyc20261120-235036) on this host: 12 of the table's 25 rows still
+#: carried it while the guard reported every one of them `unchanged` and exited 0.
+PLACEHOLDER_CLASS = "**unclassified**"
 
 
 def digest(text):
@@ -175,20 +199,27 @@ def rendered_blocks(records):
 
 
 def table_rows(text):
-    """`{task: (chars, sha256 or None)}` from the rotation table's rows, in written order.
+    """`{task: (chars, sha256 or None, class cell)}` from the rotation table's rows.
 
     A `None` digest is a row that cannot say what text it classified - either a table written
     before the column existed or a cell left empty - and it is carried rather than defaulted, so
     `classify` can report the row instead of answering for it.
+
+    The class cell is carried as written, or `""` when the row carries none. It is not
+    normalised: `PLACEHOLDER_CLASS` is compared as an exact string, because the one thing this
+    file must recognise is the value its own `--init` prints, and a matcher loose enough to
+    catch a paraphrase would also catch a reader's classification that quotes it.
     """
     rows = {}
     for line in text.splitlines():
         match = TABLE_ROW.match(line)
         if match:
             sha = match.group("sha")
+            rest = match.group("rest") or ""
             rows[match.group("task")] = (
                 int(match.group("chars")),
                 sha.lower() if sha else None,
+                rest.split("|")[0].strip(),
             )
     return rows
 
@@ -207,7 +238,7 @@ def classify(blocks, rows):
         if task not in rows:
             findings.append(("unclassified", task, f"{length} chars, no table row"))
             continue
-        chars, sha = rows[task]
+        chars, sha, class_cell = rows[task]
         if chars != length:
             findings.append(("changed", task, f"table says {chars}, block is {length}"))
             continue
@@ -231,6 +262,20 @@ def classify(blocks, rows):
                 )
             )
             continue
+        # Before `duplicate`, because the two ask different questions: `duplicate` is a fact
+        # about the installation's task table, while this is the row still saying nobody read
+        # the block. A reader told only about the duplicate would leave the row unclassified.
+        if class_cell == PLACEHOLDER_CLASS:
+            findings.append(
+                (
+                    "placeholder",
+                    task,
+                    f"{length} chars match the row, but its class cell is still `--init`'s "
+                    f"placeholder: the numbers say the block has not moved, and they say "
+                    f"nothing about whether anyone decided what it turned out to be",
+                )
+            )
+            continue
         if both:
             findings.append(
                 (
@@ -242,7 +287,7 @@ def classify(blocks, rows):
             )
             continue
         findings.append(("unchanged", task, f"{length} chars, unchanged"))
-    for task, (chars, _sha) in rows.items():
+    for task, (chars, _sha, _class_cell) in rows.items():
         renders = blocks.get(task, ("", 0, False))[0]
         if not renders:
             findings.append(("gone", task, f"table says {chars} chars, nothing renders"))
@@ -316,7 +361,9 @@ def init_table(blocks):
         "|---|---|---|---|---|",
     ]
     for task, length, sha in rows:
-        lines.append(f"| `{task}` | {length} | {sha} | **unclassified** | printed by --init |")
+        lines.append(
+            f"| `{task}` | {length} | {sha} | {PLACEHOLDER_CLASS} | printed by --init |"
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -411,8 +458,12 @@ def main(argv=None):
     changed = [
         f
         for f in findings
-        if f[0] in ("changed", "unclassified", "rewritten")
+        if f[0] in ("changed", "unclassified", "rewritten", "placeholder")
     ]
+    # The remedy differs from `changed`'s even though the action is the same: a `changed` row was
+    # classified once and has drifted, so re-reading it is the cost of the drift. A `placeholder`
+    # row was never classified at all, so its unchanged numbers are not evidence of anything.
+    placeholder = [f for f in findings if f[0] == "placeholder"]
     # `undigested` is the one state here that asks for a *row edit* rather than a reading: the
     # row already says what the block turned out to be, and what it lacks is the digest. Counting
     # it with the states that need a classification made the tally say `22 need classifying`
@@ -438,6 +489,13 @@ def main(argv=None):
             print(
                 "classify the block(s) above in the rotation table before re-reading any "
                 "unchanged one - a block whose length and sha256 are unchanged has not moved"
+            )
+        if placeholder:
+            print(
+                f"a row whose class cell is still `{PLACEHOLDER_CLASS}` holds a fingerprint and "
+                "no classification: `--init` wrote it and nobody decided what that block turned "
+                "out to be, so its unchanged numbers are not evidence that it was read. Replace "
+                "the placeholder with what the block is, and leave its length and digest alone"
             )
         if undigested:
             print(
