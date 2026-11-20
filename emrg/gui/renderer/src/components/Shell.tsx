@@ -10,7 +10,7 @@ import { TaskFormDialog, type TaskFormPayload } from "./TaskFormDialog";
 import { RantDialog } from "./RantDialog";
 import type { AgentRec, RantRec, TaskRec } from "../lib/workspaceView";
 import type { SessionRow } from "../lib/openSession";
-import type { SessionInfo } from "../lib/sidebar";
+import { resolveEntryTitle, type SessionInfo } from "../lib/sidebar";
 import { SessionColumn } from "./SessionColumn";
 import { IconRail } from "./IconRail";
 import { StatusBand } from "./StatusBand";
@@ -248,6 +248,12 @@ export function Shell() {
   const activeSessionEntry = appState.openSessions.find((o) => o.sid === activeSid);
   const activeKnown = appState.sessions.find((s) => s.session_id === activeSid);
   const activeAgent = activeSessionEntry?.projectName || "";
+  // The band shows the session's name (issue #3089). `resolveEntryTitle` is the one rule
+  // the session column already uses, so the two cannot disagree; the daemon's session
+  // list is the fallback for a session that is open but not yet in the open list.
+  const activeSessionName = activeSessionEntry
+    ? resolveEntryTitle(activeSessionEntry, appState.sessions)
+    : (activeKnown?.title ?? "");
   const activeMsgCount = (activeKnown as { message_count?: number } | undefined)?.message_count ?? 0;
   // The turn's elapsed time is no longer formatted here: the status band does it from
   // `startedAtMs` (`formatElapsed`, the same reader the sidebar's stopwatch uses), so
@@ -1133,6 +1139,8 @@ export function Shell() {
         running={busy}
         startedAtMs={activeTurnStart}
         usage={usageWindow}
+        sessionId={activeSid}
+        sessionName={activeSessionName}
         leftOpen={leftOpen}
         rightOpen={rightOpen}
         onToggleLeft={() => setLeftOpen((v) => !v)}

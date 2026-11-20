@@ -122,6 +122,35 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* The current session, moved out of the window title (issue #3089). The title bar is
+   drawn by the operating system, so the id it used to carry could not be selected; here
+   it is ordinary text. The name gives way first and the id never does: a narrow window
+   must still leave something a reader can copy, and a shortened id is a different id. */
+.band-session {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  flex: 0 1 auto;
+  /* Text, not a control: the id is here to be dragged and copied out. */
+  user-select: text;
+}
+
+.band-session-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-1);
+}
+
+/* The id never truncates — a shortened id is a different id. */
+.band-session-id {
+  flex: none;
+  color: var(--text-1);
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
 .band-right {
   margin-left: auto;
   display: flex;

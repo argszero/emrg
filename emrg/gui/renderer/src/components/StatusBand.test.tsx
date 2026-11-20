@@ -3,6 +3,8 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { StatusBand } from "./StatusBand";
 import { I18nProvider } from "../lib/i18n";
 import { STATUS_BAND_HEIGHT } from "../lib/cockpit";
+// 样式表走 Vite 的 `?raw`，不走 `node:fs`（`tests/test_renderer_node_types.py`）。
+import cockpitCss from "../cockpit.css?raw";
 
 /**
  * StatusBand.test.tsx — the one row that is always on screen (issue #2959 item 1).
@@ -17,6 +19,12 @@ import { STATUS_BAND_HEIGHT } from "../lib/cockpit";
  * The window is three segments and never a total (rant 2026-11-19T09:31:00), and each
  * segment is `null` on its own: an endpoint that never reports cache hits must show `—`
  * there while input and output still read.
+ *
+ * One cell is not a reading at all: the open session's name and id (issue #3089), which
+ * the window title used to carry where nothing could be selected. It is asserted here as
+ * *text* — a span with no control inside, a hover title, no placeholder when no session is
+ * open — and its two stylesheet rules are read as text, because jsdom has no layout to
+ * truncate anything in.
  */
 
 function setup(props: Partial<Parameters<typeof StatusBand>[0]> = {}) {
@@ -157,19 +165,25 @@ describe("StatusBand", () => {
     expect(screen.getByTestId("band-elapsed")).toHaveTextContent("—");
   });
 
-  it("只有三项读数与两个栏开关：会话标题、模型、消息条数都不在这行里（issue #2969）", () => {
+  it("只有三项读数与两个栏开关：模型与消息条数不在这行里（issue #2969、#3089）", () => {
     setup({
       running: true,
       usage: { input: 3000, cache: 2000, output: 400, windowStart: 0, windowEnd: 1 },
       startedAtMs: Date.now() - 65_000,
+      sessionId: "s1",
+      sessionName: "Alpha",
     });
     const band = screen.getByTestId("status-band");
     // 三个变的读数：状态、计时、最近 24 小时。轮数那一格连同它右边的分隔符一起没了
     // （issue #3039）——这一行已经说了在跑、跑了多久，轮数没有第二个用处。
+    //
+    // 会话名与 id 不是第四个读数（issue #3089）：它不随时间变，它是**能拖走、能复制**
+    // 的那段文字，所以它不占 `.band-item`，这一行的读数仍然只有三个。
     expect(band.querySelectorAll(".band-state, .band-item")).toHaveLength(3);
+    expect(band.querySelectorAll(".band-session")).toHaveLength(1);
     // ……两个按钮，一个不多：搜索与新建会话的入口在会话栏（issue #3028）
     expect(band.querySelectorAll("button")).toHaveLength(2);
-    // 一个不动的值出现在这一行，就是把状态带变回了顶栏：这三样是宿主点名移出的
+    // 一个不动的值出现在这一行，就是把状态带变回了顶栏：这两样仍是宿主点名移出的
     for (const gone of ["session-info", "conn-status", "conn-vision"]) {
       expect(screen.queryByTestId(gone)).not.toBeInTheDocument();
     }
@@ -209,5 +223,177 @@ describe("StatusBand", () => {
     // 开着的栏按钮带 .on，关着的不带——一眼能看出哪一栏在屏幕上
     expect(screen.getByTestId("band-toggle-left")).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByTestId("band-toggle-right")).toHaveAttribute("aria-pressed", "false");
+  });
+});
+
+// ── 状态带上的当前会话（rant 2026-11-20T18:09:49 / issue #3089）───────────────
+
+/**
+ * 标题栏是系统画的：里面的会话名与 id 拖不动、复制不出来，而 id 恰恰是最要复制的东西
+ * （贴进 issue、贴进日志、告诉另一个 agent 说的是哪个会话）。这一格把它挪成普通文字。
+ *
+ * 逻辑断言在这一层；「窄窗先截名字、id 一个字都不截」只能读样式表——jsdom 没有排版，
+ * 拿不到真实的截断结果，读声明是唯一能变红的读法。
+ */
+
+/** 从样式表里取出一个选择器的声明块。取不到就断言失败，绝不让空串把断言放过去。 */
+function cssRule(selector: string): string {
+  const start = cockpitCss.indexOf(`\n${selector} {`);
+  expect(start).toBeGreaterThanOrEqual(0);
+  const end = cockpitCss.indexOf("}", start);
+  const body = cockpitCss.slice(start, end);
+  expect(body.length).toBeGreaterThan(20);
+  return body;
+}
+
+describe("状态带上的当前会话（issue #3089）", () => {
+  it("名字在前、id 在后，都是普通文字节点", () => {
+    setup({ sessionId: "s_260727_1103_866d", sessionName: "emrg-main" });
+    expect(screen.getByTestId("band-session").tagName).toBe("SPAN");
+    const name = screen.getByTestId("band-session-name");
+    const id = screen.getByTestId("band-session-id");
+    expect(name).toHaveTextContent("emrg-main");
+    expect(id).toHaveTextContent("s_260727_1103_866d");
+    // 读的顺序：先「这是哪个会话」，再「它的号是多少」
+    expect(name.compareDocumentPosition(id) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("这一格不是控件：里面没有按钮/链接/输入框，点一下也不触发任何回调", () => {
+    const h = setup({ sessionId: "s1", sessionName: "Alpha" });
+    const cell = screen.getByTestId("band-session");
+    expect(
+      cell.querySelectorAll("button, a, input, select, textarea, [role='button'], [tabindex]"),
+    ).toHaveLength(0);
+    fireEvent.click(cell);
+    fireEvent.contextMenu(cell);
+    expect(h.onToggleLeft).not.toHaveBeenCalled();
+    expect(h.onToggleRight).not.toHaveBeenCalled();
+  });
+
+  it("会话没有名字时只显示 id：不画空括号，也不留一个孤立的分隔符", () => {
+    const { unmount } = render(
+      <I18nProvider lang="en">
+        <StatusBand
+          running={false}
+          usage={null}
+          sessionId="s_1"
+          sessionName=""
+          leftOpen
+          rightOpen
+          onToggleLeft={vi.fn()}
+          onToggleRight={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+    expect(screen.queryByTestId("band-session-name")).toBeNull();
+    expect(screen.getByTestId("band-session").textContent).toBe("s_1");
+    unmount();
+  });
+
+  it("没有打开任何会话：整格不渲染，也不拿 — 占位", () => {
+    // 占位符会读成「有个会话，只是号读不出来」。判据不是「找不到 band-session」，而是
+    // 这一行的**结构**一个节点都不多：多出来的那个 —— 无论挂在哪个节点上、写的是 — 还是
+    // 空串 —— 都会让它变红。
+    //
+    // 比的是 innerHTML 不是 textContent：两次渲染都没有会话，所以「无会话时多画一个占位」
+    // 这个变异在两边都画了同一个占位，比文本会被它躲过去（实测：只比 textContent 时这个
+    // 变异没被抓住）。结构之比才分得出「多了一个节点」。
+    const props = {
+      running: true,
+      usage: null,
+      leftOpen: true,
+      rightOpen: true,
+      onToggleLeft: vi.fn(),
+      onToggleRight: vi.fn(),
+    };
+    const bare = render(
+      <I18nProvider lang="en">
+        <StatusBand {...props} />
+      </I18nProvider>,
+    );
+    const withoutSessionProps = bare.container.innerHTML;
+    bare.unmount();
+    const withNull = render(
+      <I18nProvider lang="en">
+        <StatusBand {...props} sessionId={null} sessionName="Alpha" />
+      </I18nProvider>,
+    );
+    expect(withNull.container.innerHTML).toBe(withoutSessionProps);
+    expect(screen.queryByTestId("band-session")).toBeNull();
+    // 三个读数、两个开关按钮——没有第四个格子
+    const band = screen.getByTestId("status-band");
+    expect(band.querySelectorAll(".band-state, .band-item")).toHaveLength(3);
+    expect(band.querySelectorAll("button")).toHaveLength(2);
+  });
+
+  it("悬停提示只有一条：「当前会话」/ Current session", () => {
+    setup({ sessionId: "s1", sessionName: "Alpha" });
+    expect(screen.getByTestId("band-session").getAttribute("title")).toBe("Current session");
+    render(
+      <I18nProvider lang="zh">
+        <StatusBand
+          running={false}
+          usage={null}
+          sessionId="s1"
+          sessionName="Alpha"
+          leftOpen
+          rightOpen
+          onToggleLeft={vi.fn()}
+          onToggleRight={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+    // 两次渲染各一格：中文那条挂在第二次那一格上
+    const cells = screen.getAllByTestId("band-session");
+    expect(cells[cells.length - 1].getAttribute("title")).toBe("当前会话");
+  });
+
+  it("改名/换会话后这一格跟着换，不会多出第二格", () => {
+    const props = {
+      running: false,
+      usage: null,
+      leftOpen: true,
+      rightOpen: true,
+      onToggleLeft: vi.fn(),
+      onToggleRight: vi.fn(),
+    };
+    const { rerender } = render(
+      <I18nProvider lang="en">
+        <StatusBand {...props} sessionId="s1" sessionName="Alpha" />
+      </I18nProvider>,
+    );
+    expect(screen.getByTestId("band-session-name")).toHaveTextContent("Alpha");
+    rerender(
+      <I18nProvider lang="en">
+        <StatusBand {...props} sessionId="s2" sessionName="Beta" />
+      </I18nProvider>,
+    );
+    expect(screen.getAllByTestId("band-session")).toHaveLength(1);
+    expect(screen.getByTestId("band-session-name")).toHaveTextContent("Beta");
+    expect(screen.getByTestId("band-session-id")).toHaveTextContent("s2");
+    expect(screen.queryByText("Alpha")).toBeNull();
+    expect(screen.queryByText("s1")).toBeNull();
+  });
+
+  it("窄窗先短名字（末尾省略号），id 一个字都不截", () => {
+    const name = cssRule(".band-session-name");
+    expect(name).toMatch(/text-overflow:\s*ellipsis/);
+    expect(name).toMatch(/overflow:\s*hidden/);
+    expect(name).toMatch(/min-width:\s*0/);
+    // id 那一半：不缩、不裁。缩了或裁了就是另一个 id
+    const id = cssRule(".band-session-id");
+    expect(id).toMatch(/flex:\s*none/);
+    expect(id).not.toMatch(/text-overflow/);
+    expect(id).not.toMatch(/overflow/);
+    expect(id).not.toMatch(/min-width:\s*0/);
+    // 等宽：id 是要一个字一个字对着看的
+    expect(id).toMatch(/font-family:\s*var\(--font-mono/);
+  });
+
+  it("样式链上没有一条规则把这一格变成不可选：选中就是它存在的理由", () => {
+    expect(cssRule(".band-session")).toMatch(/user-select:\s*text/);
+    for (const selector of [".band-session", ".band-session-name", ".band-session-id", ".status-band"]) {
+      expect(cssRule(selector)).not.toMatch(/user-select:\s*none/);
+    }
   });
 });

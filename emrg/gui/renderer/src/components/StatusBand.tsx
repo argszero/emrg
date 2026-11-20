@@ -10,10 +10,16 @@ import type { UsageWindowReading } from "../lib/daemonBridge";
  * has been running, and what the last 24 hours cost. Three readings, and that is the
  * whole row's left side. The last one is a *window*, not this turn
  * (rant 2026-11-19T09:31:00): it survives a session switch and a GUI restart, which is
- * the whole reason it replaced the per-turn total. What does not move — the
- * session's title, its id, the model, the message count — is not here: the title is in
- * the window's title bar already, the model switches at the composer, and a second
- * place for a fact turns a status row into a header by accretion.
+ * the whole reason it replaced the per-turn total.
+ *
+ * The one thing here that does not move is the session's **name and id** (issue #3089):
+ * they used to ride the window title, which the operating system draws, so neither could
+ * be dragged or copied — and the id is the part a reader copies most (into an issue, into
+ * a log, to say to another agent which session is meant). Here they are ordinary text in a
+ * `span`: not a button, not a link, not a hover card, because a reading that answers a
+ * click teaches the next reader to click readings. The model and the message count stay
+ * out — the model switches at the composer, and a second place for a fact turns a status
+ * row into a header by accretion.
  *
  * The right end is exactly the two pane toggles — the session column and the inspector.
  * Search and new-session are not here: the session column's own header carries them, and
@@ -37,6 +43,16 @@ export interface StatusBandProps {
    * there is no session, or the daemon has not answered the narrowed question yet.
    */
   usage: UsageWindowReading | null;
+  /**
+   * The session the band is showing, as text the host can select (issue #3089).
+   *
+   * `sessionId` is the whole cell's existence: no session ⇒ the cell is not rendered at
+   * all, because a placeholder would read as a session whose id could not be read.
+   * `sessionName` may be empty — an unnamed session shows its id alone, never an empty
+   * pair of quotes or a stray separator.
+   */
+  sessionId?: string | null;
+  sessionName?: string;
   leftOpen: boolean;
   rightOpen: boolean;
   onToggleLeft: () => void;
@@ -49,6 +65,8 @@ export function StatusBand({
   running,
   startedAtMs,
   usage,
+  sessionId,
+  sessionName,
   leftOpen,
   rightOpen,
   onToggleLeft,
@@ -85,6 +103,21 @@ export function StatusBand({
           machineOutput: formatTokens(usage?.output),
         })}
       </span>
+      {sessionId ? (
+        <>
+          <span className="band-sep" />
+          <span className="band-session" data-testid="band-session" title={t("band.sessionTitle")}>
+            {sessionName ? (
+              <span className="band-session-name" data-testid="band-session-name">
+                {sessionName}
+              </span>
+            ) : null}
+            <span className="band-session-id" data-testid="band-session-id">
+              {sessionId}
+            </span>
+          </span>
+        </>
+      ) : null}
       <span className="band-right">
         <button
           type="button"
