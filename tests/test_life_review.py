@@ -203,6 +203,7 @@ def _probe(source: str) -> None:
     )
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
 def test_a_pipe_at_the_watermark_reads_as_absent_instead_of_blocking(tmp_path: Path) -> None:
     """A FIFO is answered ``None``, like a damaged file — and answered at all.
 
@@ -223,6 +224,7 @@ def test_a_pipe_at_the_watermark_reads_as_absent_instead_of_blocking(tmp_path: P
     )
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
 def test_the_watermark_writer_never_opens_a_path_it_did_not_create(tmp_path: Path) -> None:
     """A pipe planted where the old temporary file went does not block the write.
 
