@@ -129,6 +129,16 @@ level "fallback"  it could not be read, and §5's readings say so
   renderer is available, the publish reading is `not attempted` and names the blocked step, as §5's
   table already provides: an image described in words and a placeholder file are both an image that
   does not exist, and the sourcing rule above applies to a picture as squarely as to a sentence.
+- **A reader who is not its author sees the piece before it ships — twice.** Once before the piece
+  is produced, and once before it is published: the second is the one that catches what the first
+  cannot, because the drafted piece is what a reader can actually judge. Ask a specific question
+  rather than for a verdict — where it does not land, which part is padding, what a reader who does
+  not know the subject would still be missing. **Adopt wording, structure and what to cut; never a
+  number, a quotation, a time or a fact** — a reader's rewrite of a figure is a claim with no
+  source, which the bullets above already forbid. Record each consultation in §5's readings: what
+  was asked, what was taken, what was rejected. **A round that consulted nobody says so there**, in
+  the same form as an unread trend: which reader the installation has is its configuration to name,
+  and silence about the step is a gap in the round rather than a clean one.
 
 ### 4. Publish — through the session this machine already holds, once
 
