@@ -1273,6 +1273,15 @@ body.col-resizing * {
   text-overflow: ellipsis;
 }
 
+/* The unsaved dot. It reports rather than acts, so it is small, coloured, and not a
+   button — the close button is what acts on it. */
+.editor-tab-dirty {
+  flex: none;
+  color: var(--accent);
+  font-size: 10px;
+  line-height: 1;
+}
+
 .editor-tab-close {
   flex: none;
   padding: 0 2px;
@@ -1307,40 +1316,247 @@ body.col-resizing * {
   opacity: 0.6;
 }
 
-.editor-scroll {
+/* ── The right column as an editor ────────────────────────────────────────────
+   Rant 2026-11-20T18:01:52. The panel used to be a read-only preview with a hand-built
+   gutter; CodeMirror now owns the text, its gutter and its scrolling, so what is left here
+   is the frame around it — the head with the two toggles, the ask bars, the minimap column
+   and the status corner. */
+
+.editor-head {
+  display: flex;
+  align-items: center;
+  flex: none;
+  border-bottom: 1px solid var(--border);
+}
+
+/* The breadcrumb gives way to the toggles: a deep path is long, a toggle is two glyphs. */
+.editor-head .editor-crumbs {
+  flex: 1;
+  min-width: 0;
+  border-bottom: none;
+}
+
+.editor-toggles {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px;
+}
+
+.editor-toggle {
+  padding: 1px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-3);
+  font-size: var(--fs-small);
+  cursor: pointer;
+}
+
+.editor-toggle:hover {
+  color: var(--text-1);
+  background: var(--bg-hover);
+}
+
+/* An on toggle is not just brighter: it is a different state, so it gets a border too. */
+.editor-toggle.on {
+  color: var(--accent);
+  border-color: var(--border);
+}
+
+.editor-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* The ask bars — close-with-unsaved and disk-changed. They sit above the text because the
+   question is about the text, and they carry their own buttons so the answer is one click
+   away from the sentence that asked it. */
+.editor-ask {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-hover);
+  font-size: var(--fs-small);
+  color: var(--text-1);
+}
+
+.editor-ask-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-ask-btn {
+  flex: none;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--fs-small);
+  cursor: pointer;
+}
+
+.editor-ask-btn:hover {
+  color: var(--text-1);
+}
+
+.editor-ask-btn.primary {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.editor-body {
+  display: flex;
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  min-width: 0;
 }
 
-/* 行号是本滚动容器的第一列，`position: sticky` 钉在左边：横向滚动时它不动。 */
-.editor-inner {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  align-items: start;
-  min-width: min-content;
+/* The editor itself fills what the minimap leaves. `.cm-scroller` is CodeMirror's own
+   scroll container, and it is the element that must be allowed to shrink — a flex child
+   defaults to its content's height, which would push the status corner off the panel. */
+.code-editor {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
-.editor-gutter {
-  padding: 4px 6px 4px 4px;
-  border-right: 1px solid var(--border);
-  background: var(--bg-panel);
-  color: var(--text-3);
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: var(--fs-small);
-  line-height: 1.5;
-  text-align: right;
-  user-select: none;
-}
-
-.editor-text {
-  margin: 0;
-  padding: 4px 8px;
+.editor-body .cm-editor {
+  height: 100%;
+  background: transparent;
   color: var(--text-1);
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: var(--fs-small);
+}
+
+.editor-body .cm-scroller {
+  font-family: var(--font-mono, ui-monospace, monospace);
   line-height: 1.5;
-  white-space: pre;
+  min-height: 0;
+}
+
+.editor-body .cm-editor.cm-focused {
+  outline: none;
+}
+
+/* The gutter is CodeMirror's, pinned by its own layout (it is a sticky sibling column of
+   the scroller), so it stays put when the text scrolls sideways. */
+.editor-body .cm-gutters {
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border);
+  color: var(--text-3);
+}
+
+.editor-body .cm-activeLineGutter {
+  background: var(--bg-hover);
+  color: var(--text-2);
+}
+
+.editor-body .cm-activeLine {
+  background: var(--bg-hover);
+}
+
+.editor-body .cm-selectionBackground,
+.editor-body .cm-editor .cm-selectionBackground {
+  background: var(--bg-hover);
+}
+
+/* Token colours. The theme's own palette decides them, so switching the theme recolours
+   the code without rebuilding the editor. */
+.tok-keyword {
+  color: var(--accent);
+}
+
+.tok-string {
+  color: var(--text-1);
+}
+
+.tok-comment {
+  color: var(--text-3);
+  font-style: italic;
+}
+
+.tok-number,
+.tok-operator {
+  color: var(--text-2);
+}
+
+.tok-type,
+.tok-function {
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.tok-property,
+.tok-heading {
+  color: var(--text-2);
+}
+
+.tok-punct {
+  color: var(--text-3);
+}
+
+.tok-link {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.tok-invalid {
+  color: var(--danger, #c0392b);
+  text-decoration: underline wavy;
+}
+
+/* The minimap: one thin column of bars, drawn from the whole document rather than its
+   first page (see `minimapBars`). It is a control, so it answers a click. */
+.editor-minimap {
+  flex: none;
+  width: 44px;
+  overflow: hidden;
+  padding: 4px 3px;
+  border-left: 1px solid var(--border);
+  background: var(--bg-panel);
+  cursor: pointer;
+}
+
+.editor-minimap-bar {
+  display: block;
+  height: 2px;
+  margin: 0 0 1px;
+  border-radius: 1px;
+  background: transparent;
+}
+
+.editor-minimap-bar.filled {
+  background: var(--text-3);
+}
+
+/* The status corner: which language this is, and where the caret is. Both are readings, so
+   neither wraps and neither is elided. */
+.editor-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  height: 22px;
+  padding: 0 6px;
+  border-top: 1px solid var(--border);
+  color: var(--text-3);
+  font-size: var(--fs-small);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.editor-status-dirty {
+  color: var(--accent);
 }
 
 .editor-note {

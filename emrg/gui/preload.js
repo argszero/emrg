@@ -54,6 +54,9 @@ const api = {
   // issue #3026：右栏两个文件树的两个根（agent 工作目录 / 该会话的会话目录）
   sessionRoots: (payload) => ipcRenderer.invoke("emrg:sessionRoots", payload),
   readFile: (payload) => ipcRenderer.invoke("emrg:readFile", payload), // 右栏工作区 P1：文件查看器
+  // rant 2026-11-20T18:01:52：右栏编辑器的两条文件通道——探测磁盘有没有变、把改动写回
+  statFile: (payload) => ipcRenderer.invoke("emrg:statFile", payload),
+  writeFile: (payload) => ipcRenderer.invoke("emrg:writeFile", payload),
   previewHtml: (payload) => ipcRenderer.invoke("emrg:previewHtml", payload), // P2.3：HTML 预览（WebContentsView）
   closePreview: (payload) => ipcRenderer.invoke("emrg:closePreview", payload), // P2.3：关闭/切走 HTML 预览
   panelResized: (payload) => ipcRenderer.invoke("emrg:panelResized", payload), // P2.3：面板布局上报 → bounds 同步

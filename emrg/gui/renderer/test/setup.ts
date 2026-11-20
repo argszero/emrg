@@ -59,3 +59,20 @@ if (typeof Range.prototype.getBoundingClientRect === "undefined") {
 if (typeof document.elementFromPoint !== "function") {
   document.elementFromPoint = () => null;
 }
+
+/**
+ * jsdom 缺 ResizeObserver —— @codemirror/view 用它观察编辑器尺寸（3 处调用）。
+ *
+ * 空实现而不是「抛错」：编辑器在 jsdom 里没有布局，观察器的回调本来也不会因为尺寸变化
+ * 触发，而没有它 CodeMirror 构造 EditorView 时直接抛 "ResizeObserver is not defined"。
+ * 形状照 DOM 的来（observe / unobserve / disconnect），所以被测组件拿到的是一个能调用的
+ * 观察器，而不是一个被跳过的分支。
+ */
+if (typeof globalThis.ResizeObserver === "undefined") {
+  class StubResizeObserver implements ResizeObserver {
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+  }
+  globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
+}

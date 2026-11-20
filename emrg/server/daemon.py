@@ -79,6 +79,7 @@ from emrg.sandbox import escalation
 from emrg.sandbox.policy import DEFAULT_MODE as DEFAULT_SANDBOX_MODE
 from emrg.sandbox.policy import SANDBOX_MODES, resolve_policy
 from emrg.sandbox.grants import manifest_targets
+from emrg.sandbox.fence import file_refusal
 from emrg.sandbox.roots import (
     canonical_path,
     granted_grants,
@@ -3380,6 +3381,37 @@ class EmrgServer:
                 path_str,
                 msg.get("start_line"),
                 msg.get("line_limit"),
+                ws,
+            )
+
+        elif msg_type == "stat_file":
+            # The editor's external-change probe (rant 2026-11-20T18:01:52): mtime and
+            # size, never the content — a probe runs on focus and on tab activation, and
+            # asking "did it move" by reading the whole file would cost the file each time.
+            path_str = msg.get("path", "")
+            if not path_str:
+                await self._send(ws, {
+                    "type": "file_stat",
+                    "error": "stat_file requires path",
+                })
+                return
+            await self._handle_stat_file(path_str, ws)
+
+        elif msg_type == "write_file":
+            # Saving the editor's buffer back to its file (rant 2026-11-20T18:01:52).
+            path_str = msg.get("path", "")
+            content = msg.get("content")
+            if not path_str or not isinstance(content, str):
+                await self._send(ws, {
+                    "type": "file_written",
+                    "error": "write_file requires path and a string content",
+                })
+                return
+            await self._handle_write_file(
+                path_str,
+                content,
+                msg.get("session_id") or "",
+                msg.get("cwd") or "",
                 ws,
             )
 
@@ -7962,6 +7994,140 @@ class EmrgServer:
             "content": "\n".join(selected),
             "truncated": truncated,
             "total_lines": total,
+        })
+
+    async def _handle_stat_file(self, path_str: str, ws) -> None:
+        """Report whether a file moved on disk — the editor's external-change probe.
+
+        The editor holds the text it read, so the one fact it cannot derive is whether
+        the bytes under it changed. A stat is exactly that fact and nothing more: no
+        content crosses the wire, so a probe can run on every focus and every tab
+        activation without reading a large file to answer a yes/no question.
+
+        A missing file is an **answer** (``exists: False``), not a failure: the editor
+        reports the file as deleted on disk, which is a different sentence from "cannot
+        tell". A path that is not a regular file is refused with the same words the file
+        tools use, because a FIFO or a device has no meaningful mtime to compare.
+        """
+        raw = Path(path_str).expanduser()
+        if not raw.is_absolute():
+            await self._send(ws, {
+                "type": "file_stat",
+                "error": "path must be absolute",
+            })
+            return
+        path = raw.resolve()
+        try:
+            if not path.exists():
+                await self._send(ws, {
+                    "type": "file_stat",
+                    "path": str(path),
+                    "exists": False,
+                })
+                return
+            kind = non_regular_kind(path)
+            if kind is not None:
+                await self._send(ws, {
+                    "type": "file_stat",
+                    "path": str(path),
+                    "exists": True,
+                    "error": special_file_refusal(path, kind),
+                })
+                return
+            info = path.stat()
+        except OSError as exc:
+            await self._send(ws, {
+                "type": "file_stat",
+                "path": str(path),
+                "error": f"cannot stat file: {exc}",
+            })
+            return
+        await self._send(ws, {
+            "type": "file_stat",
+            "path": str(path),
+            "exists": True,
+            "mtime": info.st_mtime,
+            "size": info.st_size,
+        })
+
+    async def _handle_write_file(
+        self, path_str: str, content: str, session_id: str, cwd: str, ws
+    ) -> None:
+        """Save the editor's buffer back to its file (rant 2026-11-20T18:01:52).
+
+        The boundary is the one the agent's ``write`` tool already honours — the
+        session's policy, resolved here the way every other writer resolves it — and a
+        target outside it is refused **before** anything is written, with that tool's own
+        refusal text. The host is editing a file on their own machine, so the tier and the
+        roots they named are the whole question.
+
+        This is *not* the ``write`` tool, and the difference is one rule: that tool
+        refuses a whole-file replacement of content **nobody has read**, which is a rule
+        about a model overwriting a file it was never shown. An editor save starts from
+        the bytes the panel read and now holds as its dirty buffer, so the question cannot
+        come out true — it is answered by construction, not skipped. ``bytes`` are what
+        the panel showed, decoded as UTF-8: a file that was not UTF-8 never reached an
+        editor in the first place (the reader answers ``binary`` for it).
+
+        The frame carries the new ``mtime`` and ``size`` so the panel can record what it
+        just wrote: without them the very next external-change probe would report the
+        panel's own save as somebody else's change and prompt about it.
+        """
+        raw = Path(path_str).expanduser()
+        if not raw.is_absolute():
+            await self._send(ws, {
+                "type": "file_written",
+                "error": "path must be absolute",
+            })
+            return
+        path = raw.resolve()
+        if not session_id or not cwd:
+            await self._send(ws, {
+                "type": "file_written",
+                "error": "write_file requires session_id and cwd",
+            })
+            return
+        session = self._get_or_create_session(session_id, Path(cwd), register=False)
+        policy = resolve_policy(
+            mode=resolve_client_tier(session),
+            workspace_root=str(session.cwd),
+            session_id=session.session_id,
+            extra_grants=session.sandbox_grants,
+            withheld_roots=session.sandbox_withheld,
+        )
+        reason = file_refusal(str(path), policy)
+        if reason:
+            await self._send(ws, {
+                "type": "file_written",
+                "path": str(path),
+                "error": reason,
+            })
+            return
+        if path.exists():
+            kind = non_regular_kind(path)
+            if kind is not None:
+                await self._send(ws, {
+                    "type": "file_written",
+                    "path": str(path),
+                    "error": special_file_refusal(path, kind),
+                })
+                return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+            info = path.stat()
+        except OSError as exc:
+            await self._send(ws, {
+                "type": "file_written",
+                "path": str(path),
+                "error": f"cannot write file: {exc}",
+            })
+            return
+        await self._send(ws, {
+            "type": "file_written",
+            "path": str(path),
+            "size": info.st_size,
+            "mtime": info.st_mtime,
         })
 
     async def _handle_list_memories(
