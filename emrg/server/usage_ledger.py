@@ -208,13 +208,51 @@ class UsageLedger:
         """
         end = float(self._clock()) if now is None else float(now)
         start = end - WINDOW_SECONDS
+        return self._sums(self._window_entries(start, end), start, end, session_id)
+
+    def reading(self, now: float | None = None, session_id: str | None = None) -> dict:
+        """``window()`` plus the same window grouped by session, from **one** read.
+
+        Rant 2026-11-20T17:30:50 asks a client to rank one segment, so it needs every
+        session's three segments and its call count — and it needs those to reconcile with
+        the machine totals the status band already shows. Both come from the same records
+        here, in one pass, for two reasons: two passes over a 2 MB file every poll is a
+        cost this answer cannot justify, and two passes could straddle an append, so a
+        client's breakdown would not add up to the total printed beside it.
+
+        ``groups`` is the **only** account of the window's contents: the machine's three
+        top-level figures are the sum of these rows, so item 7's reconciliation is an
+        identity rather than a second measurement that could disagree.
+        """
+        end = float(self._clock()) if now is None else float(now)
+        start = end - WINDOW_SECONDS
+        entries = self._window_entries(start, end)
+        out = self._sums(entries, start, end, session_id)
+        out["groups"] = self._groups(entries)
+        return out
+
+    def _window_entries(self, start: float, end: float) -> list[dict]:
+        """The records inside ``start``…``end``, both edges read the same way.
+
+        One read, shared by every answer about this window: a window narrowed in one
+        method and widened in the other is the way two readings of one file start
+        disagreeing, and the near edge is the one the rant names explicitly.
+        """
+        return [
+            entry for entry in self._read()
+            if isinstance(entry.get("ts"), (int, float))
+            and start <= float(entry["ts"]) <= end
+        ]
+
+    def _sums(
+        self, entries: list[dict], start: float, end: float,
+        session_id: str | None,
+    ) -> dict:
+        """The three sums over ``entries`` — the machine's, and one session's beside it."""
         named = session_id if isinstance(session_id, str) and session_id else None
         sums: dict[str, int] = {}
         mine: dict[str, int] = {}
-        for entry in self._read():
-            ts = entry.get("ts")
-            if not isinstance(ts, (int, float)) or ts < start or ts > end:
-                continue
+        for entry in entries:
             # A row written before rows carried a session belongs to the machine and to
             # nobody else (item 4): `entry.get("sid")` is None for it, and `named` never is.
             is_mine = named is not None and entry.get("sid") == named
@@ -233,3 +271,43 @@ class UsageLedger:
             "output": sums.get("output"),
             "session": {name: mine.get(name) for name, _ in _SEGMENTS},
         }
+
+    def _groups(self, entries: list[dict]) -> list[dict]:
+        """``entries`` grouped by the session each record names, the unnamed volume last.
+
+        A record written before rows carried a session lands in the row whose ``session``
+        is ``None`` — item 5: its volume is real and so it is reported, and it belongs to
+        no conversation, so no client may open it as one. Every segment a group never
+        measured is ``None``, the same rule the window's own sums keep.
+
+        ``calls`` counts records, not tokens: it is the denominator of a session's output
+        per call, so it has to be a measurement of its own rather than something derived
+        from a segment that may be missing.
+        """
+        by_session: dict[str, dict] = {}
+        unnamed: dict = {"session": None, "calls": 0}
+        for entry in entries:
+            counts = {}
+            for name, key in _SEGMENTS:
+                count = _a_count(entry.get(key))
+                if count is not None:
+                    counts[name] = count
+            if not counts:
+                continue
+            sid = entry.get("sid")
+            group = unnamed
+            if isinstance(sid, str) and sid:
+                group = by_session.setdefault(sid, {"session": sid, "calls": 0})
+            group["calls"] += 1
+            for name, count in counts.items():
+                group[name] = group.get(name, 0) + count
+        return [
+            {
+                "session": group["session"],
+                "calls": group["calls"],
+                "input": group.get("input"),
+                "cache": group.get("cache"),
+                "output": group.get("output"),
+            }
+            for group in [*by_session.values(), unnamed]
+        ]

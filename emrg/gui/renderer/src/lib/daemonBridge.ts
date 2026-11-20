@@ -18,6 +18,7 @@ import type { TranscriptStore, DeltaChunk, DoneData, ToolStartData, ToolEndData 
 import type { OpenSessionEntry } from "./sidebar";
 import type { ImageAttach } from "./composer";
 import type { TreeEntry } from "./fileTree";
+import type { UsageGroup } from "./usageRanking";
 
 /* ── 事件帧（与 main.js 广播契约一致：{ type, data, sid }） ── */
 
@@ -468,6 +469,16 @@ export interface UsageWindowReading {
   sessionInput?: number | null;
   sessionCache?: number | null;
   sessionOutput?: number | null;
+  /**
+   * The same window grouped by session (rant 2026-11-20T17:30:50).
+   *
+   * One row per session the window names, plus one row whose `session` is `null` — the
+   * volume recorded before rows carried a session, which belongs to no conversation. The
+   * machine's three figures above are the sum of these rows and that one, so a ranking
+   * and the total printed beside it cannot disagree. Absent on an older daemon, which is
+   * why the panel ranks an empty list rather than inventing rows.
+   */
+  groups?: UsageGroup[];
   windowStart: number | null;
   windowEnd: number | null;
 }
@@ -477,6 +488,31 @@ function aReportedCount(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? Math.floor(value)
     : null;
+}
+
+/**
+ * The window's per-session rows, as the daemon grouped them.
+ *
+ * A row that names no session stays a row: it is the older volume, and dropping it here
+ * is what would make the ranking's rows stop adding up to the machine total. Its `session`
+ * is `null` rather than `""`, because an empty id is a value a caller could compare and a
+ * missing one is not.
+ */
+function aReportedGroups(value: unknown): UsageGroup[] {
+  if (!Array.isArray(value)) return [];
+  const rows: UsageGroup[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object") continue;
+    const group = raw as Record<string, unknown>;
+    rows.push({
+      session: typeof group.session === "string" && group.session ? group.session : null,
+      calls: aReportedCount(group.calls) ?? 0,
+      input: aReportedCount(group.input),
+      cache: aReportedCount(group.cache),
+      output: aReportedCount(group.output),
+    });
+  }
+  return rows;
 }
 
 export interface DaemonBridgeDeps {
@@ -516,6 +552,8 @@ export interface DaemonBridgeDeps {
       output?: unknown;
       /** The named session's share of the same window, or absent when none was named. */
       session?: { input?: unknown; cache?: unknown; output?: unknown };
+      /** The window grouped by session (rant 2026-11-20T17:30:50). */
+      groups?: unknown;
       windowStart?: unknown;
       windowEnd?: unknown;
     }>;
@@ -1277,6 +1315,7 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
           sessionInput: aReportedCount(session?.input),
           sessionCache: aReportedCount(session?.cache),
           sessionOutput: aReportedCount(session?.output),
+          groups: aReportedGroups(answer?.groups),
           windowStart: typeof answer?.windowStart === "number" ? answer.windowStart : null,
           windowEnd: typeof answer?.windowEnd === "number" ? answer.windowEnd : null,
         },

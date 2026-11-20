@@ -3267,9 +3267,14 @@ class EmrgServer:
             # place of it: `session_id` asks for the same three segments narrowed to one
             # conversation, and a message that names none gets `None` for those three
             # rather than the machine's figures under a session's name (issue #3072).
+            # Rant 2026-11-20T17:30:50 asks for the window ranked by segment, which needs
+            # each session's three segments and its call count beside the machine totals.
+            # `reading` answers both from one pass of the file; asking `window` twice would
+            # read the same 2 MB twice per poll and could straddle an append, leaving a
+            # breakdown that does not add up to the total printed next to it.
             await self._send(ws, {
                 "type": "usage_window",
-                **self._usage_ledger.window(session_id=msg.get("session_id")),
+                **self._usage_ledger.reading(session_id=msg.get("session_id")),
             })
 
         elif msg_type == "resolve_session_cwd":

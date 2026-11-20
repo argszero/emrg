@@ -931,6 +931,19 @@ vision = false
           cache: session.cache ?? null,
           output: session.output ?? null,
         },
+        // Rant 2026-11-20T17:30:50: the same window grouped by session, one row per
+        // session plus the row whose `session` is null (volume from before rows carried a
+        // session). Passed through rather than recomputed — the daemon is the ledger's
+        // only reader, and a second grouping here would be a second ledger.
+        groups: Array.isArray(frame.groups)
+          ? frame.groups.map((g) => ({
+              session: typeof g?.session === "string" && g.session ? g.session : null,
+              calls: Number.isFinite(g?.calls) ? g.calls : 0,
+              input: Number.isFinite(g?.input) ? g.input : null,
+              cache: Number.isFinite(g?.cache) ? g.cache : null,
+              output: Number.isFinite(g?.output) ? g.output : null,
+            }))
+          : [],
       };
     });
 

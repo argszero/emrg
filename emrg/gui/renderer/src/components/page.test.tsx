@@ -184,10 +184,14 @@ describe("StatusBand", () => {
           rightOpen
           onToggleLeft={noop}
           onToggleRight={noop}
+          onOpenRanking={() => {}}
         />
       </I18nProvider>,
     );
     const band = screen.getByTestId("status-band");
-    expect(band.querySelectorAll("button")).toHaveLength(2);
+    // 右端那一块：恰好两个开关。三段读数的按钮在左边——它们是读数，不是这一端的动作
+    // （rant 2026-11-20T17:30:50），所以这条把范围收到 `.band-right` 上，仍然一个不多。
+    expect(band.querySelector(".band-right")?.querySelectorAll("button")).toHaveLength(2);
+    expect(band.querySelectorAll("button")).toHaveLength(5);
   });
 });

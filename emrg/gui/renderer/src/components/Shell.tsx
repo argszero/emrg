@@ -14,6 +14,8 @@ import { resolveEntryTitle, type SessionInfo } from "../lib/sidebar";
 import { SessionColumn } from "./SessionColumn";
 import { IconRail } from "./IconRail";
 import { StatusBand } from "./StatusBand";
+import { UsageRanking } from "./UsageRanking";
+import type { UsageSegment } from "../lib/usageRanking";
 import { SearchOverlay } from "./SearchOverlay";
 import { ResizeHandle } from "./ResizeHandle";
 import {
@@ -615,6 +617,23 @@ export function Shell() {
   const usageWindow = appState.usageWindow;
 
   /**
+   * Which segment's ranking is open (rant 2026-11-20T17:30:50), `null` for none.
+   *
+   * One segment at a time because one table can only carry one scale: the ranking is the
+   * segment the host clicked on the band, and switching means clicking another reading.
+   */
+  const [rankingSegment, setRankingSegment] = useState<UsageSegment | null>(null);
+
+  /**
+   * A session's title for the ranking's first column: the open list first (it carries the
+   * title the host is reading right now), then the daemon's known sessions. Unknown is
+   * `undefined`, and the panel prints the id alone rather than an invented name.
+   */
+  const sessionNameOf = (sid: string): string | undefined =>
+    appState.openSessions.find((entry) => entry.sid === sid)?.title ??
+    appState.sessions.find((entry) => entry.session_id === sid)?.title;
+
+  /**
    * Where the inspector's two trees are rooted (issue #3026).
    *
    * Both roots come from the main process, because it is the only layer holding the
@@ -1145,6 +1164,21 @@ export function Shell() {
         rightOpen={rightOpen}
         onToggleLeft={() => setLeftOpen((v) => !v)}
         onToggleRight={() => setRightOpen((v) => !v)}
+        onOpenRanking={setRankingSegment}
+      />
+      <UsageRanking
+        open={rankingSegment !== null}
+        segment={rankingSegment ?? "input"}
+        reading={usageWindow}
+        nameOf={sessionNameOf}
+        onOpenSession={(sid) => {
+          // Item 8: the click opens that conversation, and the panel gets out of the way
+          // in the same act — a panel left standing over the session it opened reads as a
+          // second thing to dismiss.
+          setRankingSegment(null);
+          void selectSession(sid);
+        }}
+        onClose={() => setRankingSegment(null)}
       />
       <div className="react-shell-body">
         <IconRail activeView={activeView} onSwitchView={switchView} />

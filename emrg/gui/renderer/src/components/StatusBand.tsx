@@ -1,6 +1,7 @@
 import { useI18n } from "../lib/i18n";
 import { formatElapsed } from "../lib/sidebar";
 import { STATUS_BAND_HEIGHT, formatTokens } from "../lib/cockpit";
+import { USAGE_SEGMENTS, type UsageSegment } from "../lib/usageRanking";
 import type { UsageWindowReading } from "../lib/daemonBridge";
 
 /**
@@ -57,6 +58,14 @@ export interface StatusBandProps {
   rightOpen: boolean;
   onToggleLeft: () => void;
   onToggleRight: () => void;
+  /**
+   * Open the ranking for one segment (rant 2026-11-20T17:30:50).
+   *
+   * Each reading is its own control because each answers its own question: one table can
+   * be sorted by one scale, so the reading the host clicks is the ranking they get. The
+   * band itself ranks nothing — it states three numbers and hands the choice on.
+   */
+  onOpenRanking: (segment: UsageSegment) => void;
   /** Injected clock: the shell re-renders once a second while a turn is running. */
   nowMs?: number;
 }
@@ -71,11 +80,23 @@ export function StatusBand({
   rightOpen,
   onToggleLeft,
   onToggleRight,
+  onOpenRanking,
   nowMs,
 }: StatusBandProps) {
   const { t } = useI18n();
   const now = nowMs ?? Date.now();
   const elapsed = formatElapsed(startedAtMs, now);
+  // The two sides of every reading, named once so the three cells cannot drift apart.
+  const sessionSide = {
+    input: usage?.sessionInput,
+    cache: usage?.sessionCache,
+    output: usage?.sessionOutput,
+  };
+  const machineSide = {
+    input: usage?.input,
+    cache: usage?.cache,
+    output: usage?.output,
+  };
 
   return (
     <div
@@ -84,25 +105,34 @@ export function StatusBand({
       role="status"
       style={{ height: STATUS_BAND_HEIGHT }}
     >
-      <span className={`band-state ${running ? "running" : "idle"}`} data-testid="band-state">
+      <span
+        className={`band-state band-yield ${running ? "running" : "idle"}`}
+        data-testid="band-state"
+      >
         <i />
         {running ? t("band.running") : t("band.idle")}
       </span>
-      <span className="band-sep" />
-      <span className="band-item band-mono" data-testid="band-elapsed">
+      <span className="band-sep band-yield" />
+      <span className="band-item band-mono band-yield" data-testid="band-elapsed">
         {elapsed || "—"}
       </span>
-      <span className="band-sep" />
-      <span className="band-item" data-testid="band-usage" title={t("band.usageTitle")}>
-        {t("band.usage", {
-          input: formatTokens(usage?.sessionInput),
-          machineInput: formatTokens(usage?.input),
-          cache: formatTokens(usage?.sessionCache),
-          machineCache: formatTokens(usage?.cache),
-          output: formatTokens(usage?.sessionOutput),
-          machineOutput: formatTokens(usage?.output),
-        })}
-      </span>
+      <span className="band-sep band-yield" />
+      {USAGE_SEGMENTS.map((segment) => (
+        <button
+          key={segment}
+          type="button"
+          className="band-item band-usage"
+          data-testid={`band-usage-${segment}`}
+          title={t("band.usageTitle")}
+          onClick={() => onOpenRanking(segment)}
+        >
+          {t("band.segment", {
+            label: t(`band.seg.${segment}`),
+            mine: formatTokens(sessionSide[segment]),
+            machine: formatTokens(machineSide[segment]),
+          })}
+        </button>
+      ))}
       {sessionId ? (
         <>
           <span className="band-sep" />
