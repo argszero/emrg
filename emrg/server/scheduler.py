@@ -58,8 +58,13 @@ from emrg.server.agents import AgentRegistry
 # The judge's round (`emrg/server/life_review.py`): who is on the roster, how much
 # each one presents, and whether the round may start at all. Imported as pure
 # functions so the gate can be asked without building a handler.
+#: The judge's registered name, from the module that owns it. The review task's
+#: record takes its subject from here, so the seed and the registration that logs
+#: `life: registered the judge agent ...` cannot drift apart.
+from emrg.server.life import JUDGE_AGENT_NAME
 from emrg.server.life_review import (
     LIFE_REVIEW_TASK_TYPE,
+
     read_watermark,
     render_roster,
     roster,
@@ -597,6 +602,48 @@ DEFAULT_TASK_RECORD: dict = {
 }
 
 
+#: How often the judge's round is scheduled. Half an hour is the cadence the value's
+#: own band vocabulary is written against ("this half hour" in the roster's prose),
+#: and it is the interval the host's hand-written record used.
+REVIEW_TASK_INTERVAL = 1800
+
+
+def review_task_record() -> dict:
+    """The record that puts the judge's round on a schedule.
+
+    Every string it carries comes from the constant that owns it —
+    ``LIFE_REVIEW_TASK_TYPE`` for both the name and the type, ``JUDGE_AGENT_NAME`` for
+    the subject — so renaming the judge or the type moves this record with it. The
+    name and the type are the same word deliberately: the type is what the gate asks
+    for, and `name` is also this task's session id and log file name, so one word
+    names it everywhere a reader looks.
+    """
+    return {
+        "name": LIFE_REVIEW_TASK_TYPE,
+        "type": LIFE_REVIEW_TASK_TYPE,
+        "config": {"agent": JUDGE_AGENT_NAME},
+        "interval": REVIEW_TASK_INTERVAL,
+        "enabled": True,
+    }
+
+
+def _is_review_record(record: dict) -> bool:
+    """Whether this record is the review task, under either of the two words it carries.
+
+    **Name or type**, because both spellings describe a review round already on the
+    schedule: a host who wrote ``name: judge-run`` with ``type: life-review`` has the
+    round, and seeding a second record beside it would run the judge twice per window.
+    Reading only the name would do that; reading only the type would miss a record the
+    host named ``life-review`` and mistyped.
+
+    `enabled: false` is such a record. Stopping the review is what that flag is for,
+    and a stopped record is not an absent one.
+    """
+    return (record.get("name") == LIFE_REVIEW_TASK_TYPE
+            or record.get("type") == LIFE_REVIEW_TASK_TYPE)
+
+
+
 class TableUnreadable(Exception):
     """tasks.yml exists but could not be read as a list of task records.
 
@@ -783,17 +830,21 @@ def read_task_run_records(path: Path) -> list[dict]:
 def read_table(path: Path | None = None) -> list[dict]:
     """Read tasks.yml. The only reader in the codebase.
 
-    - File missing ⇒ write the default table, then return it. This is a general rule
-      and not an install step (host principle): deleting the file re-seeds `emrg-task`.
+    - File missing ⇒ write the default table (the evolution task **and** the review
+      task), then return it. This is a general rule and not an install step (host
+      principle): deleting the file re-seeds both. The review record belongs here
+      rather than to an install step for the same reason the other one does — a
+      table this code writes is a table whose judge is scheduled.
     - Parse failure, or a root that is not a list ⇒ `TableUnreadable`. Never `[]`.
     - Otherwise the records exactly as written: keys not rewritten, order not changed,
       fields not filled in.
     """
     path = path or _tasks_yml_path()
     if not path.exists():
-        write_table([dict(DEFAULT_TASK_RECORD)], path)
+        table = [dict(DEFAULT_TASK_RECORD), review_task_record()]
+        write_table(table, path)
         logger.info("TaskScheduler: %s was missing — seeded the default table", path)
-        return [dict(DEFAULT_TASK_RECORD)]
+        return table
     try:
         data = yaml.safe_load(_read_text(path))
     except (yaml.YAMLError, OSError) as exc:
@@ -815,6 +866,36 @@ def write_table(records: list[dict], path: Path | None = None) -> None:
     """
     path = path or _tasks_yml_path()
     atomic_write_yaml(records, path, prefix=".tasks_", dumper=_TaskTableDumper)
+
+
+def ensure_review_task(path: Path | None = None) -> list[dict]:
+    """Add the review task's record when the table holds none; change nothing else.
+
+    Returns the table **as it now stands**, so a caller gets the read and the top-up
+    as one answer instead of reading the file twice.
+
+    The one write it can make appends a record, and only after a successful read: a
+    table that cannot be read raises out of :func:`read_table` before anything here
+    reaches the writer, so a damaged file is never replaced — and never replaced by an
+    empty table, which would retire every task at its next wake. A record that is
+    already there is returned exactly as written: this function adds, it never
+    normalises, because a host's own `interval`, `enabled` and extra fields are the
+    host's.
+
+    Why the top-up lives here rather than in an install step: an install step runs
+    once, at one version, and a host who missed that version would never be scheduled
+    again. This is answered by the table's own contents at every reconcile, so it is
+    the same rule for a fresh install, an upgrade, and a record deleted by hand.
+    """
+    path = path or _tasks_yml_path()
+    table = read_table(path)
+    if any(_is_review_record(r) for r in table):
+        return table
+    table = [*table, review_task_record()]
+    write_table(table, path)
+    logger.info("TaskScheduler: %s held no review record — seeded %r",
+                path, LIFE_REVIEW_TASK_TYPE)
+    return table
 
 
 def migrate_task_config_keys(path: Path | None = None) -> int:
@@ -3788,13 +3869,19 @@ class TaskScheduler:
         cancel a running cycle by construction, and it is idempotent by construction
         too (a name already in `_live` is skipped).
 
+        The table is read through :func:`ensure_review_task`, so this tick also puts
+        the review record back when the table exists without one. That is the whole
+        of the review task's delivery to an existing install: no restart, no install
+        step, no edit of the host's file. A host who wants the review stopped sets
+        `enabled: false`, which is a record and therefore not a gap.
+
         An unreadable table is reported and changes **nothing**. That is the one
         failure mode worth being pedantic about: reading "unreadable" as "empty" would
         retire every handler at its next wake, i.e. stop every scheduled task after one
         non-atomic save by an editor.
         """
         try:
-            table = read_table(self._tasks_file)
+            table = ensure_review_task(self._tasks_file)
         except TableUnreadable as exc:
             logger.error(
                 "TaskScheduler: %s is unreadable (%s) — no handler started or "
@@ -3840,6 +3927,12 @@ class TaskScheduler:
         # default table for that case, which is also the only case in which a missing
         # `emrg-task` is restored. A file that exists without that record is the host's
         # decision and stays that way (design decision D2).
+        #
+        # The review record is the one exception, and the distinction is what it
+        # schedules: `emrg-task` runs this project's own evolution, so a host removing
+        # it is steering, while the review record schedules the judge whose absence is
+        # invisible — the value simply reads `unjudged` for ever. So `reconcile` puts
+        # that one back, and `enabled: false` remains the way to stop it.
         self._ensure_emrg_agent_entry()
         self.reconcile()
         self._reconcile_task = asyncio.create_task(self.reconcile_loop())
