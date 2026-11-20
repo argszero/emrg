@@ -1,133 +1,71 @@
 "use strict";
 /**
- * window-title.test.js — issue #3040: the window title names a session by its id alone.
+ * window-title.test.js — the window title is the bare product name (issue #3089).
  *
- * Two layers are guarded here, because the defect had two halves:
+ * Issue #3040 put the open session into the title (`EMRG — <name> (<id>)`) and this file
+ * guarded the seven sites that rewrote it. The host's 2026-11-20T18:09:49 rant reversed
+ * that decision: the title bar is drawn by the operating system, so nothing inside it can
+ * be dragged or copied — and the session id is the very thing a reader copies, into an
+ * issue, into a log, to say to another agent which session is meant. The name and the id
+ * moved into the status band, where they are ordinary selectable text
+ * (`renderer/src/components/StatusBand.tsx`); the title stayed behind as one constant.
  *
- *   1. **The composition** — `EMRG — <name> (<id>)` for a named session, `EMRG — <id>` for
- *      an unnamed one, the bare application name when nothing is open. Pure, so it is
- *      driven directly.
- *   2. **The wiring** — the title has to be *recomputed* at the moments a session changes:
- *      when a name arrives late, after a rename, when the open session closes. A title
- *      composed only at switch time keeps showing the name it had then, which is the half
- *      a reader notices. `main.js` cannot be loaded by this suite (it requires Electron),
- *      so this half is asserted against its source: the file may no longer compose a title
- *      itself, and each handler that can change the current session must call the
- *      refresher. That is the shape the repo already uses where the subject is a file.
+ * `main.js` cannot be loaded by this suite (it requires Electron), so the wiring half is
+ * read from its source — the shape the repo already uses where the subject is a file. What
+ * it looks for is the *absence of a writer*: a title nothing recomposes is a title that
+ * cannot come to name a session again.
+ *
+ * The three mutations this file has to redden (rant 2026-11-20T18:09:49): put the session
+ * back into the title, and either the composer or its refresher reappears here.
  */
 const { test } = require("node:test");
 const assert = require("node:assert");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const { composeWindowTitle, cleanSessionName, makeTitleRefresher } = require("../window-title");
+const titleModule = require("../window-title");
 
 const GUI_ROOT = path.join(__dirname, "..");
 const MAIN_SRC = fs.readFileSync(path.join(GUI_ROOT, "main.js"), "utf-8");
-const SID = "s_260727_1103_866d";
+const INDEX_HTML = fs.readFileSync(path.join(GUI_ROOT, "renderer", "src", "index.html"), "utf-8");
 
-/** Slice a named region out of main.js, refusing a slice that found nothing usable. */
-function block(startMarker, endMarker) {
-  const i = MAIN_SRC.indexOf(startMarker);
-  assert.ok(i >= 0, `main.js no longer contains ${startMarker}`);
-  const j = MAIN_SRC.indexOf(endMarker, i + startMarker.length);
-  assert.ok(j > i, `main.js has no ${endMarker} after ${startMarker}`);
-  const out = MAIN_SRC.slice(i, j);
-  // A bound that collapsed to nothing would make every assertion below vacuous.
-  assert.ok(out.length > 80, `the slice ${startMarker}…${endMarker} is only ${out.length} chars`);
-  return out;
+/** How many times `needle` occurs — 0 asserted below reads as a count, not as a vibe. */
+function count(haystack, needle) {
+  return haystack.split(needle).length - 1;
 }
 
-// ── 1. Composition ────────────────────────────────────────────────────────────
-
-test("a named session writes the name and the id together", () => {
-  assert.strictEqual(composeWindowTitle(SID, "emrg-main"), `EMRG — emrg-main (${SID})`);
+test("the title is the bare product name", () => {
+  assert.strictEqual(titleModule.APP_NAME, "EMRG");
 });
 
-test("an unnamed session writes the id alone: no empty parentheses, no undefined", () => {
-  for (const name of [undefined, null, "", "   ", "\n", 42]) {
-    const title = composeWindowTitle(SID, name);
-    assert.strictEqual(title, `EMRG — ${SID}`, `name=${JSON.stringify(name)}`);
-    assert.ok(!title.includes("()"), `name=${JSON.stringify(name)} produced empty parentheses`);
-    assert.ok(!/undefined|null|NaN/.test(title), `name=${JSON.stringify(name)} leaked a placeholder`);
-  }
+test("both carriers of the title say the same thing", () => {
+  // Electron adopts the page's <title> once it is parsed; the BrowserWindow option only
+  // covers the moment before that. Two carriers, one value — or a window that renames
+  // itself a second after it opens.
+  const matches = INDEX_HTML.match(/<title>([\s\S]*?)<\/title>/);
+  assert.ok(matches, "renderer/src/index.html carries no <title>");
+  assert.strictEqual(matches[1].trim(), titleModule.APP_NAME);
 });
 
-test("with nothing open the title carries no session at all", () => {
-  for (const sid of [null, undefined, "", "   "]) {
-    assert.strictEqual(composeWindowTitle(sid, "emrg-main"), "EMRG", `sid=${JSON.stringify(sid)}`);
-  }
+test("the module carries no composition rule any more", () => {
+  // A surviving export is how the old shape comes back: #3040's rule was a pure function
+  // of (sessionId, name), so a caller that still found one would keep naming sessions.
+  assert.deepStrictEqual(Object.keys(titleModule), ["APP_NAME"]);
 });
 
-test("a name with a newline or padding is flattened to one line", () => {
-  assert.strictEqual(cleanSessionName("  emrg\n-main  "), "emrg -main");
-  assert.strictEqual(composeWindowTitle(SID, "a\nb"), `EMRG — a b (${SID})`);
-});
-
-// ── 2. The refresher recomputes from live state ───────────────────────────────
-
-function mountRefresher(initial = {}) {
-  const state = { sid: SID, name: undefined, ...initial };
-  const written = [];
-  const refresh = makeTitleRefresher({
-    setTitle: (title) => written.push(title),
-    getSessionId: () => state.sid,
-    getSessionName: () => state.name,
-  });
-  return { state, written, refresh };
-}
-
-test("a name arriving late updates the title on its own", () => {
-  const { state, written, refresh } = mountRefresher();
-  assert.strictEqual(refresh(), `EMRG — ${SID}`);
-  state.name = "emrg-main"; // 第一条消息之后 daemon 才给它名字
-  assert.strictEqual(refresh(), `EMRG — emrg-main (${SID})`);
-  assert.deepStrictEqual(written, [`EMRG — ${SID}`, `EMRG — emrg-main (${SID})`]);
-});
-
-test("a rename is reflected immediately, not on the next switch", () => {
-  const { state, written, refresh } = mountRefresher({ name: "before" });
-  assert.strictEqual(refresh(), `EMRG — before (${SID})`);
-  state.name = "after"; // 改名成功
-  assert.strictEqual(refresh(), `EMRG — after (${SID})`);
-  assert.strictEqual(written.at(-1), `EMRG — after (${SID})`);
-});
-
-test("closing the open session returns the title to the session-less form", () => {
-  const { state, refresh } = mountRefresher({ name: "emrg-main" });
-  assert.strictEqual(refresh(), `EMRG — emrg-main (${SID})`);
-  state.sid = null;
-  assert.strictEqual(refresh(), "EMRG");
-});
-
-// ── 3. The wiring in main.js ─────────────────────────────────────────────────
-
-test("main.js composes no title of its own — the rule lives in one file", () => {
-  assert.ok(
-    !MAIN_SRC.includes("EMRG — "),
-    "main.js must not compose a title: every site calls refreshWindowTitle()",
+test("main.js takes the name from this module", () => {
+  assert.strictEqual(
+    count(MAIN_SRC, 'const { APP_NAME } = require("./window-title")'),
+    1,
+    "main.js must take the product name from window-title.js, once",
   );
-  assert.ok(MAIN_SRC.includes('require("./window-title")'), "main.js must require window-title");
 });
 
-test("every handler that changes the current session recomputes the title", () => {
-  for (const [name, label] of [
-    ["emrg:switchSession", "switching"],
-    ["emrg:newSession", "creating"],
-    ["emrg:renameSession", "renaming"],
-    ["emrg:removeAgent", "removing a project"],
-  ]) {
-    const body = block(`ipcMain.handle("${name}"`, "ipcMain.handle(");
-    assert.ok(
-      body.includes("refreshWindowTitle()"),
-      `the ${label} handler (${name}) must call refreshWindowTitle()`,
-    );
-  }
-});
-
-test("a late name and a closed session both recompute the title", () => {
-  const lateName = block("function touchOpenSession(", "function markSessionActive(");
-  assert.ok(lateName.includes("refreshWindowTitle()"), "touchOpenSession must refresh once a name arrives");
-  const closing = block("async function closeSession(sid)", "return { ok: true, closed: !!entry };");
-  assert.ok(closing.includes("refreshWindowTitle()"), "closeSession must refresh the title");
+test("main.js never writes a window title", () => {
+  // The three shapes a title writer takes: the Electron call, #3040's refresher, and a
+  // hand-composed `EMRG — …` string. Any one of them would let the window name a session
+  // again, which is the defect the status band exists to end.
+  assert.strictEqual(count(MAIN_SRC, "setTitle"), 0, "main.js calls setTitle");
+  assert.strictEqual(count(MAIN_SRC, "refreshWindowTitle"), 0, "main.js holds a title refresher");
+  assert.strictEqual(count(MAIN_SRC, "EMRG \u2014 "), 0, "main.js composes an `EMRG — …` title");
 });

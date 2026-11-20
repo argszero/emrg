@@ -1142,7 +1142,7 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
     delete (window as unknown as { emrg?: unknown }).emrg;
   });
 
-  it("状态带里没有会话标题、模型、消息条数（issue #2969）", async () => {
+  it("状态带只提当前会话的名字与 id，不提别的会话、模型、消息条数（issue #3089）", async () => {
     const m = mockEmrg();
     render(wrapper(<Shell />));
     await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
@@ -1158,11 +1158,21 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
     });
     await waitFor(() => expect(screen.getByTestId("status-band")).toBeInTheDocument());
     const band = screen.getByTestId("status-band");
-    // 一次会话已经选中、daemon 也报了标题与条数：状态带仍然一个字都不提它们
-    expect(band.textContent).not.toContain("Alpha");
-    expect(band.textContent).not.toContain("s1");
+    // 会话从标题栏搬进状态带（rant 2026-11-20T18:09:49）：标题栏由系统画，里面的 id
+    // 拖不动也复制不出来。这一格提当前那一个会话，别的不提。
+    await waitFor(() => expect(screen.getByTestId("band-session-name")).toHaveTextContent("Alpha"));
+    expect(screen.getByTestId("band-session-id")).toHaveTextContent("s1");
+    expect(band.textContent).not.toContain("Beta");
+    expect(band.textContent).not.toContain("s2");
+    // 这两样仍然不在这行里：模型在输入框那儿切，条数是会话栏的事
     expect(band.textContent).not.toMatch(/\bmsgs\b/);
     expect(band.textContent).not.toContain("deepseek");
+    // 改了名就跟着换（清单 6）：这一格读的是打开会话的名字，不是切会话那一刻的快照
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha renamed" }, { sid: "s2", title: "Beta" }]));
+    await waitFor(() =>
+      expect(screen.getByTestId("band-session-name")).toHaveTextContent("Alpha renamed"),
+    );
+    expect(screen.getByTestId("band-session-id")).toHaveTextContent("s1");
   });
 
   it("中途打开一个已在跑的会话：计时从 daemon 的快照时刻起算（rant 2026-09-27T18:41:52 requirement 2）", async () => {
