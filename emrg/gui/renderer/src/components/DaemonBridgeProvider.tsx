@@ -85,6 +85,18 @@ interface EmrgWindow {
      * it", so the column would say it cannot list directories in a build that can.
      */
     listFiles?: (p: { path: string }) => Promise<{ entries?: unknown[]; truncated?: boolean }>;
+    /**
+     * The right-hand editor's file read (issue #3068): one file's text, or the daemon's
+     * reason it has none. Named here for the reason documented on `usageWindow` below —
+     * a channel missing from this literal reaches the bridge as `undefined`, which the
+     * bridge reads as "this build cannot read files".
+     */
+    readFile?: (p: { path: string }) => Promise<{
+      content?: string;
+      binary?: boolean;
+      truncated?: boolean;
+      totalLines?: number | null;
+    }>;
     sessionRoots?: (p: {
       sessionId: string;
     }) => Promise<{ agentRoot?: string | null; sessionRoot?: string | null }>;
@@ -194,6 +206,12 @@ export function DaemonBridgeProvider({ children }: { children: ReactNode }) {
           const emrg = (window as unknown as EmrgWindow).emrg;
           if (!emrg?.listFiles) throw new Error("listFiles unavailable");
           return emrg.listFiles(p);
+        },
+        // The editor's file read (issue #3068), on the same terms once more.
+        readFile: async (p) => {
+          const emrg = (window as unknown as EmrgWindow).emrg;
+          if (!emrg?.readFile) throw new Error("readFile unavailable");
+          return emrg.readFile(p);
         },
         sessionRoots: async (p) => {
           const emrg = (window as unknown as EmrgWindow).emrg;

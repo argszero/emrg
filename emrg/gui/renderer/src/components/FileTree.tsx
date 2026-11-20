@@ -46,10 +46,23 @@ interface OpenFileBridge {
 /** What one directory's listing resolves to; `null` = this build cannot ask at all. */
 export type LoadDir = (path: string) => Promise<{ entries: TreeEntry[]; truncated: boolean } | null>;
 
+/**
+ * A file row was clicked, with the absolute path and the root it hangs from (issue
+ * #3068).
+ *
+ * `pin` is false for the first click and true for a double click: the editor opens a
+ * preview for the former and a pinned tab for the latter. Directory rows never report —
+ * a click on one only opens or closes it — so the editor has no way to open a folder by
+ * accident.
+ */
+export type OpenFile = (req: { path: string; root: string; pin: boolean }) => void;
+
 export interface FileTreeProps {
   /** Absolute path the tree is rooted at; `null` = no session to root at. */
   root: string | null;
   loadDir?: LoadDir;
+  /** A file row was clicked; omitted = this tree is a reading only. */
+  onOpenFile?: OpenFile;
   /** test-id prefix, so the two trees in one panel stay distinguishable. */
   testId: string;
   /**
@@ -77,7 +90,7 @@ const GLYPHS: Record<string, string> = {
   file: "▤",
 };
 
-export function FileTree({ root, loadDir, testId, expanded, onExpandedChange }: FileTreeProps) {
+export function FileTree({ root, loadDir, testId, expanded, onExpandedChange, onOpenFile }: FileTreeProps) {
   const { t } = useI18n();
   const [dirs, setDirs] = useState<DirMap>({});
   // Open folders are the caller's when it supplies `expanded`, and this tree's own
@@ -415,6 +428,15 @@ export function FileTree({ root, loadDir, testId, expanded, onExpandedChange }: 
               onClick={() => {
                 setSelected(row.path);
                 open(row);
+                // A file row is also a request to see the file (issue #3068, item 6).
+                // `open` above does nothing for a file, so a directory click reports
+                // nothing and only expands.
+                if (row.type === "file" && root) onOpenFile?.({ path: row.path, root, pin: false });
+              }}
+              onDoubleClick={() => {
+                // A double click pins: the two single clicks before it opened a preview
+                // (the second one only re-focused that same tab), and this makes it stay.
+                if (row.type === "file" && root) onOpenFile?.({ path: row.path, root, pin: true });
               }}
               onContextMenu={(e) => openMenuAt(e, row.path)}
               title={row.name}
@@ -486,9 +508,11 @@ export interface FileTreeRootsProps {
   testId: string;
   expanded?: Set<string>;
   onExpandedChange?: (next: Set<string>) => void;
+  /** A file row was clicked; forwarded to every root this wrapper draws. */
+  onOpenFile?: OpenFile;
 }
 
-export function FileTreeRoots({ roots, loadDir, testId, expanded, onExpandedChange }: FileTreeRootsProps) {
+export function FileTreeRoots({ roots, loadDir, testId, expanded, onExpandedChange, onOpenFile }: FileTreeRootsProps) {
   const [own, setOwn] = useState<Set<string>>(() => new Set());
   const openSet = expanded ?? own;
   const setOpenSet = onExpandedChange ?? setOwn;
@@ -519,6 +543,7 @@ export function FileTreeRoots({ roots, loadDir, testId, expanded, onExpandedChan
         loadDir={loadDir}
         expanded={openSet}
         onExpandedChange={setOpenSet}
+        onOpenFile={onOpenFile}
       />
     );
   }
@@ -533,6 +558,7 @@ export function FileTreeRoots({ roots, loadDir, testId, expanded, onExpandedChan
           loadDir={loadDir}
           expanded={openSet}
           onExpandedChange={setOpenSet}
+          onOpenFile={onOpenFile}
         />
       ))}
     </div>
