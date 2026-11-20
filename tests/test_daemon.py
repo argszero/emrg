@@ -6054,3 +6054,340 @@ def test_the_tasks_list_frame_carries_the_minimum_interval(tmp_path, monkeypatch
     rows = {t["name"]: t for t in frame["tasks"]}
     assert rows["windowed"]["schedule"] == windows, "the form prefills from this"
     assert rows["plain"]["schedule"] is None, "absent stays absent, not []"
+
+
+# ── the editor's two channels: the probe, and the save ──────────────
+#
+# The right-column editor holds the bytes it read, so the two facts it cannot derive
+# for itself are "did the file move underneath me" and "put my buffer back". Both are
+# daemon messages — `stat_file`, `write_file` — rather than tool calls: a probe runs on
+# every focus and every tab activation, where reading the whole file to answer a yes/no
+# question would cost the file each time, and a save is the host's own edit rather than
+# a model reaching for a path.
+#
+# Neither channel is reached by the tool suite, so without these tests the refusals of
+# 166 lines of dispatch-and-handler are read only by hand — and the save's boundary is
+# the session's sandbox policy, which is exactly the kind of rule that looks right in a
+# diff and is wrong on one path. Driven through `_process_message` rather than the
+# handlers directly: the message-shape checks live in the dispatch, and a test that
+# called the handler could not see them.
+
+
+def _editor_session(server, tmp_path, session_id="editor-save", tier=None):
+    """The session a save resolves its policy from, optionally at a named tier.
+
+    `_get_or_create_session` is the daemon's own entry point and it **writes** the
+    session directory, so it runs before the drive: a save that must be refused has to
+    meet a tier already on disk, because `Session.load` is where the handler reads it.
+    """
+    session = server._get_or_create_session(session_id, tmp_path, register=False)
+    if tier is not None:
+        session.set_sandbox(tier)
+    return session
+
+
+def test_the_editor_probe_answers_mtime_and_size_and_never_the_content(tmp_path):
+    """A probe is a yes/no question with two numbers attached.
+
+    `content` is asserted **absent**, not merely ignored: the reason this channel exists
+    beside `read_file` is that asking "did it move" must not cost the file, and a frame
+    that quietly carried the bytes would leave the panel no way to tell a probe from a
+    read.
+    """
+    server = _make_server()
+    target = tmp_path / "doc.txt"
+    target.write_text("first line\nsecond line\n", encoding="utf-8")
+    on_disk = target.stat()
+
+    frames = _drive(server, {"type": "stat_file", "path": str(target)})
+
+    assert len(frames) == 1, frames
+    frame = frames[0]
+    assert frame["type"] == "file_stat"
+    assert frame["exists"] is True
+    assert frame["mtime"] == on_disk.st_mtime
+    assert frame["size"] == on_disk.st_size
+    assert "error" not in frame, frame
+    assert "content" not in frame, (
+        "the probe answers with two numbers — carrying the bytes would be the read it "
+        "exists to avoid"
+    )
+
+
+def test_the_editor_probe_answers_a_missing_file_rather_than_failing(tmp_path):
+    """Deleted-on-disk is an answer, and a different sentence from "cannot tell".
+
+    If a missing path arrived as an `error`, every unsaved new buffer — whose file does
+    not exist yet — would show the host a fault on its first focus instead of the
+    ordinary state it is in.
+    """
+    server = _make_server()
+
+    frames = _drive(server, {"type": "stat_file", "path": str(tmp_path / "nope.txt")})
+
+    assert len(frames) == 1, frames
+    frame = frames[0]
+    assert frame["type"] == "file_stat"
+    assert frame["exists"] is False
+    assert "error" not in frame, (
+        "a path with no file is an answer, not a failure: the panel reports the file "
+        "as deleted on disk"
+    )
+
+
+def test_the_editor_probe_refuses_a_relative_path(tmp_path):
+    """A probe names the file the panel read, which was resolved when it was read.
+
+    A relative path would be resolved against the *daemon's* working directory, which
+    is not necessarily the session's, so the same string would stat a different file
+    than the one on screen.
+    """
+    server = _make_server()
+
+    frames = _drive(server, {"type": "stat_file", "path": "relative.txt"})
+
+    assert len(frames) == 1, frames
+    frame = frames[0]
+    assert frame["type"] == "file_stat"
+    assert "absolute" in frame.get("error", ""), frame
+    assert "exists" not in frame, (
+        "a path this refused was never answered for — reporting `exists` here would "
+        "describe a file nobody stat'd"
+    )
+
+
+def test_the_editor_probe_names_the_kind_of_a_path_that_is_not_a_file(tmp_path):
+    """A directory has no meaningful mtime to compare, so it is described, not compared.
+
+    A directory is the fixture rather than a FIFO because the answer is portable: what
+    is being pinned is that the kind is asked **before** the stat is trusted, and the
+    refusal is the file tools' own sentence rather than a second one written here.
+    """
+    server = _make_server()
+    directory = tmp_path / "a-directory"
+    directory.mkdir()
+
+    frames = _drive(server, {"type": "stat_file", "path": str(directory)})
+
+    assert len(frames) == 1, frames
+    frame = frames[0]
+    assert frame["type"] == "file_stat"
+    assert "a directory, not a regular file" in frame.get("error", ""), frame
+    assert "mtime" not in frame and "size" not in frame, (
+        "there is nothing to compare here: the frame must not carry numbers for a "
+        "subject it just refused"
+    )
+
+
+def test_the_editor_save_writes_the_buffer_and_reports_what_it_wrote(tmp_path):
+    """The save is the panel's buffer, written where the panel says.
+
+    `size` is checked against the bytes on disk *after* the write, so a frame carrying
+    the pre-write size — the panel's own buffer length, which is the tempting thing to
+    report — fails here.
+    """
+    server = _make_server()
+    _editor_session(server, tmp_path)
+    target = tmp_path / "doc.txt"
+    target.write_text("old text\n", encoding="utf-8")
+
+    frames = _drive(server, {
+        "type": "write_file",
+        "path": str(target),
+        "content": "new text\n",
+        "session_id": "editor-save",
+        "cwd": str(tmp_path),
+    })
+
+    assert len(frames) == 1, frames
+    frame = frames[0]
+    assert frame["type"] == "file_written"
+    assert "error" not in frame, frame
+    assert target.read_text(encoding="utf-8") == "new text\n"
+    assert frame["size"] == target.stat().st_size
+    assert frame["mtime"] == target.stat().st_mtime
+
+
+def test_the_editor_save_creates_the_directory_a_new_file_needs(tmp_path):
+    """Saving a new file into a path that does not exist yet is the ordinary case.
+
+    An editor buffer whose directory was removed has nothing to write into, and a
+    handler that let `write_text` fail would answer `cannot write file` for a save it
+    could have made.
+    """
+    server = _make_server()
+    _editor_session(server, tmp_path)
+    target = tmp_path / "sub" / "deeper" / "new.txt"
+
+    frames = _drive(server, {
+        "type": "write_file",
+        "path": str(target),
+        "content": "born on save\n",
+        "session_id": "editor-save",
+        "cwd": str(tmp_path),
+    })
+
+    assert len(frames) == 1, frames
+    assert "error" not in frames[0], frames[0]
+    assert target.read_text(encoding="utf-8") == "born on save\n"
+
+
+def test_the_save_and_the_probe_agree_about_what_was_just_written(tmp_path):
+    """The panel's own save must not come back as somebody else's change.
+
+    The round trip is the unit: a save reports the new `mtime`, the panel records it,
+    and the very next probe answers the same number — so the probe's comparison is
+    quiet. Both frames likewise name the file under the same resolved `path`, because
+    the panel keys the recorded mtime on the name the probe will ask about.
+    """
+    server = _make_server()
+    _editor_session(server, tmp_path)
+    target = tmp_path / "doc.txt"
+
+    written = _drive(server, {
+        "type": "write_file",
+        "path": str(target),
+        "content": "the host's edit\n",
+        "session_id": "editor-save",
+        "cwd": str(tmp_path),
+    })[0]
+    probed = _drive(server, {"type": "stat_file", "path": str(target)})[0]
+
+    assert written["path"] == probed["path"], (
+        "one file, one name: the panel compares these two strings"
+    )
+    assert probed["mtime"] == written["mtime"], (
+        "the probe must answer the mtime the save just reported, or the panel reads "
+        "its own write as an external change and prompts about it"
+    )
+    assert probed["size"] == written["size"]
+
+
+def test_the_editor_save_is_refused_under_a_read_only_tier(tmp_path):
+    """The save's boundary is the session's sandbox policy, and it lands before a byte.
+
+    A read-only tier is the fixture precisely because it grants **no** root at all: the
+    workspace and the system temp area are grants this mode does not make, so the test
+    cannot pass on a tmp path some ambient root already covers (measured: a
+    workspace-write policy grants `gettempdir()` as well as the workspace, so a control
+    written inside tmp reads the environment rather than the boundary).
+    """
+    server = _make_server()
+    _editor_session(server, tmp_path, tier="read-only")
+    existing = tmp_path / "doc.txt"
+    existing.write_text("original\n", encoding="utf-8")
+    fresh = tmp_path / "new.txt"
+
+    for target in (existing, fresh):
+        frames = _drive(server, {
+            "type": "write_file",
+            "path": str(target),
+            "content": "half a thought\n",
+            "session_id": "editor-save",
+            "cwd": str(tmp_path),
+        })
+        assert len(frames) == 1, frames
+        frame = frames[0]
+        assert frame["type"] == "file_written", frame
+        assert "read-only sandbox" in frame.get("error", ""), (
+            f"expected the policy's own refusal, got {frame!r}"
+        )
+        assert "size" not in frame and "mtime" not in frame, (
+            "a refused save wrote nothing, so it has no size and no mtime to report"
+        )
+
+    assert existing.read_text(encoding="utf-8") == "original\n", (
+        "the refusal is checked before the write: the file still holds what it held"
+    )
+    assert not fresh.exists(), (
+        "a byte on disk here means the boundary was reported after it was crossed"
+    )
+
+
+def test_the_editor_save_refuses_a_target_that_is_not_a_regular_file(tmp_path):
+    """A save is a whole-file replacement, so its target has to be a file.
+
+    A directory is the portable fixture: it exists, it is not regular, and writing to
+    it raises rather than blocks — the kind is asked anyway, because the same branch is
+    what keeps a FIFO from reaching `write_text` on the event loop.
+    """
+    server = _make_server()
+    _editor_session(server, tmp_path)
+    directory = tmp_path / "a-directory"
+    directory.mkdir()
+
+    frames = _drive(server, {
+        "type": "write_file",
+        "path": str(directory),
+        "content": "not here\n",
+        "session_id": "editor-save",
+        "cwd": str(tmp_path),
+    })
+
+    assert len(frames) == 1, frames
+    frame = frames[0]
+    assert frame["type"] == "file_written"
+    assert "a directory, not a regular file" in frame.get("error", ""), frame
+    assert directory.is_dir(), "the refused target is untouched"
+
+
+def test_the_editor_save_takes_an_emptied_buffer_but_not_a_missing_one(tmp_path):
+    """An empty content is a real save; an absent one is a malformed message.
+
+    The two are one keystroke apart — emptying a file is how a host deletes its text —
+    so a check written as `if not content` would refuse the save that clears a file and
+    leave the panel holding a change it did make.
+    """
+    server = _make_server()
+    _editor_session(server, tmp_path)
+    target = tmp_path / "doc.txt"
+    target.write_text("everything the host just deleted\n", encoding="utf-8")
+
+    emptied = _drive(server, {
+        "type": "write_file",
+        "path": str(target),
+        "content": "",
+        "session_id": "editor-save",
+        "cwd": str(tmp_path),
+    })
+    assert len(emptied) == 1, emptied
+    assert "error" not in emptied[0], emptied[0]
+    assert target.read_text(encoding="utf-8") == ""
+
+    for missing in (
+        {"type": "write_file", "path": str(target),
+         "session_id": "editor-save", "cwd": str(tmp_path)},
+        {"type": "write_file", "path": str(target), "content": None,
+         "session_id": "editor-save", "cwd": str(tmp_path)},
+        {"type": "write_file", "content": "text",
+         "session_id": "editor-save", "cwd": str(tmp_path)},
+    ):
+        frames = _drive(server, missing)
+        assert len(frames) == 1, frames
+        assert "requires path and a string content" in frames[0].get("error", ""), (
+            f"a malformed save must be refused by the dispatch, not written: {frames!r}"
+        )
+    assert target.read_text(encoding="utf-8") == "", (
+        "no refused message may have written anything"
+    )
+
+
+def test_the_editor_save_needs_the_session_it_resolves_its_policy_from(tmp_path):
+    """The tier and roots a save runs under come from the session, so it must be named.
+
+    Without them the handler has no policy to ask, and the one policy it could invent —
+    no tier at all — resolves to unconfined, which is the wrong way to be wrong.
+    """
+    server = _make_server()
+    target = tmp_path / "doc.txt"
+
+    for missing in (
+        {"type": "write_file", "path": str(target), "content": "text",
+         "cwd": str(tmp_path)},
+        {"type": "write_file", "path": str(target), "content": "text",
+         "session_id": "editor-save", "cwd": ""},
+    ):
+        frames = _drive(server, missing)
+        assert len(frames) == 1, frames
+        assert "requires session_id and cwd" in frames[0].get("error", ""), frames
+    assert not target.exists(), "nothing was written without a session to name"
