@@ -20,12 +20,17 @@ PASS=0; FAIL=0
 smoke_home="$(mktemp -d)"
 # 红线守卫（rant 2026-08-25T10:38:34 / MANIFESTO 第四条附则二）：绝不以任何形式
 # stop/restart daemon。临时 daemon（步骤 2 自起）在 Windows 上仍持有
-# $HOME/.emrg/logs/emrgd.log 等文件句柄 → 此处 rm 可能 "Device or resource busy"；
+# $HOME/.emrg/global/logs/emrgd.log 等文件句柄 → 此处 rm 可能 "Device or resource busy"；
 # 2>/dev/null || true 使清理尽力而为（失败不改变退出码），残留临时 HOME 由
 # CI runner 的 orphan-process 清理兜底，本机由 56031 端口守卫降级兜底。
 trap 'rm -rf "$smoke_home" 2>/dev/null || true' EXIT
 export HOME="$smoke_home"
-mkdir -p "$HOME/.emrg"
+# The home root holds `global/` plus an agent's own state (emrg/home_layout.py), and every
+# file the daemon writes — the config, the auth token, the logs — lives under `global/`.
+# The install tree below follows the same split; a runtime path spelled `$HOME/.emrg/<name>`
+# that is not under `global/` is the pre-split root and the daemon will not look there.
+# Measured: v0.3.70 (run 44870840332) failed this step on all four platform legs that way.
+mkdir -p "$HOME/.emrg/global"
 # R114: Windows 下经 cmd 启动的原生 python.exe 不认 Git Bash 的 $HOME —
 # Path.home() 读 USERPROFILE/HOMEDRIVE/HOMEPATH。隔离 HOME 冒烟必须同步这三个
 # 变量，否则 daemon 会把 config/port 写到真实用户目录（config 缺失 → 崩溃不写 port）。
@@ -74,7 +79,7 @@ say "2. daemon start + port + auth + pong"
 if [ "$DAEMON_DEGRADED" -eq 1 ]; then
   ok "2. audit-degraded — port 56031 busy (real daemon running), not touching it"
 else
-cat > "$HOME/.emrg/config.toml" <<'EOF'
+cat > "$HOME/.emrg/global/config.toml" <<'EOF'
 [llm]
 base_url = "https://api.deepseek.com"
 api_key = "sk-..."
@@ -86,22 +91,22 @@ EOF
 if [ -n "${WINDIR:-}" ]; then
   # $HOME 在 Git Bash 是 POSIX 路径（/c/Users/...），cmd 需 Windows 路径（C:\Users\...）→ cygpath -m
   EMRGD_CMD="$(cygpath -m "$HOME/.emrg/global/install/bin/emrgd.cmd")"
-  (cd "$HOME" && cmd //c "start /b $EMRGD_CMD" >"$HOME/.emrg/emrgd-debug.log" 2>&1)
+  (cd "$HOME" && cmd //c "start /b $EMRGD_CMD" >"$HOME/.emrg/global/emrgd-debug.log" 2>&1)
 else
-  nohup emrgd >"$HOME/.emrg/emrgd-debug.log" 2>&1 &
+  nohup emrgd >"$HOME/.emrg/global/emrgd-debug.log" 2>&1 &
 fi
 for i in $(seq 1 30); do
-  [ -f "$HOME/.emrg/emrgd.token" ] && break
+  [ -f "$HOME/.emrg/global/emrgd.token" ] && break
   sleep 0.5
 done
-if [ ! -f "$HOME/.emrg/emrgd.token" ]; then
+if [ ! -f "$HOME/.emrg/global/emrgd.token" ]; then
   echo "  [debug] emrgd-debug.log:" >&2
-  cat "$HOME/.emrg/emrgd-debug.log" 2>/dev/null || true
+  cat "$HOME/.emrg/global/emrgd-debug.log" 2>/dev/null || true
   echo "  [debug] emrgd.log (tail):" >&2
-  tail -20 "$HOME/.emrg/logs/emrgd.log" 2>/dev/null || true
+  tail -20 "$HOME/.emrg/global/logs/emrgd.log" 2>/dev/null || true
   fail "daemon did not write token file"
 else
-  token=$(cat "$HOME/.emrg/emrgd.token")
+  token=$(cat "$HOME/.emrg/global/emrgd.token")
   if python3 - "$token" <<'PYEOF'
 import json, sys
 from websockets.sync.client import connect
@@ -129,8 +134,8 @@ fi
 say "3. session persistence core (no-LLM)"
 if [ "$DAEMON_DEGRADED" -eq 1 ]; then
   ok "3. audit-degraded — port 56031 busy"
-elif [ -f "$HOME/.emrg/emrgd.token" ]; then
-  if python3 - "$HOME/.emrg/emrgd.token" <<'PYEOF'
+elif [ -f "$HOME/.emrg/global/emrgd.token" ]; then
+  if python3 - "$HOME/.emrg/global/emrgd.token" <<'PYEOF'
 import json, sys, websockets.sync.client
 port, token = 56031, open(sys.argv[1]).read().strip()
 ws = websockets.sync.client.connect(f"ws://127.0.0.1:{port}", open_timeout=3)
@@ -150,8 +155,8 @@ fi
 say "4. daemon still alive (re-auth + pong)"
 if [ "$DAEMON_DEGRADED" -eq 1 ]; then
   ok "4. audit-degraded — port 56031 busy"
-elif [ -f "$HOME/.emrg/emrgd.token" ]; then
-  token=$(cat "$HOME/.emrg/emrgd.token")
+elif [ -f "$HOME/.emrg/global/emrgd.token" ]; then
+  token=$(cat "$HOME/.emrg/global/emrgd.token")
   if python3 - "$token" <<'PYEOF'
 import json, sys
 from websockets.sync.client import connect
