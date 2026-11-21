@@ -240,3 +240,127 @@ def test_the_daemon_entry_point_runs_the_migration_first():
         "the migration runs after the logging setup, which creates global/logs/ first — so "
         "a host's pre-split logs/ would be set aside as logs.pre-global instead of moved"
     )
+
+
+# ── the register travels with the trees it names ──────────────────────
+#
+# A register stores the verbatim directory a session runs in, so moving a tree without its
+# row leaves an agent pointing at a directory that no longer exists: the row is well-formed,
+# the tree is intact, and only a reader that stats the path finds the disagreement. These
+# tests hold the rewrite that closes it — and the boundaries that keep it from reaching rows
+# it has no business touching.
+
+
+def _register(root: Path, rows: list[dict]) -> Path:
+    """A register at ``root``'s top level, the shape a pre-migration host has."""
+    import yaml
+
+    path = root / home_layout.AGENTS_FILENAME
+    path.write_text(yaml.safe_dump(rows), encoding="utf-8")
+    return path
+
+
+def _rows(path: Path) -> dict[str, str]:
+    import yaml
+
+    return {row["name"]: row["path"] for row in yaml.safe_load(path.read_text(encoding="utf-8"))}
+
+
+def test_an_agent_under_a_moved_tree_still_names_a_directory_that_exists(tmp_path):
+    """The defect: after the move the row pointed at the pre-split path, which is gone."""
+    _tree(tmp_path, "evolution/", "config.toml")
+    agent = tmp_path / "evolution"
+    _register(tmp_path, [{"path": str(agent), "name": "emrg", "life": 145}])
+
+    home_layout.migrate_into_global(tmp_path)
+
+    rows = _rows(tmp_path / "global" / home_layout.AGENTS_FILENAME)
+    assert rows["emrg"] == str(tmp_path / "global" / "evolution")
+    assert Path(rows["emrg"]).is_dir(), "the row must name a directory that is really there"
+
+
+def test_a_row_for_the_root_itself_is_left_alone(tmp_path):
+    """The home root is a registered agent and it does not move, so neither does its row."""
+    _tree(tmp_path, "evolution/")
+    _register(tmp_path, [
+        {"path": str(tmp_path), "name": ".emrg", "life": 120},
+        {"path": str(tmp_path / "evolution"), "name": "emrg", "life": 145},
+    ])
+
+    home_layout.migrate_into_global(tmp_path)
+
+    rows = _rows(tmp_path / "global" / home_layout.AGENTS_FILENAME)
+    assert rows[".emrg"] == str(tmp_path), "the root stayed, so its row must too"
+    assert rows["emrg"] == str(tmp_path / "global" / "evolution")
+
+
+def test_a_row_outside_the_root_is_left_alone(tmp_path, tmp_path_factory):
+    """A register holds directories anywhere; a rewrite bounded to the move must miss them."""
+    elsewhere = tmp_path_factory.mktemp("elsewhere")
+    _tree(tmp_path, "evolution/")
+    _register(tmp_path, [{"path": str(elsewhere), "name": "other", "life": 5}])
+
+    home_layout.migrate_into_global(tmp_path)
+
+    rows = _rows(tmp_path / "global" / home_layout.AGENTS_FILENAME)
+    assert rows["other"] == str(elsewhere)
+
+
+def test_a_row_for_a_look_alike_name_is_not_rewritten(tmp_path):
+    """``evolution-old`` is not inside ``evolution``; a prefix test that says it is is wrong."""
+    _tree(tmp_path, "evolution/")
+    _register(tmp_path, [
+        {"path": str(tmp_path / "evolution-old"), "name": "older", "life": 9},
+    ])
+
+    home_layout.migrate_into_global(tmp_path)
+
+    rows = _rows(tmp_path / "global" / home_layout.AGENTS_FILENAME)
+    assert rows["older"] == str(tmp_path / "evolution-old")
+
+
+def test_a_tree_set_aside_has_its_row_follow_it_too(tmp_path):
+    """An entry whose name ``global/`` already holds lands beside it, and the row follows."""
+    _tree(tmp_path, "evolution/")
+    (tmp_path / "global" / "evolution").mkdir(parents=True)
+    _register(tmp_path, [{"path": str(tmp_path / "evolution"), "name": "emrg", "life": 1}])
+
+    home_layout.migrate_into_global(tmp_path)
+
+    rows = _rows(tmp_path / "global" / home_layout.AGENTS_FILENAME)
+    assert rows["emrg"] == str(tmp_path / "global" / f"evolution{home_layout.SET_ASIDE_SUFFIX}")
+    assert Path(rows["emrg"]).is_dir()
+
+
+def test_an_unreadable_register_is_left_exactly_as_it_was(tmp_path):
+    """It could not be read, so its rows are unknown; rewriting it would delete them all."""
+    _tree(tmp_path, "evolution/")
+    path = tmp_path / home_layout.AGENTS_FILENAME
+    path.write_bytes(b"\xff\xfe not yaml at all\n")
+
+    moved = home_layout.migrate_into_global(tmp_path)
+
+    assert sorted(moved) == ["agents.yml", "evolution"], "the move itself still happened"
+    assert (tmp_path / "global" / home_layout.AGENTS_FILENAME).read_bytes() == (
+        b"\xff\xfe not yaml at all\n"
+    ), "a register this call could not read must come back byte for byte"
+
+
+def test_a_second_pass_rewrites_nothing(tmp_path):
+    """Repeatable: the rows already name their new homes, so nothing matches."""
+    _tree(tmp_path, "evolution/")
+    _register(tmp_path, [{"path": str(tmp_path / "evolution"), "name": "emrg", "life": 1}])
+    home_layout.migrate_into_global(tmp_path)
+    after_first = (tmp_path / "global" / home_layout.AGENTS_FILENAME).read_bytes()
+
+    assert home_layout.migrate_into_global(tmp_path) == []
+    assert (tmp_path / "global" / home_layout.AGENTS_FILENAME).read_bytes() == after_first
+
+
+def test_the_register_is_found_at_the_top_level_when_it_did_not_move(tmp_path):
+    """``register_after_migration`` reads where the file is, not where it should be."""
+    inside = tmp_path / "global" / home_layout.AGENTS_FILENAME
+    assert home_layout.register_after_migration(tmp_path) == tmp_path / home_layout.AGENTS_FILENAME
+    inside.parent.mkdir(parents=True)
+    inside.write_text("[]", encoding="utf-8")
+    assert home_layout.register_after_migration(tmp_path) == inside

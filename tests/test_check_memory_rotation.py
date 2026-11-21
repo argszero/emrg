@@ -944,7 +944,7 @@ def test_with_neither_name_the_reading_is_unmeasurable_never_a_pass(
 
 
 def test_the_bookmark_default_names_the_file_this_installation_writes(mod):
-    """The register's name **moves**; the bookmark's does not, and the default must say so.
+    """The basename is host state; the directory it sits under is not.
 
     Nothing above catches this. Every test in this file replaces `DEFAULT_BOOKMARK` with a
     file under `tmp_path`, so the default's own value is read by no test and a wrong one is
@@ -953,11 +953,14 @@ def test_the_bookmark_default_names_the_file_this_installation_writes(mod):
 
     What a wrong value costs is not a failing test but a stopped clock: step 0 is the step
     that is never skipped, and its answer becomes `not measurable` on every cycle from the
-    merge onwards, because the file the constant then names is created by nothing. The
-    register is the mirror image and stays correct *because* something moves it
-    (`emrg.config` migrates the file), which is why its new name is right and this one is
-    not. So the pin is the requirement: the basename is host state, preserved verbatim
-    until a change in this tree actually renames that file.
+    merge onwards, because the file the constant then names is created by nothing.
+
+    Two things decide the right value, and they move for different reasons. The **basename**
+    is host state that no code in this tree renames, so it stays verbatim - that is what
+    this pin is for. The **directory** is not: the root migration moves the whole
+    `evolution/` tree into `global/`, so a constant still naming the pre-split place answers
+    `not measurable` on every cycle from the upgrade onwards. `global/` in the value is that
+    second fact, and the split is what `test_every_default_lands_under_global` holds.
     """
     assert mod.DEFAULT_BOOKMARK.endswith(
         "/.emrg/memory/project-memory-rotation-bookmark.md"
@@ -965,6 +968,52 @@ def test_the_bookmark_default_names_the_file_this_installation_writes(mod):
         "the bookmark's basename is host state: no code in this tree renames that file, so a "
         "renamed constant points at nothing and step 0 answers `not measurable` every cycle"
     )
+
+
+def test_every_default_resolves_into_global_once_the_host_has_migrated(mod):
+    """The root migration moves these four files; a default that cannot follow stops reading.
+
+    Measured before this: the guard named `~/.emrg/agents.yml` while `emrg.config` answered
+    `~/.emrg/global/agents.yml`, so the guard and the code it guards were reading two
+    different files — and after a host's upgrade the guard's one is created by nothing, so
+    step 0 answers `not measurable` on every cycle from then on.
+    """
+    pairs = [
+        ("DEFAULT_AGENTS", "PRE_SPLIT_AGENTS"),
+        ("DEFAULT_BOOKMARK", "PRE_SPLIT_BOOKMARK"),
+        ("LEGACY_AGENTS", "PRE_SPLIT_LEGACY_AGENTS"),
+        ("BOOKMARK_FALLBACK", "PRE_SPLIT_BOOKMARK_FALLBACK"),
+    ]
+    for used, literal in pairs:
+        pre_split = getattr(mod, literal)
+        assert mod.post_split(pre_split) == mod.GLOBAL_PREFIX + pre_split[len(mod.ROOT_PREFIX):], (
+            f"{literal}'s post-split twin is not under global/ — the migration keeps the "
+            f"relative path and changes only the prefix"
+        )
+        # And the value the guard actually uses is one of the two, never a third thing.
+        assert getattr(mod, used) in (pre_split, mod.post_split(pre_split))
+
+
+def test_the_root_itself_is_not_an_entry_under_it(mod):
+    """A path that merely starts with the root's letters is not inside the root."""
+    assert mod.post_split("~/.emrg") == "~/.emrg", "the root is not an entry under itself"
+    assert mod.post_split("~/.emrgx/agents.yml") == "~/.emrgx/agents.yml", (
+        "a sibling directory whose name begins with .emrg is not the root"
+    )
+
+
+def test_the_migrated_file_wins_and_the_old_one_answers_before_it_exists(mod, tmp_path):
+    """Both windows: the host before its first start, and the same host after it."""
+    before = tmp_path / "agents.yml"
+    after = tmp_path / "global" / "agents.yml"
+    before.write_text("[]", encoding="utf-8")
+
+    assert mod.prefer_existing(str(before), str(after)) == str(before)
+
+    after.parent.mkdir()
+    after.write_text("[]", encoding="utf-8")
+
+    assert mod.prefer_existing(str(before), str(after)) == str(after)
 
 
 

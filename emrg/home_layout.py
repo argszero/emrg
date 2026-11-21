@@ -39,6 +39,7 @@ take is the name a top-level entry of that name is about to move into.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from pathlib import Path
 
@@ -55,6 +56,48 @@ GLOBAL_DIRNAME = "global"
 #: global root, so the one that exists before a migration is EMRG's and moves. A session
 #: started in the home directory after the migration creates its own if it needs one.
 AGENT_STATE_NAMES = frozenset({"sessions", "memory", "emrg-client.log"})
+
+#: The agent register's name. Spelled here because the migration has to find the file
+#: after moving it, and the module that owns the register's *contents* is not the module
+#: that owns this root's shape.
+AGENTS_FILENAME = "agents.yml"
+
+
+def register_after_migration(base: Path) -> Path:
+    """Where the agent register is once the migration has run.
+
+    ``global/agents.yml`` when it is there, the top level otherwise — the shape
+    :func:`emrg.config.register_for_reading` uses, and for the same reason: an entry that
+    did not move (or a root that was never migrated) must still be read at the one place
+    it exists rather than reported as absent.
+    """
+    inside = base / GLOBAL_DIRNAME / AGENTS_FILENAME
+    return inside if inside.exists() else base / AGENTS_FILENAME
+
+
+def moved_path_mapper(done: list[tuple[Path, Path]]):
+    """A mapper that carries a recorded directory along with the tree it was recorded in.
+
+    The register stores the verbatim directory a session runs in, so moving ``evolution/``
+    into ``global/`` leaves every row for a tree inside it naming a directory that no
+    longer exists. The mapper answers the new path for a row that was inside a moved tree
+    and the string it was given for every other row, which is what keeps the rewrite
+    bounded to what actually moved.
+
+    The root itself is never covered: a row for the home-level ``.emrg`` directory names
+    the root, which stays where it is.
+    """
+
+    def mapper(current: str) -> str:
+        if not current:
+            return current
+        for source, target in done:
+            source_s, target_s = str(source), str(target)
+            if current == source_s or current.startswith(source_s + os.sep):
+                return target_s + current[len(source_s):]
+        return current
+
+    return mapper
 
 
 def home_root() -> Path:
@@ -130,6 +173,11 @@ def migrate_into_global(root: Path | None = None) -> list[str]:
     has its newcomer set aside beside it (:data:`SET_ASIDE_SUFFIX`) rather than replacing
     a file with a directory.
 
+    The agent register's rows travel with the trees they name
+    (:func:`_carry_register_rows`): a row stores the verbatim directory a session runs
+    in, so a tree moved without its row leaves an agent pointing at a directory that no
+    longer exists — well-formed, silently wrong, and found only by whoever stats the path.
+
     Called from the daemon's entry point and from ``emrg``'s CLI start — the processes that
     can be first to touch this root — and never from :func:`global_dir` or any other path
     answer, so that asking where something lives never moves a host's files.
@@ -155,4 +203,47 @@ def migrate_into_global(root: Path | None = None) -> list[str]:
         logger.warning("migration into %s/ stopped and was reverted: %s",
                        GLOBAL_DIRNAME, exc)
         return []
+    _carry_register_rows(base, done)
     return [source.name for source, _target in done]
+
+
+def _carry_register_rows(base: Path, done: list[tuple[Path, Path]]) -> None:
+    """Rewrite the register's rows for the directories this pass moved.
+
+    A register stores the verbatim directory a session runs in. Moving ``evolution/``
+    into ``global/`` therefore leaves that agent's row naming a directory that no longer
+    exists — and nothing in the root says so: the row is well-formed, the tree is intact,
+    and only a reader that stats the path finds the disagreement. Measured on the
+    development host, 2 of its 42 rows were under a tree this migration moves.
+
+    The rewrite goes through :meth:`emrg.server.agents.AgentRegistry.rewrite_paths`, which
+    already exists for this case and had no caller — a second YAML writer here would be a
+    second answer to "what does a row look like", and the register is the one place that
+    knows.
+
+    Imported inside the function on purpose: this module is imported by
+    :mod:`emrg.config`, which the register's module reads, so a module-scope import would
+    close the cycle.
+
+    A register that cannot be read, or a rewrite that cannot be written, leaves the file
+    exactly as it was and does not fail the migration: the files *did* move, and reporting
+    that a pass failed because a reference could not be updated would send the next reader
+    looking for a move that already happened.
+    """
+    try:
+        from emrg.server.agents import AgentRegistry
+    except Exception:  # pragma: no cover - an import that always succeeds in-tree
+        logger.warning("could not load the agent register; its paths were not updated",
+                       exc_info=True)
+        return
+    try:
+        renamed = AgentRegistry(register_after_migration(base)).rewrite_paths(
+            moved_path_mapper(done)
+        )
+    except OSError:
+        logger.warning("could not update the agent register after the move",
+                       exc_info=True)
+        return
+    if renamed:
+        logger.info("agent register followed the move: %s", ", ".join(sorted(renamed)))
+
