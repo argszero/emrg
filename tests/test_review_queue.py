@@ -3029,3 +3029,18 @@ def test_one_open_pr_is_not_told_about_a_pair_that_does_not_exist(mod, monkeypat
     assert rc == 0
     assert "1 PR(s)" in out
     assert "check-merge-pairs" not in out, out
+
+
+def test_the_header_names_the_ledger_file_it_read(mod, monkeypatch, capsys):
+    """The default chooses between two files — the host's store before the home-root
+    migration and after it — so the reading says which one it opened. A reader cannot
+    otherwise tell a pre-split ledger from a migrated one, and the two can hold different
+    rows while a host sits between releases (issue #3141)."""
+    rants_of(mod, monkeypatch, ("2026-09-30T09:17:54+08:00", "pending"))
+    monkeypatch.setattr(mod, "open_prs", lambda repo=mod.REPO: [])
+    mod.main(["--rants", "/somewhere/else.jsonl", "--repo", "owner/repo"])
+    out = capsys.readouterr().out
+
+    assert "ledger: /somewhere/else.jsonl" in out, (
+        f"the header must name the ledger it read, so the default's choice is visible: {out}"
+    )

@@ -1794,7 +1794,8 @@ def test_the_state_words_are_not_flattened_into_one_mark(mod) -> None:
 # The chain's first joint: an issue's `Origin: rant <timestamp>` (R5)
 #
 # The link above is read from GitHub; this one is read from a **file**, because a rant
-# timestamp is a host-local handle (`~/.emrg/rants.jsonl`). The questions are different:
+# timestamp is a host-local handle (`~/.emrg/rants.jsonl`, or `~/.emrg/global/rants.jsonl`
+# once the home-root migration has run). The questions are different:
 # *does the handle resolve* (otherwise the issue's reader cannot reach the requirement the
 # issue carries) and *is one rant claimed by two unlabelled issues* (otherwise a deliberate
 # split cannot be told from a duplicate claim).
@@ -3023,3 +3024,113 @@ def test_the_title_is_what_declares_the_version_and_the_body_is_not(mod) -> None
     rows = {row.number: row for row in mod.judge_issues(issues, refs, {})}
     assert "check-release-published.py v0.3.46" in rows[2781].detail
     assert "check-release-published" not in rows[2760].detail
+
+
+# --------------------------------------------------------------------------- #
+# The ledger's default, on either side of the home-root split (issue #3141)
+#
+# `emrg/home_layout.py` moves everything EMRG owns into `.emrg/global/`, and the call that
+# performs the move sits in the daemon's entry point — so a checkout, and every host between
+# one release and the next, keeps its ledger at the pre-split path while this code already
+# expects the migrated one. A default naming only the migrated path answered `unmeasurable`
+# on every run of `scripts/review-queue.py` for the whole of that window, with the ledger
+# present and readable one directory up.
+# --------------------------------------------------------------------------- #
+
+
+def _load_sibling(name: str):
+    """Another script in this directory, loaded the way the instruments load each other."""
+    spec = importlib.util.spec_from_file_location(
+        name.removesuffix(".py").replace("-", "_"), REPO_ROOT / "scripts" / name
+    )
+    assert spec and spec.loader
+    sibling = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = sibling
+    spec.loader.exec_module(sibling)
+    return sibling
+
+
+def test_the_ledger_default_is_the_file_the_host_actually_has(
+    mod, tmp_path, monkeypatch
+) -> None:
+    """The reading follows the host, in both windows, and it is asked per call.
+
+    A host that has not migrated keeps its ledger at the pre-split path and that is the file
+    to read; once the migration has run, the migrated file is the live one. Pinned against a
+    home this test owns rather than the developer's, because the answer is the host's state.
+    """
+    home = tmp_path / "home"
+    (home / ".emrg").mkdir(parents=True)
+    (home / ".emrg" / "rants.jsonl").write_text("", encoding="utf-8")
+    for var in ("HOME", "USERPROFILE"):  # ntpath reads USERPROFILE, posixpath reads HOME
+        monkeypatch.setenv(var, str(home))
+    monkeypatch.delenv("EMRG_RANTS", raising=False)
+
+    assert mod.rants_path() == home / ".emrg" / "rants.jsonl", (
+        "before the migration the host's ledger is at the pre-split path, and a default "
+        "naming only the migrated one answers unmeasurable while the file sits right there"
+    )
+
+    (home / ".emrg" / "global").mkdir()
+    (home / ".emrg" / "global" / "rants.jsonl").write_text("", encoding="utf-8")
+
+    assert mod.rants_path() == home / ".emrg" / "global" / "rants.jsonl", (
+        "after the migration the moved file is the live one"
+    )
+
+
+def test_the_migrated_ledger_wins_and_the_old_one_answers_before_it_exists(
+    mod, tmp_path
+) -> None:
+    """Both windows, over real files: a host before its first start, and the same host after."""
+    before = tmp_path / "rants.jsonl"
+    after = tmp_path / "global" / "rants.jsonl"
+    before.write_text("", encoding="utf-8")
+
+    assert mod.prefer_existing(str(before), str(after)) == str(before), (
+        "a host that has not migrated keeps its ledger at the pre-split path, and that is "
+        "the file to read"
+    )
+
+    after.parent.mkdir()
+    after.write_text("", encoding="utf-8")
+
+    assert mod.prefer_existing(str(before), str(after)) == str(after), (
+        "once the migration has moved the file, the migrated copy is the live one"
+    )
+
+
+def test_the_choice_is_the_file_and_not_the_directory(mod, tmp_path) -> None:
+    """A `global/` directory holding no ledger is not a migrated host: the move is
+    all-or-nothing, but the directory can also be created by a start that moved nothing."""
+    before = tmp_path / "rants.jsonl"
+    after = tmp_path / "global" / "rants.jsonl"
+    before.write_text("", encoding="utf-8")
+    after.parent.mkdir()
+
+    assert mod.prefer_existing(str(before), str(after)) == str(before)
+
+
+def test_the_two_scripts_that_resolve_a_split_default_answer_the_same_way() -> None:
+    """The shape is carried twice — once per standalone program, because neither can import
+    the other's hyphenated file as a module — so the copies are **held** to one answer
+    instead of trusted to stay in step. Without this, the next change to where a host keeps
+    its files would be made in one of them and the other would keep answering the old way,
+    in silence, which is the whole defect this pins."""
+    rotation = _load_sibling("check-memory-rotation.py")
+    links = _load_module()
+
+    assert rotation.ROOT_PREFIX == links.ROOT_PREFIX
+    assert rotation.GLOBAL_PREFIX == links.GLOBAL_PREFIX
+    for path in (
+        "~/.emrg/rants.jsonl",
+        "~/.emrg/agents.yml",
+        "~/.emrg/evolution/emrg/.emrg/memory/MEMORY.md",
+        "~/.emrg",
+        "~/.emrgx/rants.jsonl",
+        "/tmp/rants.jsonl",
+    ):
+        assert links.post_split(path) == rotation.post_split(path), (
+            f"the two copies of post_split disagree on {path!r}: "
+            f"{links.post_split(path)!r} vs {rotation.post_split(path)!r}"
+        )
