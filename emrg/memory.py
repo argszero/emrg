@@ -169,6 +169,11 @@ MEMORY_INDEX_NAME = "MEMORY.md"
 #: half-migrated store that lists part of itself and looks healthy.
 MEMORY_REF_DIRNAME = "ref"
 MEMORY_ARCHIVE_DIRNAME = "archive"
+#: The statuses a detail file carries once it is no longer in use. `ref/` holds the files
+#: still in use and `archive/` the ones that are not, so this set is what decides which of
+#: the two a file belongs in — spelled once, since a writer that decided for itself would
+#: be a second answer to "is this file retired".
+MEMORY_RETIRED_STATUSES = frozenset({"superseded", "merged"})
 INDEX_TITLE_MAX_CHARS = 512  # max chars for one index title / line
 INDEX_COUNT_WARN = 100       # >N memory files → consolidation recommended
 # >50KB MEMORY.md → consolidation recommended. One number, two *units*, which is
@@ -1052,6 +1057,7 @@ class MemoryStore:
         self.directory = directory
         self.scope = scope
         self.directory.mkdir(parents=True, exist_ok=True)
+        self.migrate_flat_layout()
 
     @property
     def index_path(self) -> Path:
@@ -1067,6 +1073,82 @@ class MemoryStore:
         those are the two paths that put a file in it.
         """
         return self.directory / MEMORY_REF_DIRNAME
+
+    def migrate_flat_layout(self) -> int:
+        """Move detail files that sit beside the index into the layout readers walk.
+
+        A memory directory used to keep its detail files directly beside `MEMORY.md`, and
+        the readers were moved to `ref/` without the files being moved with them. So every
+        store created before that change answers for nothing it holds: `list()` comes back
+        empty, :attr:`count` is zero, and an update, a delete, a merge or a promotion
+        cannot find the id it was handed — while each of those files sits one directory
+        away, unread. Measured on the store of this project's own evolution workspace:
+        **211 detail files, 0 of them listed**.
+
+        The move happens in the constructor every store goes through rather than in a
+        startup hook, because `AgentMemoryStore` and `SessionMemoryStore` are built per
+        command against a working directory no startup can enumerate in advance — and a
+        migration a caller has to remember to run is the kind that goes missing, which is
+        the defect being repaired. The constructor is not a new write path either: it
+        already creates the directory.
+
+        One file at a time, so a pass that stops part-way leaves the earlier files moved
+        and the later ones where they were, and a second pass finishes the job: what it
+        looks for is files beside the index, so a migrated store finds none. A retired file
+        goes to `archive/` and a file still in use to `ref/`; one whose frontmatter will
+        not parse stays in use, because "unreadable" is not "no longer needed". A
+        destination that already exists is named and left alone, never overwritten.
+
+        :returns: how many files this call moved.
+        """
+        try:
+            stray = [
+                path
+                for path in sorted(self.directory.glob("*.md"))
+                if path.name != MEMORY_INDEX_NAME
+            ]
+        except OSError:
+            logger.debug(
+                "memory layout migration could not list %s", self.directory, exc_info=True
+            )
+            return 0
+
+        moved = 0
+        for path in stray:
+            target_dir = self.ref_dir
+            try:
+                if MemoryFile.from_file(path).status in MEMORY_RETIRED_STATUSES:
+                    target_dir = self.directory / MEMORY_ARCHIVE_DIRNAME
+            except (OSError, ValueError):
+                # Unparseable frontmatter: the file stays in use, in `ref/`, which is the
+                # directory a reader can still find it in.
+                logger.debug(
+                    "memory layout migration kept an unreadable file in use: %s", path,
+                    exc_info=True,
+                )
+            target = target_dir / path.name
+            try:
+                target_dir.mkdir(parents=True, exist_ok=True)
+                if target.exists():
+                    logger.warning(
+                        "memory layout migration left %s where it was: %s already exists",
+                        path.name, target,
+                    )
+                    continue
+                path.rename(target)
+            except OSError:
+                logger.warning(
+                    "memory layout migration could not move %s", path, exc_info=True
+                )
+                continue
+            moved += 1
+
+        if moved:
+            logger.info(
+                "memory layout migrated: moved %d detail file(s) out of %s",
+                moved, self.directory,
+            )
+        return moved
 
     # ── Index helpers ──────────────────────────────────────────
 

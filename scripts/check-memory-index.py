@@ -793,7 +793,8 @@ def _report(reading: Reading) -> list[str]:
         out.append(
             f"  this store keeps its detail files beside the index: it has no "
             f"{MEMORY_REF_DIRNAME}/ directory, and the store reads only that one - "
-            f"move them into {MEMORY_REF_DIRNAME}/ for the listing to show them"
+            f"opening the store once (any memory command, which is what constructs it) "
+            f"moves them into {MEMORY_REF_DIRNAME}/ for the listing to show them"
         )
     where = (
         f"beside {reading.path.name}"
