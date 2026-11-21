@@ -2013,3 +2013,35 @@ def test_a_round_hands_the_stopped_task_to_the_host_rather_than_switching_it_off
     assert "host's to change" in body, (
         "the rule does not say whose decision it is, which is the whole content of the hand-over"
     )
+    assert "no tool call here may write" in body, (
+        "the rule does not say why a round cannot do it, so it reads as a policy the round could "
+        "choose to ignore rather than a mechanism that stops it — and a round whose own "
+        "configuration asks for the task to be closed then has nothing to explain the refusal"
+    )
+    assert "close request carrying the reading" in body, (
+        "the hand-over is not a request the host can act on in one step: without the reading that "
+        "ended the competition, acting on it means going back to the platform's own pages"
+    )
+    assert "enabled: false" not in body, (
+        "the prompt now instructs a round to disable its own task, which no tool here can do and "
+        "which would be the round editing the host's configuration"
+    )
+
+
+def test_the_source_states_the_constraint_and_never_instructs_a_self_close():
+    """The file level, which the render level cannot answer on its own.
+
+    A Jinja construct can remove text from a prompt while the source keeps every character, so
+    the same two readings are taken of the file: the constraint is written in the source that
+    ships, and no instruction to disable a task is anywhere in it.
+    """
+    source = PROMPT.read_text(encoding="utf-8")
+    assert "no tool call here may write" in source, (
+        "the constraint that makes the hand-over the whole of a round's part is not in the source"
+    )
+    assert "close request carrying the reading" in source, (
+        "the hand-over is not a close request carrying its reading in the source"
+    )
+    assert "enabled: false" not in source, (
+        "the template instructs a round to disable its own task, which the round cannot carry out"
+    )
