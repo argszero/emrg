@@ -212,6 +212,59 @@ DATE_SHAPED = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}[ T]")
 MEMORY_SUBDIR = (".emrg", "memory")
 SESSIONS_SUBDIR = (".emrg", "sessions")
 
+#: The home-level root, and the directory the root migration puts everything EMRG owns
+#: under. Both spelled here because this script runs **without the package** - it is
+#: stdlib-only, so it cannot ask `emrg.config` where a file lives, and the migration
+#: itself lives in the package.
+ROOT_PREFIX = "~/.emrg/"
+GLOBAL_PREFIX = "~/.emrg/global/"
+
+
+def post_split(path: str) -> str:
+    """Where ``path`` lives once the root migration has run.
+
+    The migration moves every entry EMRG owns from ``~/.emrg/<name>`` to
+    ``~/.emrg/global/<name>``, keeping the relative path, so the transformation is the one
+    prefix and nothing else. :data:`ROOT_PREFIX` itself is untouched: it is the root, not
+    an entry under it, which is why a path that does not start with it comes back as it
+    was rather than gaining a prefix it never had.
+    """
+    if not path.startswith(ROOT_PREFIX):
+        return path
+    return GLOBAL_PREFIX + path[len(ROOT_PREFIX):]
+
+
+def resolve_default(path: str) -> str:
+    """``path``'s post-migration twin when that file exists, and ``path`` otherwise.
+
+    Only the migration moves these files, and it runs on the first start of a build that
+    carries it — so a checkout, and every host between one release and the next, has the
+    files at the **pre-split** paths while the code that reads them already expects
+    ``global/``. A default naming only one of the two answers `not measurable` for the
+    whole of the other window, and step 0 is the step that is never skipped: that is a
+    stopped rotation clock, not a failed test.
+
+    Resolved against the **file**, not the ``global/`` directory: a migration that stopped
+    part way (it is all-or-nothing, but a host can also have created ``global/`` from some
+    other start) leaves the directory present and this file absent, and the directory is
+    then the wrong thing to ask.
+    """
+    return prefer_existing(path, post_split(path))
+
+
+def prefer_existing(pre_split: str, post_split_path: str) -> str:
+    """The one of the two that is on disk, preferring the migrated path.
+
+    Split out from :func:`resolve_default` so the choice can be held still by a test: the
+    two candidates it takes are ordinary paths, and a fixture can build either without the
+    host's own root being involved.
+    """
+    try:
+        return post_split_path if Path(post_split_path).expanduser().exists() else pre_split
+    except OSError:
+        return pre_split
+
+
 #: The defaults name **this repository's** layout, which is not every installation's:
 #: measured 2026-11-18, the host that filed issue #2951 keeps its bookmark under the other
 #: name and has never written the one below, and a review of that issue reported the
@@ -219,7 +272,8 @@ SESSIONS_SUBDIR = (".emrg", "sessions")
 #: because step 0 runs every cycle; another layout is reached by naming the two paths -
 #: and, for the bookmark, by `BOOKMARK_FALLBACK` when the default's name is absent - and
 #: the report says which file it read either way.
-DEFAULT_AGENTS = "~/.emrg/agents.yml"
+PRE_SPLIT_AGENTS = "~/.emrg/agents.yml"
+DEFAULT_AGENTS = resolve_default(PRE_SPLIT_AGENTS)
 #: The basename is **host state and stays verbatim**: a test in
 #: `tests/test_check_memory_rotation.py` pins it, because renaming the constant renames no
 #: file, and step 0 then answers `not measurable` on every cycle from the merge onwards.
@@ -229,8 +283,12 @@ DEFAULT_AGENTS = "~/.emrg/agents.yml"
 #: name is absent and `BOOKMARK_FALLBACK`'s is present, and a review of that issue
 #: reported the reverse on another host. So neither name is universal, and the value
 #: below stays the one this repository has always carried - a test pins it - while the
-#: other is reached by the fallback and the run says which file it read.
-DEFAULT_BOOKMARK = "~/.emrg/evolution/emrg/.emrg/memory/project-memory-rotation-bookmark.md"
+#: other is reached by the fallback and the run says which file it read. What *does* move
+#: is the directory: the root migration takes the whole `evolution/` tree into `global/`,
+#: so each literal here is resolved through :func:`resolve_default` rather than used as
+#: written.
+PRE_SPLIT_BOOKMARK = "~/.emrg/evolution/emrg/.emrg/memory/project-memory-rotation-bookmark.md"
+DEFAULT_BOOKMARK = resolve_default(PRE_SPLIT_BOOKMARK)
 
 #: The register's name before an Agent became the record of the directory a
 #: session runs in. **Named here because this script runs without the package** —
@@ -246,7 +304,8 @@ DEFAULT_BOOKMARK = "~/.emrg/evolution/emrg/.emrg/memory/project-memory-rotation-
 #: `not measurable` on every cycle of that window and stop the rotation's clock;
 #: the fallback reads what is there and **says which file it read**, so the
 #: reading never claims a subject it did not open.
-LEGACY_AGENTS = "~/.emrg/projects.yml"
+PRE_SPLIT_LEGACY_AGENTS = "~/.emrg/projects.yml"
+LEGACY_AGENTS = resolve_default(PRE_SPLIT_LEGACY_AGENTS)
 
 #: The other name a bookmark is kept under, reached only when the default is absent
 #: (issue #2951). On the host that filed that issue the default's name is absent and this
@@ -255,7 +314,8 @@ LEGACY_AGENTS = "~/.emrg/projects.yml"
 #: possibilities, neither is a replacement for the other, and the fallback fires only from
 #: the default - never on a path a caller named - so the reading is always about the file
 #: it opened.
-BOOKMARK_FALLBACK = "~/.emrg/evolution/emrg/.emrg/memory/project-memory-bookmark.md"
+PRE_SPLIT_BOOKMARK_FALLBACK = "~/.emrg/evolution/emrg/.emrg/memory/project-memory-bookmark.md"
+BOOKMARK_FALLBACK = resolve_default(PRE_SPLIT_BOOKMARK_FALLBACK)
 
 
 class Unmeasurable(Exception):
