@@ -67,13 +67,33 @@ def _top_level(root: Path) -> list[Path]:
         return []
 
 
+#: Appended to the name of an entry that is set aside because ``global/`` already holds
+#: something by that name.
+SET_ASIDE_SUFFIX = ".pre-global"
+
+
+def _free_name(target_root: Path, name: str) -> Path:
+    """A path under ``target_root`` that nothing occupies yet, for a set-aside entry."""
+    candidate = target_root / f"{name}{SET_ASIDE_SUFFIX}"
+    counter = 2
+    while candidate.exists():
+        candidate = target_root / f"{name}{SET_ASIDE_SUFFIX}-{counter}"
+        counter += 1
+    return candidate
+
+
 def pending_moves(root: Path | None = None) -> list[tuple[Path, Path]]:
     """The ``(source, target)`` pairs a migration would perform — moving nothing.
 
-    A pair is *pending* only when the target is still absent. An entry that is already
-    at the target, and an entry whose name is already taken in ``global/``, are both left
-    alone: the first needs no move and the second would overwrite something, and a
-    migration that overwrites is the one defect here that cannot be undone.
+    A pair is *pending* while the entry is still at the top level. An entry whose name
+    ``global/`` already holds is **set aside inside ``global/``** under
+    :data:`SET_ASIDE_SUFFIX` rather than skipped or overwritten: skipped leaves it at the
+    top level, which is the state this split exists to end, and overwriting replaces one
+    tree with another, which is the one defect here that cannot be undone.
+
+    The measured case is an upgrade. The new installer writes ``global/install`` while the
+    previous installation's tree is still at ``install``, so by the time the daemon first
+    starts, both exist; the old tree is the one that moves aside.
     """
     base = home_root() if root is None else Path(root)
     target_root = base / GLOBAL_DIRNAME
@@ -81,9 +101,11 @@ def pending_moves(root: Path | None = None) -> list[tuple[Path, Path]]:
     for entry in _top_level(base):
         if entry.name == GLOBAL_DIRNAME or entry.name in AGENT_STATE_NAMES:
             continue
-        target = target_root / entry.name
-        if target.exists() or not entry.exists():
+        if not entry.exists():
             continue
+        target = target_root / entry.name
+        if target.exists():
+            target = _free_name(target_root, entry.name)
         pending.append((entry, target))
     return pending
 
@@ -96,8 +118,9 @@ def migrate_into_global(root: Path | None = None) -> list[str]:
     way puts back what this call moved — a half-migrated root would leave some readers
     on the old path and some on the new, which is worse than an unmigrated one.
 
-    Nothing is deleted, nothing is overwritten, and a name already taken in ``global/``
-    keeps the entry where it is rather than replacing a file with a directory.
+    Nothing is deleted and nothing is overwritten: a name already taken in ``global/``
+    has its newcomer set aside beside it (:data:`SET_ASIDE_SUFFIX`) rather than replacing
+    a file with a directory.
 
     Called from the daemon's startup, which is the one process that owns this root —
     never from :func:`global_dir` or any other path answer, so that asking where
