@@ -45,6 +45,7 @@ import pytest
 import yaml
 
 from emrg.agent import Agent
+from emrg.memory import AgentMemoryStore
 from emrg.protocol import InstanceIdentity
 from emrg.sandbox.policy import SandboxPolicy
 from emrg.sandbox.roots import canonical_path, writable_roots
@@ -638,8 +639,13 @@ def test_prompt_memory_writes_land_where_the_daemon_loads_them(tmp_path, monkeyp
         "the daemon embedded no agent index for a session whose cwd carries one — "
         "the comparison below would be against nothing"
     )
-    assert data["agent_memory_dir"] == str(memory_root), (
-        f"the templates tell the agent to write under {memory_root}, but the daemon "
+    # The store's own directory, asked of the store rather than spelled here: the detail
+    # files moved into a `ref/` subdirectory, and a name written out in this test would be
+    # a second spelling to keep in step with it. What this compares is unchanged — the
+    # root the templates name and the root the daemon loads are one directory.
+    detail_root = AgentMemoryStore(source_dir).ref_dir
+    assert Path(data["agent_memory_dir"]) == detail_root, (
+        f"the templates tell the agent to write under {detail_root}, but the daemon "
         f"embeds {data['agent_memory_dir']} as agent memory — the write root and "
         f"the loaded root have split apart again"
     )

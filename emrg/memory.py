@@ -156,6 +156,19 @@ VALID_STATUSES = {"active", "superseded", "merged"}
 #: renders *after* the file exists, so a session starting from nothing invented
 #: `index.md` and its memory was invisible from then on: the daemon looks here.
 MEMORY_INDEX_NAME = "MEMORY.md"
+#: The subdirectory a memory directory keeps its detail files in, and the one it keeps
+#: retired ones in. The top level holds `MEMORY.md` and nothing else — the index is the
+#: directory's one map, and every other file is either still in use (`ref/`) or not
+#: (`archive/`).
+#:
+#: Readers read `ref/` and never `archive/`, so "which files are still in use" is a
+#: directory rather than a judgement each listing makes for itself. What that costs is
+#: stated here because it is deliberate: a directory whose files have not been moved yet
+#: lists nothing, which is a visible empty listing and an index guard that says the
+#: directory has not been migrated — the same answer in both places rather than a
+#: half-migrated store that lists part of itself and looks healthy.
+MEMORY_REF_DIRNAME = "ref"
+MEMORY_ARCHIVE_DIRNAME = "archive"
 INDEX_TITLE_MAX_CHARS = 512  # max chars for one index title / line
 INDEX_COUNT_WARN = 100       # >N memory files → consolidation recommended
 # >50KB MEMORY.md → consolidation recommended. One number, two *units*, which is
@@ -1044,6 +1057,17 @@ class MemoryStore:
     def index_path(self) -> Path:
         return self.directory / MEMORY_INDEX_NAME
 
+    @property
+    def ref_dir(self) -> Path:
+        """Where the detail files are: the one directory every reader and writer uses.
+
+        Not created here. A read that mkdir'd would write to a directory it was only
+        asked to look at, and `list()` on a store nobody has written to yet is a
+        legitimate empty answer. `create` and `promote_to_agent` create it, because
+        those are the two paths that put a file in it.
+        """
+        return self.directory / MEMORY_REF_DIRNAME
+
     # ── Index helpers ──────────────────────────────────────────
 
     def _load_index(self) -> MemoryIndex:
@@ -1094,7 +1118,7 @@ class MemoryStore:
     def _rebuild_index(self) -> MemoryIndex:
         """Rebuild the entire index by scanning all .md files."""
         idx = MemoryIndex()
-        for path in sorted(self.directory.glob("*.md")):
+        for path in sorted(self.ref_dir.glob("*.md")):
             if path.name == MEMORY_INDEX_NAME:
                 continue
             try:
@@ -1130,7 +1154,7 @@ class MemoryStore:
         "not found" is equally unproven for it.
         """
         unreadable: list[tuple[Path, str]] = []
-        for path in sorted(self.directory.glob("*.md")):
+        for path in sorted(self.ref_dir.glob("*.md")):
             if path.name == MEMORY_INDEX_NAME:
                 continue
             try:
@@ -1148,7 +1172,7 @@ class MemoryStore:
 
     def _find_by_filename(self, filename: str) -> Path | None:
         """Find a memory .md file by filename."""
-        path = self.directory / filename
+        path = self.ref_dir / filename
         return path if path.exists() else None
 
     def _resolve_filename(self, mem: MemoryFile) -> str:
@@ -1157,10 +1181,10 @@ class MemoryStore:
         stem = Path(base).stem
         candidate = base
         counter = 1
-        while (self.directory / candidate).exists():
+        while (self.ref_dir / candidate).exists():
             # Check if existing file has the same id (update in place)
             try:
-                existing = MemoryFile.from_file(self.directory / candidate)
+                existing = MemoryFile.from_file(self.ref_dir / candidate)
                 if existing.id == mem.id:
                     return candidate  # same memory, overwrite
             except (OSError, ValueError):
@@ -1210,7 +1234,8 @@ class MemoryStore:
         )
 
         filename = self._resolve_filename(mem)
-        filepath = self.directory / filename
+        self.ref_dir.mkdir(parents=True, exist_ok=True)
+        filepath = self.ref_dir / filename
 
         # Name the file this memory is in, so the index row, this instance and
         # every later reader agree with the write. (This used to be an
@@ -1288,7 +1313,7 @@ class MemoryStore:
     ) -> list[MemoryFile]:
         """List all memories, optionally filtered by type or status."""
         memories: list[MemoryFile] = []
-        for path in sorted(self.directory.glob("*.md")):
+        for path in sorted(self.ref_dir.glob("*.md")):
             if path.name == MEMORY_INDEX_NAME:
                 continue
             try:
@@ -1378,7 +1403,7 @@ class MemoryStore:
     @property
     def count(self) -> int:
         """Number of .md memory files (excluding MEMORY.md)."""
-        return len([p for p in self.directory.glob("*.md") if p.name != MEMORY_INDEX_NAME])
+        return len([p for p in self.ref_dir.glob("*.md") if p.name != MEMORY_INDEX_NAME])
 
     def promote_to_agent(
         self, mem_id: str, agent_store: MemoryStore
@@ -1407,12 +1432,13 @@ class MemoryStore:
         mem.scope = "agent"
         mem.updated_at = now_iso()
 
-        new_path = agent_store.directory / mem.filename
+        agent_store.ref_dir.mkdir(parents=True, exist_ok=True)
+        new_path = agent_store.ref_dir / mem.filename
         # Handle filename conflicts in agent store
         counter = 1
         while new_path.exists():
             stem = Path(mem.filename).stem
-            new_path = agent_store.directory / f"{stem}-{counter}.md"
+            new_path = agent_store.ref_dir / f"{stem}-{counter}.md"
             counter += 1
 
         # The copy lives at ``new_path``, not at the name its title derives —

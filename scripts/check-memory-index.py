@@ -328,6 +328,10 @@ try:
     # reading this tool prints and the instruction an agent receives count the same
     # lines. Spelled separately once - both as `- ` - a table index fell between them.
     is_index_row = _memory_module.is_index_row
+    # Where the detail files live, from the same module for the same reason: the store
+    # reads `ref/` and never the top level, so a guard resolving rows against the top
+    # level would report every row of a migrated index as pointing at nothing.
+    MEMORY_REF_DIRNAME = _memory_module.MEMORY_REF_DIRNAME
     # The cells are the same module's answer for the same reason: a row's cell boundaries
     # are part of what "a table row" means, and a second splitter here would be a second
     # spelling of the escape rule, free to disagree with the shape definition beside it.
@@ -466,6 +470,11 @@ class Reading(NamedTuple):
     cell_faults: tuple[tuple[int, int, int], ...] = ()
     detail_files: tuple[str, ...] = ()
     unnamed_details: tuple[str, ...] = ()
+    #: The directory this reading resolved row links against and read detail files from.
+    #: `None` means the index's own directory — the layout of a store whose files have
+    #: not moved under `ref/` yet, which is what `_detail_dir` decides and `_report` says
+    #: out loud rather than letting a reader assume either layout.
+    detail_dir: Optional[Path] = None
 
     @property
     def rows(self) -> int:
@@ -506,7 +515,7 @@ class Reading(NamedTuple):
 
         :returns: one pair per unresolved link, in file order.
         """
-        base = self.path.parent
+        base = self.detail_dir or self.path.parent
         out: list[tuple[int, str]] = []
         for line, target in self.row_targets:
             if not os.path.exists(os.path.join(base, target)):
@@ -613,6 +622,23 @@ def _id_token(entry_id: str) -> "re.Pattern[str]":
     )
 
 
+def _detail_dir(index_path: Path) -> Path:
+    """The directory this index's detail files are in, and the one rows resolve against.
+
+    `ref/` when it is there, the index's own directory otherwise. The store reads `ref/`
+    and nothing else, so on a migrated store this is the only directory whose files the
+    index is a map of; `archive/` is never a subject here, because a retired file is not
+    one the index is expected to name.
+
+    The fallback is not a second layout the store supports — it is what lets this tool
+    measure a store whose files have not been moved yet instead of reporting every row as
+    a broken link. `_report` names which one it read, so the reading says its subject
+    rather than leaving a reader to assume.
+    """
+    ref = index_path.parent / MEMORY_REF_DIRNAME
+    return ref if ref.is_dir() else index_path.parent
+
+
 def measure(path: Path) -> Reading:
     """Read one index and count what the rule counts.
 
@@ -653,7 +679,8 @@ def measure(path: Path) -> Reading:
         if cell_header is not None
         else ()
     )
-    entries = _active_detail_files(path.parent, path.name)
+    detail_dir = _detail_dir(path)
+    entries = _active_detail_files(detail_dir, path.name)
     written = _written_names(text, lines, cell_header[0] if cell_header else None)
     return Reading(
         path, len(lines), len(text), tuple(row_lines), tuple(row_lengths),
@@ -673,6 +700,7 @@ def measure(path: Path) -> Reading:
                 written,
             )
         ),
+        detail_dir=detail_dir,
     )
 
 
@@ -757,10 +785,25 @@ def _report(reading: Reading) -> list[str]:
             "subject here - a table row names its detail file in prose, and this is "
             "not a statement that every row link resolves"
         )
+    detail_base = reading.detail_dir or reading.path.parent
+    out.append(f"  detail files read from: {detail_base}")
+    if detail_base == reading.path.parent and any(
+        entry.name != reading.path.name for entry in reading.path.parent.glob("*.md")
+    ):
+        out.append(
+            f"  this store keeps its detail files beside the index: it has no "
+            f"{MEMORY_REF_DIRNAME}/ directory, and the store reads only that one - "
+            f"move them into {MEMORY_REF_DIRNAME}/ for the listing to show them"
+        )
+    where = (
+        f"beside {reading.path.name}"
+        if detail_base == reading.path.parent
+        else f"in {detail_base}"
+    )
     for number, target in unresolved:
         out.append(
             f"  row at line {number} names {target}, "
-            f"which is not beside {reading.path.name}"
+            f"which is not {where}"
         )
     out.append(
         f"  detail files {len(reading.detail_files)}, named nowhere: "
