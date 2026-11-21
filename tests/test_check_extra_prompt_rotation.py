@@ -488,3 +488,85 @@ def test_init_with_no_rendering_block_is_not_a_pass(mod, tmp_path, capsys):
 
     assert mod.main(["--tasks", str(tasks), "--init"]) == 2
     assert "no record with a rendering extra_prompt" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# The task table's default, on either side of the home-root split (issue #3145)
+#
+# `emrg/home_layout.py` moves everything EMRG owns into `.emrg/global/`, and the call that
+# performs the move sits in the daemon's entry point - so a host between one release and the
+# next keeps its task table at the pre-split path while this script asked for the migrated one.
+# The default then answered `cannot measure` for the whole of that window, with the table
+# present and readable one directory up, which reads as "nothing to classify" rather than as
+# a broken instrument. Every fixture here is a home this test owns: the answer is the host's
+# state, so the host's own root must never be an input.
+# --------------------------------------------------------------------------- #
+
+
+def _fake_home(tmp_path: Path, monkeypatch, *, pre: bool = False, post: bool = False) -> Path:
+    """A home carrying the task table on the pre-split side, the migrated side, or neither."""
+    home = tmp_path / "home"
+    (home / ".emrg").mkdir(parents=True)
+    if pre:
+        (home / ".emrg" / "tasks.yml").write_text("[]", encoding="utf-8")
+    if post:
+        (home / ".emrg" / "global").mkdir()
+        (home / ".emrg" / "global" / "tasks.yml").write_text("[]", encoding="utf-8")
+    for var in ("HOME", "USERPROFILE"):  # ntpath reads USERPROFILE, posixpath reads HOME
+        monkeypatch.setenv(var, str(home))
+    return home
+
+
+def test_a_host_that_has_not_migrated_can_still_be_measured(mod, tmp_path, monkeypatch, capsys):
+    """The defect itself: the default named only the migrated path.
+
+    A rotation clock that cannot see the task table cannot advance, and the failure looks
+    like "nothing to classify" - the same string a genuinely clean rotation prints.
+    """
+    body = "y" * 32
+    home = _fake_home(tmp_path, monkeypatch, pre=True)
+    (home / ".emrg" / "tasks.yml").write_text(
+        yaml.safe_dump([_record("zeta", text=body)], allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    table = _table(tmp_path, {"zeta": _row(body)})
+
+    assert mod.main(["--table", str(table)]) == 0, (
+        "a host whose task table is still at the pre-split path answered 'cannot measure' "
+        "while the file was readable one directory up, so the whole rotation went blind"
+    )
+    out = capsys.readouterr().out
+    assert str(home / ".emrg" / "tasks.yml") in out, (
+        f"the reading must name the table it opened, so which side of the split was read is "
+        f"visible: {out}"
+    )
+
+
+def test_the_migrated_table_wins_once_it_exists(mod, tmp_path, monkeypatch):
+    """The other window, over real files: after the migration the moved table is the live one."""
+    home = _fake_home(tmp_path, monkeypatch, pre=True, post=True)
+
+    assert mod.resolve_tasks_path() == home / ".emrg" / "global" / "tasks.yml", (
+        "once the migration has moved the table, the migrated copy is the one to read"
+    )
+
+
+def test_the_choice_is_the_file_and_not_the_directory(mod, tmp_path, monkeypatch):
+    """A `global/` directory holding no task table is not a migrated host.
+
+    The move is all-or-nothing, but the directory can also be created by a start that moved
+    nothing, so asking the directory instead of the file answers a path that is not there.
+    """
+    home = _fake_home(tmp_path, monkeypatch, pre=True)
+    (home / ".emrg" / "global").mkdir()
+
+    assert mod.resolve_tasks_path() == home / ".emrg" / "tasks.yml"
+
+
+def test_an_explicit_tasks_path_is_not_resolved_to_its_twin(mod, tmp_path, monkeypatch):
+    """`--tasks` names a file to measure, and resolving its twin would answer another file."""
+    _fake_home(tmp_path, monkeypatch, pre=True, post=True)
+    given = tmp_path / "elsewhere" / "tasks.yml"
+
+    assert mod.resolve_tasks_path(given) == given
+    assert mod.resolve_tasks_path(str(given)) == given

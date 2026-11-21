@@ -39,7 +39,8 @@ What it reads, and what it prints first
 --------------------------------------
 Two subjects, both named before any verdict:
 
-* the **task table** (`--tasks`, default `~/.emrg/global/tasks.yml`) - the records whose
+* the **task table** (`--tasks`, default the host's own store: `~/.emrg/global/tasks.yml`
+  once the home-root migration has run, `~/.emrg/tasks.yml` before it) - the records whose
   `extra_prompt` may render;
 * the **rotation table** (`--table`, default
   `.emrg/memory/task-extra-prompt-rotation.md`) - one Markdown row per classified block,
@@ -140,7 +141,87 @@ DEFAULT_TABLE = REPO_ROOT / ".emrg" / "memory" / "task-extra-prompt-rotation.md"
 
 #: The default task table, which is this host's. `--tasks` exists so the reading can be taken
 #: on a fixture, and the default is never exercised by a test.
-DEFAULT_TASKS = Path("~/.emrg/global/tasks.yml")
+#:
+#: **Which path that is under the host's root is two paths, and the window between them is not
+#: hypothetical.** `emrg/home_layout.py` moves everything EMRG owns into `global/`, and the call
+#: that performs the move sits in the daemon's own entry point - so a checkout, and every host
+#: between one release and the next, keeps its task table at the pre-split path while this
+#: script already asked for the migrated one. Measured on this host before the fix, with
+#: `~/.emrg/tasks.yml` present and readable and no `~/.emrg/global/` directory at all:
+#:
+#:     cannot measure: /Users/.../.emrg/global/tasks.yml is unreadable ([Errno 2] ...)
+#:
+#: - so the whole task-configuration rotation answered "cannot measure" for the length of that
+#: window, which reads as "nothing to classify" rather than as a broken instrument (issue
+#: #3145). :func:`resolve_tasks_path` is what makes the default ask the file that is there.
+PRE_SPLIT_TASKS = "~/.emrg/tasks.yml"
+
+#: The home-level root, and the directory the root migration puts everything EMRG owns under.
+#: Both are spelled here because this script runs **without the package** - it is stdlib-only,
+#: so it cannot ask `emrg.config` or `emrg.home_layout` where a file lives, and the migration
+#: itself lives in the package. `scripts/check-issue-links.py` and
+#: `scripts/check-memory-rotation.py` carry the same pair and the same three functions below for
+#: the same window, and `tests/test_check_issue_links.py` holds every copy to one set of answers
+#: rather than trusting them to stay in step.
+ROOT_PREFIX = "~/.emrg/"
+GLOBAL_PREFIX = "~/.emrg/global/"
+
+
+def post_split(path: str) -> str:
+    """Where ``path`` lives once the root migration has run.
+
+    The migration moves every entry EMRG owns from ``~/.emrg/<name>`` to
+    ``~/.emrg/global/<name>``, keeping the relative path, so the transformation is the one
+    prefix and nothing else. :data:`ROOT_PREFIX` itself is untouched: it is the root, not an
+    entry under it, which is why a path that does not start with it comes back as it was
+    rather than gaining a prefix it never had.
+    """
+    if not path.startswith(ROOT_PREFIX):
+        return path
+    return GLOBAL_PREFIX + path[len(ROOT_PREFIX):]
+
+
+def prefer_existing(pre_split: str, post_split_path: str) -> str:
+    """The one of the two that is on disk, preferring the migrated path.
+
+    Split out from :func:`resolve_default` so the choice can be held still by a test: the two
+    candidates it takes are ordinary paths, and a fixture can build either without the host's
+    own root being involved.
+    """
+    try:
+        return post_split_path if Path(post_split_path).expanduser().exists() else pre_split
+    except OSError:
+        return pre_split
+
+
+def resolve_default(path: str) -> str:
+    """``path``'s post-migration twin when that file exists, and ``path`` otherwise.
+
+    Resolved against the **file**, not against the ``global/`` directory: a migration that
+    stopped part way (it is all-or-nothing, but a host can also have created ``global/`` from
+    some other start) leaves the directory present and this file absent, and the directory is
+    then the wrong thing to ask.
+    """
+    return prefer_existing(path, post_split(path))
+
+
+#: The default task table is **resolved when it is read**, inside
+#: :func:`resolve_tasks_path`, and there is deliberately no module-level constant holding the
+#: answer: a value frozen at import is one answer for the life of a process, it cannot be asked
+#: about a fixture's home, and `argparse`'s `default=` is evaluated at import exactly like one.
+
+
+def resolve_tasks_path(override=None) -> Path:
+    """The task table: ``--tasks`` when given, else the host's own store wherever it is.
+
+    Read **per call**, so the answer follows the host it is asked about rather than the state
+    of the tree when this module was imported. An override is taken as given - a caller naming
+    a path is measuring that path, and resolving its post-split twin would answer a file the
+    caller did not name.
+    """
+    if override is not None:
+        return Path(os.path.expanduser(str(override)))
+    return Path(resolve_default(PRE_SPLIT_TASKS)).expanduser()
 
 #: One row of the rotation table: `| `task` | 6327 | <sha256> | class | evidence |`. The length is
 #: matched as a plain integer and the digest as 64 hex characters, because those two are what
@@ -392,8 +473,12 @@ def main(argv=None):
     parser.add_argument(
         "--tasks",
         type=Path,
-        default=DEFAULT_TASKS,
-        help="the task table to read (default: %(default)s)",
+        default=None,
+        help=(
+            "the task table to read (default: the host's own store - "
+            "~/.emrg/global/tasks.yml once the home-root migration has run, "
+            "~/.emrg/tasks.yml before it)"
+        ),
     )
     parser.add_argument(
         "--table",
@@ -417,7 +502,7 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
-    tasks_path = Path(os.path.expanduser(str(args.tasks)))
+    tasks_path = resolve_tasks_path(args.tasks)
     table_path = Path(os.path.expanduser(str(args.table)))
 
     records = _load_tasks(tasks_path)
