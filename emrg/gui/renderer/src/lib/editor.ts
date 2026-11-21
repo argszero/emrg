@@ -1,16 +1,22 @@
 /**
- * The editor's tab model — one file per tab, at most one preview, Memory always first
- * (issue #3068).
+ * The editor's tab model — one file per tab, at most one preview, and nothing open when
+ * there is nothing to show (rant 2026-11-21T10:18:48).
  *
  * Kept out of the component because these are the rules that decide what a click does,
  * and each of them has a wrong-but-plausible neighbour: a preview that does not replace
  * the previous one, a de-duplication that also rewrites the tab it found, a close that
- * falls back to Memory instead of the right-hand neighbour. Pure functions let a test
- * state the rule once and a mutation arm break exactly that rule.
+ * falls back to the wrong neighbour. Pure functions let a test state the rule once and a
+ * mutation arm break exactly that rule.
  */
 
-/** The tab that is always there and cannot be closed. */
-export const MEMORY_TAB_ID = "memory";
+/**
+ * The state of a column with no file open.
+ *
+ * An empty string, because every tab's id is an absolute path and no absolute path is
+ * empty: the one value that can never name a tab is what makes "nothing is open" a value
+ * of `active` rather than a second field every reader has to remember to check.
+ */
+export const NO_FILE_OPEN = "";
 
 export interface FileTab {
   /** The tab's identity: its absolute path. One file, one tab. */
@@ -26,11 +32,11 @@ export interface FileTab {
 export interface EditorState {
   /** Pinned and preview file tabs, in the order they were opened. */
   tabs: FileTab[];
-  /** The active tab's id: a file path, or `MEMORY_TAB_ID`. */
+  /** The active tab's id: a file path, or `NO_FILE_OPEN` when nothing is open. */
   active: string;
 }
 
-export const EMPTY_EDITOR: EditorState = { tabs: [], active: MEMORY_TAB_ID };
+export const EMPTY_EDITOR: EditorState = { tabs: [], active: NO_FILE_OPEN };
 
 /**
  * Open (or re-focus) a file.
@@ -56,9 +62,9 @@ export function openFile(
   return { tabs: [...kept, tab], active: tab.id };
 }
 
-/** Activate one tab; an id that names no tab leaves the state alone. */
+/** Activate one tab; an id that names no open tab leaves the state alone. */
 export function activate(state: EditorState, id: string): EditorState {
-  if (id !== MEMORY_TAB_ID && !state.tabs.some((tab) => tab.id === id)) return state;
+  if (id !== NO_FILE_OPEN && !state.tabs.some((tab) => tab.id === id)) return state;
   return { tabs: state.tabs, active: id };
 }
 
@@ -76,20 +82,18 @@ export function pinTab(state: EditorState, id: string): EditorState {
 }
 
 /**
- * Close one tab.
+ * Close one tab. Every tab closes — there is no permanence left in the strip.
  *
- * Memory is never closed. When the closed tab was the active one, its **right-hand
- * neighbour** takes over; with nothing to the right, the left-hand neighbour does; with
- * nothing left at all, the editor returns to the Memory door. A tab closed while another
- * one is active leaves the active tab alone.
+ * When the closed tab was the active one, its **right-hand neighbour** takes over; with
+ * nothing to the right, the left-hand neighbour does; with nothing left at all, nothing
+ * is open and the column renders empty. A tab closed while another one is active leaves
+ * the active tab alone.
  */
 export function closeTab(state: EditorState, id: string): EditorState {
-  if (id === MEMORY_TAB_ID) return state;
   const index = state.tabs.findIndex((tab) => tab.id === id);
   if (index < 0) return state;
   const tabs = state.tabs.filter((tab) => tab.id !== id);
   if (state.active !== id) return { tabs, active: state.active };
   const neighbour = tabs[index] ?? tabs[index - 1] ?? null;
-  return { tabs, active: neighbour ? neighbour.id : MEMORY_TAB_ID };
+  return { tabs, active: neighbour ? neighbour.id : NO_FILE_OPEN };
 }
-

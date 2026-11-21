@@ -123,11 +123,13 @@ describe("词典完整性守卫（防漂移）", () => {
   // 分组工具条的「刷新」「全部收起」随按钮一起删掉 → 544 - 2 = 542。
   // 2026-11-21 issue #3123：排名面板改成挂在状态带读数下的浮层，遮挡与关闭按钮一起删掉，
   // 「关闭」中英各 1 条 → 542 - 1 = 541。
-  it("zh/en 各 541 个 key 且完全对齐", () => {
+  // 2026-11-21 issue #3125：右栏去掉记忆标签与记忆门，标签名 / 提示语 / 打开按钮
+  // 三条文案中英各删一条 → 541 - 3 = 538。
+  it("zh/en 各 538 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(541);
-    expect(enKeys.length).toBe(541);
+    expect(zhKeys.length).toBe(538);
+    expect(enKeys.length).toBe(538);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);
