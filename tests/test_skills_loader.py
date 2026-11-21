@@ -328,11 +328,11 @@ class TestADeclarationThatLosesItsName:
     def _roots(tmp_path, monkeypatch):
         """A user root and an agent root, both off the real home."""
         home = tmp_path / "home" / ".emrg"
-        (home / "skills").mkdir(parents=True)
-        monkeypatch.setattr(loader_mod, "config_dir", lambda: home)
+        (home / "global" / "skills").mkdir(parents=True)
+        monkeypatch.setattr(loader_mod.home_layout, "home_root", lambda: home)
         agent = tmp_path / "agent"
         (agent / ".emrg" / "skills").mkdir(parents=True)
-        return home / "skills", agent
+        return home / "global" / "skills", agent
 
     def test_two_flat_files_declaring_one_name_report_the_one_that_lost_it(
         self, tmp_path, monkeypatch

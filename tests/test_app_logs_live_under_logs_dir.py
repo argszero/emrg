@@ -123,16 +123,16 @@ def test_the_daemon_log_handler_writes_under_logs(tmp_path, monkeypatch):
         installed = [
             h for h in logging.root.handlers if isinstance(h, logging.handlers.RotatingFileHandler)
         ] if hasattr(logging, "handlers") else []
-    under = tmp_path / ".emrg" / "logs" / "emrgd.log"
+    under = tmp_path / ".emrg" / "global" / "logs" / "emrgd.log"
     assert under.exists(), "the daemon's rotating handler did not write under logs/"
-    assert not (tmp_path / ".emrg" / "emrgd.log").exists(), "the old root copy is still written"
+    assert not (tmp_path / ".emrg" / "global" / "emrgd.log").exists(), "the old root copy is still written"
     if installed:
         assert Path(installed[0].baseFilename) == under
 
 
 def test_the_crash_log_path_is_under_logs(tmp_path, monkeypatch):
     _stub_home(monkeypatch, tmp_path)
-    assert server_main._crash_log_path() == tmp_path / ".emrg" / "logs" / "emrgd-crash.log"
+    assert server_main._crash_log_path() == tmp_path / ".emrg" / "global" / "logs" / "emrgd-crash.log"
 
 
 def test_the_crash_log_is_really_opened_under_logs(tmp_path):
@@ -158,33 +158,37 @@ def test_the_crash_log_is_really_opened_under_logs(tmp_path):
         timeout=180,
     )
     assert proc.returncode == 0, proc.stderr
-    written = tmp_path / ".emrg" / "logs" / "emrgd-crash.log"
+    written = tmp_path / ".emrg" / "global" / "logs" / "emrgd-crash.log"
     assert written.exists(), f"nothing was written to {written} (stderr: {proc.stderr!r})"
     assert "reached" in written.read_text(encoding="utf-8")
-    assert not (tmp_path / ".emrg" / "emrgd-crash.log").exists()
+    assert not (tmp_path / ".emrg" / "global" / "emrgd-crash.log").exists()
 
 
 def test_the_client_log_paths_are_under_logs(tmp_path, monkeypatch):
     _stub_home(monkeypatch, tmp_path)
-    assert dm._log_path() == tmp_path / ".emrg" / "logs" / "emrgd.log"
-    assert dm._start_stderr_path() == tmp_path / ".emrg" / "logs" / "emrgd-start.err"
+    assert dm._log_path() == tmp_path / ".emrg" / "global" / "logs" / "emrgd.log"
+    assert dm._start_stderr_path() == tmp_path / ".emrg" / "global" / "logs" / "emrgd-start.err"
     # and the child's stderr file really opens there, creating the directory
     handle = dm._truncate_start_stderr(dm._start_stderr_path())
     assert handle is not None
     handle.close()
-    assert (tmp_path / ".emrg" / "logs" / "emrgd-start.err").exists()
+    assert (tmp_path / ".emrg" / "global" / "logs" / "emrgd-start.err").exists()
 
 
 def test_the_exit_record_is_under_logs():
     """Read as a value: the constant is resolved at import, like the writers' own."""
-    assert srv._EXIT_RECORD_PATH == logs_dir() / "emrgd-exit.log"
+    # The constant is frozen at import from the host's own root, which is where the
+    # daemon that writes it runs; asking `logs_dir()` here would answer this test's
+    # scratch root instead, because the suite redirects the root everywhere.
+    assert srv._EXIT_RECORD_PATH == Path.home() / ".emrg" / "global" / "logs" / "emrgd-exit.log"
 
 
 # ── the migration ──────────────────────────────────────────────────────────
 
 
 def _legacy_root(tmp_path: Path) -> Path:
-    root = tmp_path / ".emrg"
+    """The global root a migrated install has: stray logs sit beside `logs/`, not above it."""
+    root = tmp_path / ".emrg" / "global"
     (root / "logs").mkdir(parents=True, exist_ok=True)
     return root
 
@@ -582,7 +586,7 @@ def _run_in_a_child(env: dict, code: str, seconds: int = 30):
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
 def test_a_fifo_at_the_daemon_log_does_not_wedge_the_startup(tmp_path):
     """`RotatingFileHandler` opens at construction, so this is an open on a startup path."""
-    logs = tmp_path / ".emrg" / "logs"
+    logs = tmp_path / ".emrg" / "global" / "logs"
     logs.mkdir(parents=True)
     fifo = logs / "emrgd.log"
     os.mkfifo(fifo)
@@ -628,7 +632,7 @@ def test_a_directory_at_the_daemon_log_names_its_kind_and_still_starts(
     `tests/test_skills_registry.py`, `tests/test_sessions_index.py`).
     """
     _stub_home(monkeypatch, tmp_path)
-    log_file = tmp_path / ".emrg" / "logs" / "emrgd.log"
+    log_file = tmp_path / ".emrg" / "global" / "logs" / "emrgd.log"
     log_file.mkdir(parents=True)
 
     with _root_handlers_cleared():
@@ -648,7 +652,7 @@ def test_a_directory_at_the_daemon_log_names_its_kind_and_still_starts(
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
 def test_a_fifo_at_the_crash_log_does_not_wedge_the_startup(tmp_path):
     """The crash sink's own contract for a file it cannot open: keep the DEVNULL sinks."""
-    logs = tmp_path / ".emrg" / "logs"
+    logs = tmp_path / ".emrg" / "global" / "logs"
     logs.mkdir(parents=True)
     fifo = logs / "emrgd-crash.log"
     os.mkfifo(fifo)

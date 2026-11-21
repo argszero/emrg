@@ -4076,7 +4076,7 @@ class TaskScheduler:
         What is still needed is the agent entry (rant 02:58): if agents.yml lacks
         `emrg`, `_resolve_agent_path("emrg")` returns None and the handler's
         `_source_dir` degenerates to the relative string "emrg" (a dangling cwd). The
-        path is fixed to ~/.emrg/evolution/emrg; an existing entry is preserved as-is
+        path is fixed to ~/.emrg/global/evolution/emrg; an existing entry is preserved as-is
         (dev machines may configure a custom path).
         """
         # The write goes through `AgentRegistry`, so the register keeps one writer
@@ -4105,7 +4105,7 @@ class TaskScheduler:
             )
             return
         reg = AgentRegistry(register)
-        target = str(Path.home() / ".emrg" / "evolution" / "emrg")
+        target = str(config_dir() / "evolution" / "emrg")
         try:
             row = next((e for e in reg.entries() if e.get("name") == "emrg"), None)
             if row is None:

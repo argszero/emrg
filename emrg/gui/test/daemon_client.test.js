@@ -86,7 +86,7 @@ function assertTokenFileInTmp(tokenFile) {
 
 function setupTempHome() {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "emrg-gui-test-"));
-  fs.mkdirSync(path.join(tmpHome, ".emrg"), { recursive: true });
+  fs.mkdirSync(path.join(tmpHome, ".emrg", "global"), { recursive: true });
   origHome = process.env.HOME;
   origUserProfile = process.env.USERPROFILE;
   process.env.HOME = tmpHome;
@@ -1568,7 +1568,7 @@ test("P2 ownStream: 断连 → 释放锁", async () => {
  *  Rant 2026-10-09T14:20:18：应用级日志进了 ~/.emrg/logs/，所以这个夹具也必须读
  *  代码读的那个目录——它写、_readLogTail 读，两边不同的话这些测试就是在测空气。 */
 const logFile = () => {
-  const file = path.join(os.homedir(), ".emrg", "logs", "emrgd.log");
+  const file = path.join(os.homedir(), ".emrg", "global", "logs", "emrgd.log");
   fs.mkdirSync(path.dirname(file), { recursive: true });
   return file;
 };

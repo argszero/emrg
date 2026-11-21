@@ -51,7 +51,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-DEFAULT_PATH = Path.home() / ".emrg" / "logs" / "usage-anchor.jsonl"
+DEFAULT_PATH = Path.home() / ".emrg" / "global" / "logs" / "usage-anchor.jsonl"
 DEFAULT_CURRENT = 0.25
 
 # Issue #1087: the scheduled planted-fire drill (daemon.py) rides the real

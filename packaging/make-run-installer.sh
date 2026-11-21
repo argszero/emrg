@@ -55,7 +55,7 @@ VERSION="__EMRG_VERSION__"
 # Default from HOME unconditionally — never inherit an ambient PREFIX env var
 # (common on build servers / containers: make install PREFIX=..., SDKs, CI
 # images). --prefix= is the only override.
-PREFIX="$HOME/.emrg/install"
+PREFIX="$HOME/.emrg/global/install"
 WRITE_PROFILE=1
 START=0
 
@@ -66,7 +66,7 @@ Usage: ./EMRG-<ver>-linux-<arch>.run [options]
 One-command offline install of EMRG (bundled Python + deps, no network).
 
 Options:
-  --prefix=<dir>   Install directory (default: ~/.emrg/install)
+  --prefix=<dir>   Install directory (default: ~/.emrg/global/install)
   --no-profile     Do not append ~/.local/bin to the shell profile PATH
   --start          Start the background daemon (emrgd) after install
   -h, --help       Show this help
@@ -74,7 +74,7 @@ Options:
 After install:
   emrg  → ~/.local/bin/emrg   (TUI; ~/.local/bin added to PATH in ~/.bashrc
   emrgd → ~/.local/bin/emrgd   when missing — skip with --no-profile)
-  uninstall → ~/.emrg/install/bin/emrg-uninstall
+  uninstall → ~/.emrg/global/install/bin/emrg-uninstall
 EOF
 }
 

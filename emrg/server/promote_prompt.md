@@ -63,14 +63,14 @@ Durable facts — `channel accounts`, `blog posts`, `blog drafts`, `banned list`
 
 #### 0.2 Read the project config
 
-Read the full config of `{{ agent.name }}` from `~/.emrg/agents.yml` (path, name, description, custom fields) as context. The `agent` variable in the template (name/path/description and other fields) is already injected into this prompt.
+Read the full config of `{{ agent.name }}` from `~/.emrg/global/agents.yml` (path, name, description, custom fields) as context. The `agent` variable in the template (name/path/description and other fields) is already injected into this prompt.
 
 #### 0.3 Confirm promotion channel availability
 
 - **Browser-first channel probing (MUST, PR #899, rant 2026-08-19T21:08:55)**: use `browser-harness` to operate the **real browser** for all channel detection and actions — the login state (cookies/sessions) exists **only in the real browser**. curl/API probes see a logged-out view and misjudge channel availability (e.g. curl returns 000 for Reddit while the browser is logged in and fully usable). When checking whether a channel works / is logged in / can post: **open it in the real browser via browser-harness first**; only fall back to curl for plain public-data reads (public JSON endpoints, docs) when the browser path is unavailable or the data is genuinely public.
 - **Direct CDP connection (MUST, PR #987, rant 2026-08-25T17:57:15)**: all browser operations MUST connect **directly** to the local CDP endpoint `ws://127.0.0.1:57000/devtools/page/...` (HTTP `127.0.0.1:57000/json` returns 200 with the tab list) — following the r47/r48 `_post_*.py` CDP script pattern (websocket to `ws://127.0.0.1:57000/devtools/page/<tab-id>`). **FORBIDDEN**: calling browser-harness's `remote-debugging-setup` / opening `chrome://inspect` — that pops Chrome's "Allow remote debugging?" authorization dialog and blocks waiting for host clicks. The 57000 endpoint is always available on this host; if a direct connection fails, **retry the direct connection** (the tab list may have changed), never switch to the popup flow.
 - Check the CLI: `which curl` (public-data reads only — never for login-state judgment)
-- Check whether the browser harness skill is available (`/skills` or `ls ~/.emrg/skills/`)
+- Check whether the browser harness skill is available (`/skills` or `ls ~/.emrg/global/skills/`)
 - **Discovery is active, and it is a reading rather than an assumption**: re-probe the channels this account already holds — one that worked last round can be logged out, rate-limited or gone — and judge a **new** one on three things: audience fit for this project, that community's tolerance for this subject, and what the account costs to hold (registration, verification, upkeep). Write the verdict into the `channel accounts` entry (§4.2) whether the channel is adopted or rejected, so one considered once is not considered again from nothing.
 - Channel unavailable → record it in this round's closing summary (blocked = channel unavailable, §4); skip channel actions this round, but still write the closing summary
 - **Channel not logged in** → check the recorded `channel accounts` list for that channel (§4):
@@ -369,7 +369,7 @@ here, because a second copy of a rule is a copy that can disagree. So there is
 nothing for this prompt to write by hand — and no reason to open the file at all,
 not even to read it.
 
-- `agent` = the promoted project's registered short name (as in `~/.emrg/agents.yml`); the rant is then handled by that project's evolution task. The tool warns when the name is not registered.
+- `agent` = the promoted project's registered short name (as in `~/.emrg/global/agents.yml`); the rant is then handled by that project's evolution task. The tool warns when the name is not registered.
 - Deduplicate before submitting: `submit_rant(action="list", agent="{{ agent.name }}")` and skip feedback that is already queued.
 - Each message notes the source (channel + link) so the evolution task can trace back.
 
@@ -502,7 +502,7 @@ Record this round's numbers in the closing summary's `promotion metrics` line (�
 - 🛑 No buying stars / farming forks / any black-hat promotion
 - 🛑 No promotional emails to user inboxes
 - 🛑 No promotion in topics unrelated to the project
-- 🛑 Don't modify `~/.emrg/config.toml`
+- 🛑 Don't modify `~/.emrg/global/config.toml`
 - 🛑 Don't skip the preparation step (even when "everything looks fine")
 - 🛑 **Never write, restore or introduce anything that stops or restarts the emrg server / `emrgd`** — not in a test, not in a script, not in any other code path: `stop_all()`, `stop_daemon()`, `emrg server stop`, `emrg server restart`, or a test that reaches a real teardown. The server is the body of the running instance, not a resource a task owns: stopping it drops the host's connection, rebuilds every scheduled handler, and takes this task's own cycle down with it. This is `MANIFESTO.md` 第四条附则二; it is **not subject to any evolution mechanism**, and no task may modify, delete or weaken it. **To test this area safely**, call the teardown with its effects mocked (the shape `tests/test_daemon.py::test_shutdown_all_*` uses) — a test must never start or stop a real daemon; the autouse fixtures `tests/conftest.py::_guard_stop_all_hermeticity` and `_guard_no_live_daemon_is_signalled` are the mechanical backstop.
-- 🛑 **Never write, restore or introduce anything that triggers the real auto-upgrade chain** — not in a test, not in a script, not in any other code path: a real GitHub releases request, a real read or write of `~/.emrg/install/version.txt`, a real `emrg-upgrade` session write, or `UpgradeManager.tick()` / the daemon's `_run_upgrade_session` reached without full isolation. This is `MANIFESTO.md` 第四条附则三; it is **not subject to any evolution mechanism**. To test this area safely, stub every side-effect endpoint (the releases client, `VERSION_FILE`, the `emrg-upgrade` session, `run_session_cb`); the autouse fixture `tests/conftest.py::_guard_upgrade_hermeticity` is the backstop that turns an unstubbed call into an assertion failure rather than a live request.
+- 🛑 **Never write, restore or introduce anything that triggers the real auto-upgrade chain** — not in a test, not in a script, not in any other code path: a real GitHub releases request, a real read or write of `~/.emrg/global/install/version.txt`, a real `emrg-upgrade` session write, or `UpgradeManager.tick()` / the daemon's `_run_upgrade_session` reached without full isolation. This is `MANIFESTO.md` 第四条附则三; it is **not subject to any evolution mechanism**. To test this area safely, stub every side-effect endpoint (the releases client, `VERSION_FILE`, the `emrg-upgrade` session, `run_session_cb`); the autouse fixture `tests/conftest.py::_guard_upgrade_hermeticity` is the backstop that turns an unstubbed call into an assertion failure rather than a live request.

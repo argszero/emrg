@@ -173,6 +173,26 @@ def _redirect_std_streams() -> None:
 def main() -> None:
     from emrg.config import load_config
 
+    # The root's migration runs **here**, and first, because this is the process every
+    # launch path ends in: the GUI spawns `python -m emrg.server`, the TUI client spawns
+    # the same, and `emrg server` reaches it through the client's daemon manager. Wiring
+    # it into the CLI alone left the two paths a host actually uses uncovered, and the
+    # failure is not subtle: `load_config()` raises when its file is absent, so an
+    # upgraded host's daemon would find nothing at ``global/config.toml`` — the config
+    # still being at the pre-split path — and exit before it ever bound a port, which the
+    # GUI reports as a daemon that will not start. Measured on this repository's own GUI
+    # integration suite (CI run 44860021369, `test` leg): seven tests, `daemon token file
+    # timeout`, because the daemon died before writing a token.
+    #
+    # It also has to run *before* `_configure_logging()`, and that is not tidiness: the
+    # first thing the logging setup does is create its directory, which is now
+    # ``global/logs/``. Once that exists, a host's pre-split ``logs/`` at the top level has
+    # a name already taken in ``global/`` and is set aside as ``logs.pre-global`` instead
+    # of landing where its reader looks — a silent split of the host's own logs.
+    from emrg.home_layout import migrate_into_global
+
+    migrate_into_global()
+
     _configure_logging()
     _redirect_std_streams()
     # Rant 2026-09-27T19:45:54 defect B: the PATH this daemon was started with is

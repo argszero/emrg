@@ -40,11 +40,11 @@ ok()   { PASS=$((PASS+1)); printf '  ✓ %s\n' "$*"; }
 fail() { FAIL=$((FAIL+1)); printf '  ✗ %s\n' "$*"; }
 
 # ── 环境：复制 runtime 到临时 HOME 的 install/（模拟安装器）──
-say "installing runtime to \$HOME/.emrg/install"
-mkdir -p "$HOME/.emrg/install"
-cp -R "$INSTALL_ROOT/." "$HOME/.emrg/install/"
-export PATH="$HOME/.emrg/install/bin:$PATH"
-export PYTHONPATH="$HOME/.emrg/install/source:$HOME/.emrg/install/lib"
+say "installing runtime to \$HOME/.emrg/global/install"
+mkdir -p "$HOME/.emrg/global/install"
+cp -R "$INSTALL_ROOT/." "$HOME/.emrg/global/install/"
+export PATH="$HOME/.emrg/global/install/bin:$PATH"
+export PYTHONPATH="$HOME/.emrg/global/install/source:$HOME/.emrg/global/install/lib"
 export PYTHONDONTWRITEBYTECODE=1
 
 # 1. emrg --version（R98：走 argparse 不进 TUI）
@@ -85,7 +85,7 @@ EOF
 # R114：输出保留到 emrgd-debug.log（不丢 /dev/null），daemon 启动失败时可诊断。
 if [ -n "${WINDIR:-}" ]; then
   # $HOME 在 Git Bash 是 POSIX 路径（/c/Users/...），cmd 需 Windows 路径（C:\Users\...）→ cygpath -m
-  EMRGD_CMD="$(cygpath -m "$HOME/.emrg/install/bin/emrgd.cmd")"
+  EMRGD_CMD="$(cygpath -m "$HOME/.emrg/global/install/bin/emrgd.cmd")"
   (cd "$HOME" && cmd //c "start /b $EMRGD_CMD" >"$HOME/.emrg/emrgd-debug.log" 2>&1)
 else
   nohup emrgd >"$HOME/.emrg/emrgd-debug.log" 2>&1 &
@@ -195,12 +195,12 @@ if python -c "import rich, httpx, yaml, jinja2, websockets; print('deps OK')" >/
 
 # 8. GUI 入口存在（R39：CI 无显示器，完整 GUI 冒烟留本地）
 say "8. GUI entry exists"
-if [ -x "$HOME/.emrg/install/bin/emrg" ]; then ok "bin/emrg"; else fail "bin/emrg"; fi
+if [ -x "$HOME/.emrg/global/install/bin/emrg" ]; then ok "bin/emrg"; else fail "bin/emrg"; fi
 
 # 9-12: GUI+TUI 同开 / 平台卸载器 / 只读验证 / 离线验证 —— CI 审计降级
 say "9-12. platform-specific (audit-degraded in CI)"
 ok "9. GUI+TUI same daemon — local manual (R120 同 cwd 前提)"
-if [ -f "$HOME/.emrg/install/bin/emrg-uninstall" ]; then ok "10. emrg-uninstall present"; else fail "10. emrg-uninstall"; fi
+if [ -f "$HOME/.emrg/global/install/bin/emrg-uninstall" ]; then ok "10. emrg-uninstall present"; else fail "10. emrg-uninstall"; fi
 ok "11. read-only install — local manual (R61/R47)"
 ok "12. offline install — Linux CI iptables/unshare (R47/R96)"
 
@@ -212,11 +212,11 @@ if [ -z "$RUN_FILE" ]; then
 else
   run_home="$(mktemp -d)"
   if (cd "$run_home" && HOME="$run_home" bash "$RUN_FILE" --no-profile >/dev/null 2>&1) \
-     && [ -x "$run_home/.emrg/install/bin/emrg" ] \
+     && [ -x "$run_home/.emrg/global/install/bin/emrg" ] \
      && [ -L "$run_home/.local/bin/emrg" ] \
      && [ -L "$run_home/.local/bin/emrgd" ] \
-     && [ -x "$run_home/.emrg/install/bin/emrg-uninstall" ] \
-     && HOME="$run_home" "$run_home/.emrg/install/bin/emrg" --version 2>&1 | grep -q "emrg "; then
+     && [ -x "$run_home/.emrg/global/install/bin/emrg-uninstall" ] \
+     && HOME="$run_home" "$run_home/.emrg/global/install/bin/emrg" --version 2>&1 | grep -q "emrg "; then
     ok "13. .run install (extract + symlink + version)"
     # 幂等重跑（覆盖旧安装）
     if (cd "$run_home" && HOME="$run_home" bash "$RUN_FILE" --no-profile >/dev/null 2>&1); then
@@ -237,21 +237,21 @@ fi
 #     bin\python.exe 本体——先复刻安装器 [Code] ssPostInstall 写的 bin\pyvenv.cfg
 #     （home = 绝对路径；相对路径实测 "Failed to import encodings"），再验证。
 say "14. bundled python venv (pyvenv.cfg home fix)"
-PY_BIN="$HOME/.emrg/install/bin/python"
+PY_BIN="$HOME/.emrg/global/install/bin/python"
 if [ -n "${WINDIR:-}" ]; then
   # R131：dist/runtime 未经安装器（pyvenv.cfg 由 make-installer.sh [Code] 在
   # ssPostInstall 写入），smoke 在此复刻同款内容。有了 cfg 后 bin\python.exe
   # 本体即可用（R100 "缺 DLL" 结论修正：DLL 同在 bin\，真正缺的是 cfg）。
-  INSTALL_BIN_WIN="$(cygpath -w "$HOME/.emrg/install/bin")"
-  printf 'home = %s\\python-dist\n' "$INSTALL_BIN_WIN" > "$HOME/.emrg/install/bin/pyvenv.cfg"
-  PY_BIN="$HOME/.emrg/install/bin/python.exe"
+  INSTALL_BIN_WIN="$(cygpath -w "$HOME/.emrg/global/install/bin")"
+  printf 'home = %s\\python-dist\n' "$INSTALL_BIN_WIN" > "$HOME/.emrg/global/install/bin/pyvenv.cfg"
+  PY_BIN="$HOME/.emrg/global/install/bin/python.exe"
   if [ ! -e "$PY_BIN" ]; then
-    PY_BIN="$HOME/.emrg/install/bin/python-dist/python.exe"
+    PY_BIN="$HOME/.emrg/global/install/bin/python-dist/python.exe"
   fi
-elif [ -e "$HOME/.emrg/install/bin/python-dist/python.exe" ]; then
-  PY_BIN="$HOME/.emrg/install/bin/python-dist/python.exe"
-elif [ -e "$HOME/.emrg/install/bin/python-dist/python3.13.exe" ]; then
-  PY_BIN="$HOME/.emrg/install/bin/python-dist/python3.13.exe"
+elif [ -e "$HOME/.emrg/global/install/bin/python-dist/python.exe" ]; then
+  PY_BIN="$HOME/.emrg/global/install/bin/python-dist/python.exe"
+elif [ -e "$HOME/.emrg/global/install/bin/python-dist/python3.13.exe" ]; then
+  PY_BIN="$HOME/.emrg/global/install/bin/python-dist/python3.13.exe"
 fi
 venv_dir="$smoke_home/.venv-smoke"
 VENV_PY="$venv_dir/bin/python"

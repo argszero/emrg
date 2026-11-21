@@ -51,7 +51,7 @@ def test_guard_rejects_real_agents_yml():
     """Writing the real ~/.emrg/agents.yml is a hard error."""
     import emrg.server.scheduler as sched_mod
 
-    real = (Path.home() / ".emrg" / "agents.yml").resolve()
+    real = (Path.home() / ".emrg" / "global" / "agents.yml").resolve()
     with pytest.raises(AssertionError, match="hermetic"):
         sched_mod.atomic_write_yaml([], real, prefix=".agents_")
 
@@ -60,7 +60,7 @@ def test_guard_rejects_real_tasks_yml():
     """Writing the real ~/.emrg/tasks.yml is a hard error (same class)."""
     import emrg.server.scheduler as sched_mod
 
-    real = (Path.home() / ".emrg" / "tasks.yml").resolve()
+    real = (Path.home() / ".emrg" / "global" / "tasks.yml").resolve()
     with pytest.raises(AssertionError, match="hermetic"):
         sched_mod.atomic_write_yaml([], real, prefix=".tasks_")
 

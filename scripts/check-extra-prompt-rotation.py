@@ -39,7 +39,7 @@ What it reads, and what it prints first
 --------------------------------------
 Two subjects, both named before any verdict:
 
-* the **task table** (`--tasks`, default `~/.emrg/tasks.yml`) - the records whose
+* the **task table** (`--tasks`, default `~/.emrg/global/tasks.yml`) - the records whose
   `extra_prompt` may render;
 * the **rotation table** (`--table`, default
   `.emrg/memory/task-extra-prompt-rotation.md`) - one Markdown row per classified block,
@@ -116,7 +116,7 @@ filled in its own rows would be recording classifications nobody made.
 
 What it does not do
 -------------------
-It **measures and never repairs**: it does not touch `~/.emrg/tasks.yml`, which is the host's
+It **measures and never repairs**: it does not touch `~/.emrg/global/tasks.yml`, which is the host's
 file, and it does not rewrite the rotation table, because recording a classification needs a
 reader's judgement about what the block turned out to be. It prints the lengths and the digests;
 the cycle decides what a moved one means.
@@ -140,7 +140,7 @@ DEFAULT_TABLE = REPO_ROOT / ".emrg" / "memory" / "task-extra-prompt-rotation.md"
 
 #: The default task table, which is this host's. `--tasks` exists so the reading can be taken
 #: on a fixture, and the default is never exercised by a test.
-DEFAULT_TASKS = Path("~/.emrg/tasks.yml")
+DEFAULT_TASKS = Path("~/.emrg/global/tasks.yml")
 
 #: One row of the rotation table: `| `task` | 6327 | <sha256> | class | evidence |`. The length is
 #: matched as a plain integer and the digest as 64 hex characters, because those two are what

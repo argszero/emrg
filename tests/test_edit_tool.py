@@ -242,7 +242,7 @@ def test_edit_workspace_write_blocks_a_protected_daemon_file(tmp_path, monkeypat
     # expanduser("~") reads USERPROFILE on Windows, HOME elsewhere.
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
-    target = home / ".emrg" / "config.toml"
+    target = home / ".emrg" / "global" / "config.toml"
     target.parent.mkdir(parents=True)
     target.write_text("sentinel = true\n", encoding="utf-8")
     workspace = tmp_path / "ws"

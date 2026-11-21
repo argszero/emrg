@@ -51,10 +51,10 @@ WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 #: which answers whichever name the register currently holds, #2545), so it joins
 #: this list where names become paths.
 PROTECTED_FILES = (
-    "~/.emrg/config.toml",
-    "~/.emrg/emrgd.token",
-    "~/.emrg/tasks.yml",
-    "~/.emrg/rants.jsonl",
+    "~/.emrg/global/config.toml",
+    "~/.emrg/global/emrgd.token",
+    "~/.emrg/global/tasks.yml",
+    "~/.emrg/global/rants.jsonl",
 )
 
 

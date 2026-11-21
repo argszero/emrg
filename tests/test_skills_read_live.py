@@ -49,14 +49,14 @@ def _skill(name: str, description: str = "a skill", body: str = "Body.") -> str:
 def roots(tmp_path, monkeypatch):
     """A user root and a agent root, both off the real home (and both empty)."""
     data = tmp_path / "home" / ".emrg"
-    (data / "skills").mkdir(parents=True)
-    monkeypatch.setattr(loader_mod, "config_dir", lambda: data)
-    monkeypatch.setattr(registry_mod, "config_dir", lambda: data)
+    (data / "global" / "skills").mkdir(parents=True)
+    monkeypatch.setattr(loader_mod.home_layout, "home_root", lambda: data)
+    monkeypatch.setattr(registry_mod, "config_dir", lambda: data / "global")
 
     agent = tmp_path / "agent"
     (agent / ".git").mkdir(parents=True)
     (agent / ".emrg" / "skills").mkdir(parents=True)
-    return data / "skills", agent
+    return data / "global" / "skills", agent
 
 
 # ── the two layouts ────────────────────────────────────────────────

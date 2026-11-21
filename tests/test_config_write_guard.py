@@ -41,7 +41,7 @@ def guarded_file(tmp_path, monkeypatch):
     a guard proven only on paths the pre-filter skips would be proven on
     nothing.
     """
-    victim = tmp_path / ".emrg" / "config.toml"
+    victim = tmp_path / ".emrg" / "global" / "config.toml"
     victim.parent.mkdir(parents=True)
     monkeypatch.setattr(conftest, "_REAL_CONFIG_FILES", (victim.resolve(),))
     return victim
@@ -50,15 +50,15 @@ def guarded_file(tmp_path, monkeypatch):
 def test_the_three_real_files_are_named():
     """All three, not two: `config.toml` is the one the incident was about."""
     home = Path.home()
-    assert conftest._is_real_config_target(home / ".emrg" / "config.toml")
-    assert conftest._is_real_config_target(home / ".emrg" / "agents.yml")
-    assert conftest._is_real_config_target(home / ".emrg" / "tasks.yml")
+    assert conftest._is_real_config_target(home / ".emrg" / "global" / "config.toml")
+    assert conftest._is_real_config_target(home / ".emrg" / "global" / "agents.yml")
+    assert conftest._is_real_config_target(home / ".emrg" / "global" / "tasks.yml")
 
 
 def test_a_scratch_path_is_never_a_real_file(tmp_path):
     """The counter-direction: a tmp file of the same name must pass through."""
     assert not conftest._is_real_config_target(tmp_path / "config.toml")
-    assert not conftest._is_real_config_target(tmp_path / ".emrg" / "config.toml")
+    assert not conftest._is_real_config_target(tmp_path / ".emrg" / "global" / "config.toml")
     assert not conftest._is_real_config_target(None)
     assert not conftest._is_real_config_target(3)
 

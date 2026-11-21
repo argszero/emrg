@@ -2280,7 +2280,7 @@ def test_ensure_emrg_agent_entry_adds_agent_entry_when_missing(tmp_path):
     data = yaml.safe_load(agents_yml.read_text(encoding="utf-8"))
     assert isinstance(data, list)
     emrg = next(e for e in data if e.get("name") == "emrg")
-    assert emrg["path"] == str(Path.home() / ".emrg" / "evolution" / "emrg")
+    assert emrg["path"] == str(tmp_path / "evolution" / "emrg")
     assert len([e for e in data if e.get("name") == "emrg"]) == 1  # no dup
 
 
@@ -2340,9 +2340,7 @@ def test_ensure_emrg_agent_entry_repairs_stale_agent_entry(tmp_path):
 
     data = yaml.safe_load(agents_yml.read_text(encoding="utf-8"))
     by_name = {e["name"]: e for e in data}
-    assert by_name["emrg"]["path"] == (
-        str(Path.home() / ".emrg" / "evolution" / "emrg")
-    )  # repaired
+    assert by_name["emrg"]["path"] == str(tmp_path / "evolution" / "emrg")  # repaired
     assert by_name["other"]["path"] == str(tmp_path / "other")  # untouched
     assert len(data) == 2
 

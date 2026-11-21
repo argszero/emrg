@@ -163,7 +163,7 @@ class SubmitRantTool(ToolExecutor):
                         "type": "string",
                         "description": (
                             "REQUIRED for submit — the target agent's name = the "
-                            "short `name` registered in ~/.emrg/agents.yml "
+                            "short `name` registered in ~/.emrg/global/agents.yml "
                             "(e.g. 'emrg', 'aitokenpool') — NOT the GitHub "
                             "owner/repo form (rant 2026-08-24T10:54:04). If "
                             "you cannot determine which agent the rant "
@@ -299,7 +299,7 @@ class SubmitRantTool(ToolExecutor):
             )
         target = f" ({agent})" if agent else ""
         # Rant 2026-08-24T10:54:04: the name must be the short one registered
-        # in ~/.emrg/agents.yml — not the GitHub owner/repo form. When the
+        # in ~/.emrg/global/agents.yml — not the GitHub owner/repo form. When the
         # given name is not registered, append a non-blocking warning with the
         # registered candidates so a copy-pasted wrong name is caught at
         # submit time instead of requiring a manual re-submit + void.
@@ -308,7 +308,7 @@ class SubmitRantTool(ToolExecutor):
             candidates = " | ".join(sorted(registered))
             warning = (
                 f"\n⚠ agent {agent!r} is not a registered name in "
-                f"~/.emrg/agents.yml (registered: {candidates}) — use the "
+                f"~/.emrg/global/agents.yml (registered: {candidates}) — use the "
                 f"short `name` (e.g. 'emrg' or 'aitokenpool')."
             )
         else:

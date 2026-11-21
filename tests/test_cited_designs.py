@@ -44,7 +44,7 @@ def _home(tmp_path: Path, with_emrg: bool = True) -> Path:
 
 
 def _design(home: Path, name: str, text: str = "# design\n") -> Path:
-    target = home / ".emrg" / "designs" / name
+    target = home / ".emrg" / "global" / "designs" / name
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text, encoding="utf-8")
     return target
@@ -53,7 +53,7 @@ def _design(home: Path, name: str, text: str = "# design\n") -> Path:
 def test_a_cited_design_that_is_present_reads_clean(tmp_path, capsys):
     mod = _load()
     root = tmp_path / "repo"
-    _templates(root, {"p.md": "see `~/.emrg/designs/alpha.md` for the rule\n"})
+    _templates(root, {"p.md": "see `~/.emrg/global/designs/alpha.md` for the rule\n"})
     home = _home(tmp_path)
     _design(home, "alpha.md")
 
@@ -71,7 +71,7 @@ def test_an_absent_design_is_named_with_the_line_that_cites_it(tmp_path, capsys)
     root = tmp_path / "repo"
     _templates(
         root,
-        {"evolution_prompt.md": "first line\nsee `~/.emrg/designs/gone.md` §0-§2\n"},
+        {"evolution_prompt.md": "first line\nsee `~/.emrg/global/designs/gone.md` §0-§2\n"},
     )
     home = _home(tmp_path)
 
@@ -89,7 +89,7 @@ def test_a_machine_with_no_emrg_home_is_not_measurable(tmp_path, capsys):
     """A CI runner has never run EMRG: absent host documents there say nothing."""
     mod = _load()
     root = tmp_path / "repo"
-    _templates(root, {"p.md": "see `~/.emrg/designs/alpha.md`\n"})
+    _templates(root, {"p.md": "see `~/.emrg/global/designs/alpha.md`\n"})
     home = _home(tmp_path, with_emrg=False)
 
     rc = mod.check(root, home)
@@ -142,7 +142,7 @@ def test_host_state_the_prompt_also_cites_is_out_of_scope(tmp_path, capsys):
             "p.md": (
                 "the signal is `.emrg/pause` and `~/.emrg/pause` when paused\n"
                 "`~/.emrg/tasks.yml` and `~/.emrg/notary.env` may be absent\n"
-                "the blueprint is `~/.emrg/designs/alpha.md`\n"
+                "the blueprint is `~/.emrg/global/designs/alpha.md`\n"
             )
         },
     )
@@ -163,8 +163,8 @@ def test_one_design_cited_twice_is_one_design(tmp_path, capsys):
     _templates(
         root,
         {
-            "a.md": "`~/.emrg/designs/alpha.md`\n",
-            "b.md": "again: `~/.emrg/designs/alpha.md`\n",
+            "a.md": "`~/.emrg/global/designs/alpha.md`\n",
+            "b.md": "again: `~/.emrg/global/designs/alpha.md`\n",
         },
     )
     home = _home(tmp_path)
@@ -181,7 +181,7 @@ def test_the_first_line_names_the_tree_it_read(tmp_path, capsys):
     """Every guard in this family says what it read before it says what it found."""
     mod = _load()
     root = tmp_path / "repo"
-    _templates(root, {"p.md": "`~/.emrg/designs/alpha.md`\n"})
+    _templates(root, {"p.md": "`~/.emrg/global/designs/alpha.md`\n"})
     home = _home(tmp_path)
     _design(home, "alpha.md")
 

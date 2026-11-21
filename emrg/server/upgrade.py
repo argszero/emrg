@@ -27,7 +27,7 @@ from typing import Callable, Optional
 
 import httpx
 
-from emrg.config import UpdateConfig
+from emrg.config import UpdateConfig, config_dir
 from emrg.memory import NotARegularFile
 
 # The "is this a regular file" rule is the tool layer's (`special_file_kind`, a whitelist of
@@ -46,14 +46,14 @@ logger = logging.getLogger(__name__)
 RELEASES_URL = "https://api.github.com/repos/argszero/emrg/releases?per_page=30"
 # Fixed work directory: isolated clone of the evolution repo — the agent can
 # freely checkout any tag without touching the evolution task's worktree.
-UPGRADE_WORK_DIR = Path.home() / ".emrg" / "upgrade-work" / "emrg"
-INSTALL_DIR = Path.home() / ".emrg" / "install"
+UPGRADE_WORK_DIR = config_dir() / "upgrade-work" / "emrg"
+INSTALL_DIR = config_dir() / "install"
 VERSION_FILE = INSTALL_DIR / "version.txt"
 # The version the install replaced last time (written by the upgrade prompt
 # before it overwrites version.txt — PR #912). It names the one backup that a
 # failed upgrade can still be restored from, so the retention below keeps it.
 PREVIOUS_VERSION_FILE = INSTALL_DIR / "previous-version.txt"
-BACKUP_DIR = Path.home() / ".emrg" / "upgrade-backup"
+BACKUP_DIR = config_dir() / "upgrade-backup"
 GUI_SRC = Path(__file__).parent.parent / "gui"  # evolution repo's emrg/gui
 # Hard-coded 5-minute check interval (host: not configurable).
 TICK_INTERVAL = 300
@@ -533,7 +533,7 @@ class UpgradeManager:
         )
         template = env.get_template("upgrade_prompt.j2")
         return template.render(
-            source_repo=str(Path.home() / ".emrg" / "evolution" / "emrg"),
+            source_repo=str(config_dir() / "evolution" / "emrg"),
             upgrade_work=str(UPGRADE_WORK_DIR),
             install_dir=str(INSTALL_DIR),
             target_tag=target_tag,

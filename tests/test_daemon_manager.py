@@ -245,8 +245,10 @@ class TestCheckAndRestartIfStale:
         suite: a temp-root home is itself an allowed write zone (PR #1318).
         """
         home = tmp_path / "home"
-        (home / ".emrg").mkdir(parents=True)
-        cfg = home / ".emrg" / "config.toml"
+        (home / ".emrg" / "global").mkdir(parents=True)
+        import emrg.home_layout as _layout
+        monkeypatch.setattr(_layout, "home_root", lambda: home / ".emrg")
+        cfg = home / ".emrg" / "global" / "config.toml"
         cfg.write_text('[llm]\nmodel = "test-model"\n')
         future = 1e12
         os.utime(cfg, (future, future))

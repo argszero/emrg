@@ -966,8 +966,8 @@ class TestIndependentLockProbe:
     def test_check_install_writable_returns_locked(self, monkeypatch, tmp_path):
         monkeypatch.setattr(_stop_all, "is_win", lambda: True)
         monkeypatch.setattr(_stop_all.os.path, "expanduser", lambda _: str(tmp_path))
-        emrg_root = str(tmp_path / ".emrg" / "install")
-        self._mk_root(tmp_path / ".emrg", files=("a.txt",))  # creates ~/.emrg/install
+        emrg_root = str(tmp_path / ".emrg" / "global" / "install")
+        self._mk_root(tmp_path / ".emrg" / "global", files=("a.txt",))  # ~/.emrg/global/install
         monkeypatch.setattr(_stop_all, "_check_locked_files", lambda r: [emrg_root + "/a.txt"])
         assert _stop_all.check_install_writable() == [emrg_root + "/a.txt"]
 
@@ -1177,7 +1177,7 @@ class TestLockProbeFailClosed:
         _lock_probe_error + prints `lock-probe ERROR ... FAIL CLOSED`."""
         monkeypatch.setattr(_stop_all, "is_win", lambda: True)
         monkeypatch.setattr(_stop_all.os.path, "expanduser", lambda _: str(tmp_path))
-        root = tmp_path / ".emrg" / "install"
+        root = tmp_path / ".emrg" / "global" / "install"
         root.mkdir(parents=True)
         (root / "a.txt").write_text("x", encoding="utf-8")
 
@@ -1199,7 +1199,7 @@ class TestLockProbeFailClosed:
         module-holder scan."""
         monkeypatch.setattr(_stop_all, "is_win", lambda: True)
         monkeypatch.setattr(_stop_all.os.path, "expanduser", lambda _: str(tmp_path))
-        root = tmp_path / ".emrg" / "install"
+        root = tmp_path / ".emrg" / "global" / "install"
         (root / "sub").mkdir(parents=True)
         (root / "a.txt").write_text("x", encoding="utf-8")
         (root / "sub" / "b.txt").write_text("x", encoding="utf-8")
@@ -1214,7 +1214,7 @@ class TestLockProbeFailClosed:
         (installer aborts instead of overwriting locked files)."""
         monkeypatch.setattr(_stop_all, "is_win", lambda: True)
         monkeypatch.setattr(_stop_all.os.path, "expanduser", lambda _: str(tmp_path))
-        root = tmp_path / ".emrg" / "install"
+        root = tmp_path / ".emrg" / "global" / "install"
         root.mkdir(parents=True)
         (root / "a.txt").write_text("x", encoding="utf-8")
         monkeypatch.setattr(_stop_all, "_port_is_open", lambda port, timeout=0.3: False)
@@ -1333,7 +1333,7 @@ class TestTeeDualWrite:
         assert f is not None
         name = f.name
         f.close()
-        assert str(tmp_path / ".emrg" / "logs") in name
+        assert str(tmp_path / ".emrg" / "global" / "logs") in name
         import re
         assert re.search(r"stop_all-\d{8}-\d{6}\.log$", name), name
 
@@ -1360,7 +1360,7 @@ class TestTeeDualWrite:
         assert _stop_all.stop_all() == 0
         out = capsys.readouterr().out
         assert "log also written to" in out
-        assert str(tmp_path / ".emrg" / "logs") in out
+        assert str(tmp_path / ".emrg" / "global" / "logs") in out
         assert "exit code 0 (clean)" in out
 
 
@@ -1381,7 +1381,7 @@ class TestStopLogDirIsNotHostState:
         predicate — the fake home is only ever an input to ``expanduser``."""
         monkeypatch.delenv("EMRG_STOP_LOG_DIR", raising=False)
         monkeypatch.setattr(_stop_all.os.path, "expanduser", lambda _: str(tmp_path))
-        assert _stop_all._stop_log_dir() == str(tmp_path / ".emrg" / "logs")
+        assert _stop_all._stop_log_dir() == str(tmp_path / ".emrg" / "global" / "logs")
 
     def test_the_suite_pins_the_stop_log_out_of_the_host_home(self):
         """The autouse guard must be in force for every test, this one included
@@ -1398,7 +1398,7 @@ class TestStopLogDirIsNotHostState:
         assert pinned, "the suite's stop-log pin is not in force (see conftest)"
         resolved = Path(_stop_all._stop_log_dir()).resolve()
         assert resolved == Path(pinned).resolve(), resolved
-        host_logs = (Path.home() / ".emrg" / "logs").resolve()
+        host_logs = (Path.home() / ".emrg" / "global" / "logs").resolve()
         assert resolved != host_logs, f"stop log dir is host state: {resolved}"
 
     def test_stop_all_writes_its_log_into_the_pinned_dir(
@@ -1421,7 +1421,7 @@ class TestStopLogDirIsNotHostState:
         capsys.readouterr()
         written = sorted(p.name for p in pin.glob("stop_all-*.log"))
         assert len(written) == 1, written
-        assert not (fake_home / ".emrg" / "logs").exists()
+        assert not (fake_home / ".emrg" / "global" / "logs").exists()
 
 
 class TestStopAllHermeticityGuard:

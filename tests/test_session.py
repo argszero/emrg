@@ -286,8 +286,8 @@ def test_every_builder_of_the_layout_is_found(expression):
         # A prompt that tells a reader where memory lives is prose, not a producer.
         'f"Agent: `{cwd}/.emrg/memory/` (agent-scope, cross-session)"',
         # The host's install root is a different fact from a directory's layout.
-        'Path.home() / ".emrg" / "install"',
-        'cwd / ".emrg" / "config.toml"',
+        'Path.home() / ".emrg" / "global" / "install"',
+        'cwd / ".emrg" / "global" / "config.toml"',
         'agent.memory_dir / "MEMORY.md"',
     ],
 )

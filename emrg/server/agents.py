@@ -201,6 +201,33 @@ class AgentRegistry:
             prefix=".agents_",
         )
 
+    def rewrite_paths(self, mapper) -> list[str]:
+        """Rewrite every row's directory through ``mapper``, and report the names that moved.
+
+        A register stores the verbatim directory a session runs in, so a directory that
+        was moved leaves its row pointing at a path that no longer exists. ``mapper``
+        takes the stored path and returns the new one, or the same string to leave that
+        row alone — which is what keeps a rewrite bounded to the tree that actually
+        moved rather than to every row the register holds.
+
+        A register that could not be read answers no names and is left untouched: its
+        rows are unknown, and rewriting a file whose contents this call never saw is how
+        a read-then-rewrite path deletes every row a host had (see :meth:`_read`).
+        """
+        rows = self._read()
+        if rows is None:
+            return []
+        changed: list[str] = []
+        for row in rows:
+            current = row.get("path") or ""
+            moved = mapper(current)
+            if moved and moved != current:
+                row["path"] = moved
+                changed.append(row.get("name") or moved)
+        if changed:
+            self._write(rows)
+        return changed
+
     def for_dir(self, cwd: str | os.PathLike[str]) -> dict:
         """The row for a directory, created in place when the register lacks one.
 

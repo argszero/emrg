@@ -59,7 +59,7 @@ def test_stop_all_py_covers_daemon_gui_tui_git_verify():
     assert r"$_.ProcessId -ne {own}" in content
     assert ".format(own=own, name_re=_WIN_PY_NAME_RE)" in content
     # bundled git：install\\git\\ 前缀（系统 Git 永不命中）
-    assert r'\"$env:USERPROFILE\\.emrg\\install\\git\\*\"' in content
+    assert r'\"$env:USERPROFILE\\.emrg\\global\\install\\git\\*\"' in content
     assert "stop_bundled_git" in content
     # verify + 非零退出码（残留清单点名进程名+pid）
     assert "def verify" in content
@@ -339,7 +339,7 @@ def test_make_installer_iss_writes_pyvenv_cfg():
     smoke = _read("packaging/smoke-test.sh")
     assert 'if [ -n "${WINDIR:-}" ]; then' in smoke
     assert "printf 'home = %s\\\\python-dist\\n'" in smoke
-    assert 'PY_BIN="$HOME/.emrg/install/bin/python.exe"' in smoke
+    assert 'PY_BIN="$HOME/.emrg/global/install/bin/python.exe"' in smoke
     # upgrade_prompt.j2：本地等价安装也要写 bin\\pyvenv.cfg（绝对 home）
     prompt = _read("emrg/server/prompts/upgrade_prompt.j2")
     assert "bin/pyvenv.cfg" in prompt

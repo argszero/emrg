@@ -294,7 +294,9 @@ def test_the_protected_file_itself_is_refused_too(outside):
     """The same rule one level down: a root *is* the file it names."""
     ws, _ = outside
 
-    verdict = judge_extra_root("~/.emrg/agents.yml", _ws_policy(ws))
+    # The register is derived, never spelled (#2545): ask where it lives and name that.
+    from emrg.config import register_for_reading
+    verdict = judge_extra_root(str(register_for_reading()), _ws_policy(ws))
 
     assert verdict.refusal and "agents.yml" in verdict.refusal
 
@@ -318,8 +320,8 @@ def test_a_root_naming_the_protected_directory_by_another_spelling_is_refused(
     """
     ws, _ = outside
     home = tmp_path / "home"
-    (home / ".emrg").mkdir(parents=True)
-    victim = home / ".emrg" / "config.toml"
+    (home / ".emrg" / "global").mkdir(parents=True)
+    victim = home / ".emrg" / "global" / "config.toml"
     victim.write_text("host state", encoding="utf-8")
     variant = home / ".EMRG"
     if not file_policy.same_file(str(variant), str(home / ".emrg")):
@@ -439,7 +441,7 @@ def test_the_fence_refuses_a_protected_file_even_when_a_root_covers_it(outside):
     ws, _ = outside
     policy = _ws_policy(ws, extra=(canonical_path(os.path.expanduser("~/.emrg")),))
 
-    refusal = file_refusal(os.path.expanduser("~/.emrg/config.toml"), policy)
+    refusal = file_refusal(os.path.expanduser("~/.emrg/global/config.toml"), policy)
 
     assert refusal and "protected daemon file" in refusal
 

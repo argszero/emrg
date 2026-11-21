@@ -481,7 +481,7 @@ def test_the_default_roots_are_the_three_beside_the_instance_root(tmp_path, monk
     """
     instance_root = tmp_path / "home" / ".emrg"
     instance_root.mkdir(parents=True)
-    monkeypatch.setattr(loader_mod, "config_dir", lambda: instance_root)
+    monkeypatch.setattr(loader_mod.home_layout, "home_root", lambda: instance_root)
 
     actual = default_skill_roots()
 
@@ -489,7 +489,7 @@ def test_the_default_roots_are_the_three_beside_the_instance_root(tmp_path, monk
     assert [path for _, path in actual] == [
         tmp_path / "home" / ".claude" / "skills",
         tmp_path / "home" / ".agents" / "skills",
-        instance_root / "skills",
+        instance_root / "global" / "skills",
     ], actual
     for _, path in actual:
         assert str(tmp_path) in str(path), f"{path} is not under the redirected home"

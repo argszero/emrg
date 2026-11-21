@@ -31,13 +31,13 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 import pytest
 
 _REAL_CONFIG_FILES = (
-    (Path.home() / ".emrg" / "config.toml").resolve(),
-    (Path.home() / ".emrg" / "agents.yml").resolve(),
-    (Path.home() / ".emrg" / "tasks.yml").resolve(),
+    (Path.home() / ".emrg" / "global" / "config.toml").resolve(),
+    (Path.home() / ".emrg" / "global" / "agents.yml").resolve(),
+    (Path.home() / ".emrg" / "global" / "tasks.yml").resolve(),
     # The 24-hour token ledger (rant 2026-11-19T09:31:00). Not a config file, but the one
     # file whose contents the host actually reads to see what a day cost — a test that
     # appended fabricated tokens to it would move that answer, silently and for a day.
-    (Path.home() / ".emrg" / "usage-ledger.jsonl").resolve(),
+    (Path.home() / ".emrg" / "global" / "usage-ledger.jsonl").resolve(),
 )
 
 
@@ -278,9 +278,36 @@ def _redirect_the_config_path(monkeypatch, tmp_path):
     import emrg.config as cfg_mod
     import emrg.server.config_reload as cr_mod
 
-    cfg_path = tmp_path / ".emrg" / "config.toml"
+    cfg_path = tmp_path / ".emrg" / "global" / "config.toml"
     monkeypatch.setattr(cfg_mod, "config_path", lambda: cfg_path)
     monkeypatch.setattr(cr_mod, "config_path", lambda: cfg_path)
+
+
+@pytest.fixture(autouse=True)
+def _root_the_daemon_in_a_scratch_tree(monkeypatch, tmp_path):
+    """Point the daemon's global root at this test's scratch tree.
+
+    Constructing a real `EmrgServer` resolves the global data root and **creates** it —
+    `__init__` makes the root and the `skills/` directory inside it — so a suite that
+    builds a server without saying where its root is writes the host's own
+    `~/.emrg/global`. Before the root moved it wrote the host's `~/.emrg`, where those
+    directories already existed and the create was a silent no-op; the sandbox refuses
+    the write now, which is how the leak surfaced rather than being fixed.
+
+    One module is re-pointed, and it is not the one that defines the name:
+    `emrg.server.daemon` imported `config_dir` by value, so patching `emrg.config`
+    would leave the constructor on the host's root. A test that wants a root of its own
+    passes `runtime_dir=` and wins over this default.
+    """
+    import emrg.home_layout as layout_mod
+
+    # One seam, not one per module: every caller does `from emrg.config import
+    # config_dir` and binds that function by value, but its body resolves
+    # `emrg.home_layout.global_dir()` at call time, which asks `home_root()`. Patching
+    # the name they all share therefore moves every derived path at once — the daemon's
+    # root, the scheduler's log directory, the skills catalog, the register, the install
+    # tree — where patching each module's binding would be a list to fall behind.
+    monkeypatch.setattr(layout_mod, "home_root", lambda: tmp_path / ".emrg")
 
 
 @pytest.fixture(autouse=True)

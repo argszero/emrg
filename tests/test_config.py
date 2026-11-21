@@ -24,14 +24,18 @@ from tests.bounded_read import DEADLINE_SECONDS, within
 def test_config_dir():
     d = config_dir()
     assert isinstance(d, Path)
-    assert d.name == ".emrg"
+    # The global data root is one level below the home-level `.emrg`, which also holds a
+    # session's own state when an agent is started in the home directory.
+    assert d.name == "global"
+    assert d.parent.name == ".emrg"
 
 
 def test_config_path():
     p = config_path()
     assert isinstance(p, Path)
     assert p.name == "config.toml"
-    assert p.parent.name == ".emrg"
+    assert p.parent.name == "global"
+    assert p.parent.parent.name == ".emrg"
 
 
 def test_the_default_config_path_is_redirected_into_the_scratch_tree(tmp_path):
@@ -53,8 +57,9 @@ def test_the_default_config_path_is_redirected_into_the_scratch_tree(tmp_path):
     the server builds) 201, `daemon.py:650` (a poll that ticks) 1.
     """
     p = cfg_mod.config_path()
-    assert p.parent.name == ".emrg"
-    assert p.parent.parent == tmp_path, (
+    assert p.parent.name == "global"
+    assert p.parent.parent.name == ".emrg"
+    assert p.parent.parent.parent == tmp_path, (
         "the suite resolved the default config path outside the test's scratch "
         "tree — the host's real ~/.emrg/config.toml is being read again"
     )
@@ -70,7 +75,7 @@ def test_the_reloader_resolves_the_config_path_inside_the_scratch_tree(tmp_path)
     the class of defect this suite has hit twice (`tests/test_ws_e2e.py`'s
     module-level binding, `tests/test_config_reload.py`'s 14 host reads).
     """
-    assert cr.config_path() == tmp_path / ".emrg" / "config.toml"
+    assert cr.config_path() == tmp_path / ".emrg" / "global" / "config.toml"
 
 
 def test_llm_config_defaults():
@@ -342,7 +347,7 @@ def test_load_config_refuses_a_directory_subject(tmp_path, monkeypatch):
     refusal is the same class of answer with the kind named rather than a new outcome, and
     every caller's existing handler keeps working unchanged.
     """
-    cfg_path = tmp_path / ".emrg" / "config.toml"
+    cfg_path = tmp_path / ".emrg" / "global" / "config.toml"
     _plant(cfg_path, "dir")
     monkeypatch.setattr(cfg_mod, "config_path", lambda: cfg_path)
 
@@ -363,7 +368,7 @@ def test_load_config_refuses_a_fifo_subject(tmp_path, monkeypatch):
     call did **not return within 8 s**, because the open waits for a writer and raises
     nothing, so no handler around it can fire.
     """
-    cfg_path = tmp_path / ".emrg" / "config.toml"
+    cfg_path = tmp_path / ".emrg" / "global" / "config.toml"
     _plant(cfg_path, "fifo")
     monkeypatch.setattr(cfg_mod, "config_path", lambda: cfg_path)
 
@@ -383,7 +388,7 @@ def test_the_section_loaders_degrade_on_a_directory_subject(tmp_path, monkeypatc
     A guard that raised instead would turn a documented default into a crash on a path
     the daemon builds itself in `__init__`.
     """
-    cfg_path = tmp_path / ".emrg" / "config.toml"
+    cfg_path = tmp_path / ".emrg" / "global" / "config.toml"
     _plant(cfg_path, "dir")
     monkeypatch.setattr(cfg_mod, "config_path", lambda: cfg_path)
 
@@ -399,7 +404,7 @@ def test_the_section_loaders_degrade_on_a_fifo_subject(tmp_path, monkeypatch):
     within 8 s**. `EmrgServer.__init__` calls them (`daemon.py:637`/`:643`), so the block
     was the daemon's construction, before any event loop or handler existed.
     """
-    cfg_path = tmp_path / ".emrg" / "config.toml"
+    cfg_path = tmp_path / ".emrg" / "global" / "config.toml"
     _plant(cfg_path, "fifo")
     monkeypatch.setattr(cfg_mod, "config_path", lambda: cfg_path)
 
@@ -420,7 +425,7 @@ def test_the_section_loaders_degrade_on_an_undecodable_subject(tmp_path, monkeyp
     The control is the *same document* with the offending byte replaced: these readers are
     not merely returning a default for every file they are handed.
     """
-    cfg_path = tmp_path / ".emrg" / "config.toml"
+    cfg_path = tmp_path / ".emrg" / "global" / "config.toml"
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     document = b'[sandbox]\npwsh_path = "/opt/pwsh"\n[update]\nenabled = false\n'
 
@@ -444,7 +449,7 @@ def test_ensure_config_never_opens_a_non_regular_subject(tmp_path, monkeypatch):
     and `exists()` is true for a FIFO. So the subject is left exactly as it was and no open
     happens — guarding this write would be code no reading can reach.
     """
-    cfg_path = tmp_path / ".emrg" / "config.toml"
+    cfg_path = tmp_path / ".emrg" / "global" / "config.toml"
     _plant(cfg_path, "fifo")
     monkeypatch.setattr(cfg_mod, "config_path", lambda: cfg_path)
 
@@ -528,7 +533,7 @@ def test_the_foreground_daemon_command_reports_a_refused_config(
     `ensure_tool_dirs` is stubbed because it rewrites this process's `PATH`, which no test
     of a config reader should leave mutated for its neighbours.
     """
-    cfg_path = tmp_path / ".emrg" / "config.toml"
+    cfg_path = tmp_path / ".emrg" / "global" / "config.toml"
     _plant(cfg_path, "fifo")
     monkeypatch.setattr(cfg_mod, "config_path", lambda: cfg_path)
     monkeypatch.setattr("emrg.tool_path.ensure_tool_dirs", lambda: None)
@@ -621,7 +626,7 @@ class TestTheInstallerWritesTheConfigPrivate:
             check=True,
         )
 
-        cfg_path = home / ".emrg" / "config.toml"
+        cfg_path = home / ".emrg" / "global" / "config.toml"
         assert cfg_path.exists(), (
             "the installer wrote no config file, so the mode below would be asserted about "
             "nothing — the extraction or the stub is wrong, not the rule"
@@ -664,7 +669,7 @@ class TestTheConfigFileIsPrivate:
 
     @posix_only
     def test_a_created_config_file_is_private(self, tmp_path, monkeypatch):
-        cfg_path = tmp_path / ".emrg" / "config.toml"
+        cfg_path = tmp_path / ".emrg" / "global" / "config.toml"
         monkeypatch.setattr(cfg_mod, "config_path", lambda: cfg_path)
         assert not cfg_path.exists()
 
@@ -681,7 +686,7 @@ class TestTheConfigFileIsPrivate:
         since 2026-09-27, holding a real 33-character key — would stay readable by every other
         local user for the life of the machine.
         """
-        cfg_path = tmp_path / ".emrg" / "config.toml"
+        cfg_path = tmp_path / ".emrg" / "global" / "config.toml"
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         cfg_path.write_text('api_key = "a-real-key"\n', encoding="utf-8")
         os.chmod(cfg_path, 0o644)
@@ -702,7 +707,7 @@ class TestTheConfigFileIsPrivate:
         already closed to other users. Rewriting it would be this function opening a file its
         owner shut.
         """
-        cfg_path = tmp_path / ".emrg" / "config.toml"
+        cfg_path = tmp_path / ".emrg" / "global" / "config.toml"
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         cfg_path.write_text("[llm]\n", encoding="utf-8")
         os.chmod(cfg_path, 0o400)
@@ -721,7 +726,7 @@ class TestTheConfigFileIsPrivate:
         """
         from unittest import mock
 
-        cfg_path = tmp_path / ".emrg" / "config.toml"
+        cfg_path = tmp_path / ".emrg" / "global" / "config.toml"
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         cfg_path.write_text("[llm]\n", encoding="utf-8")
         os.chmod(cfg_path, cfg_mod.CONFIG_FILE_MODE)

@@ -145,10 +145,38 @@ def _harden_redirected_output() -> None:
             pass
 
 
+def _migrate_home_root(command: str | None) -> None:
+    """Move an existing installation's global entries into ``global/`` before anything reads it.
+
+    Runs once per start of the process that owns the root, and only for the two commands
+    that own it: the daemon and the client. ``stop`` and ``update`` are left out on
+    purpose — they are the paths an installation is repaired or replaced through, and a
+    move that happened underneath them would be a second change while the first is in
+    flight.
+
+    Repeatable by construction (:func:`emrg.home_layout.migrate_into_global` answers an
+    empty list once there is nothing left to move), and it prints nothing on a run that
+    moved nothing, so a normal start stays silent.
+    """
+    if command not in (None, "server"):
+        return
+    from emrg.home_layout import migrate_into_global
+
+    moved = migrate_into_global()
+    if not moved:
+        return
+    try:
+        print(f"emrg: moved {len(moved)} global entr{'y' if len(moved) == 1 else 'ies'} "
+              f"into the global/ root", flush=True)
+    except (OSError, ValueError):
+        pass
+
+
 def main() -> None:
     _harden_redirected_output()
     parser = _build_parser()
     parsed = parser.parse_args()
+    _migrate_home_root(parsed.command)
 
     init_auto_evolve = getattr(parsed, "init_auto_evolve", False)
 

@@ -3,7 +3,7 @@
 
 Measured on this host 2026-11-18 (issue #2984): `emrg/server/evolution_prompt.md` cites
 five paths under the host's home, and one of them --
-`~/.emrg/designs/memory-index-compaction-design.md` -- is the document the index-hygiene
+`~/.emrg/global/designs/memory-index-compaction-design.md` -- is the document the index-hygiene
 rule calls the authoritative statement of what compaction is, what counts as done and what
 must never be done. On this machine that document is present and has been since
 2026-09-25, so nothing was absent here. What went wrong was the reading: a directory that
@@ -33,7 +33,7 @@ Exit codes, because "could not measure" is never a pass:
 The scope is designs, deliberately. The same templates cite host paths whose absence is
 normal on a working machine -- a pause file, a notarization env file, a task's own output
 -- so a sweep over every `~/` path would report expected absences as faults, and a guard
-that cries on a healthy machine is read as noise and then ignored. `~/.emrg/designs/*.md`
+that cries on a healthy machine is read as noise and then ignored. `~/.emrg/global/designs/*.md`
 is a class whose members exist to be read.
 
 Usage: check-cited-designs.py [--root <checkout>] [--home <the home to ask>]
@@ -54,7 +54,7 @@ TEMPLATES = Path("emrg") / "server"
 #: A design under the host's home, as the prompt writes it. Backticked in the prose and
 #: bare inside a sentence, so the pattern stops at a quote, a backtick or whitespace
 #: rather than trying to parse Markdown.
-CITATION = re.compile(r"~/\.emrg/designs/[A-Za-z0-9._-]+\.md")
+CITATION = re.compile(r"~/\.emrg/global/designs/[A-Za-z0-9._-]+\.md")
 
 #: What a citation resolves to under the home this run was given. The `~` is never handed
 #: to `expanduser` here: this script must be able to ask about a home it was pointed at,
@@ -84,7 +84,7 @@ def check(root: Path, home: Path) -> int:
     if not found:
         print(
             f"could not measure: no file under {templates} cites a design under "
-            f"`{HOME_PREFIX}.emrg/designs/`, so nothing was asked"
+            f"`{HOME_PREFIX}.emrg/global/designs/`, so nothing was asked"
         )
         return 2
 

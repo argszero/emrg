@@ -648,13 +648,13 @@ def test_upgrade_chain_hermeticity_guards():
         up.httpx.AsyncClient()
 
     # 2. Version file: not the real ~/.emrg/install/version.txt.
-    assert up.VERSION_FILE != Path.home() / ".emrg" / "install" / "version.txt"
+    assert up.VERSION_FILE != Path.home() / ".emrg" / "global" / "install" / "version.txt"
 
     # 3. Retention (issue #1389): the upgrade tick prunes the snapshot
     #    directory, and on a real host that directory holds the only rollback
     #    snapshot there is. If this assertion ever fails, every test that calls
     #    tick() is deleting the host's rollback path.
-    assert up.BACKUP_DIR != Path.home() / ".emrg" / "upgrade-backup"
+    assert up.BACKUP_DIR != Path.home() / ".emrg" / "global" / "upgrade-backup"
 
 
 # ── no residual references to the removed mechanism ───────────────────────

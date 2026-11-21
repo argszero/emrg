@@ -37,7 +37,7 @@ from emrg.tools.shell_dialects import SHELL_TOOL_NAMES
 
 def _write_config(tmp_path: Path, body: str) -> None:
     """Write the config file the autouse fixture points ``config_path()`` at."""
-    path = tmp_path / ".emrg" / "config.toml"
+    path = tmp_path / ".emrg" / "global" / "config.toml"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
 

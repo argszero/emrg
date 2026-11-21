@@ -79,11 +79,11 @@ def tmp_home(tmp_path, monkeypatch):
     import emrg.skills.loader as loader
 
     # mimic the real config_dir() shape (~/.emrg) so all paths line up
-    emrg_dir = tmp_path / ".emrg"
+    emrg_dir = tmp_path / ".emrg" / "global"
     monkeypatch.setattr(registry, "config_dir", lambda: emrg_dir)
     monkeypatch.setattr(installer, "config_dir", lambda: emrg_dir)
     # isolate the loader's user-skill dir (~/.emrg/skills) from the real host
-    monkeypatch.setattr(loader.Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(loader.home_layout, "home_root", lambda: tmp_path / ".emrg")
     return tmp_path
 
 
@@ -197,7 +197,7 @@ class TestCatalogAsSkill:
 
     def test_load_skills_includes_catalog(self, tmp_home):
         # user skills dir: catalog + one real skill → both loaded
-        skills_dir = tmp_home / ".emrg" / "skills"
+        skills_dir = tmp_home / ".emrg" / "global" / "skills"
         skills_dir.mkdir(parents=True)
         (skills_dir / "skill-catalog.md").write_text(BASELINE_CATALOG_MD, encoding="utf-8")
         real = skills_dir / "real-skill.md"
@@ -209,7 +209,7 @@ class TestCatalogAsSkill:
 
     def test_deprecated_recommended_md_never_loads(self, tmp_home):
         # the superseded registry file (10:11:35 design) must not become a skill
-        skills_dir = tmp_home / ".emrg" / "skills"
+        skills_dir = tmp_home / ".emrg" / "global" / "skills"
         skills_dir.mkdir(parents=True)
         (skills_dir / "recommended.md").write_text(
             "---\nskills:\n  - name: browser-harness\n---\nbody", encoding="utf-8"
@@ -275,7 +275,7 @@ class TestInstall:
         assert result["ok"] is True
         assert result["version"] == "0.1.8"
         # skill file landed with valid frontmatter
-        skill_file = tmp_home / ".emrg" / "skills" / "browser-harness.md"
+        skill_file = tmp_home / ".emrg" / "global" / "skills" / "browser-harness.md"
         assert skill_file.exists()
         fm = _parse_frontmatter(skill_file.read_text(encoding="utf-8"))
         assert fm["name"] == "browser-harness" and fm["description"]
@@ -308,7 +308,7 @@ class TestInstall:
             "browser-harness", confirmed=True, runner=runner, http_get=FakeHttp()
         ))
         assert "error" in result
-        assert not (tmp_home / ".emrg" / "skills" / "browser-harness.md").exists()
+        assert not (tmp_home / ".emrg" / "global" / "skills" / "browser-harness.md").exists()
 
     def test_publish_invalid_output_rolls_back(self, tmp_home, with_cli):
         ensure_catalog_file()
@@ -318,7 +318,7 @@ class TestInstall:
             "browser-harness", confirmed=True, runner=runner, http_get=FakeHttp()
         ))
         assert "error" in result
-        assert not (tmp_home / ".emrg" / "skills" / "browser-harness.md").exists()
+        assert not (tmp_home / ".emrg" / "global" / "skills" / "browser-harness.md").exists()
         assert read_state() == {}  # nothing recorded
 
     def test_publish_empty_output(self, tmp_home, with_cli):
@@ -354,7 +354,7 @@ class TestUpdate:
         result = _run(installer.update_managed_skills(runner=runner, http_get=FakeHttp("v0.1.8")))
         assert result["updated"] == ["browser-harness"]
         assert read_state()["browser-harness"]["version"] == "0.1.8"
-        assert (tmp_home / ".emrg" / "skills" / "browser-harness.md").exists()
+        assert (tmp_home / ".emrg" / "global" / "skills" / "browser-harness.md").exists()
 
     def test_up_to_date_no_publish(self, tmp_home, with_cli):
         ensure_catalog_file()
@@ -383,7 +383,7 @@ class TestUpdate:
         ensure_catalog_file()
         # browser-harness is NOT in state (host manual copy) → never refreshed
         write_state({"other": {"version": "9.9.9", "managed": True}})
-        manual = tmp_home / ".emrg" / "skills" / "browser-harness.md"
+        manual = tmp_home / ".emrg" / "global" / "skills" / "browser-harness.md"
         manual.parent.mkdir(parents=True, exist_ok=True)
         manual.write_text("# host's own copy\n", encoding="utf-8")
         result = _run(installer.update_managed_skills(runner=FakeRunner(VALID_SKILL_MD), http_get=FakeHttp("v0.1.8")))
@@ -495,7 +495,7 @@ class TestThePublisherAsksTheKindBeforeOpening:
     @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
     def test_a_fifo_target_is_refused_rather_than_blocking(self, tmp_home, with_cli):
         ensure_catalog_file()
-        os.mkfifo(tmp_home / ".emrg" / "skills" / "browser-harness.md")
+        os.mkfifo(tmp_home / ".emrg" / "global" / "skills" / "browser-harness.md")
         runner = FakeRunner(skill_output=VALID_SKILL_MD)
 
         result = within(DEADLINE_SECONDS, lambda: _run(installer.install_skill(
@@ -517,7 +517,7 @@ class TestThePublisherAsksTheKindBeforeOpening:
         ))
 
         assert result["ok"] is True, result
-        assert (tmp_home / ".emrg" / "skills" / "browser-harness.md").is_file()
+        assert (tmp_home / ".emrg" / "global" / "skills" / "browser-harness.md").is_file()
 
     def test_a_directory_target_is_refused_by_kind_on_every_platform(self, tmp_home, with_cli):
         """**FIFO-free, and it discriminates** — the arm the Windows leg was missing.
@@ -544,7 +544,7 @@ class TestThePublisherAsksTheKindBeforeOpening:
         this family's own wording and is what the base cannot produce.
         """
         ensure_catalog_file()
-        (tmp_home / ".emrg" / "skills" / "browser-harness.md").mkdir()
+        (tmp_home / ".emrg" / "global" / "skills" / "browser-harness.md").mkdir()
         runner = FakeRunner(skill_output=VALID_SKILL_MD)
 
         result = _run(installer.install_skill(
@@ -696,7 +696,7 @@ class TestVendorCopyInstall:
         ))
 
         assert result["ok"] is True, result
-        target = tmp_home / ".emrg" / "skills" / "vendor-one"
+        target = tmp_home / ".emrg" / "global" / "skills" / "vendor-one"
         assert (target / "SKILL.md").read_text(encoding="utf-8") == VENDOR_SKILL_MD
         assert (target / "scripts" / "run.py").read_text(encoding="utf-8") == "print('vendored')\n"
         assert not (target / "neighbour").exists(), "a sibling directory was copied too"
@@ -741,7 +741,7 @@ class TestVendorCopyInstall:
 
         assert "error" in result, result
         assert "skills/vendor-one" in result["error"], result["error"]
-        assert not (tmp_home / ".emrg" / "skills" / "vendor-one").exists()
+        assert not (tmp_home / ".emrg" / "global" / "skills" / "vendor-one").exists()
         assert read_state() == {}, "nothing may be recorded when the copy did not happen"
 
     def test_a_copy_without_a_usable_skill_file_is_refused_and_leaves_nothing(
@@ -759,7 +759,7 @@ class TestVendorCopyInstall:
         ))
 
         assert "error" in result, result
-        target = tmp_home / ".emrg" / "skills" / "vendor-one"
+        target = tmp_home / ".emrg" / "global" / "skills" / "vendor-one"
         assert not target.exists(), "a refused copy left the half-written directory behind"
         assert read_state() == {}
 
@@ -769,7 +769,7 @@ class TestVendorCopyInstall:
             "vendor-one", http_get=FakeCommits(), fetch_bytes=FakeBytes(None),
         ))
         assert "error" in result, result
-        assert not (tmp_home / ".emrg" / "skills" / "vendor-one").exists()
+        assert not (tmp_home / ".emrg" / "global" / "skills" / "vendor-one").exists()
 
     def test_an_unknown_install_kind_is_still_refused(self, tmp_home, no_cli):
         """The control: accepting a second kind must not mean accepting any kind."""

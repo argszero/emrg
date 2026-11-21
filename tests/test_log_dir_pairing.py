@@ -39,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from emrg.client import daemon_manager as dm  # noqa: E402
 from emrg.config import config_dir, logs_dir  # noqa: E402
+from emrg import home_layout  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GUI_CLIENT = REPO_ROOT / "emrg" / "gui" / "daemon_client.js"
@@ -54,6 +55,9 @@ _JS_JOIN = re.compile(
     re.MULTILINE,
 )
 _JS_STRING = re.compile(r'"([^"]*)"')
+
+#: A `path.join` argument that is another declaration of this file, e.g. `EMRG_GLOBAL()`.
+_JS_CALLEE = re.compile(r"([A-Za-z_$][\w$]*)\(\)")
 
 
 def _join_args(text: str, constant: str) -> list[str] | None:
@@ -74,10 +78,35 @@ def _join_args(text: str, constant: str) -> list[str] | None:
     return None
 
 
+def _resolved_args(text: str, constant: str) -> list[str] | None:
+    """`_join_args`, with any argument naming another declaration expanded in place.
+
+    The JS keeps one root (`EMRG_GLOBAL`) and builds the log directory from it, so a
+    comparison against the literal home chain would report the good declaration as a
+    mismatch. Following the call keeps the pairing measured on what the file actually
+    resolves to; a call that names nothing declared here answers `None`, which the
+    caller reports as unreadable rather than as equal.
+    """
+    parts = _join_args(text, constant)
+    if parts is None:
+        return None
+    out: list[str] = []
+    for part in parts:
+        callee = _JS_CALLEE.fullmatch(part)
+        if callee is None:
+            out.append(part)
+            continue
+        inner = _resolved_args(text, callee.group(1))
+        if inner is None:
+            return None
+        out.extend(inner)
+    return out
+
+
 def _expected_parts() -> list[str]:
     """What the JS declaration must spell to reach the same directory."""
-    relative = logs_dir().relative_to(Path.home())
-    return [HOMEDIR_TOKEN, *relative.parts]
+    inner = config_dir().relative_to(home_layout.home_root())
+    return [HOMEDIR_TOKEN, home_layout.home_root().name, *inner.parts, "logs"]
 
 
 # ── the extractor's controls ────────────────────────────────────────────────
@@ -109,7 +138,7 @@ def test_the_python_side_derives_the_directory_from_the_config_dir():
 
 
 def test_the_gui_declares_the_same_directory():
-    declared = _join_args(GUI_CLIENT.read_text(encoding="utf-8"), "EMRG_LOGS_DIR")
+    declared = _resolved_args(GUI_CLIENT.read_text(encoding="utf-8"), "EMRG_LOGS_DIR")
     assert declared is not None, (
         f"{GUI_CLIENT.name} declares no EMRG_LOGS_DIR — the JS side cannot be "
         "read, so the pairing is unmeasurable rather than absent"
@@ -133,7 +162,7 @@ def test_the_gui_client_takes_both_its_paths_from_that_one_constant():
 
 def test_the_gui_main_process_writes_its_log_into_the_same_directory():
     """`createLogger`'s `logDir` is the third site, and it moved with the other two."""
-    declared = _join_args(GUI_MAIN.read_text(encoding="utf-8"), "logDir")
+    declared = _resolved_args(GUI_MAIN.read_text(encoding="utf-8"), "logDir")
     assert declared == _expected_parts(), (
         f"emrg-gui.log must land in {logs_dir()}, and main.js declares {declared!r}"
     )

@@ -7,7 +7,7 @@ Why this file exists
 `cycle-archive-YYYYMMDD.md` once an index passed 50 cycle rows, and the shipped
 evolution prompt stated that protocol (hard cap of 50 cycle rows, the archive file,
 "archive files are excluded from the system prompt", a row-cap catch-up check). The
-host measured the mechanism's own rule set (`~/.emrg/designs/memory-index-compaction-design.md`
+host measured the mechanism's own rule set (`~/.emrg/global/designs/memory-index-compaction-design.md`
 §3): an archived row left the prompt and landed in a file the prompt never embeds, so
 the net effect was content leaving context rather than an index getting shorter — and
 the count it watched was the wrong subset (the index that reached 195 lines satisfied
@@ -92,7 +92,7 @@ BLOCK_END = "\n- Keep the file format identical"
 #: So a bare repo-relative form is a pointer the prompt's own reader cannot follow.
 DESIGN_NAME = "memory-index-compaction-design.md"
 DESIGN_RELATIVE = f".emrg/designs/{DESIGN_NAME}"
-DESIGN_RESOLVABLE = re.compile(rf"~/\.emrg/designs/{re.escape(DESIGN_NAME)}")
+DESIGN_RESOLVABLE = re.compile(rf"~/\.emrg/global/designs/{re.escape(DESIGN_NAME)}")
 
 #: The design's own threshold, §0: 行数 > 100 — deliberately not spelled here. The
 #: number this file asserts is the one the daemon counts with (`MEMORY_INDEX_ROW_CAP`,

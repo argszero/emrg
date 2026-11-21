@@ -4,7 +4,7 @@ This module converges the old ``bin/stop-emrg.cmd`` logic into one Python
 implementation (host rant 2026-08-17T10:32:27 — "不要 stop-emrg.cmd 了，
 所有动作都在 emrg stop 命令里完成"). It is the single source of truth for
 stopping the daemon / TUI / GUI / bundled git before a Windows installer
-overwrites ``~/.emrg/install`` (the pythonw daemon holds file locks that
+overwrites ``~/.emrg/global/install`` (the pythonw daemon holds file locks that
 Inno's CloseApplications cannot see).
 
 It runs in three contexts, which is why it must stay pure-stdlib:
@@ -91,7 +91,7 @@ def is_win() -> bool:
 
 def config_dir() -> Path:
     """The EMRG runtime directory (~/.emrg), matching emrg.config.config_dir."""
-    return Path(os.path.expanduser("~")) / ".emrg"
+    return Path(os.path.expanduser("~")) / ".emrg" / "global"
 
 
 def _no_window() -> dict:
@@ -533,7 +533,7 @@ def stop_daemon() -> None:
     the fixed port is the ground truth; the emrgd.pid file is gone, so liveness
     is judged by the port and the kill target is found by command line).
 
-    Also removes ``~/.emrg/emrgd.token`` once the daemon port is confirmed
+    Also removes ``~/.emrg/global/emrgd.token`` once the daemon port is confirmed
     closed (the daemon itself removes it on graceful shutdown; a force-killed
     daemon cannot, so we clean it up — the next daemon start re-asserts it).
     """
@@ -671,7 +671,7 @@ def stop_bundled_git() -> None:
         return
     ps_cmd = (
         "$ErrorActionPreference='SilentlyContinue'; "
-        "$prefix=\"$env:USERPROFILE\\.emrg\\install\\git\\*\"; "
+        "$prefix=\"$env:USERPROFILE\\.emrg\\global\\install\\git\\*\"; "
         "Get-CimInstance Win32_Process | "
         "Where-Object { $_.ExecutablePath -like $prefix -and "
         "$_.Name -in @('git.exe','ssh.exe','plink.exe','bash.exe') } | "
@@ -765,7 +765,7 @@ public static class RM {
   }
 }
 '@
-$root = Join-Path $env:USERPROFILE '.emrg\install'
+$root = Join-Path $env:USERPROFILE '.emrg\global\install'
 if (-not (Test-Path $root)) { exit 0 }
 $files = @(Get-ChildItem $root -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -915,7 +915,7 @@ def _print_rm_diag(stdout: str) -> None:
 
 _MODULE_HOLDER_PS = r"""
 $ErrorActionPreference = 'SilentlyContinue'
-$root = Join-Path $env:USERPROFILE '.emrg\install'
+$root = Join-Path $env:USERPROFILE '.emrg\global\install'
 if (-not (Test-Path $root)) { exit 0 }
 $cut = $root.Length + 1
 # Self + full ancestor chain (stop_all runs from install\python-dist\python.exe
@@ -1157,7 +1157,7 @@ def _windows_lock_owners(kill: bool, stdout: str | None = None) -> list[tuple[in
 # silently pass verify.
 
 def _iter_install_files(root: str) -> list[str]:
-    """All files under ``root`` (``~/.emrg/install``) — deterministic order."""
+    """All files under ``root`` (``~/.emrg/global/install``) — deterministic order."""
     files: list[str] = []
     for dirpath, _dirnames, filenames in os.walk(root):
         for fn in filenames:
@@ -1245,8 +1245,8 @@ _lock_probe_error: str | None = None
 
 
 def _install_root() -> str:
-    """Windows install dir (``~/.emrg/install``) — single source of truth."""
-    return os.path.join(os.path.expanduser("~"), ".emrg", "install")
+    """Windows install dir (``~/.emrg/global/install``) — single source of truth."""
+    return os.path.join(os.path.expanduser("~"), ".emrg", "global", "install")
 
 
 def check_install_writable() -> list[str]:
@@ -1558,7 +1558,7 @@ def _verify_windows_categories(skip_gui: bool = False) -> list[tuple[str, list[s
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
              "$p = Get-CimInstance Win32_Process | Where-Object { "
-             "$_.ExecutablePath -like \"$env:USERPROFILE\\.emrg\\install\\git\\*\" }; "
+             "$_.ExecutablePath -like \"$env:USERPROFILE\\.emrg\\global\\install\\git\\*\" }; "
              "if ($p) { $p | ForEach-Object { Write-Output "
              "(\"{0} (pid {1})\" -f $_.Name, $_.ProcessId) } }"],
             capture_output=True, text=True, timeout=10, **_no_window(),
@@ -1655,17 +1655,19 @@ def _pythonpath_install_warning(line: str) -> str | None:
     """Warn when any PYTHONPATH references the install dir (C-extension lock
     root cause, rant 2026-08-18T09:40:40). Pure function → unit-testable.
 
-    Matches only the install dir anchored on ``~/.emrg/install`` (both path
-    separators) — bare ``install\\lib`` substrings are NOT matched, so an
-    unrelated ``C:\\python\\install\\lib`` never warns spuriously (pm25coder
-    review note, PR #832).
+    Matches only the install dir, under either the current ``~/.emrg/global/install`` or
+    the pre-split ``~/.emrg/install`` (both path separators) — an installation upgrading
+    across the split still has the old spelling in its environment, and it names the same
+    hazard. Bare ``install\\lib`` substrings are NOT matched, so an unrelated
+    ``C:\\python\\install\\lib`` never warns spuriously (pm25coder review note, PR #832).
     """
     if not line or "PYTHONPATH" not in line or "(unset)" in line:
         return None
     lowered = line.lower()
-    for marker in (r".emrg\install", r"/.emrg/install"):
+    for marker in (r".emrg\global\install", r"/.emrg/global/install",
+                   r".emrg\install", r"/.emrg/install"):
         if marker in lowered:
-            return ("PYTHONPATH references ~/.emrg/install — any python "
+            return ("PYTHONPATH references the EMRG install directory — any python "
                     "process may import from install\\lib and lock C "
                     "extensions; clear it before running the installer")
     return None
@@ -1676,7 +1678,7 @@ class _Tee:
     (rant 2026-08-18T11:20:54). The Inno installer redirects stop_all stdout
     to a random temp dir ({tmp}\\stop_all.log) that is deleted when the
     install ends or is cancelled — the tee keeps a persistent fixed-path copy
-    (~/.emrg/logs/stop_all-<ts>.log) for post-mortem forensics. All existing
+    (~/.emrg/global/logs/stop_all-<ts>.log) for post-mortem forensics. All existing
     print() calls keep working untouched (they write to sys.stdout, which is
     replaced with a _Tee during stop_all)."""
 
@@ -1705,7 +1707,7 @@ class _Tee:
 
 
 def _stop_log_dir() -> str:
-    """Directory the dual-write stop log lands in: ``~/.emrg/logs`` by default,
+    """Directory the dual-write stop log lands in: ``~/.emrg/global/logs`` by default,
     ``$EMRG_STOP_LOG_DIR`` when set.
 
     The override exists because that path is *host state* and had no seam
@@ -1717,7 +1719,7 @@ def _stop_log_dir() -> str:
     override = os.environ.get("EMRG_STOP_LOG_DIR")
     if override:
         return override
-    return os.path.join(os.path.expanduser("~"), ".emrg", "logs")
+    return os.path.join(os.path.expanduser("~"), ".emrg", "global", "logs")
 
 
 def _open_stop_log() -> object | None:
@@ -1841,7 +1843,7 @@ def stop_all(skip_gui: bool = False) -> int:
     t0 = time.monotonic()
     # Dual-write log to a fixed path (rant 2026-08-18T11:20:54): the Inno
     # {tmp} redirect vanishes when the install ends/cancels — tee a persistent
-    # copy to ~/.emrg/logs/stop_all-<ts>.log. Every print below automatically
+    # copy to ~/.emrg/global/logs/stop_all-<ts>.log. Every print below automatically
     # lands in both. The line is also printed so the Inno-side log and the
     # operator both see the fixed location.
     _log_f = _open_stop_log()

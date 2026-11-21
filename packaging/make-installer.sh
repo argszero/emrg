@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # EMRG Phase 4 — platform installer wrapper (rant #12 §10/§13).
 #
-#   macOS:  用户级 pkg（R54/R126）。pkgbuild --install-location '/.emrg/install'
-#           + distribution currentUserHome 域 → pkg 引擎直接装 ~/.emrg/install/
+#   macOS:  用户级 pkg（R54/R126）。pkgbuild --install-location '/.emrg/global/install'
+#           + distribution currentUserHome 域 → pkg 引擎直接装 ~/.emrg/global/install/
 #           （R104: GUI EMRG.app → ~/Applications/，postinstall 复制）
 #           R67: postinstall $HOME 陷阱（提权时取控制台用户真实 HOME）
 #           R105: root 复制后 chown 回用户
@@ -42,8 +42,8 @@ case "$PLATFORM" in
     fi
     PKG_ROOT="$(mktemp -d)"
     # R126: payload 不再套 runtime/ 层 —— 直接放 runtime 内容。
-    # pkgbuild --install-location '/.emrg/install' + distribution currentUserHome 域
-    # → pkg 引擎直接装到 ~/.emrg/install/（rant 2026-08-05T18:45:35）
+    # pkgbuild --install-location '/.emrg/global/install' + distribution currentUserHome 域
+    # → pkg 引擎直接装到 ~/.emrg/global/install/（rant 2026-08-05T18:45:35）
     mkdir -p "$PKG_ROOT/payload/emrg-gui"
     cp -R "$RUNTIME/." "$PKG_ROOT/payload/"
     cp -R "$GUI_APP" "$PKG_ROOT/payload/emrg-gui/EMRG.app"
@@ -111,10 +111,10 @@ set +e
 USER="$(stat -f "%Su" /dev/console 2>/dev/null || echo "$USER")"
 HOME_DIR="$(dscl . -read "/Users/$USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
 [ -z "$HOME_DIR" ] && HOME_DIR="$HOME"
-UNINST="$HOME_DIR/.emrg/install/bin/emrg-uninstall"
+UNINST="$HOME_DIR/.emrg/global/install/bin/emrg-uninstall"
 if [ -x "$UNINST" ]; then
   # R15：卸载脚本需自设 PYTHONPATH
-  export PYTHONPATH="$HOME_DIR/.emrg/install/source:$HOME_DIR/.emrg/install/lib"
+  export PYTHONPATH="$HOME_DIR/.emrg/global/install/source:$HOME_DIR/.emrg/global/install/lib"
   "$UNINST" 2>&1
 fi
 # R102：删主 GUI（未运行时可直接删）
@@ -135,10 +135,10 @@ USER="$(stat -f "%Su" /dev/console 2>/dev/null || echo "$USER")"
 [ -z "$USER" ] && USER="$(whoami)"
 HOME_DIR="$(dscl . -read "/Users/$USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
 [ -z "$HOME_DIR" ] && HOME_DIR="$HOME"
-# $2 = 安装器传入的真实安装位置（currentUserHome 域下 = <home>/.emrg/install）
-INSTALL_DEST="${2:-$HOME_DIR/.emrg/install}"
+# $2 = 安装器传入的真实安装位置（currentUserHome 域下 = <home>/.emrg/global/install）
+INSTALL_DEST="${2:-$HOME_DIR/.emrg/global/install}"
 # R105: root 复制 → chown 回用户（否则用户无法更新 install/）
-chown -R "$USER":staff "$HOME_DIR/.emrg" 2>/dev/null || true
+chown -R "$USER":staff "$HOME_DIR/.emrg/global" 2>/dev/null || true
 # ② GUI EMRG.app → ~/Applications/（R104）
 # 落点不由 postinstall 决定：pkg 的 install-location 说了算；而组件里的 <relocate>
 # 能让 PackageKit 按 LaunchServices 把 bundle 装到别处（跑过 electron-builder 的机器上
@@ -167,11 +167,11 @@ ANCHOR_END="# <<< EMRG PATH <<<"
 if ! grep -qsF "$ANCHOR_START" "$HOME_DIR/.zshrc" "$HOME_DIR/.bash_profile" "$HOME_DIR/.bashrc" "$HOME_DIR/.profile" 2>/dev/null; then
   for RC in "$HOME_DIR/.zshrc" "$HOME_DIR/.bash_profile" "$HOME_DIR/.bashrc" "$HOME_DIR/.profile"; do
     [ -f "$RC" ] || continue
-    printf '\n%s\nexport PATH="$HOME/.emrg/install/bin:$PATH"\n%s\n' "$ANCHOR_START" "$ANCHOR_END" >> "$RC"
+    printf '\n%s\nexport PATH="$HOME/.emrg/global/install/bin:$PATH"\n%s\n' "$ANCHOR_START" "$ANCHOR_END" >> "$RC"
     chown "$USER":staff "$RC" 2>/dev/null || true
   done
   if [ ! -f "$HOME_DIR/.zshrc" ]; then
-    printf '\n%s\nexport PATH="$HOME/.emrg/install/bin:$PATH"\n%s\n' "$ANCHOR_START" "$ANCHOR_END" >> "$HOME_DIR/.zshrc"
+    printf '\n%s\nexport PATH="$HOME/.emrg/global/install/bin:$PATH"\n%s\n' "$ANCHOR_START" "$ANCHOR_END" >> "$HOME_DIR/.zshrc"
     chown "$USER":staff "$HOME_DIR/.zshrc" 2>/dev/null || true
   fi
 fi
@@ -185,8 +185,8 @@ fi
 exit 0
 EOF
     chmod +x "$PKG_ROOT/scripts/postinstall"
-    # 组件包：--install-location '/.emrg/install'（currentUserHome 域下相对 home 锚点，
-    # 解析为 ~/.emrg/install/，不再落到系统宗卷 /）
+    # 组件包：--install-location '/.emrg/global/install'（currentUserHome 域下相对 home 锚点，
+    # 解析为 ~/.emrg/global/install/，不再落到系统宗卷 /）
     # ⛔ 每个 bundle 必须在 component plist 里标成不可重定位。pkgbuild 从 payload 推断
     # 组件时为每个 .app 写 BundleIsRelocatable=true，组件 PackageInfo 里就出现
     # `<relocate><bundle id="…"/></relocate>` —— 那正是 PackageKit 覆盖 install-location
@@ -199,13 +199,13 @@ EOF
     pkgbuild --root "$PKG_ROOT/payload" --scripts "$PKG_ROOT/scripts" \
       --component-plist "$PKG_ROOT/components.plist" \
       --identifier "com.argszero.emrg" --version "$VERSION" \
-      --install-location '/.emrg/install' \
+      --install-location '/.emrg/global/install' \
       "$PKG_ROOT/EMRG-component.pkg"
     # 验收读的是组件包自己说的话，不是"我传了参数"：脚本以 2 退出（没读到）同样中止，
     # set -e 把两者都变成构建失败。
     python3 "$ROOT/scripts/check-pkg-relocation.py" "$PKG_ROOT/EMRG-component.pkg"
     # distribution：仅当前用户 home 域（enable_currentUserHome=true, localSystem=false）
-    # → 安装器显示"仅当前用户"，装到 ~/.emrg/install/，不要求系统卷权限
+    # → 安装器显示"仅当前用户"，装到 ~/.emrg/global/install/，不要求系统卷权限
     cat > "$PKG_ROOT/distribution.xml" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <installer-gui-script minSpecVersion="1">
@@ -269,7 +269,7 @@ EOF
       echo "!! win-unpacked not found (run: cd emrg/gui && npm run dist first)" >&2
       exit 1
     fi
-    # 组装 Inno payload：runtime + GUI → staging（Inno 安装到 %USERPROFILE%\.emrg\install）
+    # 组装 Inno payload：runtime + GUI → staging（Inno 安装到 %USERPROFILE%\.emrg\global\install）
     STAGE="$(mktemp -d)"
     # R98：iscc 是 Windows 原生程序，读不懂 Git Bash POSIX 路径（/d/a/emrg/...）
     # → cygpath -m 转 Windows 路径（正斜杠，iscc 可读；cygpath 仅 Git Bash 有，兜底保持原样）
@@ -294,7 +294,7 @@ EOF
 AppId={#MyAppId}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
-DefaultDirName={%USERPROFILE}\\.emrg\\install
+DefaultDirName={%USERPROFILE}\\.emrg\\global\\install
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 ; R118: ChangesEnvironment=yes — 写 HKCU\Environment\Path 后广播 WM_SETTINGCHANGE，
@@ -341,7 +341,7 @@ Name: "{userprograms}\\EMRG"; Filename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"; IconF
 Filename: "{app}\\bin\\python.exe"; Parameters: "{app}\\bin\\emrg-uninstall"; Flags: runhidden
 [UninstallDelete]
 ; R121: emrg-uninstall 脚本退出后（python.exe 已退出，无文件锁），强制删除
-; {app}（install/）— 兜底卸载彻底（rant 2026-08-05T15:35:17）
+; {app}（global/install/）— 兜底卸载彻底（rant 2026-08-05T15:35:17）
 Type: filesandordirs; Name: "{app}"
 [Code]
 { R120: HWND_BROADCAST 为 iscc 预定义常量（Compiler.ScriptFunc.pas RegisterConst），
@@ -475,7 +475,7 @@ end;
 // R130: 升级安装前优雅关闭运行中的 EMRG 进程（rant 2026-08-10T08:50:44 起，
 // 2026-08-17T10:32:27 收敛：stop-emrg.cmd 删除，全部停止逻辑进 emrg/_stop_all.py）——
 // Inno CloseApplications 看不到无窗口的 pythonw daemon（emrgd.cmd → pythonw.exe
-// -m emrg.server 常驻锁文件），覆盖 ~/.emrg\install 时卡在"停止已有进程"。
+// -m emrg.server 常驻锁文件），覆盖 ~/.emrg\global\install 时卡在"停止已有进程"。
 // PrepareToInstall 在安装开始前用 runtime 的 python 运行 bin\stop_all.py：
 // ws 协议关闭 daemon（固定端口 56031 + emrgd.token）→ 命令行扫描 -m emrg.server
 // 兜底 → taskkill /F、taskkill EMRG.exe 优雅→/F、CIM 命令行过滤 TUI、
