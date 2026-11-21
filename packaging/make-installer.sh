@@ -138,7 +138,7 @@ HOME_DIR="$(dscl . -read "/Users/$USER" NFSHomeDirectory 2>/dev/null | awk '{pri
 # $2 = 安装器传入的真实安装位置（currentUserHome 域下 = <home>/.emrg/global/install）
 INSTALL_DEST="${2:-$HOME_DIR/.emrg/global/install}"
 # R105: root 复制 → chown 回用户（否则用户无法更新 install/）
-chown -R "$USER":staff "$HOME_DIR/.emrg" 2>/dev/null || true
+chown -R "$USER":staff "$HOME_DIR/.emrg/global" 2>/dev/null || true
 # ② GUI EMRG.app → ~/Applications/（R104）
 # 落点不由 postinstall 决定：pkg 的 install-location 说了算；而组件里的 <relocate>
 # 能让 PackageKit 按 LaunchServices 把 bundle 装到别处（跑过 electron-builder 的机器上
@@ -294,7 +294,7 @@ EOF
 AppId={#MyAppId}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
-DefaultDirName={%USERPROFILE}\\.emrg\\install
+DefaultDirName={%USERPROFILE}\\.emrg\\global\\install
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 ; R118: ChangesEnvironment=yes — 写 HKCU\Environment\Path 后广播 WM_SETTINGCHANGE，
@@ -341,7 +341,7 @@ Name: "{userprograms}\\EMRG"; Filename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"; IconF
 Filename: "{app}\\bin\\python.exe"; Parameters: "{app}\\bin\\emrg-uninstall"; Flags: runhidden
 [UninstallDelete]
 ; R121: emrg-uninstall 脚本退出后（python.exe 已退出，无文件锁），强制删除
-; {app}（install/）— 兜底卸载彻底（rant 2026-08-05T15:35:17）
+; {app}（global/install/）— 兜底卸载彻底（rant 2026-08-05T15:35:17）
 Type: filesandordirs; Name: "{app}"
 [Code]
 { R120: HWND_BROADCAST 为 iscc 预定义常量（Compiler.ScriptFunc.pas RegisterConst），

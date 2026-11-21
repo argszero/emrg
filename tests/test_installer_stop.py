@@ -59,7 +59,7 @@ def test_stop_all_py_covers_daemon_gui_tui_git_verify():
     assert r"$_.ProcessId -ne {own}" in content
     assert ".format(own=own, name_re=_WIN_PY_NAME_RE)" in content
     # bundled git：install\\git\\ 前缀（系统 Git 永不命中）
-    assert r'\"$env:USERPROFILE\\.emrg\\install\\git\\*\"' in content
+    assert r'\"$env:USERPROFILE\\.emrg\\global\\install\\git\\*\"' in content
     assert "stop_bundled_git" in content
     # verify + 非零退出码（残留清单点名进程名+pid）
     assert "def verify" in content
