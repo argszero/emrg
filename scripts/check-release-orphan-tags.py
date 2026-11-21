@@ -55,10 +55,12 @@ never arrive as one value.
 
 A tag that will never have a release
 ------------------------------------
-Two tags on this repository carry no release and never will: `v0.3.8` and `v0.3.34` each lost
-their build, and a published successor replaced each one. They are recorded in
-`ABANDONED_TAGS` with the failed run and the successor that replaced it, because the
-alternative is a screen that answers `1` on every run for the rest of the repository's life --
+Some tags on this repository carry no release and never will: each lost its build, and a
+published successor replaced it. Which tags those are is `ABANDONED_TAGS`'s answer and not this
+paragraph's -- a list repeated here is a second carrier no test holds, and it goes stale the
+first time a tag is recorded. Each row carries its failed run and the successor that replaced
+it, because the alternative is a screen that answers `1` on every run for the rest of the
+repository's life --
 and an exit code that is correct, unactionable and permanent is an exit code its reader learns
 to ignore. That costs exactly the reading this screen was built to make cheap: an orphan
 nobody thought to ask about.
@@ -139,6 +141,13 @@ ABANDONED_TAGS: dict[str, str] = {
         "build-release run 41625081155 concluded failure on both Linux AppImage jobs; "
         "v0.3.35, published 2026-11-03, superseded it, so retrying the build now would "
         "publish a version older than the one hosts already run"
+    ),
+    "v0.3.70": (
+        "build-release run 44870840332 concluded failure on all four build jobs, each at its "
+        "`Smoke test (R42 temp HOME)` step, which read the home root the build had already "
+        "moved under `global/`; v0.3.71, published 2026-11-21, superseded it with that "
+        "reading fixed, so retrying the build now would publish a version older than the one "
+        "hosts already run"
     ),
 }
 
