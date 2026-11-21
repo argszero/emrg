@@ -121,11 +121,13 @@ describe("词典完整性守卫（防漂移）", () => {
   // 2026-11-20 issue #3095：右栏从只读预览改成编辑器，保存 / 脏点 / 关闭三选一 / 磁盘
   // 改动 / 只读说明 / 两个开关 / 语言与光标角标 +18 → 526 + 18 = 544；
   // 分组工具条的「刷新」「全部收起」随按钮一起删掉 → 544 - 2 = 542。
-  it("zh/en 各 542 个 key 且完全对齐", () => {
+  // 2026-11-21 issue #3123：排名面板改成挂在状态带读数下的浮层，遮挡与关闭按钮一起删掉，
+  // 「关闭」中英各 1 条 → 542 - 1 = 541。
+  it("zh/en 各 541 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(542);
-    expect(enKeys.length).toBe(542);
+    expect(zhKeys.length).toBe(541);
+    expect(enKeys.length).toBe(541);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);

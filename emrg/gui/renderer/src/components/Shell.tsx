@@ -622,8 +622,25 @@ export function Shell() {
    *
    * One segment at a time because one table can only carry one scale: the ranking is the
    * segment the host clicked on the band, and switching means clicking another reading.
+   *
+   * The clicked button travels with the segment (issue #3123), because the panel hangs
+   * under the reading that opened it rather than in the middle of the window. So the state
+   * is the pair, and the three dismissals are each one decision: the reading that opened it
+   * closes it, either of the other two switches to that one, and a click anywhere else is
+   * the panel's own outside-click to handle.
    */
-  const [rankingSegment, setRankingSegment] = useState<UsageSegment | null>(null);
+  const [ranking, setRanking] = useState<{
+    segment: UsageSegment;
+    anchor: HTMLElement | null;
+  } | null>(null);
+
+  const toggleRanking = (segment: UsageSegment, anchor: HTMLElement | null) => {
+    setRanking((prev) =>
+      // The same reading twice is a close, not a re-open: a control that cannot undo
+      // itself makes the host hunt for the one that can.
+      prev && prev.segment === segment ? null : { segment, anchor },
+    );
+  };
 
   /**
    * A session's title for the ranking's first column: the open list first (it carries the
@@ -1172,21 +1189,22 @@ export function Shell() {
         rightOpen={rightOpen}
         onToggleLeft={() => setLeftOpen((v) => !v)}
         onToggleRight={() => setRightOpen((v) => !v)}
-        onOpenRanking={setRankingSegment}
+        onOpenRanking={toggleRanking}
       />
       <UsageRanking
-        open={rankingSegment !== null}
-        segment={rankingSegment ?? "input"}
+        open={ranking !== null}
+        segment={ranking?.segment ?? "input"}
+        anchor={ranking?.anchor ?? null}
         reading={usageWindow}
         nameOf={sessionNameOf}
         onOpenSession={(sid) => {
           // Item 8: the click opens that conversation, and the panel gets out of the way
           // in the same act — a panel left standing over the session it opened reads as a
           // second thing to dismiss.
-          setRankingSegment(null);
+          setRanking(null);
           void selectSession(sid);
         }}
-        onClose={() => setRankingSegment(null)}
+        onClose={() => setRanking(null)}
       />
       <div className="react-shell-body">
         <IconRail activeView={activeView} onSwitchView={switchView} />

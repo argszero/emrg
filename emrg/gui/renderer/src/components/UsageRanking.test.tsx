@@ -1,20 +1,30 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
-import { UsageRanking } from "./UsageRanking";
+import { UsageRanking, placePanel } from "./UsageRanking";
 import { I18nProvider } from "../lib/i18n";
+import { STATUS_BAND_HEIGHT } from "../lib/cockpit";
 import type { UsageWindowReading } from "../lib/daemonBridge";
 
 /**
- * UsageRanking.test.tsx — one segment at a time (rant 2026-11-20T17:30:50).
+ * UsageRanking.test.tsx — one segment at a time, hanging under the reading that opened it.
  *
- * The panel exists because one table can be sorted by one scale: the session that spent
- * the most input is not the one that spent the most output. So what is asserted here is
- * that **everything the host reads follows the clicked segment** — the title, the fourth
- * column's name, the note under the table, the footer's reconciliation — and that the
- * order really is that segment's, not a cached one from the last time the panel opened.
+ * Two subjects, and the second is the one this file exists for twice.
  *
- * The unnamed volume is asserted as an absence from the table: it names no conversation,
- * so it has nothing to open and nothing to rank. Item 5 is that refusal.
+ * **The segment.** One table can be sorted by one scale: the session that spent the most
+ * input is not the one that spent the most output. So everything the host reads has to
+ * follow the clicked segment — title, fourth column, note, footer — and the order has to
+ * be that segment's, not a cached one from the last time the panel opened. The unnamed
+ * volume is asserted as an absence from the table: it names no conversation, so it has
+ * nothing to open and nothing to rank.
+ *
+ * **The shape (issue #3123).** It used to be a modal: a dimmed, blurred backdrop behind a
+ * centred card with a 关闭 button, and an unbounded row list that grew the card past the
+ * window edge. So what is asserted below is what replaced each part of that — the panel is
+ * placed from the clicked reading rather than from the window centre, the rows live inside
+ * a bounded scroller, the unnamed block and the reconciliation line sit **outside** that
+ * scroller, the footer is the last thing in the panel rather than a button, and the two
+ * dismissals are Escape and a click outside. A regression to any of these puts the
+ * transcript back under a dimmed backdrop without failing a single arithmetic test.
  *
  * The arithmetic itself is `lib/usageRanking.test.ts`; this file drives the DOM it lands
  * in, so a bar measured against the wrong denominator still shows up as a wrong width.
@@ -57,6 +67,25 @@ function show(
 
 function rowSids(): string[] {
   return screen.getAllByTestId("usage-row").map((row) => row.getAttribute("data-sid") ?? "");
+}
+
+/** A real element to anchor to, with a laid-out rectangle jsdom would otherwise report as 0. */
+function makeAnchor(rect: { left: number; bottom: number }): HTMLElement {
+  const anchor = document.createElement("button");
+  anchor.type = "button";
+  anchor.textContent = "in";
+  document.body.appendChild(anchor);
+  vi.spyOn(anchor, "getBoundingClientRect").mockReturnValue({
+    ...rect,
+    right: rect.left + 40,
+    top: rect.bottom - 20,
+    width: 40,
+    height: 20,
+    x: rect.left,
+    y: rect.bottom - 20,
+    toJSON: () => ({}),
+  } as DOMRect);
+  return anchor;
 }
 
 describe("UsageRanking — 一段一张表", () => {
@@ -172,10 +201,89 @@ describe("UsageRanking — 一段一张表", () => {
       "Listed sessions — + unnamed — = this segment's total —",
     );
   });
+});
 
-  it("关闭按钮交给 onClose", () => {
-    const h = show();
-    fireEvent.click(screen.getByTestId("usage-close"));
+describe("UsageRanking — 挂在读数下面的浮层，不是模态框（issue #3123）", () => {
+  it("位置由被点的那个读数算出来，不是从窗口中间算", () => {
+    const anchor = makeAnchor({ left: 300, bottom: 44 });
+    show({ anchor, segment: "input" });
+    const panel = screen.getByTestId("usage-ranking");
+    // 顶部正好在读数下沿之下 8px，左沿与它同列
+    expect(panel.style.top).toBe("52px");
+    expect(panel.style.left).toBe("300px");
+  });
+
+  it("左右两边都夹住：贴左窗沿时不越界，靠右太远时左沿收到窗口内", () => {
+    // 夹紧的规则本身，两个方向都量——只量一侧时把 Math.min 写成 Math.max 也通得过
+    expect(placePanel(null, 1024).left).toBe(10);
+    expect(placePanel({ getBoundingClientRect: () => ({ left: 0, bottom: 44 }) } as unknown as HTMLElement, 1024).left).toBe(10);
+    expect(placePanel({ getBoundingClientRect: () => ({ left: 980, bottom: 44 }) } as unknown as HTMLElement, 1024).left).toBe(330);
+    // 没有锚点时落在带子下面的内缩角上，不编一个按钮位置
+    expect(placePanel(null, 1024).top).toBe(STATUS_BAND_HEIGHT + 8);
+  });
+
+  it("窗口一改大小就重新量：量一次的坐标在拖动窗口之后是错的", () => {
+    const anchor = makeAnchor({ left: 300, bottom: 44 });
+    show({ anchor, segment: "input" });
+    expect(screen.getByTestId("usage-ranking").style.left).toBe("300px");
+    // 锚点在窗口变窄后仍在原处，左沿被窗口右边夹住
+    const original = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 800 });
+    try {
+      fireEvent(window, new Event("resize"));
+      expect(screen.getByTestId("usage-ranking").style.left).toBe("106px");
+    } finally {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: original });
+    }
+  });
+
+  it("行在一个有界的滚动盒里，页脚和没有名字的那条在盒子外面", () => {
+    show({ segment: "input" });
+    const panel = screen.getByTestId("usage-ranking");
+    const list = screen.getByTestId("usage-list");
+    // 滚动只发生在这一层：表格整个在它里面
+    expect(list).toContainElement(screen.getAllByTestId("usage-row")[0]);
+    expect(list.querySelector("table")).not.toBeNull();
+    // 盒子外面的三条都不在它里面，否则滚到哪就把对账行带出视野
+    expect(list).not.toContainElement(screen.getByTestId("usage-footer"));
+    expect(list).not.toContainElement(screen.getByTestId("usage-unnamed"));
+    expect(list).not.toContainElement(screen.getByTestId("usage-title"));
+    // 最后一件是那句等式，不是一个按钮
+    expect(panel.lastElementChild).toBe(screen.getByTestId("usage-footer"));
+  });
+
+  it("没有关闭按钮，也没有任何遮罩：既不 dim 也不 blur，也不拦窗口", () => {
+    show({ segment: "input" });
+    expect(screen.queryByTestId("usage-close")).toBeNull();
+    expect(document.querySelector(".usage-backdrop, .dialog-backdrop")).toBeNull();
+    // 不 modal：它不是 aria-modal，窗口里的东西照常可点可读
+    expect(screen.getByTestId("usage-ranking")).not.toHaveAttribute("aria-modal");
+  });
+
+  it("Esc 关掉，点面板外面关掉，点面板里面不关", () => {
+    const h = show({ segment: "input" });
+    fireEvent.click(screen.getByTestId("usage-list"));
+    expect(h.onClose).not.toHaveBeenCalled();
+    fireEvent.keyDown(window, { key: "Escape" });
     expect(h.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("点外面关闭；但点状态带上的读数不关——那是那个按钮自己的决定", () => {
+    const out = show({ segment: "input" });
+    fireEvent.click(document.body);
+    expect(out.onClose).toHaveBeenCalledTimes(1);
+
+    // 重开一次，点同一个读数：面板必须让路，否则「再点一次就是关掉」变成重新打开
+    const again = show({ segment: "input" });
+    const bandReading = document.createElement("button");
+    bandReading.setAttribute("data-band-usage", "input");
+    document.body.appendChild(bandReading);
+    fireEvent.click(bandReading);
+    expect(again.onClose).not.toHaveBeenCalled();
+  });
+
+  it("收起时什么都不画", () => {
+    show({ open: false });
+    expect(screen.queryByTestId("usage-ranking")).toBeNull();
   });
 });
