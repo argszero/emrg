@@ -1428,3 +1428,55 @@ def test_an_absent_version_file_is_not_a_refusal(monkeypatch, tmp_path):
 
     assert up._installed_versions() == ()
     assert mgr._read_local_version() == ""
+
+
+# ── the install root follows the running tree (issue #3143) ────────────────
+#
+# `INSTALL_DIR` used to be `config_dir() / "install"`, and `config_dir()` is the post-split
+# `global` root — so the directory a version installs into depended on which version was
+# asking. Measured on a host mid-window: the live tree is `~/.emrg/install` holding
+# `version.txt` = 0.3.69, while the constant answered `~/.emrg/global/install`, where
+# nothing exists. The answer for a missing `version.txt` is this module's documented
+# "nothing installed yet", which re-installs the release the host already runs.
+
+
+def test_the_install_root_follows_the_tree_it_runs_from(tmp_path):
+    """`bin/emrg`'s own rule — walk up from the thing that knows where it is."""
+    import emrg.server.upgrade as up
+
+    install = tmp_path / "install"
+    (install / "source" / "emrg").mkdir(parents=True)
+    (install / "bin").mkdir()
+    (install / "version.txt").write_text("0.3.72", encoding="utf-8")
+    entry = install / "source" / "emrg" / "__init__.py"
+    entry.write_text("", encoding="utf-8")
+
+    assert up.running_install_dir(entry) == install
+
+
+def test_a_checkout_concludes_there_is_no_install_tree(tmp_path):
+    """The other direction, and the one the rant names: no guess at a home path."""
+    import emrg.server.upgrade as up
+
+    checkout = tmp_path / "repo"
+    (checkout / "emrg").mkdir(parents=True)
+    entry = checkout / "emrg" / "__init__.py"
+    entry.write_text("", encoding="utf-8")
+
+    assert up.running_install_dir(entry) is None, (
+        "a checkout has no install tree, and the upgrader must say so rather than fall "
+        "back to a home-directory guess"
+    )
+
+
+def test_a_tree_with_a_version_and_no_bin_is_not_an_install_root(tmp_path):
+    """Both halves are required: a stray `version.txt` is not an installation."""
+    import emrg.server.upgrade as up
+
+    half = tmp_path / "half"
+    (half / "source" / "emrg").mkdir(parents=True)
+    (half / "version.txt").write_text("0.3.72", encoding="utf-8")
+    entry = half / "source" / "emrg" / "__init__.py"
+    entry.write_text("", encoding="utf-8")
+
+    assert up.running_install_dir(entry) is None

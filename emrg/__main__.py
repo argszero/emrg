@@ -160,10 +160,20 @@ def _migrate_home_root(command: str | None) -> None:
     """
     if command not in (None, "server"):
         return
-    from emrg.home_layout import migrate_into_global
+    from emrg.home_layout import half_migration_report, migrate_into_global
 
     moved = migrate_into_global()
     if not moved:
+        # A root this pass moved nothing in may still be part migrated — the pass that
+        # should have carried the register fails on the hosts that need it most — and a
+        # traceback naming a module does not tell a host that a directory moved
+        # (issue #3143). One line, and only when the repair could not reach it.
+        report = half_migration_report()
+        if report:
+            try:
+                print(report, flush=True)
+            except (OSError, ValueError):
+                pass
         return
     try:
         print(f"emrg: moved {len(moved)} global entr{'y' if len(moved) == 1 else 'ies'} "

@@ -189,9 +189,21 @@ def main() -> None:
     # ``global/logs/``. Once that exists, a host's pre-split ``logs/`` at the top level has
     # a name already taken in ``global/`` and is set aside as ``logs.pre-global`` instead
     # of landing where its reader looks — a silent split of the host's own logs.
-    from emrg.home_layout import migrate_into_global
+    from emrg.home_layout import half_migration_report, migrate_into_global
 
     migrate_into_global()
+    # The daemon is the process a GUI-only host starts, so it carries the same one-line
+    # report the CLI does: a half-migrated root is otherwise visible only as a traceback.
+    # Written to stderr directly, not logged: the migration runs *before*
+    # `_configure_logging()`, so a record here has no handler yet - the same reason the
+    # sibling guard above this writes to stderr.
+    _report = half_migration_report()
+    if _report:
+        try:
+            sys.stderr.write(_report + "\n")
+            sys.stderr.flush()
+        except (OSError, ValueError):
+            pass
 
     _configure_logging()
     _redirect_std_streams()

@@ -47,12 +47,49 @@ RELEASES_URL = "https://api.github.com/repos/argszero/emrg/releases?per_page=30"
 # Fixed work directory: isolated clone of the evolution repo — the agent can
 # freely checkout any tag without touching the evolution task's worktree.
 UPGRADE_WORK_DIR = config_dir() / "upgrade-work" / "emrg"
-INSTALL_DIR = config_dir() / "install"
-VERSION_FILE = INSTALL_DIR / "version.txt"
+def running_install_dir(start: Path | None = None) -> Path | None:
+    """The install tree this process is running from, or ``None`` in a checkout.
+
+    **Derived from the running tree, not from the root.** ``config_dir() / "install"``
+    answers a different directory depending on which version is asking, because
+    ``config_dir()`` is the post-split ``global`` root: the version running an upgrade
+    computes the pre-split path, and a version that knows about the split computes the
+    other one. An upgrade across that boundary writes the new tree — and ``version.txt``
+    with it — somewhere the running version does not look, and this module's own
+    documented answer for a missing ``version.txt`` is "nothing installed yet", which
+    re-installs the release the host is already running.
+
+    Measured on a host mid-window: the live tree is ``~/.emrg/install`` holding
+    ``version.txt`` = 0.3.69, while the constant answered ``~/.emrg/global/install``, where
+    nothing exists.
+
+    The rule is ``bin/emrg``'s own — walk up from the thing that knows where it is
+    (``PREFIX="$(dirname "$DIR")"``) rather than from the home directory. Both halves are
+    required: ``version.txt`` alone matches a stray file, ``bin/`` alone matches a tree
+    with no version. A checkout has neither, and the honest answer there is ``None``, not
+    a guess at a home path.
+    """
+    try:
+        here = Path(__file__).resolve() if start is None else Path(start).resolve()
+    except OSError:  # pragma: no cover - resolve answers a path or raises
+        return None
+    for candidate in here.parents:
+        try:
+            if (candidate / "version.txt").is_file() and (candidate / "bin").is_dir():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+INSTALL_DIR = running_install_dir()
+VERSION_FILE = INSTALL_DIR / "version.txt" if INSTALL_DIR is not None else None
 # The version the install replaced last time (written by the upgrade prompt
 # before it overwrites version.txt — PR #912). It names the one backup that a
 # failed upgrade can still be restored from, so the retention below keeps it.
-PREVIOUS_VERSION_FILE = INSTALL_DIR / "previous-version.txt"
+PREVIOUS_VERSION_FILE = (
+    INSTALL_DIR / "previous-version.txt" if INSTALL_DIR is not None else None
+)
 BACKUP_DIR = config_dir() / "upgrade-backup"
 GUI_SRC = Path(__file__).parent.parent / "gui"  # evolution repo's emrg/gui
 # Hard-coded 5-minute check interval (host: not configurable).
@@ -203,6 +240,8 @@ def _installed_versions() -> tuple:
     """
     versions = []
     for path in (VERSION_FILE, PREVIOUS_VERSION_FILE):
+        if path is None:
+            continue  # no install tree here: there is no file to ask about
         # Asked before it is opened, because the open decides whether this call returns at
         # all: `read_text` on a FIFO waits for a writer and raises nothing, so the
         # `except OSError` below could never fire and the block would be the daemon's own
@@ -319,6 +358,14 @@ class UpgradeManager:
     # ── Public: called by the daemon every 5 minutes ──────────────────────
     async def tick(self) -> None:
         if not self._config.enabled:
+            return
+        if VERSION_FILE is None:
+            # No install tree here — a checkout, or a host whose tree is somewhere this
+            # process cannot derive from its own file. Reading a version from a guessed
+            # home path is how a host gets offered the release it already runs, so this
+            # concludes "nothing to upgrade" instead of falling back. Asked of the file
+            # rather than of :data:`INSTALL_DIR`, because the file is what the rest of this
+            # module already reads and what a test replaces to stand a tree up.
             return
         if self._inflight:
             return  # re-entry guard: skip while an upgrade session runs
@@ -465,7 +512,14 @@ class UpgradeManager:
 
         Normalized without the leading 'v' — the target tag keeps its 'v'
         prefix when passed to the template/agent (git tag lookup needs it).
+
+        ``""`` when this process runs from no install tree at all — a checkout. The
+        answer is the same one a missing file gives, which is deliberate: the caller's
+        documented reading of it is "nothing installed yet", and :meth:`tick` returns
+        before ever asking when :data:`INSTALL_DIR` is ``None``.
         """
+        if VERSION_FILE is None:
+            return ""
         # Asked before it is opened, because the open decides whether this call returns at
         # all: `read_text` on a FIFO waits for a writer and raises nothing, so the
         # `except OSError` below could never fire and `tick()` would stop there instead —
@@ -535,11 +589,11 @@ class UpgradeManager:
         return template.render(
             source_repo=str(config_dir() / "evolution" / "emrg"),
             upgrade_work=str(UPGRADE_WORK_DIR),
-            install_dir=str(INSTALL_DIR),
+            install_dir=str(INSTALL_DIR) if INSTALL_DIR is not None else "",
             target_tag=target_tag,
             current_version=self._read_local_version(),
             delay_minutes=self._config.delay_minutes,
-            version_file=str(VERSION_FILE),
+            version_file=str(VERSION_FILE) if VERSION_FILE is not None else "",
             gui_src=str(GUI_SRC),
             backup_dir=str(BACKUP_DIR),
         )
