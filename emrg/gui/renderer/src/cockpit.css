@@ -1667,13 +1667,23 @@ body.col-resizing * {
   color: var(--text-1);
 }
 
+/* The 72px share column above is the bound, so the bar cannot keep a width of its own: a
+   fixed 96px bar plus a 6px gap plus the percentage is ~125px of content in a 72px cell,
+   which overflows into the tokens column or is clipped away by the cell's own overflow —
+   and the percentage, the number the bar is drawn for, is what goes first. So the bar takes
+   whatever the width the percentage leaves. */
+.usage-share-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .usage-bar {
-  display: inline-block;
-  width: 96px;
+  flex: 1 1 auto;
+  min-width: 16px;
   height: 6px;
   border-radius: 3px;
   background: var(--border);
-  vertical-align: middle;
   overflow: hidden;
 }
 
@@ -1684,7 +1694,6 @@ body.col-resizing * {
 }
 
 .usage-share {
-  margin-left: 6px;
   color: var(--text-3);
 }
 

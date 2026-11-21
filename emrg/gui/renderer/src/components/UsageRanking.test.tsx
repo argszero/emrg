@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { UsageRanking, placePanel } from "./UsageRanking";
 import { I18nProvider } from "../lib/i18n";
+import cockpitCss from "../cockpit.css?raw";
 import { STATUS_BAND_HEIGHT } from "../lib/cockpit";
 import type { UsageWindowReading } from "../lib/daemonBridge";
 
@@ -216,10 +217,34 @@ describe("UsageRanking — 挂在读数下面的浮层，不是模态框（issue
   it("左右两边都夹住：贴左窗沿时不越界，靠右太远时左沿收到窗口内", () => {
     // 夹紧的规则本身，两个方向都量——只量一侧时把 Math.min 写成 Math.max 也通得过
     expect(placePanel(null, 1024).left).toBe(10);
-    expect(placePanel({ getBoundingClientRect: () => ({ left: 0, bottom: 44 }) } as unknown as HTMLElement, 1024).left).toBe(10);
-    expect(placePanel({ getBoundingClientRect: () => ({ left: 980, bottom: 44 }) } as unknown as HTMLElement, 1024).left).toBe(330);
+    expect(placePanel(makeAnchor({ left: 0, bottom: 44 }), 1024).left).toBe(10);
+    expect(placePanel(makeAnchor({ left: 980, bottom: 44 }), 1024).left).toBe(330);
     // 没有锚点时落在带子下面的内缩角上，不编一个按钮位置
     expect(placePanel(null, 1024).top).toBe(STATUS_BAND_HEIGHT + 8);
+  });
+
+  it("上沿量的是状态带的下沿，不是按钮自己的下沿", () => {
+    // 带子 44px 高、三个读数在中间居中，所以按钮自己的下沿比带子下沿高十几像素：
+    // 照按钮算，浮层会压在它挂着的那条带子上，8px 的间隙变成负的。
+    const band = document.createElement("div");
+    band.className = "status-band";
+    vi.spyOn(band, "getBoundingClientRect").mockReturnValue({
+      bottom: 44,
+      top: 0,
+      left: 0,
+      right: 1024,
+      width: 1024,
+      height: 44,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    } as DOMRect);
+    const reading = makeAnchor({ left: 300, bottom: 31 });
+    band.appendChild(reading);
+    document.body.appendChild(band);
+    expect(placePanel(reading, 1024).top).toBe(44 + 8);
+    // 左沿仍然跟着被点的那个读数
+    expect(placePanel(reading, 1024).left).toBe(300);
   });
 
   it("窗口一改大小就重新量：量一次的坐标在拖动窗口之后是错的", () => {
@@ -255,6 +280,9 @@ describe("UsageRanking — 挂在读数下面的浮层，不是模态框（issue
   it("没有关闭按钮，也没有任何遮罩：既不 dim 也不 blur，也不拦窗口", () => {
     show({ segment: "input" });
     expect(screen.queryByTestId("usage-close")).toBeNull();
+    // 按名字问是问不住的：塞回来一个没有 testid 的按钮，上面那条断言照样是绿的（实测，
+    // 这条变异一开始就活下来了）。所以问这一整个种类——面板里不该有任何 button 元素。
+    expect(screen.getByTestId("usage-ranking").querySelectorAll("button")).toHaveLength(0);
     expect(document.querySelector(".usage-backdrop, .dialog-backdrop")).toBeNull();
     // 不 modal：它不是 aria-modal，窗口里的东西照常可点可读
     expect(screen.getByTestId("usage-ranking")).not.toHaveAttribute("aria-modal");
@@ -285,5 +313,91 @@ describe("UsageRanking — 挂在读数下面的浮层，不是模态框（issue
   it("收起时什么都不画", () => {
     show({ open: false });
     expect(screen.queryByTestId("usage-ranking")).toBeNull();
+  });
+});
+
+/**
+ * The geometry, asked of the stylesheet's own text.
+ *
+ * This environment computes no layout, so nothing above can assert a height, a column width
+ * or a sticky head: those live in CSS, and a test that cannot see CSS cannot hold them. A
+ * later edit that puts `table-layout` back to `auto` or drops the height bound would keep
+ * every DOM assertion in this file green, and only the rendered panel would show it.
+ */
+function rule(css: string, selector: string): string {
+  const at = css.indexOf(`${selector} {`);
+  if (at < 0) throw new Error(`no rule for ${selector}`);
+  return css.slice(at, css.indexOf("}", at) + 1);
+}
+
+/** A rule whose selector list wraps onto a second line: from the marker to the next brace. */
+function ruleAfter(css: string, marker: string): string {
+  const at = css.indexOf(marker);
+  if (at < 0) throw new Error(`no rule after ${marker}`);
+  return css.slice(at, css.indexOf("}", at) + 1);
+}
+
+describe("UsageRanking — 尺寸写在样式表里，就在这里问它（issue #3123）", () => {
+  it("面板 680 宽，窄窗口只能收窄它，不能把数字列挤出去（item 1）", () => {
+    const panel = rule(cockpitCss, ".usage-panel");
+    expect(panel).toContain("width: 680px");
+    expect(panel).toContain("max-width: calc(100vw - 20px)");
+    expect(panel).toContain("position: fixed");
+    // 挂在算出来的坐标上，压在对话框那一层（1000）之下
+    expect(panel).toContain("z-index: 900");
+  });
+
+  it("列表有界：表头 24 + 10×26 = 284，且不超过窗口的一半（item 6）", () => {
+    const list = rule(cockpitCss, ".usage-list");
+    expect(list).toContain("min(52vh, 284px)");
+    expect(list).toContain("overflow-y: auto");
+    // 滚到底之后滚轮不许继续滚到正文
+    expect(list).toContain("overscroll-behavior: contain");
+    // 284 = 24 + 10 × 26：三个数必须自洽，改一个就红
+    expect(24 + 10 * 26).toBe(284);
+  });
+
+  it("表头钉住、不透明：行从它下面过（item 7）", () => {
+    const head = rule(cockpitCss, ".usage-table thead th");
+    expect(head).toContain("position: sticky");
+    expect(head).toContain("top: 0");
+    // 透明的话，被它盖住的行会透出来
+    expect(head).toContain("background: var(--bg-panel)");
+    expect(head).toContain("height: 24px");
+  });
+
+  it("列宽固定，四列按读的顺序 72/70/46/54（item 9）", () => {
+    expect(rule(cockpitCss, ".usage-table")).toContain("table-layout: fixed");
+    const widths = [
+      ["2", "72px"],
+      ["3", "70px"],
+      ["4", "46px"],
+      ["5", "54px"],
+    ] as const;
+    for (const [nth, width] of widths) {
+      expect(ruleAfter(cockpitCss, `.usage-table th:nth-child(${nth}),`)).toContain(
+        `width: ${width}`,
+      );
+    }
+    // 顺序就是列的顺序：nth-child 的编号在样式表里出现的位置必须递增
+    const order = widths.map(([nth]) => cockpitCss.indexOf(`th:nth-child(${nth})`));
+    expect(order.every((at) => at > 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+  });
+
+  it("每行 26px，分隔线也算在里面（item 8）", () => {
+    const cell = rule(cockpitCss, ".usage-table td");
+    expect(cell).toContain("height: 26px");
+    // 旧写法是 padding 撑出来的；26 是靠 height 定死的，padding 一加就变成 36
+    expect(cell).toContain("padding: 0 6px");
+  });
+
+  it("占比列：条和数字一起装进 72px，条不再写死 96px", () => {
+    // 这一条是量出来的，不是想出来的：96px 的条 + 6px + 百分数字 ≈ 125，装进 72px 的
+    // 列里只会有两种下场——压到 token 列上，或者被格子的 overflow 剪掉百分数。
+    const bar = rule(cockpitCss, ".usage-bar");
+    expect(bar).not.toContain("width: 96px");
+    expect(bar).toContain("flex: 1 1 auto");
+    expect(rule(cockpitCss, ".usage-share-cell")).toContain("display: flex");
   });
 });

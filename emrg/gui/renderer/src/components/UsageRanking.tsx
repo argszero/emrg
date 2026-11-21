@@ -63,6 +63,8 @@ const PANEL_GAP = 8;
 
 /** A control the band itself renders: a click there is the band's to decide, not ours. */
 const BAND_CONTROL = "[data-band-usage]";
+/** The row the three readings sit in: the flap hangs from its bottom, not from theirs. */
+const BAND_ROW = ".status-band";
 
 export interface PanelPosition {
   left: number;
@@ -82,7 +84,14 @@ export interface PanelPosition {
 export function placePanel(anchor: HTMLElement | null, viewportWidth: number): PanelPosition {
   const rect = anchor?.getBoundingClientRect();
   const wantedLeft = rect ? rect.left : PANEL_EDGE;
-  const top = rect ? rect.bottom + PANEL_GAP : STATUS_BAND_HEIGHT + PANEL_GAP;
+  // The **band's** bottom, not the reading's. The band is 44px tall and its three readings
+  // are centred in it, so a reading's own bottom sits about 12px above the band's: hanging
+  // from it tucks the flap up over the bottom edge it hangs from, and the 8px gap below the
+  // readings becomes an overlap instead. The `STATUS_BAND_HEIGHT` fallback is that same
+  // edge, so a panel with no anchor and one with an anchor agree about where it is.
+  const band = anchor?.closest(BAND_ROW) ?? null;
+  const bottom = rect ? (band ? band.getBoundingClientRect().bottom : rect.bottom) : null;
+  const top = bottom === null ? STATUS_BAND_HEIGHT + PANEL_GAP : bottom + PANEL_GAP;
   return {
     left: Math.max(PANEL_EDGE, Math.min(wantedLeft, viewportWidth - PANEL_RIGHT_KEEP)),
     top,
@@ -197,11 +206,15 @@ export function UsageRanking({
               {nameOf?.(row.session ?? "") || row.session}
             </td>
             <td>
-              <span className="usage-bar" data-testid="usage-bar">
-                <i style={{ width: pct(row.share) === "—" ? "0%" : pct(row.share) }} />
-              </span>
-              <span className="usage-share" data-testid="usage-share">
-                {pct(row.share)}
+              {/* One flex row, so the bar shrinks to what the percentage leaves instead of
+                  overflowing the column the stylesheet pinned to 72px. */}
+              <span className="usage-share-cell">
+                <span className="usage-bar" data-testid="usage-bar">
+                  <i style={{ width: pct(row.share) === "—" ? "0%" : pct(row.share) }} />
+                </span>
+                <span className="usage-share" data-testid="usage-share">
+                  {pct(row.share)}
+                </span>
               </span>
             </td>
             <td className="usage-tokens" data-testid="usage-tokens">
