@@ -341,12 +341,12 @@ class TestTheDefaultLogDirectory:
         the stale copy — the fallback is a default, not a merge.
         """
         root = tmp_path / ".emrg"
-        (root / "logs").mkdir(parents=True)
+        (root / "global" / "logs").mkdir(parents=True)
         (root / "emrgd.log").write_text(
             host_line("2026-10-10 10:00:00", "sess-a", "the stale root copy only") + "\n",
             encoding="utf-8",
         )
-        (root / "logs" / "emrgd.log").write_text(
+        (root / "global" / "logs" / "emrgd.log").write_text(
             host_line("2026-10-10 11:00:00", "sess-a", "the live moved copy only") + "\n",
             encoding="utf-8",
         )

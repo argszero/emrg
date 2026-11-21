@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from emrg.server import __main__ as server_main  # noqa: E402
 
 #: Where `_configure_logging` puts the daemon's file, relative to the stubbed home.
-SINK = Path(".emrg") / "logs" / "emrgd.log"
+SINK = Path(".emrg") / "global" / "logs" / "emrgd.log"
 
 #: A frame payload as the library would render it, carrying a marker this test can search for.
 FRAME_RECORD = '> TEXT \'{"type":"ask","text":"MARKER-THE-HOSTS-MESSAGE"}\''

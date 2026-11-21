@@ -381,7 +381,7 @@ _FENCE_MARK = re.compile(r"^[ \t]*(?:```|~~~).*$", re.M)
 #: on the machine that wrote the citation (`check-rant-citations.py` measured what happens
 #: on a second host — 0 of 24 resolve there). `--rants` and `$EMRG_RANTS` exist because the
 #: tests must not read the host's live ledger, and because a fork's store is its own.
-DEFAULT_RANTS = Path.home() / ".emrg" / "rants.jsonl"
+DEFAULT_RANTS = Path.home() / ".emrg" / "global" / "rants.jsonl"
 
 #: An issue's origin line: the word `Origin:` (any case), the word `rant`, and a timestamp.
 #: Anchored to the start of a line under `re.M`, because R5 asks for it on the issue's

@@ -18,7 +18,7 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/argszero/emrg.git"
-REPO_DIR="${EMRG_SOURCE:-$HOME/.emrg/source}"
+REPO_DIR="${EMRG_SOURCE:-$HOME/.emrg/global/source}"
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -159,13 +159,13 @@ git_pull() {
 # ── Config template ────────────────────────────────────────
 
 generate_config_template() {
-    local cfg="$HOME/.emrg/config.toml"
+    local cfg="$HOME/.emrg/global/config.toml"
     if [[ -f "$cfg" ]]; then
         log "config already exists: $cfg"
         return
     fi
     log "generating config template: $cfg"
-    mkdir -p "$HOME/.emrg"
+    mkdir -p "$HOME/.emrg/global"
     cat > "$cfg" <<'EMRGCONF'
 [llm]
 # OpenAI-compatible API endpoint

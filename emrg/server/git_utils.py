@@ -19,7 +19,7 @@ from emrg.server.atomic import atomic_write_bytes
 # because the boundary is one fact and a second spelling of it is a second boundary.
 from emrg.tools.base import non_regular_kind
 
-INSTALL_BIN = Path.home() / ".emrg" / "install" / "bin"
+INSTALL_BIN = config_dir() / "install" / "bin"
 INSTALL_INFO = config_dir() / "install-info.json"
 
 logger = logging.getLogger(__name__)

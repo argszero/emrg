@@ -876,8 +876,12 @@ def build_tool_registry(
 class EmrgServer:
     """EMRG daemon — listens on Unix socket, processes tasks with tool calling."""
 
-    def __init__(self, llm_config: LlmConfig) -> None:
-        runtime_dir = config_dir()
+    def __init__(self, llm_config: LlmConfig, runtime_dir: Path | None = None) -> None:
+        # ``runtime_dir`` is the caller's own data root, for a server that must not
+        # touch the host's (a test's): the default is the one global root every other
+        # path derives from, so a server built without an argument always owns the real
+        # one, and the two paths kept here follow whichever root was used.
+        runtime_dir = config_dir() if runtime_dir is None else Path(runtime_dir)
         runtime_dir.mkdir(parents=True, exist_ok=True)
         # Ensure skills directory exists for evolution-installed skills
         (runtime_dir / "skills").mkdir(exist_ok=True)
@@ -1590,7 +1594,7 @@ class EmrgServer:
         ``_run_version`` and shows the upgrade banner when they differ.
         Returns "" when the file is missing (dev/standalone runs).
         """
-        path = Path.home() / ".emrg" / "install" / "version.txt"
+        path = config_dir() / "install" / "version.txt"
         # Asked before it is opened, because the open decides whether this call returns at
         # all: `read_text` on a FIFO waits for a writer and raises nothing, so the
         # `except (OSError, ValueError)` below could never fire and the block would be
@@ -8891,7 +8895,7 @@ def _write_exit_record(reason: str, exit_code: int, traceback_text: str | None) 
         logger.warning("failed to write exit record to %s: %s", _EXIT_RECORD_PATH, exc)
 
 
-_USAGE_ANCHOR_STATS_PATH = Path.home() / ".emrg" / "logs" / "usage-anchor.jsonl"
+_USAGE_ANCHOR_STATS_PATH = config_dir() / "logs" / "usage-anchor.jsonl"
 
 # Issue #1086 (heinrichneb, Dev.to 3doei — reader suggestion): a planted fire
 # that stops being scheduled rots as silently as the detector it guards. The
@@ -8900,7 +8904,7 @@ _USAGE_ANCHOR_STATS_PATH = Path.home() / ".emrg" / "logs" / "usage-anchor.jsonl"
 # overwritten timestamp line (not an append-only log) so the stateless age
 # check reads one line. Written by _refresh_usage_anchor on every round;
 # read by _planted_fire_alarm_loop at a low-frequency cadence.
-_PLANTED_FIRE_MARKER_PATH = Path.home() / ".emrg" / "logs" / "planted-fire-heartbeat"
+_PLANTED_FIRE_MARKER_PATH = config_dir() / "logs" / "planted-fire-heartbeat"
 
 # Issue #1114 (Vinh, Dev.to 3eac0): the marker above records "an LLM exchange
 # happened" (event class = per-exchange), so a crash loop that refreshes it
@@ -8911,7 +8915,7 @@ _PLANTED_FIRE_MARKER_PATH = Path.home() / ".emrg" / "logs" / "planted-fire-heart
 # overwrite format. Never written by the daily drill (#1087) — the drill
 # rides _refresh_usage_anchor only and does not finalize a tool loop.
 _PLANTED_FIRE_ROUND_COMPLETE_PATH = (
-    Path.home() / ".emrg" / "logs" / "planted-fire-round-complete")
+    config_dir() / "logs" / "planted-fire-round-complete")
 
 # Issue #1086: staleness threshold (days). ``now - last_heartbeat > N`` →
 # log the ``planted-fire-stale`` warning. Kept next to _SILENT_DRIFT_THRESHOLD

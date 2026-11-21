@@ -163,7 +163,14 @@ def test_read_table_returns_records_as_written(tmp_path):
 
 
 def _make_server() -> EmrgServer:
-    """Create a minimal EmrgServer for testing."""
+    """Create a minimal EmrgServer for testing, rooted in a scratch directory.
+
+    The root goes in as an argument rather than being patched afterwards: the server
+    derives two paths from it during construction (`_agents_log`, `_rants_log`), so a
+    server built on the host's root and repointed later has already created the host's
+    global directory and the skills directory inside it — which is how a test run wrote
+    the real `agents.yml` once (2026-08-13).
+    """
     server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
     # Point the agent log at a tmp file by default so context/message tests
     # can never write the real ~/.emrg/agents.yml (2026-08-13 leak). Tests
@@ -3919,23 +3926,23 @@ def test_pong_includes_current_version(tmp_path, monkeypatch):
     Missing file → empty string (dev runs), never an error.
     """
     import emrg.server.daemon as daemon_mod
-    install = tmp_path / ".emrg" / "install"
+    install = tmp_path / "install"
     install.mkdir(parents=True)
     (install / "version.txt").write_text("0.2.59\n", encoding="utf-8")
 
-    monkeypatch.setattr(daemon_mod.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(daemon_mod, "config_dir", lambda: tmp_path)
 
     server = _make_server()
     assert server._current_installed_version() == "0.2.59"
 
     # Missing file → "" (no crash)
     empty = tmp_path / "no-install"
-    monkeypatch.setattr(daemon_mod.Path, "home", lambda: empty)
+    monkeypatch.setattr(daemon_mod, "config_dir", lambda: empty)
     assert server._current_installed_version() == ""
 
     # Pong payload includes both fields (14:38:27 refactor: current_version =
     # in-memory run version captured at startup; installed_version = live read)
-    monkeypatch.setattr(daemon_mod.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(daemon_mod, "config_dir", lambda: tmp_path)
     writer = _FakeWriter()
     import asyncio
     asyncio.run(server._process_message({"type": "ping"}, writer))
@@ -3955,11 +3962,11 @@ def test_pong_run_vs_installed_version(tmp_path, monkeypatch):
     previous-version.txt is no longer used for the judgment.
     """
     import emrg.server.daemon as daemon_mod
-    install = tmp_path / ".emrg" / "install"
+    install = tmp_path / "install"
     install.mkdir(parents=True)
     (install / "version.txt").write_text("0.2.61\n", encoding="utf-8")
 
-    monkeypatch.setattr(daemon_mod.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(daemon_mod, "config_dir", lambda: tmp_path)
 
     server = _make_server()
     # _run_version captured at startup — mirrors the daemon's running code
@@ -4298,7 +4305,7 @@ def test_pong_carries_the_effective_vision(tmp_path, monkeypatch):
     """
     import emrg.server.daemon as daemon_mod
 
-    monkeypatch.setattr(daemon_mod.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(daemon_mod, "config_dir", lambda: tmp_path)
     server = _vision_server(
         [{"name": "blind", "model": "deepseek-chat", "vision": False}],
         current_vision=True, vision_default=True,
@@ -4815,9 +4822,9 @@ def test_the_installed_version_reader_does_not_open_a_named_pipe(tmp_path, monke
     import emrg.server.daemon as daemon_mod
 
     root = tmp_path / "home"
-    install = root / ".emrg" / "install"
+    install = root / "install"
     install.mkdir(parents=True)
-    monkeypatch.setattr(daemon_mod.Path, "home", lambda: root)
+    monkeypatch.setattr(daemon_mod, "config_dir", lambda: root)
     server = _make_server()
 
     fifo = install / "version.txt"
@@ -4844,10 +4851,10 @@ def test_the_daemon_still_constructs_with_a_named_pipe_at_the_installed_version(
     import emrg.server.daemon as daemon_mod
 
     root = tmp_path / "home"
-    install = root / ".emrg" / "install"
+    install = root / "install"
     install.mkdir(parents=True)
     os.mkfifo(install / "version.txt")
-    monkeypatch.setattr(daemon_mod.Path, "home", lambda: root)
+    monkeypatch.setattr(daemon_mod, "config_dir", lambda: root)
 
     server = within(DEADLINE_SECONDS, _make_server)
 
@@ -4867,10 +4874,10 @@ def test_a_directory_at_the_installed_version_is_still_no_version(tmp_path, monk
     import emrg.server.daemon as daemon_mod
 
     root = tmp_path / "home"
-    install = root / ".emrg" / "install"
+    install = root / "install"
     install.mkdir(parents=True)
     (install / "version.txt").mkdir()
-    monkeypatch.setattr(daemon_mod.Path, "home", lambda: root)
+    monkeypatch.setattr(daemon_mod, "config_dir", lambda: root)
     server = _make_server()
     caplog.set_level(logging.WARNING, logger="emrg.server.daemon")
 

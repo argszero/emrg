@@ -80,6 +80,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from emrg.config import config_dir, logs_dir  # noqa: E402
+from emrg.home_layout import home_root  # noqa: E402
 from emrg.logfiles import legacy_log_names  # noqa: E402
 
 #: Where the daemon writes its received-message record, and where it keeps the index
@@ -89,7 +90,7 @@ from emrg.logfiles import legacy_log_names  # noqa: E402
 #: root — which is the failure mode the rant names for every tail-reader. A host whose
 #: *running* daemon predates that move is covered by `config_root_log_dir()` below.
 DEFAULT_LOG_DIR = logs_dir()
-DEFAULT_INDEX = Path.home() / ".emrg" / "sessions_index.json"
+DEFAULT_INDEX = Path.home() / ".emrg" / "global" / "sessions_index.json"
 
 #: The file names this instrument reads, as a prefix: `emrgd.log` and its rotation
 #: backups. Kept in step with `read_log`'s glob by construction — the fallback below
@@ -262,7 +263,9 @@ def config_root_log_dir() -> Path | None:
     `None` when the root holds none of them, so the caller reports the empty default
     instead of silently reading a directory that has nothing to do with this question.
     """
-    root = config_dir()
+    # The home-level root, not the config dir: a daemon that predates the split
+    # wrote ``~/.emrg/emrgd.log``, and ``config_dir()`` is ``~/.emrg/global`` now.
+    root = home_root()
     if any((root / name).is_file()
            for name in legacy_log_names() if name.startswith(EMRGD_LOG_PREFIX)):
         return root

@@ -57,6 +57,7 @@ from emrg.tools.base import non_regular_kind
 # Where this instance's user skills live is `config_dir()/skills`, the same directory the
 # installer publishes into and the catalog is read from — one derivation, three readers,
 # and a test can redirect it in one place (`installer._resolve_dest` already does).
+from emrg import home_layout
 from emrg.config import config_dir
 
 logger = logging.getLogger(__name__)
@@ -383,10 +384,12 @@ ROOT_AGENT = "agent"
 def default_skill_roots() -> list[tuple[str, Path]]:
     """The three instance-wide roots and their labels, **lowest precedence first**.
 
-    They hang off ``config_dir()``'s parent rather than a second ``Path.home()`` call, and
-    that is load-bearing rather than tidy: `config_dir()` *is* ``~/.emrg``, so its parent is
-    the home the other two sit in — one derivation, so a host that redirects the instance
-    root redirects all three at once. That is what keeps a suite honest about the fourth
+    They hang off the home-level ``.emrg`` root's parent rather than a second
+    ``Path.home()`` call, and that is load-bearing rather than tidy: that root *is*
+    ``~/.emrg``, so its parent is the home the other two sit in — one derivation, so a
+    host that redirects the instance root redirects all three at once. It is *not*
+    ``config_dir()``'s parent: that one is the ``global/`` subdirectory's parent, which
+    since the split is the home-level root itself. That is what keeps a suite honest about the fourth
     argument of this rule: measured on the development host, `~/.claude/skills` holds 28
     skills and `~/.agents/skills` 27 of the same names, so a test that inherited them would
     answer one way here and another way on a runner with none.
@@ -394,7 +397,7 @@ def default_skill_roots() -> list[tuple[str, Path]]:
     The agent's own root is deliberately *not* in this list: it depends on the session, and
     `load_skills_with_shadows` reads it last so that it beats all three.
     """
-    home = config_dir().parent
+    home = home_layout.home_root().parent
     return [
         (ROOT_CLAUDE, home / ".claude" / "skills"),
         (ROOT_AGENTS, home / ".agents" / "skills"),

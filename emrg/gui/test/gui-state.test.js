@@ -38,7 +38,7 @@ after(() => {
 
 test("gui-state: 路径固定在 <home>/.emrg/gui_state.json", () => {
   const h = tmpHome();
-  assert.strictEqual(guiStatePath(h), path.join(h, ".emrg", "gui_state.json"));
+  assert.strictEqual(guiStatePath(h), path.join(h, ".emrg", "global", "gui_state.json"));
 });
 
 test("gui-state: sanitize 跳过失效条目（缺 sid/projectPath）", () => {

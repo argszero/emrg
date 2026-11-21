@@ -30,12 +30,13 @@ const WebSocket = require("ws");
 // 规范位置 ~/.emrg（daemon.py config_dir() = Path.home()/".emrg"；connect.py 无条件
 // 读 ~/.emrg/emrgd.token）。projectDir 参数与 G129 回退逻辑随概念一起清理（#884 后
 // emrgd.token 已是唯一规范位置，回退冗余）。
-const TOKEN_FILE = () => path.join(os.homedir(), ".emrg", "emrgd.token");
-// Rant 2026-10-09T14:20:18: the application-level logs live in ~/.emrg/logs, one
+const EMRG_GLOBAL = () => path.join(os.homedir(), ".emrg", "global");
+const TOKEN_FILE = () => path.join(EMRG_GLOBAL(), "emrgd.token");
+// Rant 2026-10-09T14:20:18: the application-level logs live in ~/.emrg/global/logs, one
 // derivation shared with the Python side (`emrg/config.py` logs_dir()). JS cannot
 // import Python, so the rule is written once per side and pinned equal by
 // tests/test_log_dir_pairing.py — the same treatment EMRGD_PORT below gets.
-const EMRG_LOGS_DIR = () => path.join(os.homedir(), ".emrg", "logs");
+const EMRG_LOGS_DIR = () => path.join(EMRG_GLOBAL(), "logs");
 const EMRGD_LOG = () => path.join(EMRG_LOGS_DIR(), "emrgd.log");
 // Issue #1276 item 4：子进程**自己的 stderr** 落到这里。emrgd 的日志 handler 是
 // 子进程内部才装的（`emrg/server/__main__.py:_configure_logging`），所以"还没走到
@@ -546,7 +547,7 @@ class DaemonClient {
       const tail = this._readLogTail(15, NO_LOG_MARK);
       throw new Error(
         `daemon failed to start after ${MAX_SPAWN_ATTEMPTS} attempts — ` +
-        `please start it manually ('emrg server') and check ~/.emrg/logs/emrgd.log` +
+        `please start it manually ('emrg server') and check ~/.emrg/global/logs/emrgd.log` +
         (tail ? `\n  emrgd.log tail (${EMRGD_LOG()}):\n${tail}` : "")
       );
     }

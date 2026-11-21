@@ -133,9 +133,9 @@ class TestInterpreterDiscovery:
 
     def test_candidates_cover_the_documented_layout(self, tmp_path):
         names = [p.as_posix() for p in check.interpreter_candidates(tmp_path)]
-        assert any(n.endswith("/.emrg/install/bin/python") for n in names)
-        assert any(n.endswith("/.emrg/install/bin/python.exe") for n in names)
-        assert any(n.endswith("/.emrg/install/bin/python-dist/bin/python3") for n in names)
+        assert any(n.endswith("/.emrg/global/install/bin/python") for n in names)
+        assert any(n.endswith("/.emrg/global/install/bin/python.exe") for n in names)
+        assert any(n.endswith("/.emrg/global/install/bin/python-dist/bin/python3") for n in names)
 
     def test_an_install_that_is_not_there_raises_unmeasured(self, tmp_path):
         with pytest.raises(check.Unmeasured) as exc:
@@ -148,7 +148,7 @@ class TestInterpreterDiscovery:
         assert "--python names nothing" in str(exc.value)
 
     def test_the_first_existing_candidate_wins(self, tmp_path):
-        install = tmp_path / ".emrg" / "install" / "bin"
+        install = tmp_path / ".emrg" / "global" / "install" / "bin"
         install.mkdir(parents=True)
         (install / "python").write_text("#!/bin/sh\n", encoding="utf-8")
         assert check.find_interpreter(tmp_path, None) == install / "python"

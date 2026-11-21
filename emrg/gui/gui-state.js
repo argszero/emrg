@@ -26,7 +26,7 @@ const path = require("path");
 const DEFAULT_CAP = 20;
 
 function guiStatePath(homeDir) {
-  return path.join(homeDir, ".emrg", "gui_state.json");
+  return path.join(homeDir, ".emrg", "global", "gui_state.json");
 }
 
 function isOpenEntry(s) {

@@ -91,7 +91,7 @@ def is_win() -> bool:
 
 def config_dir() -> Path:
     """The EMRG runtime directory (~/.emrg), matching emrg.config.config_dir."""
-    return Path(os.path.expanduser("~")) / ".emrg"
+    return Path(os.path.expanduser("~")) / ".emrg" / "global"
 
 
 def _no_window() -> dict:
@@ -1246,7 +1246,7 @@ _lock_probe_error: str | None = None
 
 def _install_root() -> str:
     """Windows install dir (``~/.emrg/install``) — single source of truth."""
-    return os.path.join(os.path.expanduser("~"), ".emrg", "install")
+    return os.path.join(os.path.expanduser("~"), ".emrg", "global", "install")
 
 
 def check_install_writable() -> list[str]:
@@ -1717,7 +1717,7 @@ def _stop_log_dir() -> str:
     override = os.environ.get("EMRG_STOP_LOG_DIR")
     if override:
         return override
-    return os.path.join(os.path.expanduser("~"), ".emrg", "logs")
+    return os.path.join(os.path.expanduser("~"), ".emrg", "global", "logs")
 
 
 def _open_stop_log() -> object | None:

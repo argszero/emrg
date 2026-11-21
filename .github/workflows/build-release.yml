@@ -374,7 +374,7 @@ jobs:
       #   • file source doesn't exist  from=.../emrg/emrg/dist/runtime
       #   • default Electron icon is used  reason=application icon is not set
       # 后果集中在 Linux：main.js 的 ensureAppImageExtracted 首启复制 resourcesPath/runtime 到
-      # ~/.emrg/install，缺它则装完的 AppImage 没有运行时。这一步在构建读取之前断言引用可解析
+      # ~/.emrg/global/install，缺它则装完的 AppImage 没有运行时。这一步在构建读取之前断言引用可解析
       # （宿主自查同一条命令，见脚本 --help；PR 阶段由 emrg/gui/test/build-config.test.js 钉住）。
       - name: Assert electron-builder sources resolve (emrg/gui)
         shell: bash
@@ -528,7 +528,7 @@ jobs:
           rc=0
           uv run --no-sync python3 scripts/check-pkg-relocation.py "$PKG" || rc=$?
           if [ "$rc" -eq 1 ]; then
-            echo "::error::$PKG lets PackageKit relocate one of its bundles (the identifiers are printed above), so the GUI lands wherever LaunchServices points instead of ~/.emrg/install — packaging/make-installer.sh must mark every bundle BundleIsRelocatable=false in the component plist before pkgbuild."
+            echo "::error::$PKG lets PackageKit relocate one of its bundles (the identifiers are printed above), so the GUI lands wherever LaunchServices points instead of ~/.emrg/global/install — packaging/make-installer.sh must mark every bundle BundleIsRelocatable=false in the component plist before pkgbuild."
           elif [ "$rc" -eq 2 ]; then
             echo "::error::no component could be read out of $PKG — 'could not measure' is not a pass: the package must carry a component PackageInfo whose <relocate> this tool can parse."
           elif [ "$rc" -ne 0 ]; then

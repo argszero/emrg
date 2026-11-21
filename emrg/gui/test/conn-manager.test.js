@@ -52,13 +52,13 @@ let origUserProfile = null;
 
 function setupTempHome() {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "emrg-conn-test-"));
-  fs.mkdirSync(path.join(tmpHome, ".emrg"), { recursive: true });
+  fs.mkdirSync(path.join(tmpHome, ".emrg", "global"), { recursive: true });
   origHome = process.env.HOME;
   origUserProfile = process.env.USERPROFILE;
   process.env.HOME = tmpHome;
   process.env.USERPROFILE = tmpHome;
   // 预写 port 文件（模拟已运行 daemon）——路径必须落在 tmpHome 内
-  const portFile = path.join(tmpHome, ".emrg", "emrgd.token");
+  const portFile = path.join(tmpHome, ".emrg", "global", "emrgd.token");
   assert.ok(
     path.resolve(portFile).startsWith(path.resolve(tmpHome) + path.sep),
     "port file escapes tmpHome",

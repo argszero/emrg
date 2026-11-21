@@ -198,8 +198,18 @@ def _as_bool(raw: str, default: bool) -> bool:
 
 
 def config_dir() -> Path:
-    """Returns the EMRG data directory (~/.emrg)."""
-    return Path.home() / ".emrg"
+    """Returns the global data root (``~/.emrg/global``).
+
+    **The one derivation of the root.** Every path EMRG owns hangs off this: the config,
+    the register, the task table, the rant log, the usage ledger, the install tree, the
+    upgrade work and backup trees, the log directory and the global skill root. The
+    home-level ``.emrg`` above it also holds a session's own state when an agent is
+    started in the home directory, which is the ``<cwd>/.emrg`` rule and not this one —
+    :mod:`emrg.home_layout` owns that split and the migration into it.
+    """
+    from emrg.home_layout import global_dir
+
+    return global_dir()
 
 
 def logs_dir() -> Path:
@@ -317,9 +327,8 @@ def migrate_legacy_registry(base: Path | None = None) -> bool:
 
 
 def config_path() -> Path:
-    """Returns the config file path."""
-    home = Path.home()
-    return home / ".emrg" / "config.toml"
+    """Returns the config file path, under the global root like everything else."""
+    return config_dir() / "config.toml"
 
 
 

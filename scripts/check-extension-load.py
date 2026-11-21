@@ -112,7 +112,7 @@ def interpreter_candidates(home: Path) -> list[Path]:
     `bin/python-dist/`. The list is data rather than a decision so a candidate that
     appears later cannot silently lose to one that exists but is not the bundle's.
     """
-    install = home / ".emrg" / "install" / "bin"
+    install = home / ".emrg" / "global" / "install" / "bin"
     return [
         install / "python",
         install / "python3",
@@ -310,7 +310,7 @@ def main() -> int:
     parser.add_argument(
         "--python",
         default=None,
-        help="the interpreter to measure (default: the bundled one under ~/.emrg/install)",
+        help="the interpreter to measure (default: the bundled one under ~/.emrg/global/install)",
     )
     parser.add_argument("--wheel", default=DEFAULT_WHEEL, help=f"the wheel to install (default: {DEFAULT_WHEEL})")
     parser.add_argument("--module", default=DEFAULT_MODULE, help=f"its C module to import (default: {DEFAULT_MODULE})")

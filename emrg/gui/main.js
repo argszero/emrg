@@ -88,7 +88,7 @@ function main() {
     const known = openSessions.get(sessionId)?.projectPath;
     if (known) return known;
     try {
-      const idx = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".emrg", "sessions_index.json"), "utf8"));
+      const idx = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".emrg", "global", "sessions_index.json"), "utf8"));
       const dir = idx[sessionId];
       if (typeof dir === "string" && dir) {
         // dir = <cwd>/.emrg/sessions/<sid> → cwd = 上溯 3 级（兼容 home 级会话 ~/.emrg/sessions/…）
@@ -204,7 +204,7 @@ function main() {
 
   function restoreWindowBounds(w) {
     try {
-      const p = path.join(os.homedir(), ".emrg", "gui-window.json");
+      const p = path.join(os.homedir(), ".emrg", "global", "gui-window.json");
       if (fs.existsSync(p)) {
         const b = JSON.parse(fs.readFileSync(p, "utf8"));
         w.setBounds(b);
@@ -213,7 +213,7 @@ function main() {
   }
   function saveWindowBounds(w) {
     try {
-      const p = path.join(os.homedir(), ".emrg", "gui-window.json");
+      const p = path.join(os.homedir(), ".emrg", "global", "gui-window.json");
       fs.mkdirSync(path.dirname(p), { recursive: true });
       fs.writeFileSync(p, JSON.stringify(w.getBounds()), { mode: 0o600 });
     } catch (e) { logger.debug(`[gui] window save failed: ${e.message}`); }
@@ -224,7 +224,7 @@ function main() {
   function createLogger() {
     // Rant 2026-10-09T14:20:18: the application log directory, shared with the
     // daemon and pinned by tests/test_log_dir_pairing.py (JS cannot import Python).
-    const logDir = path.join(os.homedir(), ".emrg", "logs");
+    const logDir = path.join(os.homedir(), ".emrg", "global", "logs");
     const logPath = path.join(logDir, "emrg-gui.log");
     let fd = null;
     try {
@@ -247,7 +247,7 @@ function main() {
 
   // ── config 工具（G60/G69/G116/G117）────────────────────
 
-  function configPath() { return path.join(os.homedir(), ".emrg", "config.toml"); }
+  function configPath() { return path.join(os.homedir(), ".emrg", "global", "config.toml"); }
 
   // Phase 4（rant #12 §4 R108）：打包模式无 .venv/PATH python → 内联模板直接生成
   // （与 emrg/config.py ensure_config() 105-130 行同源）；源码模式复用 ensure_config()。
@@ -1479,7 +1479,7 @@ vision = false
       writeConfig(toml);
       // 保存后不需要重启：运行中的 daemon 自己监视该文件，并在原地应用新版本
       // （emrg/server/config_reload.py，2s 轮询读字节+sha256；变更键会写进
-      //  ~/.emrg/logs/emrgd.log 的 "config.toml reloaded: changed=…" 一行）。
+      //  ~/.emrg/global/logs/emrgd.log 的 "config.toml reloaded: changed=…" 一行）。
       // 旧机制已删除：客户端曾比对 config mtime 并 SIGTERM/SIGKILL 整个 daemon
       // ——一次配置编辑不该杀掉正在跑的调度器（含演化周期）与所有已连客户端。
       if (wasRunning) {
@@ -2000,7 +2000,7 @@ vision = false
   function ensureAppImageExtracted() {
     if (process.platform !== "linux" || !process.env.APPIMAGE) return;
     const home = os.homedir();
-    const installBin = path.join(home, ".emrg", "install", "bin");
+    const installBin = path.join(home, ".emrg", "global", "install", "bin");
     if (fs.existsSync(installBin)) return; // 已解压
     const runtimeSrc = path.join(process.resourcesPath, "runtime");
     if (!fs.existsSync(runtimeSrc)) return;
@@ -2011,12 +2011,12 @@ vision = false
       if (win && !win.isDestroyed()) {
         win.webContents.send("emrg:event", { type: "status", data: { connected: false, installing: true } });
       }
-      fs.cpSync(runtimeSrc, path.join(home, ".emrg", "install"), { recursive: true });
+      fs.cpSync(runtimeSrc, path.join(home, ".emrg", "global", "install"), { recursive: true });
       const link = path.join(home, ".local", "bin", "emrg");
       if (!fs.existsSync(link)) {
-        fs.symlinkSync(path.join(home, ".emrg", "install", "bin", "emrg"), link, "file");
+        fs.symlinkSync(path.join(home, ".emrg", "global", "install", "bin", "emrg"), link, "file");
       }
-      logger.info("[gui] AppImage runtime extracted to ~/.emrg/install/");
+      logger.info("[gui] AppImage runtime extracted to ~/.emrg/global/install/");
     } catch (e) {
       logger.error("[gui] AppImage extraction failed (retry on next launch)", e);
     } finally {

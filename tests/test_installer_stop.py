@@ -339,7 +339,7 @@ def test_make_installer_iss_writes_pyvenv_cfg():
     smoke = _read("packaging/smoke-test.sh")
     assert 'if [ -n "${WINDIR:-}" ]; then' in smoke
     assert "printf 'home = %s\\\\python-dist\\n'" in smoke
-    assert 'PY_BIN="$HOME/.emrg/install/bin/python.exe"' in smoke
+    assert 'PY_BIN="$HOME/.emrg/global/install/bin/python.exe"' in smoke
     # upgrade_prompt.j2：本地等价安装也要写 bin\\pyvenv.cfg（绝对 home）
     prompt = _read("emrg/server/prompts/upgrade_prompt.j2")
     assert "bin/pyvenv.cfg" in prompt

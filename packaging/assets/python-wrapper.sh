@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # EMRG bundled Python wrapper (POSIX) — rant 2026-08-24T21:46:53.
 #
-# Installed at ~/.emrg/install/bin/python (and python3) in place of the former
+# Installed at ~/.emrg/global/install/bin/python (and python3) in place of the former
 # symlink `python -> python-dist/bin/python3.13` (R82).
 #
 # Why a wrapper instead of a symlink:

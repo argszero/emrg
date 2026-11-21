@@ -135,6 +135,8 @@ def test_the_announcement_comes_from_the_real_client_start_path(
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
+    import emrg.home_layout as _layout
+    monkeypatch.setattr(_layout, "home_root", lambda: home / ".emrg")
     monkeypatch.setattr(dm, "cleanup_server", lambda: None)
     monkeypatch.setattr(dm, "is_running", lambda: True)
     proc = MagicMock(pid=4321)
@@ -148,7 +150,7 @@ def test_the_announcement_comes_from_the_real_client_start_path(
     # host's: that channel is what names a cause when the child dies early.
     _args, kwargs = dm.asyncio.create_subprocess_exec.await_args
     assert kwargs["stderr"] is not subprocess.DEVNULL
-    err = home / ".emrg" / "logs" / "emrgd-start.err"
+    err = home / ".emrg" / "global" / "logs" / "emrgd-start.err"
     assert err.exists(), "the captured stderr lives where the diagnostic reads it"
 
 
@@ -163,6 +165,8 @@ def test_the_announcement_is_withheld_until_the_probe_answers(
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
+    import emrg.home_layout as _layout
+    monkeypatch.setattr(_layout, "home_root", lambda: home / ".emrg")
     monkeypatch.setattr(dm, "cleanup_server", lambda: None)
     monkeypatch.setattr(dm, "is_running", lambda: False)
     monkeypatch.setattr(dm.asyncio, "sleep", AsyncMock())  # no real wait, same path
