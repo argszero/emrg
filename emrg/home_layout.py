@@ -25,7 +25,15 @@ loose files again: there is no list to fall off.
 
 Both functions here are pure or opt-in. :func:`home_root` and :func:`global_dir` answer
 paths and touch nothing; :func:`migrate_into_global` is the one call that moves a host's
-files, and it is called from the daemon's startup and nowhere else.
+files, and it is called from the two processes that can be first to touch the root: the
+daemon's own entry point (``emrg/server/__main__.py``, which every launch path ends in —
+the GUI and the TUI both spawn ``python -m emrg.server``), and ``emrg``'s CLI start, whose
+commands read the config before any daemon is up. Both calls are the same function, and a
+second one finds nothing left to move. ``stop`` and ``update`` are deliberately left out:
+they are the paths an installation is repaired or replaced through, and a move underneath
+them would be a second change while the first is in flight. In every caller the call sits
+**before** anything that would create a directory inside ``global/`` — the name it would
+take is the name a top-level entry of that name is about to move into.
 """
 
 from __future__ import annotations
@@ -122,9 +130,9 @@ def migrate_into_global(root: Path | None = None) -> list[str]:
     has its newcomer set aside beside it (:data:`SET_ASIDE_SUFFIX`) rather than replacing
     a file with a directory.
 
-    Called from the daemon's startup, which is the one process that owns this root —
-    never from :func:`global_dir` or any other path answer, so that asking where
-    something lives never moves a host's files.
+    Called from the daemon's entry point and from ``emrg``'s CLI start — the processes that
+    can be first to touch this root — and never from :func:`global_dir` or any other path
+    answer, so that asking where something lives never moves a host's files.
     """
     base = home_root() if root is None else Path(root)
     pending = pending_moves(base)

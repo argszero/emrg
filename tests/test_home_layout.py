@@ -172,3 +172,71 @@ def test_a_name_the_root_owns_is_never_a_migration_subject(tmp_path, name):
         _tree(tmp_path, name)
 
     assert home_layout.pending_moves(tmp_path) == []
+
+
+def test_a_host_log_directory_lands_where_its_reader_looks(tmp_path):
+    """The ordering premise, as a behaviour rather than a comment.
+
+    `global/logs/` is the daemon's log directory, and the logging setup *creates* it. If
+    that happens before the move, the host's pre-split `logs/` at the top level finds the
+    name taken and is set aside as `logs.pre-global` — its reader then looks at an empty
+    directory while the host's own logs sit one name over. So a run that migrates first is
+    the only run in which `global/logs/` receives them.
+    """
+    _tree(tmp_path, "logs/")
+    assert not (tmp_path / "global" / "logs").exists()
+
+    home_layout.migrate_into_global(tmp_path)
+
+    assert (tmp_path / "global" / "logs" / "logs.txt").is_file()
+    assert not (tmp_path / "global" / "logs.pre-global").exists()
+
+
+def test_the_daemon_entry_point_runs_the_migration_first():
+    """Every launch path ends at `python -m emrg.server`, so the migration has to be there.
+
+    Not a restatement of the CLI's call: the GUI spawns this entry point directly
+    (`emrg/gui/daemon_client.js` — `["-m", "emrg.server"]`) and so does the TUI client
+    (`emrg/client/daemon_manager.py`), with no `emrg` command in between. Without the call
+    here, an upgraded host's daemon reads `global/config.toml`, finds the config still at
+    its pre-split path, and `load_config()` raises — the daemon exits before binding, and
+    every client reports a server that will not start. Measured: CI run 44860021369, the
+    `test` leg's GUI integration suite, seven tests on `daemon token file timeout`.
+
+    A source reading rather than a drive of `main()`, and the reason is a red line: the
+    function below the call migrates the host's register, task table and rant ledger, then
+    starts a real server. Driving it would touch a live host's files to prove an ordering.
+    What is asserted is the call itself and that it precedes the logging setup that would
+    otherwise create `global/logs/` first — the two facts that failed.
+    """
+    from emrg.server import __main__ as daemon_entry
+
+    source = Path(daemon_entry.__file__).read_text(encoding="utf-8")
+    main_body = source.split("def main() -> None:", 1)[1]
+
+    # Statement lines, not any occurrence: the first draft of this guard compared raw
+    # offsets and read the *comment* above the call — which names `_configure_logging()`
+    # while explaining why it comes second — so it reported the call after the setup when
+    # the code had it before. A subject that cannot tell a call from prose about a call
+    # answers for neither.
+    statements = [line.strip() for line in main_body.splitlines()
+                  if not line.strip().startswith("#")]
+
+    def first_statement(call: str) -> int:
+        for position, line in enumerate(statements):
+            if line == call:
+                return position
+        return -1
+
+    migrate_at = first_statement("migrate_into_global()")
+    logging_at = first_statement("_configure_logging()")
+
+    assert migrate_at != -1, (
+        "the daemon entry point does not call migrate_into_global() — every client spawns "
+        "this module, so an upgraded host's daemon would find no config and exit"
+    )
+    assert logging_at != -1, "the logging setup is not called from main() any more"
+    assert migrate_at < logging_at, (
+        "the migration runs after the logging setup, which creates global/logs/ first — so "
+        "a host's pre-split logs/ would be set aside as logs.pre-global instead of moved"
+    )

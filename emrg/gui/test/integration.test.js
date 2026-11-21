@@ -61,7 +61,15 @@ if (SKIP) {
 
 // ── 环境 ─────────────────────────────────────────────────
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "emrg-gui-integ-"));
-const tmpEmrg = path.join(tmp, ".emrg");
+// The instance's own data root — one level below the home-level `.emrg`, because that is
+// where the daemon reads its config from (`emrg/config.py::config_dir()`). Written at
+// `~/.emrg/config.toml` before this fixture was corrected, which is the *pre-split*
+// location: nothing reads it there, and `load_config()` raises when its own file is
+// absent, so the isolated daemon exited before binding a port and every test in this file
+// reported `daemon token file timeout` — fifteen seconds, no cause named. Measured on CI
+// run 44860021369 (`test` leg, all seven tests). A fresh install has exactly this shape,
+// so writing it here is also the honest fixture.
+const tmpEmrg = path.join(tmp, ".emrg", "global");
 fs.mkdirSync(tmpEmrg, { recursive: true });
 fs.writeFileSync(path.join(tmpEmrg, "config.toml"),
   `[llm]\nbase_url = "http://localhost:9999/v1"\napi_key = "test-key"\nmodel = "test-model"\n`);
@@ -95,6 +103,27 @@ function findPython() {
 let daemonProc = null;
 let client = null;
 
+function daemonLogTail() {
+  // What a startup failure leaves behind, and the only place it does: this suite spawns
+  // with `stdio: "ignore"` on purpose, so without this tail a failed daemon leaves one
+  // word — "timeout" — for a cause that is sitting in its own log. Absent logs are a
+  // reading too, and it is the default: a child that dies before installing a handler
+  // writes nothing at all, which is why the message says so rather than printing nothing.
+  const logs = path.join(tmp, ".emrg", "global", "logs");
+  const parts = [];
+  for (const name of ["emrgd.log", "emrgd-crash.log", "emrgd-start.err"]) {
+    try {
+      const text = fs.readFileSync(path.join(logs, name), "utf8").trim();
+      if (text) {
+        parts.push(`\n  --- ${name} (last 20 lines) ---\n` + text.split("\n").slice(-20).join("\n"));
+      }
+    } catch { /* not written */ }
+  }
+  return parts.length
+    ? parts.join("")
+    : `\n  (no daemon log under ${logs} — the child wrote nothing)`;
+}
+
 function waitForPortFile(timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
@@ -103,7 +132,9 @@ function waitForPortFile(timeoutMs = 15000) {
         const text = fs.readFileSync(TOKEN_FILE(tmp), "utf8");
         if (text && text.trim()) return resolve(text);
       } catch { /* not yet */ }
-      if (Date.now() > deadline) return reject(new Error("daemon token file timeout"));
+      if (Date.now() > deadline) {
+        return reject(new Error("daemon token file timeout" + daemonLogTail()));
+      }
       setTimeout(check, 200);
     };
     check();
