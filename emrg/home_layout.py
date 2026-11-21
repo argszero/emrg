@@ -41,6 +41,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,49 @@ GLOBAL_DIRNAME = "global"
 #: global root, so the one that exists before a migration is EMRG's and moves. A session
 #: started in the home directory after the migration creates its own if it needs one.
 AGENT_STATE_NAMES = frozenset({"sessions", "memory", "emrg-client.log"})
+
+
+def running_tree_anchors() -> list[Path]:
+    """The paths that say where the code executing this process lives.
+
+    Two of them, because either alone misses a case: ``sys.executable`` is the interpreter
+    (a packaged install ships its own, so the tree it sits in is live), and ``__file__`` is
+    this module (a checkout runs from a source tree with no packaged interpreter beside
+    it). Both are resolved, because the migration's own subject is a directory that a
+    symlink may already point at.
+    """
+    anchors: list[Path] = []
+    for raw in (getattr(sys, "executable", ""), __file__):
+        if not raw:
+            continue
+        try:
+            anchors.append(Path(raw).resolve())
+        except OSError:  # pragma: no cover - resolve answers a path or raises, never None
+            continue
+    return anchors
+
+
+def holds_a_running_tree(entry: Path, anchors: list[Path] | None = None) -> bool:
+    """Whether ``entry`` contains the interpreter or the package running this process.
+
+    **The migration must never move one.** Renaming a directory under a live process
+    succeeds on macOS, and every path that process holds — ``sys.path``'s source entry,
+    ``emrg.__path__``, the packaged interpreter — then names a directory that is no longer
+    there: the next *new* submodule import fails, `logging.handlers` fails, and the run
+    dies inside the very call that moved it. Measured on a host that upgraded across the
+    split: two `ModuleNotFoundError`s, a dead ``PATH`` anchor and three dead register rows,
+    with the repair done by hand.
+    """
+    if anchors is None:
+        anchors = running_tree_anchors()
+    try:
+        resolved = Path(entry).resolve()
+    except OSError:
+        return False
+    for anchor in anchors:
+        if anchor == resolved or str(anchor).startswith(str(resolved) + os.sep):
+            return True
+    return False
 
 #: The agent register's name. Spelled here because the migration has to find the file
 #: after moving it, and the module that owns the register's *contents* is not the module
@@ -154,6 +198,15 @@ def pending_moves(root: Path | None = None) -> list[tuple[Path, Path]]:
             continue
         if not entry.exists():
             continue
+        if holds_a_running_tree(entry):
+            # The install tree carries the executing source and the packaged interpreter.
+            # Renaming it under a live process leaves every path that process holds
+            # naming a directory that is gone; see :func:`holds_a_running_tree`. It
+            # relocates by being replaced, never by being moved from underneath a run.
+            logger.info(
+                "not moving %s: the code running this process lives in it", entry
+            )
+            continue
         target = target_root / entry.name
         if target.exists():
             target = _free_name(target_root, entry.name)
@@ -185,6 +238,10 @@ def migrate_into_global(root: Path | None = None) -> list[str]:
     base = home_root() if root is None else Path(root)
     pending = pending_moves(base)
     if not pending:
+        # The repair is not conditional on a move: the pass that should have carried the
+        # rows fails on exactly the hosts that need it, so a root already half migrated
+        # is repaired by the next start that finds nothing to move (issue #3143).
+        reconcile_register_paths(base)
         return []
     (base / GLOBAL_DIRNAME).mkdir(parents=True, exist_ok=True)
     done: list[tuple[Path, Path]] = []
@@ -204,6 +261,11 @@ def migrate_into_global(root: Path | None = None) -> list[str]:
                        GLOBAL_DIRNAME, exc)
         return []
     _carry_register_rows(base, done)
+    reconcile_register_paths(base)
+    if root is None:
+        # Only the host's own shell files, and only when this is the host's own root: a
+        # caller naming a root is a test, and its rc files are not ours to edit.
+        rewrite_path_anchors()
     return [source.name for source, _target in done]
 
 
@@ -246,4 +308,228 @@ def _carry_register_rows(base: Path, done: list[tuple[Path, Path]]) -> None:
         return
     if renamed:
         logger.info("agent register followed the move: %s", ", ".join(sorted(renamed)))
+
+
+#: The installer's block, and the two spellings of the bin directory it can hold.
+#:
+#: The markers are the installer's own (`packaging/make-installer.sh:165`) and
+#: `bin/emrg-uninstall`'s `clean_environment()` cleans by them, so a third spelling here
+#: would be a second convention for one block.
+PATH_ANCHOR_START = "# >>> EMRG PATH >>>"
+PATH_ANCHOR_END = "# <<< EMRG PATH <<<"
+PRE_SPLIT_BIN = "/.emrg/install/bin"
+POST_SPLIT_BIN = "/.emrg/global/install/bin"
+
+#: The shell rc files the installer writes its anchor into, in its order.
+RC_FILENAMES = (".zshrc", ".bash_profile", ".bashrc", ".profile")
+
+
+def repaired_path(current: str, root: Path) -> str:
+    """``current``'s post-split twin, when the row names a directory the split moved.
+
+    The predicate is the disagreement itself, read from the disk rather than from a move
+    log: a row survives the pass that should have rewritten it — that pass imports the
+    register inside the function, so the migration that breaks the import graph is the one
+    that skips the rewrite — and a repair tied to a move list can never revisit it. So a
+    row is repairable when its own path is **gone** and the same path under ``root/global``
+    is **there**.
+
+    Bounded by ``root`` and not by a spelling of it: a row outside this root is another
+    installation's (or another agent's) and this repair has no business touching it, and a
+    row already under ``global/`` whose directory is missing is not this migration's
+    doing. The root itself is left alone too — it does not move, so its row must not.
+    """
+    if not current:
+        return current
+    try:
+        if Path(current).exists():
+            return current
+    except OSError:
+        return current
+    try:
+        rest = Path(current).relative_to(root)
+    except ValueError:
+        return current
+    if not rest.parts or rest.parts[0] == GLOBAL_DIRNAME:
+        return current
+    twin = root / GLOBAL_DIRNAME / rest
+    try:
+        return str(twin) if twin.exists() else current
+    except OSError:
+        return current
+
+
+def split_path_mapper(root: Path):
+    """A mapper for :meth:`AgentRegistry.rewrite_paths` that repairs a stale row.
+
+    Kept separate from :func:`moved_path_mapper` because the two answer different
+    questions: that one follows a move this process just performed, and this one asks the
+    disk whether a row disagrees with it.
+    """
+
+    def mapper(current: str) -> str:
+        return repaired_path(current, root)
+
+    return mapper
+
+
+def reconcile_register_paths(base: Path | None = None) -> list[str]:
+    """Repair register rows the split has left naming a directory that is gone.
+
+    **Runs on every start, not only after a move.** The pass that should have carried the
+    rows fails on exactly the hosts that need it — it imports the register, and the
+    migration it is part of is what broke that import — so a repair tied to the move list
+    is a repair that never happens on the machine it is for. Measured on such a host: 44
+    rows, 3 dead, all three with an intact tree one directory over.
+
+    Goes through :meth:`emrg.server.agents.AgentRegistry.rewrite_paths`, the register's
+    own writer: a second YAML writer here would be a second answer to "what does a row
+    look like". Imported inside the function for the reason
+    :func:`_carry_register_rows` records — this module is imported by
+    :mod:`emrg.config`, which the register's module reads.
+    """
+    root = home_root() if base is None else Path(base)
+    try:
+        from emrg.server.agents import AgentRegistry
+    except Exception:  # pragma: no cover - an import that always succeeds in-tree
+        logger.warning("could not load the agent register; its paths were not repaired",
+                       exc_info=True)
+        return []
+    try:
+        renamed = AgentRegistry(register_after_migration(root)).rewrite_paths(
+            split_path_mapper(root)
+        )
+    except OSError:
+        logger.warning("could not repair the agent register", exc_info=True)
+        return []
+    if renamed:
+        logger.info("agent register repaired: %s", ", ".join(sorted(renamed)))
+    return renamed
+
+
+def rewrite_path_anchors(home: Path | None = None) -> list[str]:
+    """Point the installer's ``PATH`` anchor at the post-split bin directory.
+
+    An upgrade is not an installer: the block in ``.zshrc`` and its three siblings was
+    written against ``$HOME/.emrg/install/bin``, and the migration moves that directory.
+    Nothing else rewrites it, so the next shell answers ``emrg: command not found`` while
+    a working tree sits one directory away — and a fresh install never sees it, which is
+    why the packaging gates did not.
+
+    **Only lines inside the block are touched.** A host's own ``PATH`` line and everything
+    outside the markers are returned byte-identical; the block is the installer's, and it
+    is the only part of an rc file that is ours to edit. Idempotent: a block already
+    naming the post-split directory answers no file names.
+    """
+    # The "is this a regular file" rule is the tool layer's, reached at a path rather than
+    # at a mode - the same import `emrg/server/upgrade.py` makes for the same reason.
+    # **Asked before the open, because this runs on the startup path**: `read_text` on a
+    # FIFO waits for a writer and raises nothing, so no `except OSError` could bound it and
+    # the daemon would hang on its way up with no way to say why.
+    from emrg.tools.base import non_regular_kind
+
+    base = Path.home() if home is None else Path(home)
+    changed: list[str] = []
+    for name in RC_FILENAMES:
+        path = base / name
+        try:
+            kind = non_regular_kind(path)
+        except OSError:
+            continue  # absent, or unreadable: nothing of ours to rewrite
+        if kind is not None:
+            logger.warning(
+                "not rewriting the PATH anchor in %s: it is a %s, not a regular file",
+                path, kind,
+            )
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        lines = text.splitlines(keepends=True)
+        inside = False
+        rewritten = False
+        out: list[str] = []
+        for line in lines:
+            if line.strip() == PATH_ANCHOR_START:
+                inside = True
+                out.append(line)
+                continue
+            if line.strip() == PATH_ANCHOR_END:
+                inside = False
+                out.append(line)
+                continue
+            if inside and PRE_SPLIT_BIN in line:
+                out.append(line.replace(PRE_SPLIT_BIN, POST_SPLIT_BIN))
+                rewritten = True
+                continue
+            out.append(line)
+        if not rewritten:
+            continue
+        try:
+            path.write_text("".join(out), encoding="utf-8")
+        except OSError:
+            logger.warning("could not rewrite the PATH anchor in %s", path, exc_info=True)
+            continue
+        changed.append(name)
+    if changed:
+        logger.info("PATH anchor followed the move: %s", ", ".join(changed))
+    return changed
+
+
+def half_migration_report(base: Path | None = None) -> str:
+    """One line naming the recovery when this root is part migrated, or ``""``.
+
+    The traceback a half-migrated start produces is accurate and operationally useless:
+    it names a module, when what the host needs to know is that a directory moved. This
+    answers the two conditions that produce it — the source tree this module was imported
+    from no longer exists, or a register row still names a directory the split moved and
+    the repair could not reach — as one sentence.
+    """
+    root = home_root() if base is None else Path(base)
+    stale: list[str] = []
+    try:
+        source = Path(__file__).resolve().parent.parent
+        if not source.exists():
+            stale.append(f"the source tree this process runs from ({source}) is gone")
+    except OSError:
+        pass
+    try:
+        from emrg.server.agents import AgentRegistry
+    except Exception:  # pragma: no cover
+        AgentRegistry = None  # type: ignore[assignment]
+    if AgentRegistry is not None:
+        try:
+            rows = AgentRegistry(register_after_migration(root))._read() or []
+        except OSError:
+            rows = []
+        for row in rows:
+            current = row.get("path") or ""
+            if not current:
+                continue
+            try:
+                # Only rows inside this root: a row for a directory outside it is not a
+                # subject of this split, and naming one would tell a host its root is part
+                # migrated when the dead path has nothing to do with the move.
+                Path(current).relative_to(root)
+            except ValueError:
+                continue
+            except OSError:
+                continue
+            try:
+                if Path(current).exists():
+                    continue
+            except OSError:
+                continue
+            if repaired_path(current, root) != current:
+                continue  # the next start repairs this one; not the host's problem
+            stale.append(f"register row {row.get('name') or current} names {current}, which is gone")
+    if not stale:
+        return ""
+    return (
+        "emrg: this .emrg root is only part migrated - "
+        + "; ".join(stale[:3])
+        + (" (+more)" if len(stale) > 3 else "")
+        + ". Start emrg again to finish the repair, or move the directory back by hand."
+    )
 

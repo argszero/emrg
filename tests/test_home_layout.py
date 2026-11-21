@@ -364,3 +364,187 @@ def test_the_register_is_found_at_the_top_level_when_it_did_not_move(tmp_path):
     inside.parent.mkdir(parents=True)
     inside.write_text("[]", encoding="utf-8")
     assert home_layout.register_after_migration(tmp_path) == inside
+
+
+# --------------------------------------------------------------------------- #
+# The split must not move the tree it is running from (issue #3143)
+#
+# Measured on a host that upgraded across the split: the first run of the new version
+# renamed `install/` — which holds the executing source and the packaged interpreter —
+# and then died inside the call that renamed it, with two `ModuleNotFoundError`s. The
+# register rows that pass was meant to carry were never rewritten, the `PATH` anchor kept
+# naming the moved directory, and the repair was done by hand.
+#
+# Every test hands the migration a root of its own; none of them touches the real home.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_live_tree_is_never_moved_out_from_under_the_process(tmp_path, monkeypatch):
+    """The acceptance that discriminates: a module **not imported before** the call.
+
+    A test that re-imports an already-loaded module passes against the broken code,
+    because the module object is in `sys.modules` and no path is consulted. The import
+    below is new, so it has to find the source tree on disk — which is exactly what the
+    rename took away.
+    """
+    import importlib
+    import sys
+
+    install = tmp_path / "install"
+    source = install / "source"
+    package = source / "probe_live_tree_3143"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "already_in.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (package / "never_in.py").write_text("VALUE = 2\n", encoding="utf-8")
+    _tree(tmp_path, "config.toml")
+
+    monkeypatch.syspath_prepend(str(source))
+    importlib.import_module("probe_live_tree_3143.already_in")
+    # This process "runs from" the tree: the anchors are the seam that says so.
+    monkeypatch.setattr(
+        home_layout, "running_tree_anchors", lambda: [package / "__init__.py"]
+    )
+    try:
+        moved = home_layout.migrate_into_global(tmp_path)
+
+        assert "install" not in moved, (
+            "the migration moved the tree this process executes from - every path the "
+            "process holds now names a directory that is gone"
+        )
+        assert (tmp_path / "install").is_dir(), "the live tree must still be where it was"
+        assert (tmp_path / "global" / "config.toml").exists(), (
+            "the entries that are not the live tree must still have moved"
+        )
+        module = importlib.import_module("probe_live_tree_3143.never_in")
+        assert module.VALUE == 2, "a module imported after the migration must still load"
+    finally:
+        for name in [n for n in sys.modules if n.startswith("probe_live_tree_3143")]:
+            del sys.modules[name]
+
+
+def test_a_second_pass_over_a_live_root_moves_nothing(tmp_path, monkeypatch):
+    """Repeatable with the live tree present: the skip must not turn into a pending pair
+    on the next start, which would rename the tree one run later instead of never."""
+    install = tmp_path / "install"
+    (install / "source").mkdir(parents=True)
+    _tree(tmp_path, "config.toml")
+    monkeypatch.setattr(home_layout, "running_tree_anchors", lambda: [install / "source"])
+
+    first = home_layout.migrate_into_global(tmp_path)
+    second = home_layout.migrate_into_global(tmp_path)
+
+    assert first == ["config.toml"], first
+    assert second == [], second
+    assert install.is_dir()
+
+
+def test_a_register_heals_on_a_start_that_moves_nothing(tmp_path):
+    """The repair is not a stage of the move.
+
+    The pass that should have carried the rows imports the register, so the migration that
+    breaks the import graph is the one that skips the rewrite — a root already in that
+    state has nothing left to move and would never be visited again.
+    """
+    (tmp_path / "global" / "evolution" / "emrg").mkdir(parents=True)
+    _register(tmp_path / "global", [
+        {"path": str(tmp_path / "evolution" / "emrg"), "name": "emrg", "life": 145},
+    ])
+
+    assert home_layout.pending_moves(tmp_path) == [], "nothing left to move is the premise"
+    moved = home_layout.migrate_into_global(tmp_path)
+
+    assert moved == []
+    rows = _rows(tmp_path / "global" / home_layout.AGENTS_FILENAME)
+    assert rows["emrg"] == str(tmp_path / "global" / "evolution" / "emrg"), (
+        "a row naming a directory the split moved must be repaired by a start that moves "
+        "nothing"
+    )
+
+
+def test_a_repair_never_moves_a_row_to_a_directory_that_is_not_there(tmp_path):
+    """The property that makes the repair safe to run on every start.
+
+    A row whose directory is gone and whose post-split twin is *also* absent must be left
+    exactly as it was: rewriting it would replace one dead path with another and lose the
+    only evidence that something moved. Rows outside this root and the root's own row are
+    not this repair's subjects at all.
+    """
+    (tmp_path / "global" / "evolution").mkdir(parents=True)
+    outside = tmp_path.parent / "somewhere-else-3143"
+    vanished = tmp_path / "vanished" / "agent"
+    _register(tmp_path / "global", [
+        {"path": str(outside), "name": "elsewhere"},
+        {"path": str(vanished), "name": "vanished"},
+        {"path": str(tmp_path / "global" / "gone"), "name": "gone"},
+        {"path": str(tmp_path), "name": ".emrg"},
+    ])
+
+    home_layout.reconcile_register_paths(tmp_path)
+
+    rows = _rows(tmp_path / "global" / home_layout.AGENTS_FILENAME)
+    assert rows["elsewhere"] == str(outside), "a row outside the root is not ours to move"
+    assert not (tmp_path / "global" / "vanished" / "agent").exists()
+    assert rows["vanished"] == str(vanished), (
+        "the row's directory is gone and its post-split twin is gone too, so the row must "
+        "stay exactly as it was - rewriting it would trade one dead path for another and "
+        "erase the evidence that something moved"
+    )
+    assert rows["gone"] == str(tmp_path / "global" / "gone"), (
+        "a row already under global/ whose directory is missing is not the split's doing"
+    )
+    assert rows[".emrg"] == str(tmp_path), "the root does not move, so neither does its row"
+
+
+def test_the_path_anchor_follows_the_move_and_leaves_the_hosts_own_line_alone(tmp_path):
+    """Only the installer's block is rewritten, and only once."""
+    rc = tmp_path / ".zshrc"
+    host_line = 'export PATH="$HOME/bin:$PATH"\n'
+    rc.write_text(
+        host_line
+        + home_layout.PATH_ANCHOR_START + "\n"
+        + 'export PATH="$HOME/.emrg/install/bin:$PATH"\n'
+        + home_layout.PATH_ANCHOR_END + "\n",
+        encoding="utf-8",
+    )
+
+    changed = home_layout.rewrite_path_anchors(tmp_path)
+
+    text = rc.read_text(encoding="utf-8")
+    assert changed == [".zshrc"], changed
+    assert 'export PATH="$HOME/.emrg/global/install/bin:$PATH"' in text, (
+        "an upgraded host kept an anchor naming the directory the migration moved, so its "
+        "next shell answered 'emrg: command not found'"
+    )
+    assert host_line in text, "a host's own PATH line is not ours to edit"
+    assert text.count(home_layout.PATH_ANCHOR_START) == 1
+    assert home_layout.rewrite_path_anchors(tmp_path) == [], "a second run changes nothing"
+
+
+def test_an_anchor_outside_the_block_is_not_rewritten(tmp_path):
+    """The control for the test above: the same spelling outside the markers is the
+    host's, and the boundary is the markers rather than the text."""
+    rc = tmp_path / ".bashrc"
+    stray = 'alias e="PATH=$HOME/.emrg/install/bin:$PATH"\n'
+    rc.write_text(stray, encoding="utf-8")
+
+    assert home_layout.rewrite_path_anchors(tmp_path) == []
+    assert rc.read_text(encoding="utf-8") == stray
+
+
+def test_a_stale_legacy_tree_is_filed_aside_when_the_live_one_is_already_split(
+    tmp_path, monkeypatch
+):
+    """The measured upgrade case, with the process running from the new root: the old
+    tree moves aside rather than replacing anything, and nothing is deleted."""
+    _tree(tmp_path, "install/")
+    live = tmp_path / "global" / "install"
+    live.mkdir(parents=True)
+    monkeypatch.setattr(home_layout, "running_tree_anchors", lambda: [live / "bin" / "emrg"])
+
+    home_layout.migrate_into_global(tmp_path)
+
+    aside = tmp_path / "global" / f"install{home_layout.SET_ASIDE_SUFFIX}"
+    assert aside.is_dir(), "the stale legacy tree must be kept, under the set-aside suffix"
+    assert live.is_dir(), "the live tree must not be replaced"
+    assert not (tmp_path / "install").exists(), "and nothing may be left at the top level"
