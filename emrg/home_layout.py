@@ -214,10 +214,23 @@ def pending_moves(root: Path | None = None) -> list[tuple[Path, Path]]:
     return pending
 
 
+def _repair_host_anchor(root: Path | None) -> None:
+    """Rewrite the host's ``PATH`` anchor when this is the host's own root.
+
+    Only the host's own shell files, and only when this is the host's own root: a caller
+    naming a root is a test, and its rc files are not ours to edit. A helper rather than a
+    copy at each call site, so that both of :func:`migrate_into_global`'s exits reach it —
+    the one that moved something, and the one that found nothing left to move.
+    """
+    if root is None:
+        rewrite_path_anchors()
+
+
 def migrate_into_global(root: Path | None = None) -> list[str]:
     """Move every top-level entry EMRG owns into ``global/``, and report their names.
 
-    Repeatable: a second call finds the targets present and does nothing. **All or
+    Repeatable: a second call finds the targets present and moves nothing — both repairs
+    still run, which is what makes them repairs rather than aftermath. **All or
     nothing**: every move is committed only if every move succeeds, and a failure part
     way puts back what this call moved — a half-migrated root would leave some readers
     on the old path and some on the new, which is worse than an unmigrated one.
@@ -238,10 +251,15 @@ def migrate_into_global(root: Path | None = None) -> list[str]:
     base = home_root() if root is None else Path(root)
     pending = pending_moves(base)
     if not pending:
-        # The repair is not conditional on a move: the pass that should have carried the
-        # rows fails on exactly the hosts that need it, so a root already half migrated
-        # is repaired by the next start that finds nothing to move (issue #3143).
+        # Both repairs are unconditional, and for the same reason: the pass that should
+        # have carried the rows fails on exactly the hosts that need it, so a root already
+        # half migrated is repaired by the next start that finds nothing to move
+        # (issue #3143). The anchor is that argument a second time, and the release that
+        # first shipped the move is why — it moved every upgraded host's trees and rewrote
+        # no anchor at all, so those hosts arrive here with nothing left to move and
+        # everything left to repair.
         reconcile_register_paths(base)
+        _repair_host_anchor(root)
         return []
     (base / GLOBAL_DIRNAME).mkdir(parents=True, exist_ok=True)
     done: list[tuple[Path, Path]] = []
@@ -262,10 +280,7 @@ def migrate_into_global(root: Path | None = None) -> list[str]:
         return []
     _carry_register_rows(base, done)
     reconcile_register_paths(base)
-    if root is None:
-        # Only the host's own shell files, and only when this is the host's own root: a
-        # caller naming a root is a test, and its rc files are not ours to edit.
-        rewrite_path_anchors()
+    _repair_host_anchor(root)
     return [source.name for source, _target in done]
 
 

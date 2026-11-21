@@ -532,6 +532,71 @@ def test_an_anchor_outside_the_block_is_not_rewritten(tmp_path):
     assert rc.read_text(encoding="utf-8") == stray
 
 
+def test_a_start_that_moves_nothing_still_repairs_the_anchor(tmp_path, monkeypatch):
+    """The hosts this repair is for have nothing left to move.
+
+    The release that first shipped the migration moved every upgraded host's trees and
+    rewrote no anchor, so by the time a fixed version runs, ``pending_moves`` is empty on
+    exactly those hosts — and a repair reachable only from the moved branch never runs on
+    the machine it was written for. The fixture is that root: a ``global/`` tree and
+    nothing else at the top level, with a stale anchor waiting at the host's own home,
+    which is a different directory from the one the migration moves things inside of.
+    """
+    root = tmp_path / "emrg"
+    (root / "global" / "install" / "bin").mkdir(parents=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    rc = home / ".zshrc"
+    rc.write_text(
+        home_layout.PATH_ANCHOR_START + "\n"
+        + 'export PATH="$HOME/.emrg/install/bin:$PATH"\n'
+        + home_layout.PATH_ANCHOR_END + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(home_layout, "home_root", lambda: root)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls=None: home))
+
+    assert home_layout.pending_moves(root) == [], "the fixture must leave nothing to move"
+    assert home_layout.migrate_into_global() == []
+
+    text = rc.read_text(encoding="utf-8")
+    assert 'export PATH="$HOME/.emrg/global/install/bin:$PATH"' in text, (
+        "a start that found nothing to move left the stale anchor in place, so the hosts "
+        "the migration already broke — the ones with nothing left to move — are never "
+        "repaired, and their shell keeps answering 'emrg: command not found'"
+    )
+
+
+def test_a_start_that_moves_something_repairs_the_anchor_too(tmp_path, monkeypatch):
+    """The other exit, kept from silently losing its anchor repair.
+
+    Both exits now call one helper, so an arm that removes the call from the moved branch
+    has to be caught here — the test above only reaches the empty branch.
+    """
+    root = tmp_path / "emrg"
+    (root / "global").mkdir(parents=True)
+    (root / "config.toml").write_text("", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    rc = home / ".zshrc"
+    rc.write_text(
+        home_layout.PATH_ANCHOR_START + "\n"
+        + 'export PATH="$HOME/.emrg/install/bin:$PATH"\n'
+        + home_layout.PATH_ANCHOR_END + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(home_layout, "home_root", lambda: root)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls=None: home))
+
+    assert home_layout.migrate_into_global() == ["config.toml"]
+
+    text = rc.read_text(encoding="utf-8")
+    assert 'export PATH="$HOME/.emrg/global/install/bin:$PATH"' in text, (
+        "the exit that moved something stopped rewriting the anchor, so the upgrade path "
+        "the repair originally covered lost it"
+    )
+
+
 def test_a_stale_legacy_tree_is_filed_aside_when_the_live_one_is_already_split(
     tmp_path, monkeypatch
 ):
