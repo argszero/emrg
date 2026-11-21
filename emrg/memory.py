@@ -148,6 +148,14 @@ VALID_STATUSES = {"active", "superseded", "merged"}
 # cache invalidation). Write-time truncation is primary; render-time
 # truncation is a fallback for legacy dirty data. Consolidation is
 # LLM-driven; these are soft guards (warn/truncate, never auto-delete).
+#: The index's file name, and the one spelling of it in the code. It is read by
+#: `MemoryStore.index_path`, by the three name comparisons below, and by the two
+#: paths `EmrgServer._collect_memory_data` supplies to the prompt - and the prompt
+#: itself states it, because that is where an agent learns which file to create.
+#: Measured 2026-11-21 (issue #3117): the prompt named it only in the branch that
+#: renders *after* the file exists, so a session starting from nothing invented
+#: `index.md` and its memory was invisible from then on: the daemon looks here.
+MEMORY_INDEX_NAME = "MEMORY.md"
 INDEX_TITLE_MAX_CHARS = 512  # max chars for one index title / line
 INDEX_COUNT_WARN = 100       # >N memory files → consolidation recommended
 # >50KB MEMORY.md → consolidation recommended. One number, two *units*, which is
@@ -1034,7 +1042,7 @@ class MemoryStore:
 
     @property
     def index_path(self) -> Path:
-        return self.directory / "MEMORY.md"
+        return self.directory / MEMORY_INDEX_NAME
 
     # ── Index helpers ──────────────────────────────────────────
 
@@ -1087,7 +1095,7 @@ class MemoryStore:
         """Rebuild the entire index by scanning all .md files."""
         idx = MemoryIndex()
         for path in sorted(self.directory.glob("*.md")):
-            if path.name == "MEMORY.md":
+            if path.name == MEMORY_INDEX_NAME:
                 continue
             try:
                 mem = MemoryFile.from_file(path)
@@ -1123,7 +1131,7 @@ class MemoryStore:
         """
         unreadable: list[tuple[Path, str]] = []
         for path in sorted(self.directory.glob("*.md")):
-            if path.name == "MEMORY.md":
+            if path.name == MEMORY_INDEX_NAME:
                 continue
             try:
                 mem = MemoryFile.from_file(path)
@@ -1281,7 +1289,7 @@ class MemoryStore:
         """List all memories, optionally filtered by type or status."""
         memories: list[MemoryFile] = []
         for path in sorted(self.directory.glob("*.md")):
-            if path.name == "MEMORY.md":
+            if path.name == MEMORY_INDEX_NAME:
                 continue
             try:
                 mem = MemoryFile.from_file(path)
@@ -1370,7 +1378,7 @@ class MemoryStore:
     @property
     def count(self) -> int:
         """Number of .md memory files (excluding MEMORY.md)."""
-        return len([p for p in self.directory.glob("*.md") if p.name != "MEMORY.md"])
+        return len([p for p in self.directory.glob("*.md") if p.name != MEMORY_INDEX_NAME])
 
     def promote_to_agent(
         self, mem_id: str, agent_store: MemoryStore
