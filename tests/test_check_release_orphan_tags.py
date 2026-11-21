@@ -68,6 +68,20 @@ def no_baseline(mod, monkeypatch):
     return mod
 
 
+def _baseline(mod, monkeypatch, *tags: str) -> None:
+    """Narrow the record to `tags`, in the words production gives them.
+
+    The counterpart of `no_baseline`: that one says "this arm is not about the record", this
+    one says "it is about *these* rows". A fixture collection that leaves out a recorded tag is
+    audited -- correctly -- as a row that no longer describes the repository, so an arm whose
+    subject is the record's behaviour must name the rows it exercises. Inheriting the whole
+    dictionary instead couples every such arm to a list that grows: recording one more tag in
+    production then reddens arms about something else, and the red reads as a regression in
+    them. The real wording is reused, so a row still reads the way a host would see it.
+    """
+    monkeypatch.setattr(mod, "ABANDONED_TAGS", {t: mod.ABANDONED_TAGS[t] for t in tags})
+
+
 class FakeGh:
     """`_gh` replaced by a routing table: prefix of argv -> verbatim text or exception."""
 
@@ -322,17 +336,18 @@ def test_a_narrowed_subject_still_reads_the_whole_collection(mod, monkeypatch, c
 
 # ------------------------------------------------- the recorded baseline, in both directions
 #
-# Two tags on this repository will never carry a release: `v0.3.8` and `v0.3.34` each lost
-# their build and were superseded by a published successor. A screen that faults on them for
-# ever is an exit code its reader learns to ignore, so the two are recorded -- and every arm
-# below pins a way the record must NOT grow: a third tag faults, a row taken away faults, a
-# different fault on a recorded tag faults, and a row that stops describing the repository
-# faults -- both ways it can, by being contradicted and by naming a tag that is gone.
-# Suppression is one tag's verdict, never a class of them.
+# Some tags on this repository will never carry a release: each lost its build and was
+# superseded by a published successor. A screen that faults on them for ever is an exit code its
+# reader learns to ignore, so they are recorded -- and every arm below pins a way the record must
+# NOT grow: an unrecorded tag faults, a row taken away faults, a different fault on a recorded
+# tag faults, and a row that stops describing the repository faults -- both ways it can, by
+# being contradicted and by naming a tag that is gone. Suppression is one tag's verdict, never a
+# class of them.
 
 
 def test_a_recorded_abandoned_tag_is_named_and_does_not_fault(mod, monkeypatch, capsys):
     """Recorded is not skipped: the per-tag reading still runs, the baseline reclassifies it."""
+    _baseline(mod, monkeypatch, "v0.3.8", "v0.3.34")
     routes = _routes(
         _tags("v0.3.8", "v0.3.34", "v0.3.50"),
         _releases(*_published("v0.3.50")),
@@ -353,8 +368,9 @@ def test_a_recorded_abandoned_tag_is_named_and_does_not_fault(mod, monkeypatch, 
     )
 
 
-def test_a_third_orphan_outside_the_baseline_still_faults(mod, monkeypatch, capsys):
-    """The baseline names two tags, not a class: anything else keeps the full verdict."""
+def test_an_orphan_outside_the_baseline_still_faults(mod, monkeypatch, capsys):
+    """The baseline names specific tags, not a class: anything else keeps the full verdict."""
+    _baseline(mod, monkeypatch, "v0.3.8", "v0.3.34")
     routes = _routes(
         _tags("v9.9.9", "v0.3.8", "v0.3.34"),
         _releases(),
@@ -388,6 +404,7 @@ def test_the_baseline_never_suppresses_a_different_fault_on_a_recorded_tag(
     mod, monkeypatch, capsys
 ):
     """A draft on a recorded tag is a draft, with a draft's remedy and nothing to confirm."""
+    _baseline(mod, monkeypatch, "v0.3.8", "v0.3.34")
     routes = _routes(
         _tags("v0.3.8", "v0.3.34"),
         _releases(("v0.3.8", "true", "false", "8")),
@@ -406,6 +423,7 @@ def test_a_baseline_row_that_no_longer_describes_the_repository_is_a_fault(
     mod, monkeypatch, capsys
 ):
     """A suppression that outlives its reason is how a baseline becomes permanent rot."""
+    _baseline(mod, monkeypatch, "v0.3.8", "v0.3.34")
     routes = _routes(
         _tags("v0.3.8", "v0.3.34", "v0.3.50"),
         _releases(*_published("v0.3.8", "v0.3.50")),
@@ -432,6 +450,7 @@ def test_a_baseline_row_for_a_tag_the_collection_no_longer_has_is_a_fault(
     to rest on. The absence is confirmed on the tag's own ref first, because it was read from
     a collection.
     """
+    _baseline(mod, monkeypatch, "v0.3.8", "v0.3.34")
     routes = _routes(
         _tags("v0.3.50"),
         _releases(*_published("v0.3.50")),
@@ -461,6 +480,7 @@ def test_a_recorded_tag_the_collection_omits_but_its_ref_reports_is_not_measurab
     still reports is `not measurable` -- never a fault telling someone to delete a suppression
     that is still doing its job.
     """
+    _baseline(mod, monkeypatch, "v0.3.8")
     routes = _routes(
         _tags("v0.3.50"),
         _releases(*_published("v0.3.50")),
@@ -474,22 +494,29 @@ def test_a_recorded_tag_the_collection_omits_but_its_ref_reports_is_not_measurab
     assert "STALE" not in out, "an unconfirmed absence must never be printed as a fault"
 
 
-def test_the_baseline_is_exactly_the_two_measured_tags_and_each_carries_its_evidence(mod):
-    """The record is a reading, so a reading of it is pinned: two rows, each with its run.
+def test_the_baseline_is_exactly_the_measured_tags_and_each_carries_its_evidence(mod):
+    """The record is a reading, so a reading of it is pinned: every row names its failed run.
 
-    Growing this dict is the decision this arm exists to make deliberate -- a third tag is a
-    new permanent suppression, and it arrives as an edit to this test as well.
+    Growing this dict is the decision this arm exists to make deliberate -- a new row is a new
+    permanent suppression, and it arrives as an edit to this test as well. The count is not in
+    this test's name any more: it read "the two", and a name cannot grow a row, so the tag
+    recorded without touching the name would have been the one nobody re-read.
     """
-    assert set(mod.ABANDONED_TAGS) == {"v0.3.8", "v0.3.34"}
+    assert set(mod.ABANDONED_TAGS) == {"v0.3.8", "v0.3.34", "v0.3.70"}
     assert "36956685533" in mod.ABANDONED_TAGS["v0.3.8"], "the row cites its failed build"
     assert "41625081155" in mod.ABANDONED_TAGS["v0.3.34"], "the row cites its failed build"
-    assert "superseded" in mod.ABANDONED_TAGS["v0.3.8"].lower()
-    assert "superseded" in mod.ABANDONED_TAGS["v0.3.34"].lower()
+    assert "44870840332" in mod.ABANDONED_TAGS["v0.3.70"], "the row cites its failed build"
+    for tag, reason in mod.ABANDONED_TAGS.items():
+        assert "superseded" in reason.lower(), (
+            f"{tag}'s row does not say its successor replaced it, so a reader cannot tell a "
+            f"permanent abandonment from a build someone meant to retry"
+        )
 
 
 SUCCESSORS = {
     "v0.3.8": ("v0.3.9", "2026-10-08"),
     "v0.3.34": ("v0.3.35", "2026-11-03"),
+    "v0.3.70": ("v0.3.71", "2026-11-21"),
 }
 
 
