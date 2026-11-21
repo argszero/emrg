@@ -3111,26 +3111,41 @@ def test_the_choice_is_the_file_and_not_the_directory(mod, tmp_path) -> None:
     assert mod.prefer_existing(str(before), str(after)) == str(before)
 
 
-def test_the_two_scripts_that_resolve_a_split_default_answer_the_same_way() -> None:
-    """The shape is carried twice — once per standalone program, because neither can import
-    the other's hyphenated file as a module — so the copies are **held** to one answer
-    instead of trusted to stay in step. Without this, the next change to where a host keeps
-    its files would be made in one of them and the other would keep answering the old way,
-    in silence, which is the whole defect this pins."""
+def test_every_script_that_resolves_a_split_default_answers_the_same_way() -> None:
+    """The shape is carried once per standalone program — because none of them can import
+    another's hyphenated file as a module — so the copies are **held** to one answer instead
+    of trusted to stay in step. Without this, the next change to where a host keeps its files
+    would be made in one of them and the others would keep answering the old way, in silence,
+    which is the whole defect this pins.
+
+    Three copies now, and the third is why the rule is stated as "every" rather than counted:
+    `check-issue-links.py` and `check-memory-rotation.py` were held to one answer while
+    `check-extra-prompt-rotation.py` went on naming only the post-split path, so the
+    task-configuration rotation answered "cannot measure" on this host every cycle (issue
+    #3145). A number in a test's name would have read as complete at two.
+    """
     rotation = _load_sibling("check-memory-rotation.py")
+    extra = _load_sibling("check-extra-prompt-rotation.py")
     links = _load_module()
 
-    assert rotation.ROOT_PREFIX == links.ROOT_PREFIX
-    assert rotation.GLOBAL_PREFIX == links.GLOBAL_PREFIX
+    for other, name in ((rotation, "check-memory-rotation.py"),
+                        (extra, "check-extra-prompt-rotation.py")):
+        assert other.ROOT_PREFIX == links.ROOT_PREFIX, name
+        assert other.GLOBAL_PREFIX == links.GLOBAL_PREFIX, name
     for path in (
         "~/.emrg/rants.jsonl",
         "~/.emrg/agents.yml",
+        "~/.emrg/tasks.yml",
         "~/.emrg/evolution/emrg/.emrg/memory/MEMORY.md",
         "~/.emrg",
         "~/.emrgx/rants.jsonl",
         "/tmp/rants.jsonl",
     ):
         assert links.post_split(path) == rotation.post_split(path), (
-            f"the two copies of post_split disagree on {path!r}: "
+            f"check-issue-links and check-memory-rotation disagree on {path!r}: "
             f"{links.post_split(path)!r} vs {rotation.post_split(path)!r}"
+        )
+        assert links.post_split(path) == extra.post_split(path), (
+            f"check-issue-links and check-extra-prompt-rotation disagree on {path!r}: "
+            f"{links.post_split(path)!r} vs {extra.post_split(path)!r}"
         )
