@@ -3041,6 +3041,10 @@ def test_the_header_names_the_ledger_file_it_read(mod, monkeypatch, capsys):
     mod.main(["--rants", "/somewhere/else.jsonl", "--repo", "owner/repo"])
     out = capsys.readouterr().out
 
-    assert "ledger: /somewhere/else.jsonl" in out, (
+    # The rendering is the tool's to choose, so the expectation is built by the same
+    # `Path` it uses: comparing a literal would pin this test to the platform the
+    # assertion was written on - measured on windows-2025, `/somewhere/else.jsonl`
+    # renders as `\\somewhere\\else.jsonl` and the literal form fails there.
+    assert f"ledger: {Path('/somewhere/else.jsonl')}" in out, (
         f"the header must name the ledger it read, so the default's choice is visible: {out}"
     )
