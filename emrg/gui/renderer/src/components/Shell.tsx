@@ -1366,7 +1366,6 @@ export function Shell() {
                 loadFile={loadFile}
                 saveFile={saveFile}
                 statFile={statFile}
-                onOpenMemory={() => dialogHost.current?.openMemory()}
               />
             </aside>
           </>

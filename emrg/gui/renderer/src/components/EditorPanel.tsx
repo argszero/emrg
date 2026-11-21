@@ -11,7 +11,7 @@ import {
 import { useI18n } from "../lib/i18n";
 import {
   EMPTY_EDITOR,
-  MEMORY_TAB_ID,
+  NO_FILE_OPEN,
   activate,
   closeTab,
   openFile,
@@ -90,7 +90,7 @@ export interface EditorPanelProps {
   saveFile?: SaveFile;
   statFile?: StatFile;
   /** Open the memory dialog; the door is the Memory tab's whole content. */
-  onOpenMemory?: () => void;
+
 }
 
 /** One file as the panel last knew it: the bytes, and the stamp those bytes had. */
@@ -124,7 +124,7 @@ function messageOf(error: unknown): string {
 }
 
 export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(function EditorPanel(
-  { sid = null, loadFile, saveFile, statFile, onOpenMemory },
+  { sid = null, loadFile, saveFile, statFile },
   ref,
 ) {
   const { t, lang } = useI18n();
@@ -177,10 +177,7 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
     [],
   );
 
-  const activeFile =
-    state.active === MEMORY_TAB_ID
-      ? null
-      : state.tabs.find((tab) => tab.id === state.active) ?? null;
+  const activeFile = state.tabs.find((tab) => tab.id === state.active) ?? null;
   const display = useMemo(() => prefs.current.get(sid), [sid, prefsTick]);
 
   /** The text this path's editor shows: the buffer if it has one, else the snapshot. */
@@ -385,7 +382,7 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
 
   useEffect(() => {
     const onFocus = (): void => {
-      const path = state.active === MEMORY_TAB_ID ? null : state.active;
+      const path = state.active === NO_FILE_OPEN ? null : state.active;
       if (path) void probe(path);
     };
     window.addEventListener("focus", onFocus);
@@ -436,7 +433,6 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
 
   const requestClose = useCallback(
     (tabId: string): void => {
-      if (tabId === MEMORY_TAB_ID) return;
       if (isDirty(tabId)) {
         setCloseAsk(tabId);
         return;
@@ -495,17 +491,6 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
           if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) el.scrollLeft += e.deltaY;
         }}
       >
-        <button
-          type="button"
-          role="tab"
-          aria-selected={state.active === MEMORY_TAB_ID}
-          className={`editor-tab${state.active === MEMORY_TAB_ID ? " active" : ""}`}
-          data-testid="editor-tab-memory"
-          style={{ flex: "0 0 auto" }}
-          onClick={() => setState((prev) => activate(prev, MEMORY_TAB_ID))}
-        >
-          {t("inspector.tabMemory")}
-        </button>
         {state.tabs.map((tab) => {
           const selected = tab.id === state.active;
           const dirty = isDirty(tab.id);
@@ -744,19 +729,6 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
               {t("editor.dirty")}
             </span>
           ) : null}
-        </div>
-      ) : null}
-      {state.active === MEMORY_TAB_ID ? (
-        <div className="editor-memory" data-testid="editor-memory-door">
-          <p className="editor-note">{t("inspector.memoryHint")}</p>
-          <button
-            type="button"
-            className="inspector-door"
-            data-testid="editor-memory-open"
-            onClick={onOpenMemory}
-          >
-            {t("inspector.openMemory")}
-          </button>
         </div>
       ) : null}
     </section>

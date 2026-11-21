@@ -24,7 +24,6 @@ const FILES: Record<string, string> = {
 };
 
 interface PanelOptions {
-  onOpenMemory?: () => void;
   sid?: string | null;
   /** What the reader answers about one path: a binary frame, or a window instead of a file. */
   shape?: Record<string, { binary?: boolean; truncated?: boolean }>;
@@ -39,7 +38,6 @@ interface PanelOptions {
 }
 
 function renderPanel(options: PanelOptions = {}) {
-  const onOpenMemory = options.onOpenMemory ?? vi.fn();
   const ref = createRef<EditorPanelHandle>();
   const loadFile = vi.fn(async (p: string) => ({
     content: FILES[p] ?? "",
@@ -58,14 +56,13 @@ function renderPanel(options: PanelOptions = {}) {
         loadFile={loadFile}
         saveFile={saveFile}
         statFile={statFile}
-        onOpenMemory={onOpenMemory}
       />
     </I18nProvider>,
   );
   const open = (path: string, root = "/p/emrg", preview = true) => {
     act(() => ref.current?.openFile({ path, root, preview }));
   };
-  return { ref, loadFile, saveFile, statFile, open, onOpenMemory };
+  return { ref, loadFile, saveFile, statFile, open };
 }
 
 /** The editor's own root, and the live CodeMirror view inside it. */
@@ -94,15 +91,24 @@ function pressSave(): void {
 }
 
 describe("EditorPanel tabs (issue #3068)", () => {
-  it("标签栏第一个永远是「记忆」，没有关闭按钮；右栏不再有 agent 目录 / 会话目录两个标签", () => {
+  it("标签栏里没有「记忆」标签，也没有 agent 目录 / 会话目录两个标签", () => {
     renderPanel();
     const strip = screen.getByTestId("editor-tabs");
-    const memory = screen.getByTestId("editor-tab-memory");
-    expect(strip.firstElementChild).toBe(memory);
-    expect(memory).toHaveTextContent("Memory");
-    expect(within(memory).queryByTestId("editor-tab-close")).toBeNull();
+    // 一个文件都没打开 → 标签栏里没有任何标签，第一个也不是「记忆」
+    expect(strip.childElementCount).toBe(0);
+    expect(screen.queryByTestId("editor-tab-memory")).toBeNull();
     expect(screen.queryByText("Agent dir")).toBeNull();
     expect(screen.queryByText("Session dir")).toBeNull();
+  });
+
+  it("一个文件都没打开时右栏什么都不渲染——不写提示语，不给替代按钮", () => {
+    renderPanel();
+    const panel = screen.getByTestId("editor-panel");
+    // 空栏：面板自己的可见文本一个字符都没有，按钮一个都没有
+    expect(panel.textContent).toBe("");
+    expect(panel.querySelectorAll("button")).toHaveLength(0);
+    expect(screen.queryByTestId("editor-code")).toBeNull();
+    expect(screen.queryByTestId("editor-breadcrumb")).toBeNull();
   });
 
   it("点一个文件：多一个标签、它被选中、面包屑等于完整路径；再点同一个文件标签数不变", async () => {
@@ -156,7 +162,7 @@ describe("EditorPanel tabs (issue #3068)", () => {
     expect(a).toHaveAttribute("data-preview", "false");
   });
 
-  it("✕ 关掉当前标签后右邻接手；逐个关光只剩「记忆」且门可见、代码区与面包屑不显示", async () => {
+  it("✕ 关掉当前标签后右邻接手；逐个关光后右栏空着，代码区与面包屑不显示", async () => {
     const { open } = renderPanel();
     open("/p/emrg/a.txt", "/p/emrg", false);
     open("/p/emrg/b.txt", "/p/emrg", false);
@@ -176,8 +182,9 @@ describe("EditorPanel tabs (issue #3068)", () => {
       fireEvent.click(within(tab).getByTestId("editor-tab-close"));
     }
     expect(screen.queryAllByTestId("editor-tab")).toHaveLength(0);
-    expect(screen.getByTestId("editor-tab-memory")).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByTestId("editor-memory-door")).toBeInTheDocument();
+    // 关光最后一个之后回到「没有打开的文件」，右栏空着
+    expect(screen.getByTestId("editor-tabs").childElementCount).toBe(0);
+    expect(screen.getByTestId("editor-panel").textContent).toBe("");
     expect(screen.queryByTestId("editor-code")).toBeNull();
     expect(screen.queryByTestId("editor-breadcrumb")).toBeNull();
   });
@@ -241,11 +248,6 @@ describe("EditorPanel tabs (issue #3068)", () => {
     expect(gutters?.textContent).toContain("3");
   });
 
-  it("记忆门的按钮仍然打开记忆面板", () => {
-    const { onOpenMemory } = renderPanel();
-    fireEvent.click(screen.getByTestId("editor-memory-open"));
-    expect(onOpenMemory).toHaveBeenCalledTimes(1);
-  });
 });
 
 describe("LeftTrees → editor (issue #3068)", () => {

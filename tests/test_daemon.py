@@ -22,7 +22,7 @@ import pytest
 import yaml
 
 from emrg.config import LlmConfig
-from emrg.memory import INDEX_SIZE_WARN, AgentMemoryStore
+from emrg.memory import INDEX_SIZE_WARN, MEMORY_REF_DIRNAME, AgentMemoryStore
 from emrg.protocol import InstanceIdentity, TaskRequest
 from emrg.server import abort_runs as mod_abort_runs
 from emrg.server import daemon as daemon_mod
@@ -812,7 +812,9 @@ def _memory_agent(tmp_path, index_bytes: bytes, note_bytes: bytes | None = None)
     directory.mkdir(parents=True)
     (directory / "MEMORY.md").write_bytes(index_bytes)
     if note_bytes is not None:
-        (directory / "note.md").write_bytes(note_bytes)
+        detail = directory / MEMORY_REF_DIRNAME
+        detail.mkdir(exist_ok=True)
+        (detail / "note.md").write_bytes(note_bytes)
     return directory
 
 
@@ -890,10 +892,11 @@ def test_a_memory_that_cannot_be_read_is_not_reported_as_absent(tmp_path):
     """
     server = _make_server()
     directory = _memory_agent(tmp_path, b"# Memory Index\n", note_bytes=UNDECODABLE_MEMORY)
+    note_path = directory / MEMORY_REF_DIRNAME / "note.md"
     with pytest.raises(UnicodeDecodeError):
-        (directory / "note.md").read_text(encoding="utf-8")
+        note_path.read_text(encoding="utf-8")
 
-    assert (directory / "note.md").exists(), "the file is there; it just cannot be read"
+    assert note_path.exists(), "the file is there; it just cannot be read"
 
     frames = _drive(
         server,
@@ -4935,8 +4938,9 @@ def test_a_memory_that_is_a_named_pipe_costs_the_row_not_the_listing(tmp_path):
     """A pipe in the memory directory is skipped; the readable rows still arrive."""
     server = _make_server()
     directory = _memory_agent(tmp_path, b"# Memory Index\n")
-    os.mkfifo(directory / "pipe.md")
-    (directory / "note.md").write_text(
+    (directory / MEMORY_REF_DIRNAME).mkdir(exist_ok=True)
+    os.mkfifo(directory / MEMORY_REF_DIRNAME / "pipe.md")
+    (directory / MEMORY_REF_DIRNAME / "note.md").write_text(
         "---\nid: aaaa1111\ntype: reference\nscope: agent\nstatus: active\n"
         "title: A note\n---\n\nbody\n",
         encoding="utf-8",
@@ -4961,7 +4965,8 @@ def test_a_read_memory_through_a_pipe_directory_answers_rather_than_hangs(tmp_pa
     """
     server = _make_server()
     directory = _memory_agent(tmp_path, b"# Memory Index\n")
-    os.mkfifo(directory / "pipe.md")
+    (directory / MEMORY_REF_DIRNAME).mkdir(exist_ok=True)
+    os.mkfifo(directory / MEMORY_REF_DIRNAME / "pipe.md")
 
     frames = _drive(
         server,

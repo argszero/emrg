@@ -726,22 +726,6 @@ body.col-resizing * {
   gap: 4px;
 }
 
-.inspector-door {
-  margin: 0 10px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--bg-soft);
-  color: var(--text-1);
-  font-size: var(--fs-small);
-  padding: 4px 10px;
-  cursor: pointer;
-}
-
-.inspector-door:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
 /* The model lives here now that the band carries only what moves (issue #2969). */
 .conn-chip {
   display: inline-flex;
@@ -1514,17 +1498,6 @@ body.col-resizing * {
 
 .editor-note-error {
   color: var(--danger, #c0392b);
-}
-
-.editor-memory {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  padding: 6px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  align-items: flex-start;
 }
 
 /* ── The band's three readings and the ranking they open ─────────────────────

@@ -211,7 +211,7 @@ class TestProjectMemoryStore:
         mem = agent_store.create("decision", "Use httpx", "**What**: ...")
         assert mem.id is not None
         assert mem.scope == "agent"
-        file_path = agent_store.directory / mem.filename
+        file_path = agent_store.ref_dir / mem.filename
         assert file_path.exists()
         index_path = agent_store.index_path
         assert index_path.exists()
@@ -265,7 +265,7 @@ class TestSessionMemoryStore:
     def test_create_session_memory(self, session_store):
         mem = session_store.create("task", "Fix bug", "Working on it")
         assert mem.scope == "session"
-        assert (session_store.directory / mem.filename).exists()
+        assert (session_store.ref_dir / mem.filename).exists()
 
     def test_promote_to_agent(self, session_store, temp_cwd):
         pstore = AgentMemoryStore(temp_cwd)
@@ -390,7 +390,8 @@ class TestMemoryFileRoundTripFidelity:
     def test_store_update_rewrites_only_the_changed_line(self, temp_cwd):
         """The store's write path, on a real file: only `status` may move."""
         store = SessionMemoryStore(temp_cwd)
-        path = store.directory / "task-a.md"
+        store.ref_dir.mkdir(parents=True, exist_ok=True)
+        path = store.ref_dir / "task-a.md"
         path.write_text(SPEC_SHAPED_MEMORY, encoding="utf-8")
 
         mem = store.update("a1b2c3d4", status="superseded")
@@ -502,7 +503,8 @@ class TestChangedKeyOwnsItsLines:
     def test_store_update_lands_on_a_file_with_a_repeated_key(self, temp_cwd):
         """The same case through the store's own write path."""
         store = SessionMemoryStore(temp_cwd)
-        path = store.directory / "task-a.md"
+        store.ref_dir.mkdir(parents=True, exist_ok=True)
+        path = store.ref_dir / "task-a.md"
         path.write_text(
             SPEC_SHAPED_MEMORY.replace("status: active", "status: active\nstatus: active"),
             encoding="utf-8",
@@ -689,7 +691,7 @@ class TestTwoMemoriesWithTheSameTitle:
         return MemoryIndex.from_text(store.index_path.read_text(encoding="utf-8")).entries
 
     def _files(self, store):
-        return sorted(p.name for p in store.directory.glob("*.md") if p.name != "MEMORY.md")
+        return sorted(p.name for p in store.ref_dir.glob("*.md") if p.name != "MEMORY.md")
 
     def test_create_gives_each_memory_its_own_row(self, agent_store):
         first = agent_store.create("agent", "Same title", "first")
@@ -698,7 +700,7 @@ class TestTwoMemoriesWithTheSameTitle:
         assert self._files(agent_store) == ["agent-same-title-2.md", "agent-same-title.md"]
         assert first.filename != second.filename, "both memories claim the same file"
         for mem in (first, second):
-            assert (agent_store.directory / mem.filename).exists(), mem.filename
+            assert (agent_store.ref_dir / mem.filename).exists(), mem.filename
 
         entries = self._rows(agent_store)
         assert sorted(e.filename for e in entries) == [
@@ -760,7 +762,7 @@ class TestTwoMemoriesWithTheSameTitle:
         assert promoted is not None
         assert promoted.filename != mem.filename, "the copy claims the resident memory's file"
         assert promoted.filename.endswith("-collide-1.md"), promoted.filename
-        assert (agent.directory / promoted.filename).exists()
+        assert (agent.ref_dir / promoted.filename).exists()
         assert sorted(e.filename for e in self._rows(agent)) == sorted(
             ["agent-collide-1.md", "agent-collide.md"]
         ), "the promoted copy's row must name the file it was written to"
@@ -769,10 +771,10 @@ class TestTwoMemoriesWithTheSameTitle:
         mem = agent_store.create("agent", "Same title", "first")
         agent_store.create("agent", "Same title", "second")
 
-        text = (agent_store.directory / mem.filename).read_text(encoding="utf-8")
+        text = (agent_store.ref_dir / mem.filename).read_text(encoding="utf-8")
         assert "_filename" not in text, "the override leaked into the serialized memory"
 
-        reloaded = MemoryFile.from_file(agent_store.directory / mem.filename)
+        reloaded = MemoryFile.from_file(agent_store.ref_dir / mem.filename)
         assert reloaded._filename == mem.filename
         assert reloaded.to_markdown() == text, "a load → save rewrote the file"
 
@@ -838,7 +840,8 @@ def test_the_store_lists_the_memories_beside_a_pipe(temp_cwd):
     directory = temp_cwd / ".emrg" / "memory"
     directory.mkdir(parents=True)
     (directory / "MEMORY.md").write_text("# Memory Index\n", encoding="utf-8")
-    os.mkfifo(directory / "pipe.md")
+    (directory / "ref").mkdir()
+    os.mkfifo(directory / "ref" / "pipe.md")
     store = AgentMemoryStore(temp_cwd)
     store.create("reference", "A note", "body")
 
@@ -857,7 +860,8 @@ def test_the_scan_names_the_pipe_as_a_reason_rather_than_never_answering(temp_cw
     """
     directory = temp_cwd / ".emrg" / "memory"
     directory.mkdir(parents=True)
-    os.mkfifo(directory / "pipe.md")
+    (directory / "ref").mkdir()
+    os.mkfifo(directory / "ref" / "pipe.md")
     store = AgentMemoryStore(temp_cwd)
 
     mem, reason = store.get_with_reason("aaaa1111")
@@ -978,7 +982,7 @@ def test_the_store_route_refuses_rather_than_never_answering(temp_cwd):
 
 def _the_memory_path(store) -> Path:
     """The one memory file a store created in this test holds."""
-    files = [p for p in store.directory.glob("*.md") if p.name != "MEMORY.md"]
+    files = [p for p in store.ref_dir.glob("*.md") if p.name != "MEMORY.md"]
     assert len(files) == 1, files
     return files[0]
 
@@ -995,7 +999,7 @@ def test_a_named_pipe_marker_does_not_hold_the_promotion(session_store, temp_cwd
 
     assert promoted is not None, "the promotion itself must still complete"
     assert stat.S_ISFIFO(os.stat(marker).st_mode), "the marker was written into the pipe"
-    assert (pstore.directory / promoted.filename).exists(), "the agent copy is what the marker records"
+    assert (pstore.ref_dir / promoted.filename).exists(), "the agent copy is what the marker records"
     assert session_store.get(mem.id).status == "merged"
 
 
@@ -1139,3 +1143,68 @@ def test_the_memory_file_writer_still_writes_beside_a_pipe(tmp_path):
     MemoryFile.from_text(_MEMORY_FILE_TEXT).save(target)
 
     assert MemoryFile.from_file(target).id == "aaaa1111"
+
+
+# ── the store's layout: ref/ is what it reads, archive/ is what it does not ────
+#
+# The top level of a memory directory holds the index and nothing else. Every reader the
+# store exposes — `list`, `get`/`get_with_reason`, `count`, `rebuild_index` — reads `ref/`
+# and only `ref/`, so a retired memory can neither be listed nor re-enter the index by
+# being rebuilt into it. The four arms below are the two directions that rule has: a file
+# in `ref/` is memory, and a file in `archive/` is not, whichever of the two existed first.
+
+
+class TestTheStoreReadsRefAndIgnoresArchive:
+    def test_a_new_memory_is_written_under_ref_not_at_the_top_level(self, agent_store):
+        mem = agent_store.create("task", "Lives in ref", "body")
+
+        assert (agent_store.ref_dir / mem.filename).is_file()
+        assert sorted(p.name for p in agent_store.directory.glob("*.md")) == ["MEMORY.md"], (
+            "the top level holds the index and nothing else"
+        )
+
+    def test_a_memory_under_ref_is_listed_and_readable_by_id(self, agent_store):
+        mem = agent_store.create("reference", "In ref", "body")
+
+        assert [m.id for m in agent_store.list()] == [mem.id]
+        assert agent_store.count == 1
+        found = agent_store.get(mem.id)
+        assert found is not None and found.title == "In ref"
+
+    def test_a_memory_outside_ref_is_invisible_to_every_reader(self, agent_store):
+        """The direction that keeps a retired file retired, at the layout's own level."""
+        agent_store.ref_dir.mkdir(parents=True, exist_ok=True)
+        stray = agent_store.directory / "stray.md"
+        stray.write_text(
+            "---\nid: \"bbbb2222\"\ntype: reference\nstatus: active\ntitle: stray\n---\nbody\n",
+            encoding="utf-8",
+        )
+
+        assert agent_store.list() == []
+        assert agent_store.count == 0
+        assert agent_store.get("bbbb2222") is None
+        agent_store.rebuild_index()
+        assert "stray" not in agent_store.index_path.read_text(encoding="utf-8")
+
+    def test_a_rebuilt_index_keeps_the_ref_memories(self, agent_store):
+        mem = agent_store.create("decision", "Rebuild keeps me", "body")
+        agent_store.rebuild_index()
+
+        entries = MemoryIndex.from_text(
+            agent_store.index_path.read_text(encoding="utf-8")
+        ).entries
+        assert [e.filename for e in entries] == [mem.filename]
+        assert [m.id for m in agent_store.list()] == [mem.id]
+
+    def test_an_archived_memory_is_in_no_listing_and_no_rebuilt_index(self, agent_store):
+        mem = agent_store.create("reference", "Retired", "body")
+        archive = agent_store.directory / "archive"
+        archive.mkdir()
+        (agent_store.ref_dir / mem.filename).rename(archive / mem.filename)
+
+        assert agent_store.list() == []
+        assert agent_store.count == 0
+        agent_store.rebuild_index()
+        rebuilt = agent_store.index_path.read_text(encoding="utf-8")
+        assert mem.filename not in rebuilt
+        assert "Retired" not in rebuilt

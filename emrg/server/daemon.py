@@ -95,6 +95,7 @@ from emrg.memory import (
     INDEX_SIZE_WARN,
     INDEX_TITLE_MAX_CHARS,
     MEMORY_INDEX_NAME,
+    MEMORY_REF_DIRNAME,
     AgentMemoryStore,
     SessionMemoryStore,
     is_index_row,
@@ -2878,7 +2879,7 @@ class EmrgServer:
         pindex_path = agent_dir / MEMORY_INDEX_NAME
         if pindex_path.exists():
             data["agent_memory_index"] = self._index_for_prompt(pindex_path)
-            data["agent_memory_dir"] = str(agent_dir)
+            data["agent_memory_dir"] = str(agent_dir / MEMORY_REF_DIRNAME)
             data["agent_memory_index_path"] = str(pindex_path)
             data["has_memories"] = True
 
@@ -2886,7 +2887,7 @@ class EmrgServer:
         sindex_path = smem_dir / MEMORY_INDEX_NAME
         if sindex_path.exists():
             data["session_memory_index"] = self._index_for_prompt(sindex_path)
-            data["session_memory_dir"] = str(smem_dir)
+            data["session_memory_dir"] = str(smem_dir / MEMORY_REF_DIRNAME)
             data["session_memory_index_path"] = str(sindex_path)
             data["has_memories"] = True
 
@@ -8171,7 +8172,7 @@ class EmrgServer:
         await self._send(ws, {
             "type": "memories_list",
             "scope": scope,
-            "directory": str(store.directory),
+            "directory": str(store.ref_dir),
             "index_path": str(index_path),
             "index": index_text,
             "memories": [
@@ -8230,7 +8231,7 @@ class EmrgServer:
             "scope": scope,
             "memory_id": memory_id,
             "file": mem.filename,
-            "path": str(store.directory / mem.filename),
+            "path": str(store.ref_dir / mem.filename),
             "content": mem.to_markdown(),
             "frontmatter": {
                 "id": mem.id,
@@ -8671,8 +8672,8 @@ class EmrgServer:
                     "## Current memories\n"
                     f"{existing_summary}\n\n"
                     "## Memory directories\n"
-                    f"Session: `{session.memory_dir}/` (session-scope, this session only)\n"
-                    f"Agent: `{session.cwd}/.emrg/memory/` (agent-scope, cross-session)\n\n"
+                    f"Session: `{session.memory_dir / MEMORY_REF_DIRNAME}/` (session-scope, this session only)\n"
+                    f"Agent: `{session.agent.memory_dir / MEMORY_REF_DIRNAME}/` (agent-scope, cross-session)\n\n"
                     "## Exchange to reflect on\n"
                     f"User: {user_prompt[:500]}\n"
                     f"Assistant: {assistant_content[:1000]}\n\n"
