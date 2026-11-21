@@ -64,8 +64,12 @@ export interface StatusBandProps {
    * Each reading is its own control because each answers its own question: one table can
    * be sorted by one scale, so the reading the host clicks is the ranking they get. The
    * band itself ranks nothing — it states three numbers and hands the choice on.
+   *
+   * The button's own element goes with the segment (issue #3123): the panel hangs 8px
+   * under the reading that opened it, so the caller needs the thing that was clicked and
+   * not only the reading it stands for.
    */
-  onOpenRanking: (segment: UsageSegment) => void;
+  onOpenRanking: (segment: UsageSegment, anchor: HTMLElement | null) => void;
   /** Injected clock: the shell re-renders once a second while a turn is running. */
   nowMs?: number;
 }
@@ -123,8 +127,12 @@ export function StatusBand({
           type="button"
           className="band-item band-usage"
           data-testid={`band-usage-${segment}`}
+          // Marks the elements the panel must leave alone: a click here is this button's
+          // own decision — close the panel, switch it, or open it — and the panel's
+          // outside-click dismissal has to let it through rather than pre-empt it.
+          data-band-usage={segment}
           title={t("band.usageTitle")}
-          onClick={() => onOpenRanking(segment)}
+          onClick={(e) => onOpenRanking(segment, e.currentTarget)}
         >
           {t("band.segment", {
             label: t(`band.seg.${segment}`),

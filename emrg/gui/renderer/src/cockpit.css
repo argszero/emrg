@@ -1563,34 +1563,87 @@ body.col-resizing * {
   }
 }
 
+/* The ranking is a flap hanging under the reading that opened it, not a modal (issue
+   #3123). A modal dims and blurs the window, which hides the transcript these numbers are
+   about — the very thing a host glancing at a usage ranking is looking away from and back
+   to. So: no backdrop, no centring, and a width that holds five fixed columns whether the
+   window is 1400px wide or 620. */
 .usage-panel {
+  position: fixed;
+  z-index: 900;
+  width: 680px;
+  /* A narrow window narrows the panel; it never pushes the numeric columns out of it. */
+  max-width: calc(100vw - 20px);
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  min-width: 520px;
-  max-width: 720px;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-lg);
+}
+
+.usage-title {
+  margin: 0;
+  font-size: var(--fs-body);
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+/* The scroller, and the only thing that scrolls: a 24px header plus ten 26px rows is
+   284px, and it never takes more than half the window. The rows pass under a sticky
+   header, and the unnamed block and the reconciliation line sit outside this box so they
+   are readable at any scroll position. */
+.usage-list {
+  height: min(52vh, 284px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .usage-table {
   width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   font-size: var(--fs-secondary);
   font-variant-numeric: tabular-nums;
 }
 
-.usage-table th {
+/* Opaque, or the rows show through it as they scroll underneath. */
+.usage-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  height: 24px;
   text-align: left;
   font-weight: 600;
   color: var(--text-3);
-  padding: 4px 6px;
+  padding: 0 6px;
+  background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
 }
 
+/* Fixed widths for the four numeric columns, in this order; the name takes what is left.
+   With `table-layout: fixed` a long session name can no longer take width from the
+   numbers, which is what made them shift from row to row. */
+.usage-table th:nth-child(2),
+.usage-table td:nth-child(2) { width: 72px; }
+.usage-table th:nth-child(3),
+.usage-table td:nth-child(3) { width: 70px; }
+.usage-table th:nth-child(4),
+.usage-table td:nth-child(4) { width: 46px; }
+.usage-table th:nth-child(5),
+.usage-table td:nth-child(5) { width: 54px; }
+
 .usage-table td {
-  padding: 5px 6px;
-  border-bottom: 1px solid var(--border);
+  height: 26px;
+  padding: 0 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--text-2);
+  border-bottom: 1px solid var(--border);
 }
 
 .usage-row {
@@ -1608,20 +1661,29 @@ body.col-resizing * {
 }
 
 .usage-name {
-  max-width: 240px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-1);
 }
 
+/* The 72px share column above is the bound, so the bar cannot keep a width of its own: a
+   fixed 96px bar plus a 6px gap plus the percentage is ~125px of content in a 72px cell,
+   which overflows into the tokens column or is clipped away by the cell's own overflow —
+   and the percentage, the number the bar is drawn for, is what goes first. So the bar takes
+   whatever the width the percentage leaves. */
+.usage-share-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .usage-bar {
-  display: inline-block;
-  width: 96px;
+  flex: 1 1 auto;
+  min-width: 16px;
   height: 6px;
   border-radius: 3px;
   background: var(--border);
-  vertical-align: middle;
   overflow: hidden;
 }
 
@@ -1632,7 +1694,6 @@ body.col-resizing * {
 }
 
 .usage-share {
-  margin-left: 6px;
   color: var(--text-3);
 }
 
