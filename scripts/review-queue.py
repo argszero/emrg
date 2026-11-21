@@ -1751,7 +1751,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--rants",
         default=None,
-        help="the rant ledger to read (default: $EMRG_RANTS, else ~/.emrg/rants.jsonl). "
+        help="the rant ledger to read (default: $EMRG_RANTS, else the host's own store - "
+             "~/.emrg/global/rants.jsonl once the home-root migration has run, "
+             "~/.emrg/rants.jsonl before it). "
              "Open rants are rendered as rows of their own - a queue that showed only "
              "PRs once read as 'nothing to move' while three pending rants had no issue",
     )
@@ -1824,7 +1826,16 @@ def main(argv: list[str] | None = None) -> int:
         # The family's convention — a guard that reads a working tree names it before it
         # gives a verdict — and it applies here for the reason `local_tree` records: the
         # readings are this clone's, and so is any file the reader opens next.
-        print(f"tree: {root} on {branch} ({head[:8]})")
+        # The tree, and the ledger that answered, on one line: nothing may be printed
+        # between this line and the first row — a note ahead of a row it weakens is where
+        # this family never puts one — and the ledger name cannot be dropped either, because
+        # the default now chooses between the host's store before the root migration and
+        # after it. A reader who cannot see the choice cannot tell a pre-split reading from
+        # a migrated one, and the two can hold different rows between releases (issue #3141).
+        print(
+            f"tree: {root} on {branch} ({head[:8]})"
+            f" - ledger: {issue_links().rants_path(args.rants)}"
+        )
         here = [reading.pr for reading, _ in readings if reading.head == head]
         if here:
             print(

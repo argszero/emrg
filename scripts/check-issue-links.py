@@ -135,8 +135,10 @@ found its own issue #1747 had been opened without the line (found and fixed duri
 turn, minutes after R5's template half landed on master as part of #1738).
 
 A rant timestamp is a **host-local** handle, so the resolution is a local file read
-(`~/.emrg/rants.jsonl`, overridable with `--rants` / `$EMRG_RANTS` because the tests must not
-read the host's live ledger) and it is attempted **only when an open issue declares an origin**:
+(under the host's own `.emrg` root — `~/.emrg/global/rants.jsonl` once the home-root
+migration has run, `~/.emrg/rants.jsonl` before it — overridable with `--rants` /
+`$EMRG_RANTS` because the tests must not read the host's live ledger) and it is attempted
+**only when an open issue declares an origin**:
 a queue where nobody declares one costs no file read, and a host without a ledger does not
 have a linked queue turned into exit 2 by a check nobody asked for.
 
@@ -377,11 +379,77 @@ _FENCE_MARK = re.compile(r"^[ \t]*(?:```|~~~).*$", re.M)
 #: timestamp is the rant's only handle, so an issue whose origin cannot be resolved is a
 #: link broken at its first joint — the reader cannot reach the requirement from the work.
 #:
-#: Host-local, exactly like every rant timestamp: the store lives at `~/.emrg/rants.jsonl`
-#: on the machine that wrote the citation (`check-rant-citations.py` measured what happens
-#: on a second host — 0 of 24 resolve there). `--rants` and `$EMRG_RANTS` exist because the
-#: tests must not read the host's live ledger, and because a fork's store is its own.
-DEFAULT_RANTS = Path.home() / ".emrg" / "global" / "rants.jsonl"
+#: Host-local, exactly like every rant timestamp: the store lives under the host's own
+#: `.emrg` root on the machine that wrote the citation (`check-rant-citations.py` measured
+#: what happens on a second host — 0 of 24 resolve there). `--rants` and `$EMRG_RANTS` exist
+#: because the tests must not read the host's live ledger, and because a fork's store is its
+#: own.
+#:
+#: **Which path under that root is two paths, and the window between them is not
+#: hypothetical.** `emrg/home_layout.py` moves everything EMRG owns into `global/`, and the
+#: call that performs the move sits in the daemon's own entry point — so a checkout, and
+#: every host between one release and the next, keeps the ledger at the pre-split path while
+#: the code that reads it already expects the migrated one. A default naming only one of the
+#: two answers `unmeasurable` for the whole of the other half of that window: measured before
+#: this was fixed, `scripts/review-queue.py` exited 2 on every run with a 289,889-byte ledger
+#: sitting at `~/.emrg/rants.jsonl` and no `~/.emrg/global/` directory on the host at all
+#: (issue #3141). :func:`resolve_default` is what makes the constant below ask the file that
+#: is actually there.
+PRE_SPLIT_RANTS = "~/.emrg/rants.jsonl"
+
+#: The home-level root, and the directory the root migration puts everything EMRG owns
+#: under. Both are spelled here because this script runs **without the package** — it is
+#: stdlib-only, so it cannot ask `emrg.config` or `emrg.home_layout` where a file lives, and
+#: the migration itself lives in the package. `scripts/check-memory-rotation.py` carries the
+#: same pair and the same two functions below for the same window, and
+#: `tests/test_check_issue_links.py` holds the two copies to one set of answers rather than
+#: trusting them to stay in step.
+ROOT_PREFIX = "~/.emrg/"
+GLOBAL_PREFIX = "~/.emrg/global/"
+
+
+def post_split(path: str) -> str:
+    """Where ``path`` lives once the root migration has run.
+
+    The migration moves every entry EMRG owns from ``~/.emrg/<name>`` to
+    ``~/.emrg/global/<name>``, keeping the relative path, so the transformation is the one
+    prefix and nothing else. :data:`ROOT_PREFIX` itself is untouched: it is the root, not an
+    entry under it, which is why a path that does not start with it comes back as it was
+    rather than gaining a prefix it never had.
+    """
+    if not path.startswith(ROOT_PREFIX):
+        return path
+    return GLOBAL_PREFIX + path[len(ROOT_PREFIX):]
+
+
+def prefer_existing(pre_split: str, post_split_path: str) -> str:
+    """The one of the two that is on disk, preferring the migrated path.
+
+    Split out from :func:`resolve_default` so the choice can be held still by a test: the
+    two candidates it takes are ordinary paths, and a fixture can build either without the
+    host's own root being involved.
+    """
+    try:
+        return post_split_path if Path(post_split_path).expanduser().exists() else pre_split
+    except OSError:
+        return pre_split
+
+
+def resolve_default(path: str) -> str:
+    """``path``'s post-migration twin when that file exists, and ``path`` otherwise.
+
+    Resolved against the **file**, not against the ``global/`` directory: a migration that
+    stopped part way (it is all-or-nothing, but a host can also have created ``global/``
+    from some other start) leaves the directory present and this file absent, and the
+    directory is then the wrong thing to ask.
+    """
+    return prefer_existing(path, post_split(path))
+
+
+#: The default ledger is **resolved when it is read**, inside :func:`rants_path`, and there
+#: is deliberately no module-level constant holding the answer: a value frozen at import is
+#: one answer for the life of a process, it cannot be asked about a fixture's home, and a
+#: second spelling of the same default is the fault this file spends its docstrings on.
 
 #: An issue's origin line: the word `Origin:` (any case), the word `rant`, and a timestamp.
 #: Anchored to the start of a line under `re.M`, because R5 asks for it on the issue's
@@ -614,9 +682,18 @@ def issue_claims(text: str | None) -> set[int]:
 
 
 def rants_path(override: str | None = None) -> Path:
-    """The rant ledger: `--rants`, else `$EMRG_RANTS`, else the host's own store."""
+    """The rant ledger: `--rants`, else `$EMRG_RANTS`, else the host's own store.
+
+    The store is read at whichever of the two paths the root split has left it at — the
+    pre-split literal in :data:`PRE_SPLIT_RANTS` resolved through :func:`resolve_default` —
+    so this answers a file that exists on both sides of the migration rather than only on
+    the far side of it. Resolved **per call** so the answer follows the host it is asked
+    about; see the note above :data:`PRE_SPLIT_RANTS`.
+    """
     raw = override or os.environ.get("EMRG_RANTS")
-    return Path(raw).expanduser() if raw else DEFAULT_RANTS
+    if raw:
+        return Path(raw).expanduser()
+    return Path(resolve_default(PRE_SPLIT_RANTS)).expanduser()
 
 
 def load_rant_rows(path: Path) -> list[dict]:
@@ -1823,8 +1900,10 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help=(
             "the rant ledger an `Origin: rant <timestamp>` line is resolved against "
-            "(default: $EMRG_RANTS, else ~/.emrg/rants.jsonl). Read only when an open "
-            "issue declares an origin"
+            "(default: $EMRG_RANTS, else the host's own store - "
+            "~/.emrg/global/rants.jsonl once the home-root migration has run, "
+            "~/.emrg/rants.jsonl before it). Read only when an open issue declares "
+            "an origin"
         ),
     )
     parser.add_argument(
