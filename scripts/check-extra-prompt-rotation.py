@@ -42,8 +42,9 @@ Two subjects, both named before any verdict:
 * the **task table** (`--tasks`, default the host's own store: `~/.emrg/global/tasks.yml`
   once the home-root migration has run, `~/.emrg/tasks.yml` before it) - the records whose
   `extra_prompt` may render;
-* the **rotation table** (`--table`, default
-  `.emrg/memory/task-extra-prompt-rotation.md`) - one Markdown row per classified block,
+* the **rotation table** (`--table`, default `.emrg/memory/task-extra-prompt-rotation.md`,
+  or `.emrg/memory/ref/task-extra-prompt-rotation.md` once the memory store has migrated its
+  detail files into `ref/`) - one Markdown row per classified block,
   carrying the block's length and the sha256 of its text as they stood when that row was
   written.
 
@@ -132,12 +133,38 @@ import re
 import sys
 from pathlib import Path
 
+from emrg.memory import MEMORY_REF_DIRNAME
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-#: The home of the rotation table this repository writes. It is the evolution agent's own
-#: memory, which is untracked state rather than source - a checkout that has never run a
-#: cycle does not have it, and that is answered as exit **2** rather than as a clean rotation.
-DEFAULT_TABLE = REPO_ROOT / ".emrg" / "memory" / "task-extra-prompt-rotation.md"
+#: The rotation table's name. It is the evolution agent's own memory, which is untracked state
+#: rather than source - a checkout that has never run a cycle does not have it, and that is
+#: answered as exit **2** rather than as a clean rotation.
+TABLE_NAME = "task-extra-prompt-rotation.md"
+
+
+def default_table() -> Path:
+    """The rotation table inside this repository's memory store: `ref/` when it is there.
+
+    The store keeps every detail file in `ref/` and leaves only the index at the top
+    (`emrg.memory.MEMORY_REF_DIRNAME`), and `MemoryStore.migrate_flat_layout()` moves a store
+    that predates that layout the first time it is constructed. This table is a detail file, so
+    it walks the rule the store walks - the same one `check-memory-index.py` resolves its rows
+    against and `check-cycle-record.py` resolves its two subjects against.
+
+    Measured 2026-11-22 (`cyc20261122-142416`): while the table sat at its pre-migration path
+    this reading answered `8 unchanged`, and the moment the store was migrated it answered
+    exit 2, `cannot measure: ... is unreadable ([Errno 2] ...)` - for a file that was present
+    one directory down. Step 1.7 of a cycle then cannot be taken at all, and the answer it
+    prints reads like a missing rotation table rather than a wrong path.
+
+    Resolved at call time, never at import: `REPO_ROOT` is the subject this reads, and a
+    fixture that moves it must move the answer with it. `--table` still overrides the whole
+    question, which is how a reading is taken on a fixture.
+    """
+    memory_root = REPO_ROOT / ".emrg" / "memory"
+    ref = memory_root / MEMORY_REF_DIRNAME
+    return (ref if ref.is_dir() else memory_root) / TABLE_NAME
 
 #: The default task table, which is this host's. `--tasks` exists so the reading can be taken
 #: on a fixture, and the default is never exercised by a test.
@@ -483,8 +510,12 @@ def main(argv=None):
     parser.add_argument(
         "--table",
         type=Path,
-        default=DEFAULT_TABLE,
-        help="the section 1.7 rotation table (default: %(default)s)",
+        default=None,
+        help=(
+            "the section 1.7 rotation table (default: this checkout's memory store, which is "
+            ".emrg/memory/ref/ once the store has migrated its detail files there, and "
+            ".emrg/memory/ before it has)"
+        ),
     )
     parser.add_argument(
         "--all",
@@ -503,7 +534,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     tasks_path = resolve_tasks_path(args.tasks)
-    table_path = Path(os.path.expanduser(str(args.table)))
+    table_path = (
+        Path(os.path.expanduser(str(args.table))) if args.table is not None else default_table()
+    )
 
     records = _load_tasks(tasks_path)
     if records is None:

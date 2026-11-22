@@ -570,3 +570,48 @@ def test_an_explicit_tasks_path_is_not_resolved_to_its_twin(mod, tmp_path, monke
 
     assert mod.resolve_tasks_path(given) == given
     assert mod.resolve_tasks_path(str(given)) == given
+
+
+def test_the_default_table_resolves_a_store_that_migrated_to_ref(mod, tmp_path, monkeypatch, capsys):
+    """The store keeps its detail files in `ref/`, and the rotation table is one of them.
+
+    Measured 2026-11-22 (`cyc20261122-142416`): with the table at its pre-migration path this
+    reading answered `8 unchanged`, and the moment `MemoryStore.migrate_flat_layout()` moved
+    the store it answered exit 2 -- `cannot measure: ... is unreadable ([Errno 2] ...)` -- for a
+    file that was present one directory down. No earlier arm saw it: every one of them passes
+    `--table` explicitly, which is the one shape a cycle's own reading never uses.
+
+    `REPO_ROOT` is moved rather than the path being handed in, because that is the subject the
+    default reads; a resolver frozen at import would answer the real checkout here and the
+    fixture would pass while measuring nothing.
+    """
+    text = "x" * 40
+    tasks = _tasks(tmp_path, [_record("zeta", text=text)])
+    migrated = tmp_path / ".emrg" / "memory" / mod.MEMORY_REF_DIRNAME
+    migrated.mkdir(parents=True)
+    table = _table(migrated, {"zeta": _row(text)}, name=mod.TABLE_NAME)
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    assert mod.main(["--tasks", str(tasks)]) == 0
+    out = capsys.readouterr().out
+    assert f"table: {table} (1 row(s))" in out
+    assert "1 unchanged" in out
+
+
+def test_the_default_table_still_reads_a_store_that_did_not_migrate(mod, tmp_path, monkeypatch, capsys):
+    """The other half, without which a resolver that always answered `ref/` would pass alone.
+
+    A store whose files have not been moved yet is read where they are -- the layout that
+    predates the move, which is what every checkout that has never constructed a store holds.
+    """
+    text = "x" * 40
+    tasks = _tasks(tmp_path, [_record("zeta", text=text)])
+    flat = tmp_path / ".emrg" / "memory"
+    flat.mkdir(parents=True)
+    table = _table(flat, {"zeta": _row(text)}, name=mod.TABLE_NAME)
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    assert mod.main(["--tasks", str(tasks)]) == 0
+    out = capsys.readouterr().out
+    assert f"table: {table} (1 row(s))" in out
+    assert "1 unchanged" in out
