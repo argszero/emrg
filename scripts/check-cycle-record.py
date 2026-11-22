@@ -86,6 +86,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from emrg.memory import MEMORY_REF_DIRNAME
+
 #: The state file and its archive, by the names this host keeps them under. Both live in
 #: the memory root beside the index and the bookmark, and both are gitignored: the reading
 #: is a host-side one, so the names are data here rather than a path a CI leg could build.
@@ -208,6 +210,26 @@ def unrecognised_headers(text: str) -> list[tuple[int, str]]:
     ]
 
 
+def _detail_dir(memory_root: Path) -> Path:
+    """The directory the state file and the archive are in: `ref/` when it is there.
+
+    The store keeps every detail file in `ref/` and leaves only the index at the top
+    (`emrg.memory.MEMORY_REF_DIRNAME`), and `MemoryStore.migrate_flat_layout()` moves a
+    store that predates that layout the first time it is constructed. Both subjects read
+    here are detail files, so this guard walks the rule the store walks. Measured
+    2026-11-22 (`cyc20261122-140051`): a migrated store made this tool answer exit 2 --
+    `could not measure: the state file could not be read (FileNotFoundError)` -- for a file
+    that was present one directory down, which reads as "no record at all" rather than as
+    a wrong path.
+
+    The fallback is not a second layout: a store whose files have not been moved yet is
+    read where they are, exactly as `check-memory-index.py` resolves its rows, and the
+    report names the directory it read so the reading states its own subject.
+    """
+    ref = memory_root / MEMORY_REF_DIRNAME
+    return ref if ref.is_dir() else memory_root
+
+
 def header_faults(text: str) -> list[tuple[int, str, str]]:
     """Every block header in `text` whose **subject cell** does not name one admitted form.
 
@@ -295,10 +317,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     root = args.memory_root if args.memory_root is not None else default_memory_root()
-    state = args.state if args.state is not None else root / STATE_NAME
-    archive = args.archive if args.archive is not None else root / ARCHIVE_NAME
+    detail_dir = _detail_dir(root)
+    state = args.state if args.state is not None else detail_dir / STATE_NAME
+    archive = args.archive if args.archive is not None else detail_dir / ARCHIVE_NAME
 
     print(f"tree: {checkout_root()}")
+    print(f"detail files read from: {detail_dir}")
     print(f"state:   {state}")
     print(f"archive: {archive}")
 
