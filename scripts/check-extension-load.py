@@ -55,6 +55,10 @@ Usage
     python3 scripts/check-extension-load.py --python /path/to/python3.13
     python3 scripts/check-extension-load.py --quiet             # verdict lines only
     python3 scripts/check-extension-load.py --keep               # leave the venv in place
+    python3 scripts/check-extension-load.py --offline            # the caller blocked the
+                                                                 # network: name the wheel
+                                                                 # fetch as unmeasurable
+                                                                 # instead of waiting it out
 
 The host-side counterpart of `packaging/smoke-test.sh` item 15 (which runs the same
 chain in CI): the v0.2.7 lesson is that a CI-side validation with no host-side
@@ -210,7 +214,24 @@ def combined(proc: subprocess.CompletedProcess) -> str:
     return ((proc.stderr or "") + (proc.stdout or "")).strip()
 
 
-def measure(interpreter: Path, wheel: str, module: str, quiet: bool, keep: bool) -> int:
+#: Why `--offline` refuses instead of trying. The wheel fetch is the only step here
+#: that needs the network, so a caller who has dropped the outbound ports has already
+#: made it unanswerable: pip does not see a refusal, it sees a connection that never
+#: answers, and it spends its retry ladder learning that. Measured on this host against
+#: a listener that accepts and stalls (the shape a DROP produces, and the same command
+#: shape this script runs): **98.1 s**, six connections, `read timeout=15`, retries
+#: 3/2/1/0. That is the cost `--offline` removes from the release leg's offline smoke
+#: step, and it is the reason the refusal is stated rather than waited out.
+OFFLINE_REFUSAL = (
+    "the caller blocked the network (`--offline`) and the wheel fetch is the only step "
+    "here that needs it, so there is no `.so` to load - the fetch is a question this "
+    "caller has already made unanswerable, and this is not a reading of the interpreter"
+)
+
+
+def measure(
+    interpreter: Path, wheel: str, module: str, quiet: bool, keep: bool, offline: bool = False
+) -> int:
     """The three steps, in order. Returns the exit code (0/1/2)."""
     print(f"check-extension-load: measuring {interpreter}")
     print(f"  tree: {Path.cwd()}")
@@ -231,6 +252,11 @@ def measure(interpreter: Path, wheel: str, module: str, quiet: bool, keep: bool)
             )
     else:
         out(quiet, "  entitlement: not applicable (the entitlement is a macOS restriction)")
+
+    if offline:
+        # Before the venv, because without a wheel there is nothing to load and the
+        # venv would only add work to a question already answered "unmeasurable".
+        raise Unmeasured(OFFLINE_REFUSAL)
 
     workdir = Path(tempfile.mkdtemp(prefix="emrg-ext-load-"))
     venv = workdir / "venv"
@@ -316,11 +342,18 @@ def main() -> int:
     parser.add_argument("--module", default=DEFAULT_MODULE, help=f"its C module to import (default: {DEFAULT_MODULE})")
     parser.add_argument("--quiet", action="store_true", help="print the verdict lines only")
     parser.add_argument("--keep", action="store_true", help="leave the venv in place for inspection")
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="the caller has blocked the network: report the wheel fetch as unmeasurable "
+        "(exit 2, with that reason) instead of waiting out pip's retries, which cost 98 s "
+        "against a dropped port",
+    )
     args = parser.parse_args()
 
     try:
         interpreter = find_interpreter(Path.home(), args.python)
-        return measure(interpreter, args.wheel, args.module, args.quiet, args.keep)
+        return measure(interpreter, args.wheel, args.module, args.quiet, args.keep, args.offline)
     except Unmeasured as exc:
         print(f"check-extension-load: could not measure - {exc}")
         print("VERDICT: unmeasurable (this is not a pass)")
