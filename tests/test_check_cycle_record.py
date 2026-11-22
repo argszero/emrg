@@ -54,6 +54,8 @@ library has not reached the code it accuses.
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -646,3 +648,91 @@ def test_the_default_paths_resolve_a_store_that_migrated_to_ref(tmp_path: Path, 
           header("cyc20261112-214138") + "\n- an older block\n")
     assert mod.main(["--memory-root", str(flat)]) == 0
     assert f"detail files read from: {flat}" in capsys.readouterr().out
+
+
+def _older_install(tmp_path: Path) -> tuple[dict[str, str], Path]:
+    """An environment whose only `emrg` is a package that predates `MEMORY_REF_DIRNAME`.
+
+    This is the host's shape rather than a hypothetical one: an install tree is a released
+    copy, so it lags the checkout by however long it has been since the last upgrade, and
+    the constant this guard imports was added to the checkout in between.
+    """
+    older = tmp_path / "older-install"
+    (older / "emrg").mkdir(parents=True)
+    (older / "emrg" / "__init__.py").write_text("", encoding="utf-8")
+    (older / "emrg" / "memory.py").write_text(
+        "# an install that predates MEMORY_REF_DIRNAME\n", encoding="utf-8"
+    )
+    # A cwd that is neither the checkout nor anything above the stub: `python3 -c` puts the
+    # cwd first, so running this from the checkout would hide the very condition measured.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    return {**os.environ, "PYTHONPATH": str(older)}, elsewhere
+
+
+def test_the_script_imports_its_own_checkout_and_not_an_older_install(
+    tmp_path: Path,
+) -> None:
+    """Run as a script, `sys.path[0]` is `scripts/`, so this checkout is not on the path.
+
+    Measured 2026-11-22 (`cyc20261122-191313`) on clean master `8a2600cd`::
+
+        $ python3 scripts/check-cycle-record.py --help
+        ImportError: cannot import name 'MEMORY_REF_DIRNAME' from 'emrg.memory'
+          (/Users/.../.emrg/install/source/emrg/memory.py)
+        rc=1
+
+    Exit 1 is this family's "measured, and it failed", so a guard that never ran was
+    indistinguishable from a guard that found something. Every other arm in this file loads
+    the module by path under pytest, where the checkout is already on `sys.path` -- which is
+    exactly the condition the host does not have, and why none of them could see this.
+    """
+    env, elsewhere = _older_install(tmp_path)
+
+    # The control: where the checkout is not already first, the stub really is what `emrg`
+    # resolves to. Without it the arm below would pass on an inert stub.
+    control = subprocess.run(
+        [sys.executable, "-c", "import emrg.memory as m; print(m.__file__)"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=env, cwd=str(elsewhere),
+    )
+    assert control.returncode == 0, control.stderr
+    assert str(env["PYTHONPATH"]) in control.stdout, control.stdout
+
+    # `--help` is the smallest reading that still needs the module body: argparse answers 0
+    # only after every module-level import has completed, so a failing import cannot print
+    # a usage line.
+    run = subprocess.run(
+        [sys.executable, str(SCRIPT), "--help"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=env, cwd=str(elsewhere),
+    )
+    assert run.returncode == 0, run.stderr
+    assert "ImportError" not in run.stderr
+    assert run.stdout.startswith("usage:"), run.stdout
+
+
+def test_every_reading_works_with_only_an_older_install_on_the_path(
+    tmp_path: Path,
+) -> None:
+    """The same condition, against the reading rather than `--help`.
+
+    `--help` proves the import completed; it does not prove the constant it imported is the
+    one the reading uses, because a guard could import the name and then fail later. This
+    arm asks the question the guard exists to answer, with the same stub in place, so the
+    reading is measured end to end and the tree it names is still this checkout.
+    """
+    env, elsewhere = _older_install(tmp_path)
+    root = tmp_path / "memory"
+    root.mkdir()
+    build(root, header(CYCLE) + "\n- a fact this cycle established\n",
+          header("cyc20261112-214138") + "\n- an older block\n")
+
+    run = subprocess.run(
+        [sys.executable, str(SCRIPT), "--memory-root", str(root)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=env, cwd=str(elsewhere),
+    )
+    assert run.returncode == 0, run.stderr
+    assert f"tree: {SCRIPT.parent.parent}" in run.stdout
+    assert f"detail files read from: {root}" in run.stdout
