@@ -610,13 +610,29 @@ def test_a_header_indented_past_the_heading_limit_is_quoted_text(
     assert mod.archived_subjects(line) == [], "quoted text is not a block"
 
 
-@pytest.mark.skipif(
-    not (SCRIPT.parent.parent / ".emrg" / "memory" / "evolution-nte-steady-state-since-v0.2.73.md").is_file(),
-    reason="this checkout carries no cycle record, so the real files are not here to read",
-)
-def test_the_files_as_they_stand_read_clean() -> None:
-    """The guard must pass on the record it ships beside, or it is a rule nothing obeys."""
-    assert mod.main([]) == 0
+def test_the_files_as_they_stand_read_clean(capsys) -> None:
+    """The guard must pass on the record it ships beside, or it is a rule nothing obeys.
+
+    Read without a second list of where a record may live, and that is the correction: this
+    arm used to be a `skipif` asking `.emrg/memory/<name>` at import time, which answered
+    `absent` on the very checkout whose store keeps its detail files in `ref/` — so the one
+    arm that reads the **real** files never ran where they are, and CI could not see it
+    because a bare clone carries no `.emrg/` at all and answered `absent` the same way.
+
+    The two answers it can honestly give are read here instead. `rc 0` is the record beside
+    this checkout reading clean. `rc 2` with `could not measure` is a checkout that carries
+    none of it — a bare clone — and that is a state to report rather than a pass. What is
+    never acceptable is `rc 1`, a finding about the record this tree ships beside.
+    """
+    code = mod.main([])
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    if code == 2:
+        assert "could not measure" in out, (
+            f"rc 2 is this guard's `could not measure`; a silent one would be a checkout "
+            f"whose record is unread rather than absent: {out}")
+        return
+    assert code == 0, f"the record beside this checkout does not read clean:\n{out}"
 
 
 def test_the_default_paths_resolve_a_store_that_migrated_to_ref(tmp_path: Path, capsys) -> None:
