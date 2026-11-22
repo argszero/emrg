@@ -86,7 +86,28 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from emrg.memory import MEMORY_REF_DIRNAME
+#: This file's own tree, put in front of the interpreter's search path before the one
+#: import it takes from the package -- load-bearing rather than tidy. Run as a script,
+#: `sys.path[0]` is `scripts/`, so this checkout is not on the path at all and `emrg`
+#: resolves to whatever the interpreter finds next. On a host that has an install tree,
+#: that is the released copy, one version behind this file.
+#:
+#: Measured 2026-11-22 (`cyc20261122-191313`) on clean master `8a2600cd`::
+#:
+#:     $ python3 scripts/check-cycle-record.py --help
+#:     ImportError: cannot import name 'MEMORY_REF_DIRNAME' from 'emrg.memory'
+#:       (/Users/.../.emrg/install/source/emrg/memory.py)
+#:     rc=1
+#:
+#: Exit 1 is this family's "measured, and it failed", so a guard that never ran was
+#: indistinguishable from a guard that found something -- on every host between one
+#: release and the next. The insert is unconditional and first for the reason
+#: `check-memory-index.py` states at length, and `check-memory-rotation.py` and
+#: `find-host-message.py` spell the same three lines.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
+from emrg.memory import MEMORY_REF_DIRNAME  # noqa: E402
 
 #: The state file and its archive, by the names this host keeps them under. Both live in
 #: the memory root beside the index and the bookmark, and both are gitignored: the reading
@@ -134,8 +155,12 @@ def checkout_root() -> Path:
     that belongs to one installation -- and so the report's `tree:` line names this
     checkout whatever the caller's cwd. A line that followed the cwd would make the same
     report true of two different trees.
+
+    Derived once: `REPO_ROOT` above is this same path, and it is the one the imports were
+    resolved against. Two derivations would let the report name a tree the reading did not
+    come from, which is the `tree:` line's whole purpose one level down.
     """
-    return Path(__file__).resolve().parent.parent
+    return REPO_ROOT
 
 
 def default_memory_root() -> Path:
@@ -334,7 +359,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(
                 f"could not measure: the {label} file could not be read "
                 f"({exc.__class__.__name__}: {exc}) -- this is not a pass, it is a question "
-                "this run could not ask"
+                "this run could not ask. The `state:` and `archive:` lines above name the "
+                "paths it tried, and `uv run --no-sync python3 scripts/check-cycle-record.py` "
+                "asks the same question with the package's dependencies available: a "
+                "checkout that carries no cycle record answers exactly this, and that is "
+                "not a finding"
             )
             return 2
 
