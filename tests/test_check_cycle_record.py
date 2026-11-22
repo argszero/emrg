@@ -615,3 +615,34 @@ def test_a_header_indented_past_the_heading_limit_is_quoted_text(
 def test_the_files_as_they_stand_read_clean() -> None:
     """The guard must pass on the record it ships beside, or it is a rule nothing obeys."""
     assert mod.main([]) == 0
+
+
+def test_the_default_paths_resolve_a_store_that_migrated_to_ref(tmp_path: Path, capsys) -> None:
+    """The store keeps its detail files in `ref/`, and both of this guard's subjects are detail files.
+
+    Measured 2026-11-22 (`cyc20261122-140051`): once `MemoryStore.migrate_flat_layout()`
+    moved this project's own store into `ref/`, the guard answered exit 2 --
+    `could not measure: the state file could not be read (FileNotFoundError)` -- for a file
+    that was present one directory down. Exit 2 is the family's "not a pass, a question
+    this run could not ask", so no earlier arm saw it: every one of them passes
+    `--state` and `--archive` explicitly, which is the one shape a cycle never uses.
+
+    Both halves are read here, because a fallback that always answered the root would pass
+    the second arm on its own: a store whose files have not been moved is still read where
+    they are, and the report names the directory it read either way.
+    """
+    migrated = tmp_path / "memory" / mod.MEMORY_REF_DIRNAME
+    migrated.mkdir(parents=True)
+    build(migrated, header(CYCLE) + "\n- a fact this cycle established\n",
+          header("cyc20261112-214138") + "\n- an older block\n")
+    assert mod.main(["--memory-root", str(tmp_path / "memory")]) == 0
+    out = capsys.readouterr().out
+    assert f"detail files read from: {migrated}" in out
+    assert f"state:   {migrated / mod.STATE_NAME}" in out
+
+    flat = tmp_path / "flat"
+    flat.mkdir()
+    build(flat, header(CYCLE) + "\n- a fact this cycle established\n",
+          header("cyc20261112-214138") + "\n- an older block\n")
+    assert mod.main(["--memory-root", str(flat)]) == 0
+    assert f"detail files read from: {flat}" in capsys.readouterr().out
