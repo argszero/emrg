@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -615,3 +617,36 @@ def test_the_default_table_still_reads_a_store_that_did_not_migrate(mod, tmp_pat
     out = capsys.readouterr().out
     assert f"table: {table} (1 row(s))" in out
     assert "1 unchanged" in out
+
+
+def test_the_script_runs_as_a_subprocess_without_reaching_for_an_installed_package():
+    """The entry point a cycle actually uses: `python3 scripts/…`, not an import from pytest.
+
+    Every other arm in this file loads the module by path, and pytest has already put the
+    checkout on `sys.path` by the time one of them runs - so none of them can see what the
+    script's own entry point sees. There, `sys.path[0]` is `scripts/`, `emrg` is not on it,
+    and the module-level `from emrg.memory import MEMORY_REF_DIRNAME` either resolves from
+    whatever the host has **installed** (a released copy, older than this tree, so the name is
+    missing) or does not resolve at all. Both answer `1` with an `ImportError` on stderr: a
+    crash read as a verdict, on every host, in the one shape a section 1.7 reading is taken in.
+
+    `--help` is the probe because it needs nothing else: argparse answers `0` only after the
+    module body has imported, so a nonzero exit here is the import and nothing but the import.
+    Measured 2026-11-22 on this host - before the `sys.path` insert the run answered
+    `ImportError: cannot import name 'MEMORY_REF_DIRNAME'`, resolving
+    `/Users/…/.emrg/install/source/emrg/memory.py`; after it, `0`.
+    """
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "--help"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        cwd=str(REPO_ROOT),
+    )
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 0, combined
+    assert "ImportError" not in combined and "ModuleNotFoundError" not in combined, combined
+    # and it is this tool that answered, not some other: the flag the reading is taken with
+    assert "--table" in proc.stdout, proc.stdout

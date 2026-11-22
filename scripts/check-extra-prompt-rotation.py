@@ -133,9 +133,20 @@ import re
 import sys
 from pathlib import Path
 
-from emrg.memory import MEMORY_REF_DIRNAME
-
+#: This file's own tree, put on `sys.path` before the one import it takes from the package.
+#: A `scripts/*.py` file gets `sys.path[0] = scripts/`, so without this insert `emrg` resolves
+#: from whatever the host has **installed** - a released copy, therefore older than the tree
+#: this file ships in - and the import below raises `ImportError` on every host running a
+#: release, which is every host. Measured 2026-11-22: `python3 -c 'import emrg.memory'` from
+#: the repo root answers the checkout while this script's own entry point answered
+#: `/Users/…/.emrg/install/source/emrg/memory.py`. `check-memory-rotation.py` and
+#: `find-host-message.py` already carry this insert for the same reason.
 REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
+# The directory name the store keeps its detail files under, imported rather than re-spelled:
+# the rule is stated once in `emrg.memory`, and a second spelling of it is what issue #2559 was.
+from emrg.memory import MEMORY_REF_DIRNAME  # noqa: E402
 
 #: The rotation table's name. It is the evolution agent's own memory, which is untracked state
 #: rather than source - a checkout that has never run a cycle does not have it, and that is
