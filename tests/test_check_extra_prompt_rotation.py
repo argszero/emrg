@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -570,3 +572,81 @@ def test_an_explicit_tasks_path_is_not_resolved_to_its_twin(mod, tmp_path, monke
 
     assert mod.resolve_tasks_path(given) == given
     assert mod.resolve_tasks_path(str(given)) == given
+
+
+def test_the_default_table_resolves_a_store_that_migrated_to_ref(mod, tmp_path, monkeypatch, capsys):
+    """The store keeps its detail files in `ref/`, and the rotation table is one of them.
+
+    Measured 2026-11-22 (`cyc20261122-142416`): with the table at its pre-migration path this
+    reading answered `8 unchanged`, and the moment `MemoryStore.migrate_flat_layout()` moved
+    the store it answered exit 2 -- `cannot measure: ... is unreadable ([Errno 2] ...)` -- for a
+    file that was present one directory down. No earlier arm saw it: every one of them passes
+    `--table` explicitly, which is the one shape a cycle's own reading never uses.
+
+    `REPO_ROOT` is moved rather than the path being handed in, because that is the subject the
+    default reads; a resolver frozen at import would answer the real checkout here and the
+    fixture would pass while measuring nothing.
+    """
+    text = "x" * 40
+    tasks = _tasks(tmp_path, [_record("zeta", text=text)])
+    migrated = tmp_path / ".emrg" / "memory" / mod.MEMORY_REF_DIRNAME
+    migrated.mkdir(parents=True)
+    table = _table(migrated, {"zeta": _row(text)}, name=mod.TABLE_NAME)
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    assert mod.main(["--tasks", str(tasks)]) == 0
+    out = capsys.readouterr().out
+    assert f"table: {table} (1 row(s))" in out
+    assert "1 unchanged" in out
+
+
+def test_the_default_table_still_reads_a_store_that_did_not_migrate(mod, tmp_path, monkeypatch, capsys):
+    """The other half, without which a resolver that always answered `ref/` would pass alone.
+
+    A store whose files have not been moved yet is read where they are -- the layout that
+    predates the move, which is what every checkout that has never constructed a store holds.
+    """
+    text = "x" * 40
+    tasks = _tasks(tmp_path, [_record("zeta", text=text)])
+    flat = tmp_path / ".emrg" / "memory"
+    flat.mkdir(parents=True)
+    table = _table(flat, {"zeta": _row(text)}, name=mod.TABLE_NAME)
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    assert mod.main(["--tasks", str(tasks)]) == 0
+    out = capsys.readouterr().out
+    assert f"table: {table} (1 row(s))" in out
+    assert "1 unchanged" in out
+
+
+def test_the_script_runs_as_a_subprocess_without_reaching_for_an_installed_package():
+    """The entry point a cycle actually uses: `python3 scripts/…`, not an import from pytest.
+
+    Every other arm in this file loads the module by path, and pytest has already put the
+    checkout on `sys.path` by the time one of them runs - so none of them can see what the
+    script's own entry point sees. There, `sys.path[0]` is `scripts/`, `emrg` is not on it,
+    and the module-level `from emrg.memory import MEMORY_REF_DIRNAME` either resolves from
+    whatever the host has **installed** (a released copy, older than this tree, so the name is
+    missing) or does not resolve at all. Both answer `1` with an `ImportError` on stderr: a
+    crash read as a verdict, on every host, in the one shape a section 1.7 reading is taken in.
+
+    `--help` is the probe because it needs nothing else: argparse answers `0` only after the
+    module body has imported, so a nonzero exit here is the import and nothing but the import.
+    Measured 2026-11-22 on this host - before the `sys.path` insert the run answered
+    `ImportError: cannot import name 'MEMORY_REF_DIRNAME'`, resolving
+    `/Users/…/.emrg/install/source/emrg/memory.py`; after it, `0`.
+    """
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "--help"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        cwd=str(REPO_ROOT),
+    )
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 0, combined
+    assert "ImportError" not in combined and "ModuleNotFoundError" not in combined, combined
+    # and it is this tool that answered, not some other: the flag the reading is taken with
+    assert "--table" in proc.stdout, proc.stdout
