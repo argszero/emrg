@@ -121,6 +121,12 @@ interface EmrgBridge {
   taskTemplateUpdate(p: { name: string; prompt: string }): Promise<unknown>;
   taskTemplateDelete(p: { name: string }): Promise<unknown>;
   evolutionSummary(p: { limit: number }): Promise<{ count?: number; recent?: RecentImprovement[] }>;
+  /**
+   * 重启守护进程（rant 2026-11-22T13:43:13）——与升级横幅的「重启生效」是同一条链：
+   * 完整 stop（--skip-gui 防自杀）→ GUI 自己 relaunch。那颗按钮只随横幅出现，而横幅
+   * 当时一次都没出现，宿主在界面上就没有任何重启入口了。
+   */
+  restartDaemon?(): Promise<unknown>;
 }
 
 function bridge(): EmrgBridge | undefined {
@@ -186,6 +192,10 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
   const pendingConfirm = useRef<((ok: boolean) => void) | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  // 重启守护进程（rant 2026-11-22T13:43:13）：升级提示缺席时宿主没有别的重启入口，
+  // 所以这个动作住在「关于」——那正是“这台机器现在跑的是什么”的那一页。
+  const [restarting, setRestarting] = useState(false);
+  const [restartError, setRestartError] = useState<string | null>(null);
   // model 行内表单态（vanilla openModelForm/saveModelForm）
   const [formOpen, setFormOpen] = useState(false);
   const [editingName, setEditingName] = useState<string | null>(null);
@@ -469,6 +479,24 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [device?.open, device?.waiting]);
+
+  /** 重启守护进程（rant 2026-11-22T13:43:13）。成功时 GUI 会自己 relaunch，本组件随即
+   *  卸载——所以 `restarting` 不在这里复位：按钮停在“正在重启”，直到窗口换掉为止。 */
+  async function handleRestartDaemon() {
+    const b = bridge();
+    setRestartError(null);
+    if (!b?.restartDaemon) {
+      setRestartError(t("settings.daemonRestartUnavailable"));
+      return;
+    }
+    setRestarting(true);
+    try {
+      await b.restartDaemon();
+    } catch (e) {
+      setRestarting(false);
+      setRestartError(`${t("settings.daemonRestartFailed")}${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
 
   function openDeviceUrl() {
     const b = bridge();
@@ -1051,6 +1079,23 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
                 </div>
                 <div className="hint" style={{ marginTop: 6 }}>{t("settings.aboutDesc")}</div>
               </div>
+            </div>
+            <div className="settings-group">
+              <div className="settings-group-title">{t("settings.daemonTitle")}</div>
+              <div className="hint">{t("settings.daemonRestartDesc")}</div>
+              <button
+                type="button"
+                data-testid="settings-restart-daemon"
+                onClick={() => void handleRestartDaemon()}
+                disabled={restarting}
+              >
+                {restarting ? t("settings.daemonRestarting") : t("settings.daemonRestartBtn")}
+              </button>
+              {restartError ? (
+                <div className="hint" data-testid="settings-restart-error">
+                  {restartError}
+                </div>
+              ) : null}
             </div>
             <div className="settings-group">
               <div className="settings-group-title">{t("settings.recentTitle")}</div>

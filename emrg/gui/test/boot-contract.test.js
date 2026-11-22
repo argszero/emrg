@@ -338,3 +338,32 @@ test("issue #2490: emrg:taskLimits reports the daemon's own minimum, never a lit
     "no literal floor may live in this handler — that is the copy issue #2490 removes"
   );
 });
+
+test("upgrade prompt: the opening reading carries the installed version (rant 2026-11-22T13:43:13)", () => {
+  // The banner had exactly one producer: the 15-second heartbeat. Measured on the host
+  // 2026-11-22 — installed 0.3.73 on disk, 0.3.72 in the running daemon, and the GUI
+  // log held `[gui] connected to emrgd` with no `[gui] heartbeat started` anywhere in
+  // 197 lines, so the prompt never appeared and the host had no in-GUI restart entry
+  // either. This guard pins the second carrier (`emrg:init`'s return, which the
+  // renderer's applyInit turns into the same banner) and the one line that tells a
+  // silent producer apart from one that never ran.
+  const src = read("main.js");
+  const start = src.indexOf('ipcMain.handle("emrg:init"');
+  assert.ok(start > 0, "main.js must contain an emrg:init handler");
+  const body = src.slice(start, src.indexOf("\n    });\n", start) + 8);
+  assert.match(
+    body,
+    /installed_version: pong\?\.installed_version/,
+    "emrg:init must forward the disk version it already read, so the banner does not " +
+      "depend on a timer that can fail to start"
+  );
+  const tick = src.indexOf("async function _heartbeatTick");
+  assert.ok(tick > 0, "main.js must contain _heartbeatTick");
+  const tickBody = src.slice(tick, src.indexOf("\n  async function listSessions", tick));
+  assert.match(
+    tickBody,
+    /logger\.info\(`\[gui\] upgrade pending: installed/,
+    "raising the banner has to leave a log line, or 'nothing pending' and 'the " +
+      "producer never ran' read identically in emrg-gui.log"
+  );
+});

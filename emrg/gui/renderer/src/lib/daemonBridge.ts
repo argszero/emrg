@@ -430,6 +430,17 @@ export interface InitResult {
   model?: string;
   evolution_count?: number | null;
   current_version?: string;
+  /**
+   * The version on disk, as the daemon read it for this same pong.
+   *
+   * The upgrade banner had exactly one producer: the 15-second heartbeat in `main.js`.
+   * Measured 2026-11-22 (rant 2026-11-22T13:43:13): installed 0.3.73 on disk, 0.3.72 in
+   * the running daemon, and the prompt never appeared — that log holds `[gui] connected
+   * to emrgd` and no `[gui] heartbeat started` at all. Carrying the fact on the opening
+   * reading gives it a producer that no timer can withhold, so a dead heartbeat costs a
+   * delay at most.
+   */
+  installed_version?: string;
   version?: string;
   sessions?: SessionSummary[];
   open_sessions?: OpenSessionEntry[];
@@ -1416,6 +1427,11 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
 
   function applyInit(result: InitResult): void {
     if (!result) return;
+    // Read before the update, because the rule below compares against what the store
+    // already knew rather than against a half-applied copy of itself.
+    const before = store.get();
+    const runningVersion = result.current_version || before.currentVersion;
+    const installedVersion = result.installed_version || "";
     store.update((s) => ({
       ...s,
       // init 成功=配置存在+key 已配置（main.js 仅在两者均满足时才走到 ensureConnected）
@@ -1425,6 +1441,15 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
       vision: typeof result.vision === "boolean" ? result.vision : s.vision,
       evolutionCount: result.evolution_count ?? s.evolutionCount,
       currentVersion: result.current_version || s.currentVersion,
+      // The same test the `upgrade` frame applies, on the opening reading
+      // (rant 2026-11-22T13:43:13). One rule, two carriers: the frame arrives every
+      // 15 s from a timer, and a timer that never starts used to mean an installed
+      // release the host was never told about. `undefined` (a main process older than
+      // this field) and `""` (no install tree, as in a checkout) both mean "nothing to
+      // offer" and leave whatever was known alone; neither is "not reported yet".
+      ...(installedVersion && installedVersion !== runningVersion
+        ? { upgradeBanner: { current: runningVersion, installed: installedVersion } }
+        : {}),
       sessions: result.sessions || s.sessions,
       openSessions: result.open_sessions || s.openSessions,
       // The opening reading, from the same field the later broadcasts send. Absent
