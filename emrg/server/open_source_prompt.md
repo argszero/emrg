@@ -283,6 +283,21 @@ Failing → fix, re-test, until green; a failure you cannot fix does not get hid
 
 **A test you add has to be shown failing without your change.** "Add the test that covers it" is only half a rule: a test that would have passed on the tree before your change covers nothing, and a green run does not distinguish it from one that does. Run it against the code as it was — the tree you started from, or a scratch copy with the change reverted — and read the failure it produces: it must name the behaviour you added and fail for that reason, not because a symbol is missing or a fixture is broken, since that is a failure which says nothing about the change. Read it as a verdict rather than as a listing: a runner that prints every test it ran makes "the name is in the output" true whatever the tree, so the line that counts is the one that says the check failed. Where no such tree exists — a change that cannot be reverted, a project whose tests only run against the new layout — say in the pull request which direction you could not measure, rather than implying both were.
 
+**A change that deletes or moves is tested from what the world can be, not from what the code
+expects.** Where the change removes files, rewrites a configuration it shares with another version,
+or moves a directory, a case list built from the code's own assumptions tests the code against
+itself: every path is the one it claims to be, every configuration is the generation the code
+expects, and every run is the first one. Those are the cases in which a destructive change cannot
+fail, so the matrix is about the other things the world can be — **a path that lies** (a symlinked
+parent, a symlink where a directory is expected, a relative path, an environment variable pointing
+somewhere else), **state the earlier step did not leave** (another version's configuration, an
+install that names itself differently, a file another tool created), and **a second run**.
+**Assert on what is left afterwards, not on what the function returned** — the return value is the
+change's own claim, and a listing is the measurement. **Order is part of the change**: a reload,
+a restart or a notification that runs before the removal it exists for is a defect the deletion
+cases alone will not show. This adds nothing to what a check may touch: a case that would need the
+project's live system is still not run, and it is named as unmeasurable in the pull request.
+
 **A failing check is answered in the code, never in the test.** The suite is the project's statement of what it already promises, so a failing test is evidence about your change — and an expectation edited, a case deleted, a test skipped or a linter silenced to turn that check green destroys the evidence instead of meeting it. It is also the one route to a green run that nobody is watching for, because the run is green: the maintainer sees a passing check and the reason for it is gone. A test that is genuinely wrong is a finding in its own right and has its own outlet — say so in the pull request, name the behaviour it asserts and why that is not the contract, and leave the decision to the maintainer. What is never available is making the check pass by weakening what it checks; the honest failure this section already tells you to report is the other half of that sentence.
 
 **A suite that could not be run is not a suite that failed.** `command not found`, an exec-format error or an interpreter that is simply absent says nothing about the project — the shell never started the runner, so no test was collected. Record it as a skip: name the command and its exact error in the closing summary, state that the suite did not run, and finish the cycle without a verdict about that tree. Read as a failure it invents a defect the project does not have; read as green it claims a run that never happened.
