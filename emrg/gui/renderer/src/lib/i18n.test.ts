@@ -125,11 +125,13 @@ describe("词典完整性守卫（防漂移）", () => {
   // 「关闭」中英各 1 条 → 542 - 1 = 541。
   // 2026-11-21 issue #3125：右栏去掉记忆标签与记忆门，标签名 / 提示语 / 打开按钮
   // 三条文案中英各删一条 → 541 - 3 = 538。
-  it("zh/en 各 538 个 key 且完全对齐", () => {
+  // 2026-11-22 rant 2026-11-22T13:43:13：关于页加「重启守护进程」入口，标题 / 说明 /
+  // 按钮 / 进行中 / 失败前缀 / 无通道 六条中英各加一条 → 538 + 6 = 544。
+  it("zh/en 各 544 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(538);
-    expect(enKeys.length).toBe(538);
+    expect(zhKeys.length).toBe(544);
+    expect(enKeys.length).toBe(544);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);

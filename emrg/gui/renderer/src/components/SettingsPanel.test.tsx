@@ -413,6 +413,26 @@ describe("SettingsPanel", () => {
   // 它的成长」）指向的就是下面这块列表。React 迁移（#1024 删掉 vanilla 渲染层）之后，
   // 数据通路（daemon `evolution_summary` 帧 → main.js IPC → preload）与文案都还在，
   // 只有渲染它的那个组件没了 —— 这三条把通路重新钉住。
+  // 升级横幅里的「重启生效」是界面内唯一的重启入口，而横幅本身可能一次都不出现
+  // （rant 2026-11-22T13:43:13：安装 0.3.73、运行 0.3.72、横幅缺席，宿主只能开终端）。
+  // 关于页这颗按钮不依赖横幅，走的是同一条 emrg:restartDaemon 链。
+  it("about tab restarts the daemon without waiting for the upgrade banner", async () => {
+    const restartDaemon = vi.fn().mockResolvedValue({ ok: true });
+    setup({ restartDaemon });
+    await screen.findByTestId("settings-tab-about");
+    fireEvent.click(screen.getByTestId("settings-tab-about"));
+    fireEvent.click(screen.getByTestId("settings-restart-daemon"));
+    await waitFor(() => expect(restartDaemon).toHaveBeenCalledTimes(1));
+  });
+
+  it("about tab says so when this build has no restart channel, rather than doing nothing", async () => {
+    setup(); // mockEmrg 没有 restartDaemon —— 正是“这一版没有那条通道”
+    await screen.findByTestId("settings-tab-about");
+    fireEvent.click(screen.getByTestId("settings-tab-about"));
+    fireEvent.click(screen.getByTestId("settings-restart-daemon"));
+    expect(screen.getByTestId("settings-restart-error").textContent).toContain("no restart channel");
+  });
+
   it("about tab asks the daemon for the recent improvements", async () => {
     const summary = vi.fn().mockResolvedValue({
       count: 2,

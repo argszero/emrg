@@ -68,6 +68,10 @@ function main() {
   // 监听（grep 证实），断连只能靠 ws close 被动通知；心跳每 15s ping 一次，
   // 无 pong 或连接已断 → 主动 scheduleReconnect（指数退避已有）。
   let heartbeatTimer = null;
+  // The installed version the upgrade frame was last announced for. Only the first
+  // tick naming a given version logs, because the tick repeats every 15 s and a
+  // line per tick would bury the rest of the file.
+  let lastUpgradeAnnounced = null;
   const HEARTBEAT_MS = 15_000;
   // P4（rant 15:07:19）：跨项目打开的会话状态——sid → {projectName, projectPath,
   // lastActive}。写盘防抖 1s（打开/关闭/切换时更新，镜像 rant 设计）。
@@ -418,6 +422,11 @@ vision = false
         vision: typeof pong?.vision === "boolean" ? pong.vision : null,
         evolution_count: pong?.evolution_count ?? 0, // G19：init 透传演化计数（waitForPong 已消耗 pong）
         current_version: pong?.current_version || "", // rant 18:30:57：进程实际运行版本（升级横幅对比基准；14:38:27 起为内存版本）
+        // Rant 2026-11-22T13:43:13：升级横幅原先只有心跳一个生产者，而心跳没启动时
+        // 横幅一次都不出现（实测：磁盘 0.3.73、进程 0.3.72、日志里没有 heartbeat
+        // started）。这里让开局这次读数也带上磁盘版本，由 applyInit 设同一个横幅——
+        // 定时器缺席最多让横幅晚到，不再让它缺席。
+        installed_version: pong?.installed_version || "",
         version: APP_VERSION, // WorkBuddy P3：版本号随 package.json 走（此前 renderer 硬编码 v0.2.7）
         sessions,
         open_sessions: openSessionsList(),
@@ -1895,6 +1904,13 @@ vision = false
     // current_version（进程内存运行版本）且 installed 非空 → 发专用 upgrade 事件
     // （不复用 status，避免 handleStatus 副作用刷屏），由 renderer 弹横幅。
     if (pong.installed_version && pong.installed_version !== pong.current_version) {
+      // Rant 2026-11-22T13:43:13: a frame that was never emitted left no trace, so "no
+      // upgrade pending" and "the producer never ran" read identically in this file.
+      // One line per installed version says which of the two it was.
+      if (pong.installed_version !== lastUpgradeAnnounced) {
+        lastUpgradeAnnounced = pong.installed_version;
+        logger.info(`[gui] upgrade pending: installed ${pong.installed_version} ≠ running ${pong.current_version}`);
+      }
       sendToRenderer("upgrade", {
         current_version: pong.current_version || "",
         installed_version: pong.installed_version,

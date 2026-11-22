@@ -542,6 +542,33 @@ describe("createDaemonBridge", () => {
     expect(bridge.store.get().upgradeBanner).toEqual({ current: "0.2.84", installed: "0.2.85" });
   });
 
+  // Rant 2026-11-22T13:43:13：横幅原先只有心跳一个生产者，心跳没启动时它一次都不出现
+  // （实测：磁盘 0.3.73、进程 0.3.72、GUI 日志里没有 `heartbeat started`）。init 的
+  // 返回也带 installed_version，于是开局这次读数就能立起同一个横幅。
+  it("applyInit 也能立起升级横幅（心跳之外的第二个生产者）", () => {
+    const { bridge } = setup();
+    bridge.applyInit({
+      config_exists: true,
+      api_key_configured: true,
+      current_version: "0.3.72",
+      installed_version: "0.3.73",
+    });
+    expect(bridge.store.get().upgradeBanner).toEqual({ current: "0.3.72", installed: "0.3.73" });
+  });
+
+  it("applyInit 在版本相同 / 无读数 / 空读数时不立横幅（真值不是“没报告”，也不是“没装”）", () => {
+    const { bridge } = setup();
+    // 相同：没有待重启的升级
+    bridge.applyInit({ config_exists: true, api_key_configured: true, current_version: "0.3.73", installed_version: "0.3.73" });
+    expect(bridge.store.get().upgradeBanner).toBeNull();
+    // 缺字段：更老的 main 进程不发这个字段
+    bridge.applyInit({ config_exists: true, api_key_configured: true, current_version: "0.3.73" });
+    expect(bridge.store.get().upgradeBanner).toBeNull();
+    // 空串：没有 install 树（checkout 内存运行）
+    bridge.applyInit({ config_exists: true, api_key_configured: true, current_version: "0.3.73", installed_version: "" });
+    expect(bridge.store.get().upgradeBanner).toBeNull();
+  });
+
   // Rant 2026-09-29T15:52:38.987951+08:00 后续：提问被 daemon 单方面终结（拒绝/超时），
   // 客户端必须据此关闭对话框——否则弹窗在提问早已结束后仍宣称"已答复"。
   it("approval_request → store.pendingApproval（提问承载问题与会话）", () => {
