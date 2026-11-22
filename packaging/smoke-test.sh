@@ -282,7 +282,16 @@ rm -rf "$venv_dir"
 #     并显式打印，绝不当成通过；1 是实测失败，即 fail。
 say "15. compiled-extension wheel loads (the entitlement's referent, issue #1544)"
 ext_rc=0
-python3 "$ROOT/scripts/check-extension-load.py" --python "$PY_BIN" --quiet || ext_rc=$?
+# R96 的离线冒烟会用 iptables 丢掉 :80/:443，再跑本脚本。此时 item 15 的 wheel 取回
+# 不是「被拒绝」而是「永远等不到回答」——pip 看不到拒绝，只会把重试阶梯走完（本机实测
+# 98.1 s，6 次连接、每次 read timeout=15、retries 3/2/1/0）。所以离线调用方要把这件事
+# 说成「无法测量」而不是等出来：EMRG_SMOKE_OFFLINE=1 ⇒ --offline。这不削弱离线验证——
+# 被削弱的只是「在断网下取 wheel」这个本来就问不出答案的问题；item 1-14 的离线安装照样跑。
+ext_args=(--python "$PY_BIN" --quiet)
+if [ "${EMRG_SMOKE_OFFLINE:-}" = "1" ]; then
+  ext_args+=(--offline)
+fi
+python3 "$ROOT/scripts/check-extension-load.py" "${ext_args[@]}" || ext_rc=$?
 if [ "$ext_rc" -eq 0 ]; then
   ok "15. wheel .so loads under the bundled python"
 elif [ "$ext_rc" -eq 2 ]; then

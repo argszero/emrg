@@ -777,14 +777,40 @@ jobs:
         run: bash packaging/smoke-test.sh dist/runtime
 
       - name: Smoke offline (Linux only, R96)
+        # The script's verdict is reported, not discarded. Until now this step ran the
+        # script behind `|| true` and then ended on its last `iptables -D`, so the
+        # script's own exit code - and the `==== smoke summary: N pass, M fail ====` line
+        # it prints - reached nothing: a release whose offline install was broken
+        # published green. The step is deliberately **advisory** (it cannot fail the
+        # leg), because a release should not be blocked by a flaky offline install; what
+        # changed is that a failure is now visible in the run summary and as a warning,
+        # rather than only to whoever opens the log. EMRG_SMOKE_OFFLINE=1 tells the
+        # script's item 15 that the wheel fetch is unanswerable here (see
+        # scripts/check-extension-load.py --offline) instead of waiting out pip's
+        # retries against the dropped ports.
         if: runner.os == 'Linux'
         shell: bash
         run: |
           sudo iptables -A OUTPUT -p tcp --dport 443 -j DROP || true
           sudo iptables -A OUTPUT -p tcp --dport 80 -j DROP || true
-          bash packaging/smoke-test.sh dist/runtime || true
+          rc=0
+          EMRG_SMOKE_OFFLINE=1 bash packaging/smoke-test.sh dist/runtime \
+            >"$RUNNER_TEMP/offline-smoke.log" 2>&1 || rc=$?
           sudo iptables -D OUTPUT -p tcp --dport 443 -j DROP || true
           sudo iptables -D OUTPUT -p tcp --dport 80 -j DROP || true
+          cat "$RUNNER_TEMP/offline-smoke.log"
+          summary="$(grep -E '^==== smoke summary:' "$RUNNER_TEMP/offline-smoke.log" | tail -1 || true)"
+          if [ -z "$summary" ]; then
+            summary="the script did not reach its summary line"
+          fi
+          {
+            echo '### Offline smoke (R96) — advisory'
+            echo ''
+            echo "\`exit ${rc}\` — ${summary}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning title=Offline smoke (R96) reported a failure::exit ${rc} — ${summary}. This step is advisory by design, so the leg continues; read the log above for the failing item."
+          fi
 
       # ── 产物上传 ─────────────────────────────────────────────
       - name: Upload artifacts

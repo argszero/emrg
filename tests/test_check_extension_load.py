@@ -29,6 +29,7 @@ from __future__ import annotations
 import importlib.util
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -181,3 +182,81 @@ class TestUnmeasurableIsNeverAPass:
         assert proc.returncode == 2, proc.stdout + proc.stderr
         assert "could not measure" in proc.stdout
         assert "unmeasurable" in proc.stdout
+
+
+class TestOfflineNamesTheFetchInsteadOfWaitingForIt:
+    """The release leg's offline smoke drops :80/:443 and then runs item 15.
+
+    Against a dropped port the wheel fetch cannot be answered at all, and pip does not
+    see a refusal - it waits out six connections and its retries (measured 98.1 s on
+    this host against a listener that accepts and stalls, which is the shape a DROP
+    produces). `--offline` states that instead of paying it, and these arms pin the
+    three halves that matter: it refuses (exit 2, never 0), it names the caller's own
+    decision rather than a pip failure, and it does not spend the ladder.
+    """
+
+    def test_offline_refuses_by_name_rather_than_waiting_out_pip(self):
+        started = time.monotonic()
+        proc = _run("--offline", "--python", sys.executable)
+        elapsed = time.monotonic() - started
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "could not measure" in proc.stdout
+        assert "--offline" in proc.stdout
+        assert "unmeasurable" in proc.stdout
+        # The discriminating reading, and the reason this arm is about time: pip's
+        # ladder against a dropped port is 98.1 s (measured), so a run under 10 s
+        # cannot have been that ladder. Without this, an `--offline` that quietly did
+        # nothing would still pass the three assertions above.
+        assert elapsed < 10, f"took {elapsed:.1f}s - the refusal did not skip the fetch"
+
+    def test_the_refusal_is_not_a_pip_failure(self):
+        """A blocked network and a broken index answer different questions.
+
+        Folding the first into the second would report the caller's own decision as a
+        fault of the wheel, which is the class of mistake this repository keeps paying
+        for - so the refusal may not mention pip at all.
+        """
+        proc = _run("--offline", "--python", sys.executable)
+        combined = proc.stdout + proc.stderr
+        assert "pip install" not in combined, combined
+        assert "no `.so` to load" in combined, combined
+
+
+def _offline_step_block(workflow: str) -> str:
+    """The `Smoke offline (Linux only, R96)` step, from its name to the next step."""
+    lines = workflow.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.strip() == "- name: Smoke offline (Linux only, R96)")
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("- name:")),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
+
+
+class TestTheReleaseLegReachesThisFlag:
+    """A flag nothing passes has no reader, and this probe's only offline caller is CI.
+
+    The defect this guards is the one the step had: it ran the script behind `|| true`
+    and then ended on its last `iptables -D`, so the script's own exit code reached
+    nothing. Both carriers are pinned here because either one alone would leave the
+    verdict unread - the flag without the step, or the step without the flag.
+    """
+
+    def test_the_workflow_sets_the_offline_switch_and_the_script_forwards_it(self, tmp_path):
+        workflow = (REPO_ROOT / ".github" / "workflows" / "build-release.yml").read_text(encoding="utf-8")
+        block = _offline_step_block(workflow)
+        assert "EMRG_SMOKE_OFFLINE=1" in block, block
+
+        script = (REPO_ROOT / "packaging" / "smoke-test.sh").read_text(encoding="utf-8")
+        assert "EMRG_SMOKE_OFFLINE" in script
+        assert "ext_args+=(--offline)" in script
+
+    def test_the_offline_step_does_not_discard_the_scripts_exit_code(self):
+        workflow = (REPO_ROOT / ".github" / "workflows" / "build-release.yml").read_text(encoding="utf-8")
+        block = _offline_step_block(workflow)
+        assert "smoke-test.sh dist/runtime || true" not in block, (
+            "the script's exit code is discarded again: `|| true` after the run"
+        )
+        assert "rc=$?" in block, "the script's exit code is not captured"
+        assert "GITHUB_STEP_SUMMARY" in block, "the verdict is not written where a reader sees it"
+        assert "::warning" in block, "a failure is not announced in the run"
