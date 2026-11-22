@@ -998,8 +998,16 @@ def test_the_default_bookmark_is_read_from_the_store_s_detail_directory(
     monkeypatch.setattr(mod, "DEFAULT_BOOKMARK", str(store / "bookmark.md"))
     monkeypatch.setattr(mod, "BOOKMARK_FALLBACK", str(tmp_path / "the-other-name.md"))
 
-    assert mod.DEFAULT_BOOKMARK.endswith("/store/bookmark.md"), (
-        "the arm must set the default to the top-level name, or nothing is being measured")
+    #: The two last **parts**, not a slash-joined suffix: the fixture above builds this path
+    #: with `Path`, so on Windows it is `...\store\bookmark.md` and a suffix test against
+    #: `/store/bookmark.md` answers `False` for a default that is exactly right - which is how
+    #: this arm failed on `test-windows` while passing here. The parts of a path produced by
+    #: the platform's own `Path` are comparable on every platform, and they still separate the
+    #: top level from the detail directory: `("ref", "bookmark.md")` is the answer this arm
+    #: exists to refuse.
+    assert Path(mod.DEFAULT_BOOKMARK).parts[-2:] == ("store", "bookmark.md"), (
+        "the arm must set the default to the top-level name, or nothing is being measured: "
+        f"{mod.DEFAULT_BOOKMARK!r}")
     assert mod.main([]) == 0, "with the file in the detail directory the reading is complete"
 
     captured = capsys.readouterr()
