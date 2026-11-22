@@ -970,6 +970,77 @@ def test_the_bookmark_default_names_the_file_this_installation_writes(mod):
     )
 
 
+def test_the_default_bookmark_is_read_from_the_store_s_detail_directory(
+    mod, tmp_path, monkeypatch, capsys
+) -> None:
+    """The store's own move, which a constant cannot see: its detail files live in `ref/`.
+
+    Measured on this installation, where the store has migrated: the no-argument form answered
+    `not measurable: no bookmark at <the top level>` and returned 2, every cycle, while the
+    file it wanted sat in `ref/`. Step 0 is the step that is never skipped, so a default naming
+    the top level is a stopped rotation clock rather than a failed run.
+
+    Both directions, because a resolution that never fires and one that always fires look the
+    same from a single arm: here the top-level name is absent and the detail directory holds
+    the file, and the arm below is the reverse. The fixtures are built under `tmp_path` and the
+    constants are redirected at the module, so no host path is opened.
+    """
+    root = _root(tmp_path, "detail")
+    _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 1))
+    register = _agents(tmp_path / "agents.yml", [{"name": "detail", "path": root}])
+    store = tmp_path / "store"
+    detail_dir = store / mod.MEMORY_REF_DIRNAME
+    detail_dir.mkdir(parents=True)
+    book = _bookmark(detail_dir / "bookmark.md", [("`detail`", BASE)])
+
+    monkeypatch.setattr(mod, "DEFAULT_AGENTS", str(register))
+    monkeypatch.setattr(mod, "LEGACY_AGENTS", str(tmp_path / "absent-register.yml"))
+    monkeypatch.setattr(mod, "DEFAULT_BOOKMARK", str(store / "bookmark.md"))
+    monkeypatch.setattr(mod, "BOOKMARK_FALLBACK", str(tmp_path / "the-other-name.md"))
+
+    assert mod.DEFAULT_BOOKMARK.endswith("/store/bookmark.md"), (
+        "the arm must set the default to the top-level name, or nothing is being measured")
+    assert mod.main([]) == 0, "with the file in the detail directory the reading is complete"
+
+    captured = capsys.readouterr()
+    assert str(book) in captured.out, (
+        "the report must name the file that was opened: "
+        f"{captured.out}")
+    assert "does not exist - reading" in captured.err, (
+        f"a substitution must be said out loud: {captured.err}")
+    assert str(book) in captured.err, (
+        f"the note must name the file it read instead: {captured.err}")
+
+
+def test_the_default_bookmark_is_read_from_the_top_level_when_nothing_moved_it(
+    mod, tmp_path, monkeypatch, capsys
+) -> None:
+    """The other side of the same move: a host that has not migrated keeps the file flat.
+
+    A resolution that always reached into `ref/` would answer `not measurable` on every host
+    that has not run the store's migration yet — the mirror image of the defect above, and the
+    reason the preference is asked of the file rather than assumed from a directory's name.
+    """
+    root = _root(tmp_path, "flat")
+    _write_memory(Path(root), ".emrg/memory/MEMORY.md", _stamp(mod, 1))
+    register = _agents(tmp_path / "agents.yml", [{"name": "flat", "path": root}])
+    store = tmp_path / "store"
+    store.mkdir()
+    book = _bookmark(store / "bookmark.md", [("`flat`", BASE)])
+
+    monkeypatch.setattr(mod, "DEFAULT_AGENTS", str(register))
+    monkeypatch.setattr(mod, "LEGACY_AGENTS", str(tmp_path / "absent-register.yml"))
+    monkeypatch.setattr(mod, "DEFAULT_BOOKMARK", str(book))
+    monkeypatch.setattr(mod, "BOOKMARK_FALLBACK", str(tmp_path / "the-other-name.md"))
+
+    assert mod.main([]) == 0
+    captured = capsys.readouterr()
+    assert str(book) in captured.out
+    assert "does not exist - reading" not in captured.err, (
+        "the default is present where it says it is, so nothing was substituted - a note here "
+        f"would name a file the run did not read instead: {captured.err}")
+
+
 def test_every_default_resolves_into_global_once_the_host_has_migrated(mod):
     """The root migration moves these four files; a default that cannot follow stops reading.
 
