@@ -97,6 +97,14 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 
+#: The store's detail directory, from its one home: the memory store keeps only its index at
+#: the top level and moves every detail file into `ref/` (`MemoryStore.migrate_flat_layout`).
+#: The subject list below asks about a detail file, so it has to know this.
+from emrg.memory import MEMORY_REF_DIRNAME  # noqa: E402
+
+#: The cycle record's basename. Host state: no code in this tree renames that file.
+_STATE_NAME = "evolution-nte-steady-state-since-v0.2.73.md"
+
 #: Run here, and the first line of stdout must be `tree: <this checkout>`. Each of
 #: these takes no required argument, imports nothing outside the standard library
 #: **and this checkout's own package**, and reads a working tree — the conditions
@@ -134,7 +142,8 @@ RUN_HERE = (
 #: an index and no cycle record — the absence this entry exists to measure.
 SUBJECT_MAY_BE_ABSENT = {
     "check-cycle-record.py": (
-        ".emrg/memory/evolution-nte-steady-state-since-v0.2.73.md",
+        f".emrg/memory/{_STATE_NAME}",
+        f".emrg/memory/{MEMORY_REF_DIRNAME}/{_STATE_NAME}",
     ),
     "check-memory-index.py": (
         ".emrg/memory/MEMORY.md",
