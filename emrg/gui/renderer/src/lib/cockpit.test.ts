@@ -386,6 +386,32 @@ function blockIn(source: string, selector: string): string {
 /** The same read, for the sheet that describes the cockpit itself. */
 const block = (selector: string) => blockIn(cssSource, selector);
 
+describe("额外根目录：一个根能看见，两个根也必须能看见（issue #3168）", () => {
+  /**
+   * 一个根画成一棵树，两个根画进一个 `.ft-roots` 包装层（`FileTree.tsx`）。发布版给包装层
+   * 的子项写了 `flex: 1 1 0`，而无单位的 `0` 是 **0px**，不是 `0%`：树于是成了基高为 0 的
+   * 弹性项，高度只能来自一个自身高度由内容决定的纵列，偏偏 `.ft-body` 是滚动容器
+   * （`overflow-y: auto`），主轴上的内在贡献是 0 —— 整条链归零，两棵树各 0 高，组体只剩
+   * 包装层的 2px `gap`。宿主看到的就是「额外根目录」这一行在、下面什么都没有，连「没有」
+   * 那行也没有（那行只在列表为空时画）。一个根的会话永远进不到这条路：它的 `.ft` 是
+   * `.left-group-body`（block）的子项，`flex` 不生效，高度就是内容的高度。
+   *
+   * jsdom 不算布局，所以这条守卫读样式表文本；判据是在真布局引擎里量出来的，同样的规则、
+   * 同样的三行 22px 目录（Chrome headless）：一个根无包装层 → 70px；两个根、`flex: 1 1 0`
+   * → 0 / 0（组体 2px）；两个根、`flex: 1 1 auto` → 70 / 70（组体 142px）。
+   */
+  it("多根包装层不把子项钉在 0px 基准上", () => {
+    expect(cssSource.length).toBeGreaterThan(2000);
+    const shorthand = /flex:\s*([^;]+);/.exec(block(".ft-roots > .ft"))?.[1].trim() ?? "";
+    expect(shorthand, "`.ft-roots > .ft` 里没有 flex 简写，这条守卫就无从谈起").not.toBe("");
+    const basis = shorthand.split(/\s+/)[2] ?? "";
+    expect(
+      ["auto", "0%", "content"],
+      `基准是「${basis}」：无单位的 0 是 0px，它让两个根各画成 0 高的空壳（实测 0/0）`,
+    ).toContain(basis);
+  });
+});
+
 describe("图标轨与设置页的数值就是原型的数值（issue #2986）", () => {
   // 这些数值是宿主一眼能看出「不是同一个东西」的地方，所以它们必须被钉住，而不能只写在
   // 注释里。读的是样式表本身：`?raw` 拿的是文件文本，不经过 CSS 管线，也不会被 jsdom 的
