@@ -1324,3 +1324,48 @@ describe("聊天区滚动（issue #3024）", () => {
     expect(rule).toMatch(/overflow-anchor:\s*none/);
   });
 });
+
+/**
+ * 宿主报障 2026-11-23T14:33:25（第三次；前两次 2026-11-19T15:31:14、2026-11-20T18:08:13）：
+ * 「chat 页面还是无法选中」。录屏逐帧量到的形状是：蓝色选区一次成形、0.64–0.89 秒后一次消失。
+ * 本组件里唯一能这样清掉选区的地方是按下时的 `seedSelection` —— 它先 `removeAllRanges()`
+ * 再放一个折叠 caret。它只该用在不带正文的件上（✦、时间、工具行）：按在正文里时，浏览器
+ * 自己那一下就已经给了起点，我们再换一次只会把宿主手上的选区换掉。
+ */
+describe("按下不动既有选区：正文自己按下的地方不种 caret", () => {
+  afterEach(() => {
+    document.getSelection()?.removeAllRanges();
+    delete (document as unknown as Record<string, unknown>).caretRangeFromPoint;
+  });
+
+  it("已完成的回复里按下 → 选区还在", async () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    store.handleDelta([{ request_id: "r1", content: "**bold** text" }], "s1");
+    const { container } = setup(store, "s1");
+    act(() => {
+      store.handleDone({ request_id: "r1" }, "s1");
+    });
+    const mdDiv = await screen.findByText("**bold** text", { selector: ".md-test" });
+    const textNode = mdDiv.firstChild!;
+    // jsdom 没有 caret API：给它一个。否则 seedSelection 在「量不到 caret」那一步就返回，
+    // 这条用例会因为什么都没发生而通过 —— 空比较不是测量。
+    (document as unknown as Record<string, unknown>).caretRangeFromPoint = () => {
+      const r = document.createRange();
+      r.setStart(textNode, 0);
+      r.collapse(true);
+      return r;
+    };
+    const sel = document.getSelection()!;
+    const range = document.createRange();
+    range.selectNodeContents(textNode);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    expect(sel.isCollapsed).toBe(false);
+
+    const body = container.querySelector(".assistant-html") as HTMLElement;
+    expect(body).not.toBeNull();
+    fireEvent.pointerDown(body, { clientX: 10, clientY: 10 });
+
+    expect(document.getSelection()!.isCollapsed).toBe(false);
+  });
+});

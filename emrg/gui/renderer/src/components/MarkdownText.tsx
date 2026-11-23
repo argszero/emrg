@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
 import type { MarkdownRenderer } from "../lib/markdown";
 
+/** 渲染完成后的容器类名。正文按下的判定（`BODY_TEXT_SELECTOR`）由它派生，不留第二份拼写。 */
+export const MARKDOWN_HTML_CLASS = "assistant-html";
+
+/** 解析完成前纯文本兜底的类名。同上：一个名字一个产出者。 */
+export const MARKDOWN_PLAIN_CLASS = "assistant-plain";
+
 /**
  * MarkdownText — markdown 文本的**唯一**渲染入口（TranscriptView 与 Rant 详情共用）。
  *
@@ -16,8 +22,8 @@ export function MarkdownText({
   text,
   md,
   stripMark = true,
-  className = "assistant-html",
-  plainClassName = "assistant-plain",
+  className = MARKDOWN_HTML_CLASS,
+  plainClassName = MARKDOWN_PLAIN_CLASS,
 }: {
   text: string;
   md: MarkdownRenderer;
@@ -40,5 +46,10 @@ export function MarkdownText({
     };
   }, [text, md, stripMark]);
   if (html === null) return <span className={plainClassName}>{text}</span>;
-  return <span className={className} dangerouslySetInnerHTML={{ __html: html }} />;
+  // 容器是块级（div），不是行内（span）：marked 的输出是 <p>/<pre>/<ul> 这类块级元素，
+  // 把它们放进行内盒会触发 block-in-inline 拆分——浏览器在行内盒内部切出若干匿名块，跨这些
+  // 匿名块的选区是它最不可靠的一处。宿主三次报障（2026-11-19T15:31:14、2026-11-20T18:08:13、
+  // 2026-11-23T14:33:25「chat 页面还是无法选中」）都落在**已完成的回复**上；流式那半边用的是
+  // `div.md-stream`（块级容器），输出过程中反而好选——两条路径的差别正是这一处盒模型。
+  return <div className={className} dangerouslySetInnerHTML={{ __html: html }} />;
 }
