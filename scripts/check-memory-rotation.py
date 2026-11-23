@@ -110,6 +110,18 @@ on `projects.yml`, a note on stderr says so, and the first line of the report na
 that file as the subject. Once the daemon has moved the register the fallback is
 never reached, and a run that names `--agents` explicitly is never second-guessed.
 
+**The bookmark's other move, which a constant cannot see.** The bookmark is a detail file of
+the memory store, and that store keeps only its index at the top level: every detail file
+lives in `ref/` (`emrg.memory.MEMORY_REF_DIRNAME`), moved there by
+`MemoryStore.migrate_flat_layout()`. A default that joins the basename onto the store's top
+level therefore names a file nothing creates once the store has migrated — measured on this
+installation, where the no-argument form answered `not measurable` and returned 2 every
+cycle while the file sat in `ref/`. So the default's path is resolved where it is used:
+the store's detail directory first, the top level after that, and the bookmark's other
+basename on the same two terms (:func:`resolve_default_bookmark`). The basename itself stays
+verbatim — no code in this tree renames that file — and a `--bookmark` a caller named is
+still never second-guessed.
+
 What it does not do
 -------------------
 It **measures and never repairs**: it does not rewrite the bookmark, add a row, or
@@ -142,6 +154,13 @@ sys.path.insert(0, str(REPO_ROOT))
 # The home of "are these two paths one file". Imported rather than re-spelled: the rule is
 # stated once for the whole tree, and a second spelling of it is what produced issue #2559.
 from emrg.tools.file_policy import same_file  # noqa: E402
+
+#: The store's detail directory, imported from the one place that names it. The memory store
+#: keeps only its index at the top level and moves every detail file into `ref/`
+#: (`MemoryStore.migrate_flat_layout`), and the bookmark is one of those detail files — so the
+#: defaults below have to walk that move as well as the root's. Spelled a second time here it
+#: would be the defect #3156 and #3158 each fixed one carrier of.
+from emrg.memory import MEMORY_REF_DIRNAME  # noqa: E402
 
 #: The one stamp format a bookmark row may carry, and the one the shell form parses.
 #: Spelled as a constant because the comparison below is the only reader of it: a
@@ -263,6 +282,118 @@ def prefer_existing(pre_split: str, post_split_path: str) -> str:
         return post_split_path if Path(post_split_path).expanduser().exists() else pre_split
     except OSError:
         return pre_split
+
+
+def detail_twin(path: str | Path) -> Path:
+    """``path``'s copy inside the store's detail directory (``ref/``).
+
+    The memory store keeps only its index at the top level and moves every detail file into
+    ``ref/`` (``emrg.memory.MEMORY_REF_DIRNAME``, performed by
+    ``MemoryStore.migrate_flat_layout``), and the bookmark is one of those detail files. Which
+    side of that move a host is on is its own state — a checkout can hold the file at the top
+    level while the store that owns it has already migrated, and the reverse — so both places
+    are asked rather than assumed.
+    """
+    expanded = Path(path).expanduser()
+    return expanded.parent / MEMORY_REF_DIRNAME / expanded.name
+
+
+def root_twins(path: Path) -> tuple[Path, Path]:
+    """One store path under both spellings of the root: pre-split first, migrated second.
+
+    The inverse of :func:`post_split` is needed because a caller hands in whichever of the two
+    :func:`resolve_default` happened to answer, and the other one may be where the file is —
+    ``resolve_default`` asks about the **top level** of the store, so on a host that has
+    migrated both the root and the store it answers the pre-split spelling while the file sits
+    in `ref/` under the migrated one.
+
+    The comparison is made on **expanded** prefixes, not on the `~` constants themselves: every
+    caller here works with a path it has already expanded, and an expanded
+    `/Users/<name>/.emrg/...` starts with neither `~/.emrg/` nor `~/.emrg/global/` — so a
+    prefix test against the literals answers "no root move applies" for exactly the paths the
+    move has touched. That is the same defect this function exists to fix, one level down.
+    """
+    root_abs = str(Path(ROOT_PREFIX).expanduser())
+    global_abs = str(Path(GLOBAL_PREFIX).expanduser())
+    text = str(Path(path).expanduser())
+    pre = ROOT_PREFIX_EXPANDED(text, root_abs, global_abs)
+    post = global_abs + pre[len(root_abs):] if pre.startswith(root_abs) else pre
+    return Path(pre), Path(post)
+
+
+def ROOT_PREFIX_EXPANDED(text: str, root_abs: str, global_abs: str) -> str:
+    """``text`` with the root move undone, so its pre-split spelling is the anchor.
+
+    A path under the migrated root loses the `global/` segment; one that is already pre-split,
+    or under no root at all (a fixture's `tmp_path`), comes back unchanged.
+    """
+    if text.startswith(global_abs):
+        return root_abs + text[len(global_abs):]
+    return text
+
+
+def bookmark_candidates(named: str | Path) -> list[Path]:
+    """Every place one basename can be, in the order a reader would look.
+
+    Four, because **two moves have touched these files and neither is visible to the other**:
+    the root migration (``~/.emrg/<entry>`` → ``~/.emrg/global/<entry>``) and the memory
+    store's (``<store>/<name>`` → ``<store>/ref/<name>``). A host can be on either side of
+    each, so all four combinations are real: a fresh install has neither move, a host between
+    two releases has the root's only, an installation whose store ran first has the store's
+    only, and this one has both.
+
+    Ordered by how current each place is — the migrated root's detail directory, the migrated
+    root's top level, then the pre-split root's two — so the first file found is the most
+    recently written of the places that hold one.
+    """
+    pre, post = root_twins(Path(named).expanduser())
+    return [detail_twin(post), post, detail_twin(pre), pre]
+
+
+def _where_found(candidate: Path) -> str:
+    """Which of the store's two layouts a candidate is in, for the note that names it."""
+    return (
+        "the store's detail directory"
+        if candidate.parent.name == MEMORY_REF_DIRNAME
+        else "the store's top level"
+    )
+
+
+def resolve_default_bookmark(named: str | Path) -> tuple[Path, list[str]]:
+    """The bookmark the default names, after every move that has touched the file.
+
+    **Two moves, and neither is visible to the other.** The root migration takes
+    ``~/.emrg/<entry>`` into ``~/.emrg/global/<entry>``, which :func:`resolve_default` walks
+    for the constants below; and the memory store's migration takes every detail file from
+    the store's top level into ``ref/``, which nothing walked until this function. A host can
+    be on either side of each, so the file is looked for in the store's detail directory
+    first and at the top level after that, and then the bookmark's other basename on the same
+    two terms.
+
+    Only the **default** is resolved here. A caller that named ``--bookmark`` asked about that
+    file, and answering with another is the second-guessing the register's fallback already
+    refuses.
+
+    Answers the file to read together with the notes naming any substitution, and answers the
+    path it was given when no candidate exists — so the unmeasurable verdict names the default
+    itself rather than a path invented here.
+    """
+    given = Path(named).expanduser()
+    for candidate in bookmark_candidates(given):
+        if candidate.exists():
+            if candidate == given:
+                return candidate, []
+            return candidate, [
+                f"note: {given} does not exist - reading {candidate}, "
+                f"{_where_found(candidate)}"
+            ]
+    for candidate in bookmark_candidates(BOOKMARK_FALLBACK):
+        if candidate.exists():
+            return candidate, [
+                f"note: {given} does not exist - reading {candidate}, the bookmark's other "
+                f"name in {_where_found(candidate)}"
+            ]
+    return given, []
 
 
 #: The defaults name **this repository's** layout, which is not every installation's:
@@ -1026,17 +1157,14 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             agents_path = legacy_path
-    # The bookmark's one window, on the same terms: only the default may fall back, and the
-    # run says which file it read rather than presenting one name's answer as another's.
-    if args.bookmark == DEFAULT_BOOKMARK and not bookmark_path.exists():
-        fallback_bookmark = Path(os.path.expanduser(BOOKMARK_FALLBACK))
-        if fallback_bookmark.exists():
-            print(
-                f"note: {bookmark_path} does not exist - reading {fallback_bookmark}, "
-                f"the bookmark's other name",
-                file=sys.stderr,
-            )
-            bookmark_path = fallback_bookmark
+    # The bookmark's window, on the same terms as the register's: only the default is
+    # resolved, the run says which file it read rather than presenting one name's answer as
+    # another's, and both moves that can have touched the file are walked where a constant
+    # cannot see them.
+    if args.bookmark == DEFAULT_BOOKMARK:
+        bookmark_path, notes = resolve_default_bookmark(bookmark_path)
+        for note in notes:
+            print(note, file=sys.stderr)
     try:
         reading = read(agents_path, bookmark_path)
     except Unmeasurable as exc:
