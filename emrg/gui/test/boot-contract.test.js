@@ -367,3 +367,40 @@ test("upgrade prompt: the opening reading carries the installed version (rant 20
       "producer never ran' read identically in emrg-gui.log"
   );
 });
+
+test("#3172: 「重启生效」用的是安装树自己的解释器，不是宿主 PATH 的 python3", () => {
+  // Measured on the host 2026-11-23 10:41: the banner said 0.3.74 was installed and
+  // offered 「重启生效」; pressing it twice printed
+  //   `Error invoking remote method 'emrg:restartDaemon': … stop_all exit 1:
+  //    /Applications/Xcode.app/…/python3: Error while finding module specification
+  //    for 'emrg._stop_all' (ModuleNotFoundError: No module named 'emrg')`
+  // because daemon_client spelled the install tree `~/.emrg/install` while the installer
+  // has written `~/.emrg/global/install` since the home-layout split. This guard holds
+  // the handler to the one resolver and to main's own `app.isPackaged`: borrowing that
+  // flag from a connection object, which is null when nothing is connected, would
+  // degrade the whole chain to PATH python3 again with every unit test green.
+  const src = read("main.js");
+  const start = src.indexOf('ipcMain.handle("emrg:restartDaemon"');
+  assert.ok(start > 0, "main.js must contain an emrg:restartDaemon handler");
+  const body = src.slice(start, src.indexOf("\n    });\n", start) + 8);
+  assert.ok(body.length > 200, "the handler body must have been sliced, not empty");
+  assert.match(body, /const packaged = app\.isPackaged;/, "打包与否由 main 自己判");
+  assert.match(body, /packaged \? installedPython\(\)/, "解释器来自安装树");
+  assert.match(body, /PYTHONPATH: installedPythonPath\(\)/, "PYTHONPATH 与解释器同一前缀");
+  assert.ok(
+    !/_isPackaged|\.emrg", "install"/.test(body),
+    "旧拼写与借来的打包标志都不得回到这条链上"
+  );
+  // 解析只有一个生产者：daemon_client 里的 installedPrefix 自己认树，两个包装函数
+  // 不再各拼一次路径（上一个缺陷就是三处拼写各错各的）。
+  const dcSrc = read("daemon_client.js");
+  for (const fn of ["installedPython", "installedPythonPath"]) {
+    const at = dcSrc.indexOf(`function ${fn}(`);
+    assert.ok(at > 0, `daemon_client.js must define ${fn}`);
+    const fnBody = dcSrc.slice(at, dcSrc.indexOf("\n}\n", at));
+    assert.ok(
+      fnBody.includes("installedPrefix()"),
+      `${fn} must derive from installedPrefix(), not spell a path of its own`
+    );
+  }
+});

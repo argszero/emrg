@@ -66,7 +66,7 @@ Module._load = function (request, parent, isMain) {
   if (request === "ws") return MockWs;
   return origLoad.apply(this, arguments);
 };
-const { DaemonClient, generateSessionId, isSessionId, pickSessionCwd, TOKEN_FILE, EMRGD_PORT, EMRGD_START_ERR } = require("../daemon_client.js");
+const { DaemonClient, generateSessionId, isSessionId, pickSessionCwd, TOKEN_FILE, EMRGD_PORT, EMRGD_START_ERR, installedPrefix, installedPython, installedPythonPath } = require("../daemon_client.js");
 let tmpHome = null;
 let origHome = null;
 let origUserProfile = null;
@@ -397,9 +397,65 @@ test("P2 skipStart: stale port + daemon 已死 → 抛错不重拉（不删文�
 test("Phase4: _findDaemonExecutable 打包模式定位捆绑 emrgd（POSIX）", async () => {
   const client = new DaemonClient({ isPackaged: true });
   const exe = client._findDaemonExecutable();
-  const expected = path.join(os.homedir(), ".emrg", "install", "bin", process.platform === "win32" ? "emrgd.cmd" : "emrgd");
+  const expected = path.join(os.homedir(), ".emrg", "global", "install", "bin", process.platform === "win32" ? "emrgd.cmd" : "emrgd");
   assert.strictEqual(exe, expected);
-  assert.ok(exe.includes(path.join(".emrg", "install", "bin")), `exe=${exe}`);
+  // #3172：分家后 installer 的落点是 ~/.emrg/global/install，旧拼写 ~/.emrg/install
+  // 在宿主机上根本不存在 —— 断言两者分得开，这条守卫才不会再被旧拼写满足。
+  assert.ok(exe.includes(path.join(".emrg", "global", "install", "bin")), `exe=${exe}`);
+});
+
+// ── #3172：安装树按「version.txt + bin/」认，一条推导喂三个调用点 ───────────────
+// 实测（宿主机 2026-11-23 10:39）：~/.emrg/install 不存在，真树在
+// ~/.emrg/global/install/{version.txt,bin,source,lib}；emrg-gui.log 记着
+// `spawning packaged daemon: /Users/argszero/.emrg/install/bin/emrgd`，
+// 点「重启生效」得到 `ModuleNotFoundError: No module named 'emrg'`。
+
+test("#3172: version.txt + bin/ 都在的那棵树才是安装树，post-split 优先", () => {
+  const post = path.join(os.homedir(), ".emrg", "global", "install");
+  const pre = path.join(os.homedir(), ".emrg", "install");
+  for (const dir of [post, pre]) {
+    fs.mkdirSync(path.join(dir, "bin"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "version.txt"), dir === post ? "0.3.74" : "0.3.40");
+  }
+  assert.strictEqual(installedPrefix(), post, "两棵树都在时 installer 的落点赢");
+  // 两半缺一不可：只剩 version.txt 的旧树不算安装树（upgrade.py:running_install_dir
+  // 同一条规则 —— version.txt 单独匹配一个散落文件，bin/ 单独匹配一棵没版本的树）。
+  fs.rmSync(post, { recursive: true, force: true });
+  fs.rmSync(path.join(pre, "bin"), { recursive: true, force: true });
+  assert.strictEqual(
+    installedPrefix(),
+    post,
+    "半棵树不能被当成安装树；没有安装时给出 installer 的落点，而不是分家前的旧路径",
+  );
+});
+
+test("#3172: 分家前装的树仍然认（~/.emrg/install）", () => {
+  const pre = path.join(os.homedir(), ".emrg", "install");
+  fs.mkdirSync(path.join(pre, "bin"), { recursive: true });
+  fs.writeFileSync(path.join(pre, "version.txt"), "0.3.40");
+  assert.strictEqual(installedPrefix(), pre);
+  assert.ok(installedPythonPath().startsWith(pre + path.sep), installedPythonPath());
+});
+
+test("#3172: 解释器与 PYTHONPATH 都出自同一个前缀（宿主点重启用的就是它）", () => {
+  const post = path.join(os.homedir(), ".emrg", "global", "install");
+  const bin = path.join(post, "bin");
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(post, "version.txt"), "0.3.74");
+  const pyName = process.platform === "win32" ? "python.exe" : "python";
+  const py = path.join(bin, pyName);
+  fs.writeFileSync(py, "");
+  if (process.platform !== "win32") fs.chmodSync(py, 0o755);
+  assert.strictEqual(installedPython(), py, "安装树里的 python，而不是 PATH 的 python3");
+  assert.strictEqual(
+    installedPythonPath(),
+    [path.join(post, "source"), path.join(post, "lib")].join(path.delimiter),
+    "PYTHONPATH 指向同一个前缀 —— 上一个缺陷正是解释器与前缀指了两个地方",
+  );
+  const client = new DaemonClient({ isPackaged: true });
+  assert.ok(client._findDaemonExecutable().startsWith(post + path.sep));
+  assert.strictEqual(client._findInstalledPython(), py);
+  assert.strictEqual(client._installedPythonPath(), installedPythonPath());
 });
 
 test("Phase4: isPackaged startDaemon 走捆绑 emrgd 分支（非 python -m）", async () => {
