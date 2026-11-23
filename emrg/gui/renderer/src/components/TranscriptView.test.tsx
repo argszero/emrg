@@ -1369,3 +1369,53 @@ describe("按下不动既有选区：正文自己按下的地方不种 caret", (
     expect(document.getSelection()!.isCollapsed).toBe(false);
   });
 });
+
+/**
+ * 重渲染不许重写已完成的正文（宿主报障 2026-11-23：选中后约一秒自动消失，不动鼠标）。
+ *
+ * 实测机制：React 在组件**重渲染**时会把 `dangerouslySetInnerHTML` 再写一遍，即使 html
+ * 一字不差——写下去的是全新节点，正文里活着的选区随之塌掉。于是任何让聊天区重渲染的事
+ * （新消息、工具行、流式帧）都会重写每一条已完成回复。这条钉的是「结构变化只准写新节点，
+ * 已经在页面上的正文一个字都不许重写」。
+ */
+function watchInnerHtml() {
+  const desc = Object.getOwnPropertyDescriptor(Element.prototype, "innerHTML")!;
+  const orig = desc.set!;
+  const hits: Array<{ el: Element; cls: string; html: string }> = [];
+  Object.defineProperty(Element.prototype, "innerHTML", {
+    ...desc,
+    set(this: Element, v: string) {
+      hits.push({ el: this, cls: String(this.className || ""), html: String(v ?? "") });
+      return orig.call(this, v as string);
+    },
+  });
+  return {
+    take: () => hits.splice(0),
+    restore: () => Object.defineProperty(Element.prototype, "innerHTML", desc),
+  };
+}
+
+describe("重渲染不许重写已完成的正文", () => {
+  it("加一条消息时，已在页面上的正文一个字都不重写", async () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("q1", "s1");
+    store.handleDelta([{ request_id: "r1", content: "answer one" }], "s1");
+    store.handleDone({ request_id: "r1" } as never, "s1");
+
+    const w = watchInnerHtml();
+    const r = setup(store, "s1", fakeMd);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const mounted = w.take();
+    // 挂载本身必须写过：否则下面的「没再写」是空集，等于什么都没断言
+    expect(mounted.length).toBeGreaterThan(0);
+    const onPage = new Set(mounted.map((h) => h.el));
+
+    act(() => { store.addUserMessage("q2", "s1"); });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const rewritten = w.take().filter((h) => onPage.has(h.el));
+    w.restore();
+
+    expect(rewritten.map((h) => [h.cls, h.html])).toEqual([]);
+    expect(r.container.querySelectorAll(".assistant-html").length).toBeGreaterThan(0);
+  });
+});
