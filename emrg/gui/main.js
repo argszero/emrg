@@ -13,7 +13,7 @@ const { pathToFileURL } = require("url");
 const { spawn } = require("child_process");
 const crypto = require("crypto");
 const { parse: parseToml, stringify: stringifyToml } = require("smol-toml");
-const { generateSessionId, isSessionId, pickSessionCwd } = require("./daemon_client");
+const { generateSessionId, isSessionId, pickSessionCwd, installedPython, installedPythonPath } = require("./daemon_client");
 const { ConnManager } = require("./conn-manager");
 const {
   guiStatePath,
@@ -626,18 +626,23 @@ vision = false
     // 新 GUI 进程启动 → ensureDaemon 用新安装代码 spawn 新 daemon。TUI 不需要感知
     // 重启（直接被杀，不会进重连循环）。
     // 打包模式：宿主 PATH python3 无 `emrg` 可导入 → 用安装版运行时 python +
-    // PYTHONPATH（daemon_client._findInstalledPython/_installedPythonPath）。
+    // PYTHONPATH（daemon_client 的 installedPython/installedPythonPath）。
+    //
+    // #3172：打包与否由 main 进程自己说（app.isPackaged），不再借连接对象的
+    // `_isPackaged`——没连上 daemon 时 dc 是 null，旧写法把整条重启链降级成宿主
+    // PATH 的 python3（无 PYTHONPATH），于是宿主 2026-11-23 点「重启生效」得到
+    // `ModuleNotFoundError: No module named 'emrg'`。解析也不再看连接对象，路径
+    // 只有一处推导（daemon_client.installedPrefix：`~/.emrg/global/install` 优先，
+    // 分家前的 `~/.emrg/install` 次之）。
     ipcMain.handle("emrg:restartDaemon", async () => {
       const dc = connManager?.daemonConn();
-      const isPackaged = !!dc?._isPackaged;
-      const python = isPackaged && dc
-        ? dc._findInstalledPython()
-        : (dc?._findPython() || "python3");
+      const packaged = app.isPackaged;
+      const python = packaged ? installedPython() : (dc?._findPython() || "python3");
       const spawnOpts = {
         cwd: os.homedir(),
         stdio: ["ignore", "ignore", "pipe"],
       };
-      if (isPackaged && dc) spawnOpts.env = { ...process.env, PYTHONPATH: dc._installedPythonPath() };
+      if (packaged) spawnOpts.env = { ...process.env, PYTHONPATH: installedPythonPath() };
       if (process.platform === "win32") spawnOpts.windowsHide = true; // 防黑窗（源码模式同 G68）
       const result = await new Promise((resolve) => {
         const child = spawn(python, ["-m", "emrg._stop_all", "--skip-gui"], spawnOpts);

@@ -46,6 +46,72 @@ const EMRGD_LOG = () => path.join(EMRG_LOGS_DIR(), "emrgd.log");
 // 落文件保留这个性质，同时给失败一个可读的地方。不会重复写：emrgd 只在
 // `sys.stderr.isatty()` 时加 StreamHandler，stderr 指向文件与 DEVNULL 一样不是 tty。
 const EMRGD_START_ERR = () => path.join(EMRG_LOGS_DIR(), "emrgd-start.err");
+
+// ── The install tree has two spellings, and this module wrote the wrong one (#3172) ──
+//
+// `emrg/home_layout.py:336` names both: PRE_SPLIT_BIN `/.emrg/install/bin` and
+// POST_SPLIT_BIN `/.emrg/global/install/bin`. The installer writes the post-split one
+// (`packaging/make-installer.sh:202`, `--install-location '/.emrg/global/install'`), the
+// daemon-side stop code agrees (`_stop_all.py:1248` builds `~/.emrg/global/install`), and
+// so does this file's own `EMRG_GLOBAL()`. Three functions below spelled the pre-split
+// path instead, so on every host installed after the split they answered a directory that
+// does not exist. Measured on the host 2026-11-23 10:39: `~/.emrg/install` absent while
+// `~/.emrg/global/install/` held `version.txt` 0.3.74 + `bin/` + `source/` + `lib/`; and
+// `emrg-gui.log` carried `[gui] spawning packaged daemon:
+// /Users/argszero/.emrg/install/bin/emrgd`. The 「重启生效」 button therefore ran the
+// host's PATH `python3` with a `PYTHONPATH` pointing at nothing and died on
+// `ModuleNotFoundError: No module named 'emrg'`.
+//
+// The predicate is `emrg/server/upgrade.py:running_install_dir`'s, translated to the home
+// directory because JS has no `__file__` to walk up from: a tree holding **both**
+// `version.txt` and `bin/` is the install — `version.txt` alone matches a stray file,
+// `bin/` alone matches a tree with no version. Post-split first (where an installer puts
+// it today), pre-split second (a host whose tree predates the split), and the post-split
+// path as the constructed default so a machine that has never installed still names the
+// place an install would go.
+const INSTALL_PREFIX_CANDIDATES = () => [
+  path.join(EMRG_GLOBAL(), "install"),
+  path.join(os.homedir(), ".emrg", "install"),
+];
+
+function _looksInstalled(dir) {
+  try {
+    return fs.statSync(path.join(dir, "version.txt")).isFile()
+      && fs.statSync(path.join(dir, "bin")).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** The install tree on this machine (or where one would go). The single producer. */
+function installedPrefix() {
+  const [postSplit, preSplit] = INSTALL_PREFIX_CANDIDATES();
+  if (_looksInstalled(postSplit)) return postSplit;
+  if (_looksInstalled(preSplit)) return preSplit;
+  return postSplit;
+}
+
+/** The interpreter that can import `emrg` — the installed one, never PATH's `python3`. */
+function installedPython() {
+  const bin = path.join(installedPrefix(), "bin");
+  if (process.platform === "win32") {
+    // R100：bin/python（复制品）缺 DLL 不可用（DLL 在 python-dist/ 根）
+    for (const n of ["python-dist\\python.exe", "python-dist\\python3.13.exe", "python.exe"]) {
+      const p = path.join(bin, n);
+      try { fs.accessSync(p); return p; } catch { /* next candidate */ }
+    }
+    return "python";
+  }
+  const p = path.join(bin, "python");
+  try { fs.accessSync(p, fs.constants.X_OK); return p; } catch { /* fallthrough */ }
+  return "python3";
+}
+
+/** The PYTHONPATH the installed launchers export (`bin/emrgd`: `$PREFIX/source:$PREFIX/lib`). */
+function installedPythonPath() {
+  const prefix = installedPrefix();
+  return [path.join(prefix, "source"), path.join(prefix, "lib")].join(path.delimiter);
+}
 // Fixed daemon port (rant 2026-08-19T08:05:21 + 2026-08-20T14:32:52): the
 // daemon always listens on this constant — keep in sync with emrg/connect.py
 // EMRGD_PORT and emrg/_stop_all.py _EMRGD_PORT. The token file no longer
@@ -629,35 +695,25 @@ class DaemonClient {
   }
 
   _findDaemonExecutable() {
-    // Phase 4（rant #12 §4 R7）：打包模式定位捆绑 emrgd。
-    // Windows: ~/.emrg/install/bin/emrgd.cmd；POSIX: ~/.emrg/install/bin/emrgd。
-    const bin = path.join(os.homedir(), ".emrg", "install", "bin");
+    // Phase 4（rant #12 §4 R7）：打包模式定位捆绑 emrgd。目录来自 installedPrefix()
+    // （#3172 之前这里写死 `~/.emrg/install`，分家后的安装都指不到）。
+    const bin = path.join(installedPrefix(), "bin");
     const name = process.platform === "win32" ? "emrgd.cmd" : "emrgd";
     return path.join(bin, name);
   }
 
   // Rant 2026-08-21T12:44:34（restart-to-apply 跟进）：打包模式下 `emrg` 包位于
-  // ~/.emrg/install/{source,lib}，宿主 PATH 的 python3 上没有 `emrg` 可导入——
+  // <install>/{source,lib}，宿主 PATH 的 python3 上没有 `emrg` 可导入——
   // 重启流程必须用安装版运行时 python（与 bin/emrgd 启动器同一解析逻辑）。
+  // #3172：两个答案都改由模块级的 installedPython / installedPythonPath 推导，
+  // 三个调用点从此共用一个前缀。
   _findInstalledPython() {
-    const bin = path.join(os.homedir(), ".emrg", "install", "bin");
-    if (process.platform === "win32") {
-      // R100：bin/python（复制品）缺 DLL 不可用（DLL 在 python-dist/ 根）
-      for (const n of ["python-dist\\python.exe", "python-dist\\python3.13.exe", "python.exe"]) {
-        const p = path.join(bin, n);
-        try { fs.accessSync(p); return p; } catch { /* next candidate */ }
-      }
-      return "python";
-    }
-    const p = path.join(bin, "python");
-    try { fs.accessSync(p, fs.constants.X_OK); return p; } catch { /* fallthrough */ }
-    return "python3";
+    return installedPython();
   }
 
   // 安装版 PYTHONPATH 前缀（等价 bin/emrgd 的 PYTHONPATH="$PREFIX/source:$PREFIX/lib"）。
   _installedPythonPath() {
-    const prefix = path.join(os.homedir(), ".emrg", "install");
-    return [path.join(prefix, "source"), path.join(prefix, "lib")].join(path.delimiter);
+    return installedPythonPath();
   }
 
   // `root` 可传：默认仍是项目根（G59/G61/G126 的行为不变），测试用自己建的目录驱动
@@ -1387,4 +1443,8 @@ function generateSessionId(seed) {
   return sid;
 }
 
-module.exports = { DaemonClient, generateSessionId, isSessionId, pickSessionCwd, TOKEN_FILE, MAX_PAYLOAD, EMRGD_PORT, EMRGD_START_ERR };
+module.exports = {
+  DaemonClient, generateSessionId, isSessionId, pickSessionCwd,
+  TOKEN_FILE, MAX_PAYLOAD, EMRGD_PORT, EMRGD_START_ERR,
+  installedPrefix, installedPython, installedPythonPath,
+};
