@@ -999,7 +999,14 @@ body.col-resizing * {
 /* One root among several shares the column and scrolls on its own; a lone root keeps
    the flex behaviour it had before the composer existed (issue #3063). */
 .ft-roots > .ft {
-  flex: 1 1 0;
+  /* `auto`, not `0`: a unitless 0 is 0px, which turns the tree into a flex item whose base
+     size is zero. Its height would then have to come from the free space of a column that is
+     itself content-sized — and `.ft-body` is a scroll container, whose intrinsic contribution
+     along the scrolled axis is zero — so the whole chain resolved to 0px. Measured in Chrome
+     on the shipped rule: two roots drew 0/0 tall (the group's body 2px); with `auto`, 70/70.
+     A lone root never takes this path (its `.ft` is a block child, where `flex` is ignored),
+     which is why one extra root was visible and two were not (issue #3168). */
+  flex: 1 1 auto;
   min-height: 0;
 }
 
