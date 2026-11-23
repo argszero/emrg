@@ -1324,3 +1324,98 @@ describe("聊天区滚动（issue #3024）", () => {
     expect(rule).toMatch(/overflow-anchor:\s*none/);
   });
 });
+
+/**
+ * 宿主报障 2026-11-23T14:33:25（第三次；前两次 2026-11-19T15:31:14、2026-11-20T18:08:13）：
+ * 「chat 页面还是无法选中」。录屏逐帧量到的形状是：蓝色选区一次成形、0.64–0.89 秒后一次消失。
+ * 本组件里唯一能这样清掉选区的地方是按下时的 `seedSelection` —— 它先 `removeAllRanges()`
+ * 再放一个折叠 caret。它只该用在不带正文的件上（✦、时间、工具行）：按在正文里时，浏览器
+ * 自己那一下就已经给了起点，我们再换一次只会把宿主手上的选区换掉。
+ */
+describe("按下不动既有选区：正文自己按下的地方不种 caret", () => {
+  afterEach(() => {
+    document.getSelection()?.removeAllRanges();
+    delete (document as unknown as Record<string, unknown>).caretRangeFromPoint;
+  });
+
+  it("已完成的回复里按下 → 选区还在", async () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    store.handleDelta([{ request_id: "r1", content: "**bold** text" }], "s1");
+    const { container } = setup(store, "s1");
+    act(() => {
+      store.handleDone({ request_id: "r1" }, "s1");
+    });
+    const mdDiv = await screen.findByText("**bold** text", { selector: ".md-test" });
+    const textNode = mdDiv.firstChild!;
+    // jsdom 没有 caret API：给它一个。否则 seedSelection 在「量不到 caret」那一步就返回，
+    // 这条用例会因为什么都没发生而通过 —— 空比较不是测量。
+    (document as unknown as Record<string, unknown>).caretRangeFromPoint = () => {
+      const r = document.createRange();
+      r.setStart(textNode, 0);
+      r.collapse(true);
+      return r;
+    };
+    const sel = document.getSelection()!;
+    const range = document.createRange();
+    range.selectNodeContents(textNode);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    expect(sel.isCollapsed).toBe(false);
+
+    const body = container.querySelector(".assistant-html") as HTMLElement;
+    expect(body).not.toBeNull();
+    fireEvent.pointerDown(body, { clientX: 10, clientY: 10 });
+
+    expect(document.getSelection()!.isCollapsed).toBe(false);
+  });
+});
+
+/**
+ * 重渲染不许重写已完成的正文（宿主报障 2026-11-23：选中后约一秒自动消失，不动鼠标）。
+ *
+ * 实测机制：React 在组件**重渲染**时会把 `dangerouslySetInnerHTML` 再写一遍，即使 html
+ * 一字不差——写下去的是全新节点，正文里活着的选区随之塌掉。于是任何让聊天区重渲染的事
+ * （新消息、工具行、流式帧）都会重写每一条已完成回复。这条钉的是「结构变化只准写新节点，
+ * 已经在页面上的正文一个字都不许重写」。
+ */
+function watchInnerHtml() {
+  const desc = Object.getOwnPropertyDescriptor(Element.prototype, "innerHTML")!;
+  const orig = desc.set!;
+  const hits: Array<{ el: Element; cls: string; html: string }> = [];
+  Object.defineProperty(Element.prototype, "innerHTML", {
+    ...desc,
+    set(this: Element, v: string) {
+      hits.push({ el: this, cls: String(this.className || ""), html: String(v ?? "") });
+      return orig.call(this, v as string);
+    },
+  });
+  return {
+    take: () => hits.splice(0),
+    restore: () => Object.defineProperty(Element.prototype, "innerHTML", desc),
+  };
+}
+
+describe("重渲染不许重写已完成的正文", () => {
+  it("加一条消息时，已在页面上的正文一个字都不重写", async () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("q1", "s1");
+    store.handleDelta([{ request_id: "r1", content: "answer one" }], "s1");
+    store.handleDone({ request_id: "r1" } as never, "s1");
+
+    const w = watchInnerHtml();
+    const r = setup(store, "s1", fakeMd);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const mounted = w.take();
+    // 挂载本身必须写过：否则下面的「没再写」是空集，等于什么都没断言
+    expect(mounted.length).toBeGreaterThan(0);
+    const onPage = new Set(mounted.map((h) => h.el));
+
+    act(() => { store.addUserMessage("q2", "s1"); });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const rewritten = w.take().filter((h) => onPage.has(h.el));
+    w.restore();
+
+    expect(rewritten.map((h) => [h.cls, h.html])).toEqual([]);
+    expect(r.container.querySelectorAll(".assistant-html").length).toBeGreaterThan(0);
+  });
+});

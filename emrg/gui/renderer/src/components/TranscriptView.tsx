@@ -20,7 +20,7 @@ import { canLoadOlder, scrollCompensation, shouldLoadOlder } from "../lib/histor
 import { formatMessageTime, messageTimeTitle } from "../lib/utils";
 import { toolPhrases } from "../lib/copywriting";
 import { useI18n, type TranslateFn } from "../lib/i18n";
-import { MarkdownText } from "./MarkdownText";
+import { MARKDOWN_HTML_CLASS, MARKDOWN_PLAIN_CLASS, MarkdownText } from "./MarkdownText";
 
 /**
  * TranscriptView — 聊天区 React 渲染组件（Batch 2，设计 §5 Batch 2 项 1–3）。
@@ -101,6 +101,21 @@ export interface TranscriptViewProps {
    */
   scrollMemory?: { readonly current: ScrollMemory };
 }
+
+/**
+ * 正文容器的选择器：按在这些地方时**不**种折叠 caret。
+ *
+ * 按在正文里，浏览器自己那一下就已经给了起点；我们再 `removeAllRanges()` 放一个 caret，
+ * 换掉的是宿主手上已有的选区（宿主报障 2026-11-23T14:33:25：已完成的回复选中后约 0.7 秒
+ * 就被清掉，录屏里蓝色选区一次成形、一次消失）。种 caret 只服务**不带正文**的件——✦、
+ * 消息时间、工具行、摘要条、两条消息之间的空白：那些地方浏览器给不出正文起点，拖动会从
+ * 段落开头延伸（issue #3034）。
+ *
+ * 两个类名来自 `MarkdownText` 自己的导出，所以「渲染用的类名」与「按下判定的类名」不会
+ * 各写一份再走偏——这次的缺陷正是它们走偏的那一次：名单里写的是 `.assistant-plain`
+ * （markdown 解析完成前那一瞬的兜底类），而每一个已完成的回复带的是 `.assistant-html`。
+ */
+export const BODY_TEXT_SELECTOR = `.md-stream, .${MARKDOWN_HTML_CLASS}, .${MARKDOWN_PLAIN_CLASS}`;
 
 export function TranscriptView({
   store,
@@ -405,7 +420,7 @@ export function TranscriptView({
         ref={contentRef}
         onPointerDown={(e) => {
           const target = e.target as HTMLElement | null;
-          if (target && target.closest(".md-stream, .assistant-plain")) return;
+          if (target && target.closest(BODY_TEXT_SELECTOR)) return;
           seedSelection(typeof document === "undefined" ? null : document, {
             x: e.clientX,
             y: e.clientY,
