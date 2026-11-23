@@ -120,6 +120,49 @@ export function nearestTextNode(node: Node | null): Node | null {
   return null;
 }
 
+/** `node` 子树里最后一段字；没有文字回答 `null`。 */
+function lastTextNodeIn(node: Node | null): Node | null {
+  if (!node) return null;
+  if (node.nodeType === 3) return node;
+  const walker = node.ownerDocument?.createTreeWalker?.(node, 4 /* NodeFilter.SHOW_TEXT */);
+  if (!walker) return null;
+  let last: Node | null = null;
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) last = n;
+  return last;
+}
+
+/**
+ * 把 `(node, offset)` 这个 caret 换成「字节点 + 字偏移」。
+ *
+ * 分开写是因为两者不是同一种偏移：`caretPositionFromPoint` 落在**元素**上时，`offset` 是
+ * 「第几个孩子」的缝（0..childCount），不是字偏移。以前 `seedSelection` 把元素换成它里面
+ * 第一个文本节点、却继续用那个孩子序号当字偏移——点在行尾留白、两块行内盒之间这类地方时，
+ * 缝的序号与字的位置没有关系，锚点就落到**这一段开头**，拖动于是从段首选到当前
+ * （宿主报障 2026-11-23「想选中一句话，变成了选择从开头到当前」）。
+ *
+ * 所以元素上的缝按它的字面意思解析：缝后面那段字的开头；后面再没有字就落在元素里最后一段
+ * 字的末尾。文本节点照旧，越界夹进长度。
+ */
+export function textPositionAt(node: Node, offset: number): { node: Node; offset: number } | null {
+  if (!node) return null;
+  if (node.nodeType === 3) {
+    const length = (node.textContent ?? "").length;
+    return { node, offset: Math.max(0, Math.min(offset, length)) };
+  }
+  if (node.nodeType !== 1) return null;
+  const children = node.childNodes;
+  const index = Math.max(0, Math.min(offset, children.length));
+  // 缝之后的第一段字：`nearestTextNode` 会沿兄弟链找，正是「这之后」的意思
+  const after = index < children.length ? nearestTextNode(children[index]) : null;
+  if (after) return { node: after, offset: 0 };
+  // 缝在末尾（或其后已无文字）：元素里最后一段字的末尾
+  for (let i = Math.min(index, children.length) - 1; i >= 0; i -= 1) {
+    const before = lastTextNodeIn(children[i]);
+    if (before) return { node: before, offset: (before.textContent ?? "").length };
+  }
+  return null;
+}
+
 /**
  * 在按下处放一个折叠选区，让随后的拖动从最近的正文延伸。
  *
@@ -136,13 +179,12 @@ export function seedSelection(
   if (!doc || typeof doc.getSelection !== "function" || typeof doc.createRange !== "function") return false;
   const caret = caretAt(doc, point.x, point.y);
   if (!caret) return false;
-  const node = caret.node.nodeType === 3 ? caret.node : nearestTextNode(caret.node);
-  if (!node || node.nodeType !== 3) return false;
-  const length = (node.textContent ?? "").length;
-  const offset = Math.max(0, Math.min(caret.offset, length));
+  // 元素上的 offset 是孩子序号，换节点时必须一起换算——否则锚点会落到这一段开头
+  const at = textPositionAt(caret.node, caret.offset);
+  if (!at) return false;
   const range = doc.createRange();
   try {
-    range.setStart(node, offset);
+    range.setStart(at.node, at.offset);
   } catch {
     return false;
   }

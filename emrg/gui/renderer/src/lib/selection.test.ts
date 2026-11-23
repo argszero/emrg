@@ -5,6 +5,7 @@ import {
   nearestTextNode,
   seedSelection,
   selectionIn,
+  textPositionAt,
   type CharPoint,
 } from "./selection";
 
@@ -173,6 +174,43 @@ describe("seedSelection：按在正文以外，就从最近的字起手", () => 
     const ok = seedSelection(document, { x: 999, y: 8 }, () => ({ node, offset: 999 }));
     expect(ok).toBe(true);
     expect(document.getSelection()!.anchorOffset).toBe("hello world".length);
+  });
+
+  // 宿主报障 2026-11-23「想选中一句话，变成了选择从开头到当前」：元素上的 caret 偏移是
+  // **孩子序号**，换成字节点时若照搬，锚点就落到这一段开头，拖动于是从段首选起。
+  const seam = () => {
+    document.body.innerHTML = "<p id='p'><em>aa</em> bb</p>";
+    const p = document.getElementById("p")!;
+    document.getSelection()!.removeAllRanges();
+    return p;
+  };
+
+  it("元素上的缝 → 缝后面那段字的开头，不是这一段的开头", () => {
+    const p = seam();
+    const ok = seedSelection(document, { x: 40, y: 8 }, () => ({ node: p, offset: 1 }));
+    expect(ok).toBe(true);
+    const sel = document.getSelection()!;
+    expect(sel.anchorNode!.textContent).toBe(" bb");
+    expect(sel.anchorOffset).toBe(0);
+  });
+
+  it("缝在最后一个孩子之后 → 元素里最后一段字的末尾", () => {
+    const p = seam();
+    const ok = seedSelection(document, { x: 40, y: 8 }, () => ({ node: p, offset: p.childNodes.length }));
+    expect(ok).toBe(true);
+    const sel = document.getSelection()!;
+    expect(sel.anchorNode!.textContent).toBe(" bb");
+    expect(sel.anchorOffset).toBe(3);
+  });
+
+  it("元素里一个字都没有 → false，不改动既有选区", () => {
+    document.body.innerHTML = "<p id='p'><br></p>";
+    const p = document.getElementById("p")!;
+    // 先清干净：jsdom 的选区是文档级的，上一条用例留下的 range 会让「没有选区」变成空断言
+    document.getSelection()!.removeAllRanges();
+    const ok = seedSelection(document, { x: 40, y: 8 }, () => ({ node: p, offset: 0 }));
+    expect(ok).toBe(false);
+    expect(document.getSelection()!.rangeCount).toBe(0);
   });
 
   it("没有 document → false", () => {
