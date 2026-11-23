@@ -37,16 +37,19 @@ a day and another to one run every two days - and the template's precedence rule
 that case rather than the arithmetic. So the value is compared with the division's two
 neighbours rather than with a single expected number:
 
-* ``divides evenly`` - the division is exact, so no second can be lost whatever the block
-  writes; the word ``floor`` is inert here.
+* ``divides evenly`` - the division is exact **and the block states it**, so the rounding
+  question never arises and the word ``floor`` is inert. The block's own pace is read here
+  like everywhere else: an exact division it does not state is not agreement, and it falls
+  to the last class below.
 * ``rounded up`` - not exact, and the block states the ceiling, which is what the template
   asks for.
 * ``one second short`` - not exact, and the block states the **floor**: this is the defect
   the template's own sentence is about, and it is the only class that fails.
 * ``a pace from another source`` - neither neighbour, so the number did not come from this
-  formula at all (a host cap, or an allowance read from somewhere else). Reported and
-  counted, never called agreement and never called a defect: which it is depends on an
-  order this file cannot read.
+  formula at all (a host cap, an allowance read from somewhere else, or a value stated
+  against a division that happens to be exact). Reported and counted, never called
+  agreement and never called a defect: which it is depends on an order this file cannot
+  read.
 * ``not a pacing block`` - states neither an allowance nor a pace (a promote or scouting
   task). It makes no claim to check, so it is named and counted rather than failing the run;
   reading it as unmeasurable would leave exit ``0`` unreachable on a host that runs one.
@@ -153,7 +156,13 @@ def classify(block: str) -> tuple[int | None, int | None, int | None, str, str]:
     floor_value, remainder = divmod(DAY, n + 1)
     expected = floor_value + 1 if remainder else floor_value
     if remainder == 0:
-        return n, stated, expected, EVEN, "the division is exact"
+        # An exact division settles the *rounding* question, not the pace. The block still
+        # states a number, and a stated value that differs from the division is a pace this
+        # formula did not produce - reading the exactness as agreement would report a gap
+        # half the allowance as clean.
+        if stated == expected:
+            return n, stated, expected, EVEN, "the division is exact and the block states it"
+        return n, stated, expected, OTHER, "the division is exact and the block states another pace"
     if stated == expected:
         return n, stated, expected, UP, "the division is not exact and the value is its ceiling"
     if stated == floor_value:
