@@ -374,6 +374,15 @@ Exit `0` = Apple accepted the credentials; `1` = Apple refused them, and Apple's
 
 The step's two failure modes are told apart by **duration**, not by the exit code: a refused *submission* dies in seconds, while a notarization *verdict* takes minutes, exits 0 and reports `status=Invalid` (the step parses that status and fetches Apple's rejection log for it). `Notarize pkg` names the preflight in its own `::error::` when the submission is refused, so the remedy arrives with the failure.
 
+**The host-side counterpart of the pacing rule.** A competition task's `extra_prompt` states its submission allowance as `n` and its pace in seconds as `interval`, and the competition template fixes that pace as `86400 / (n + 1)` rounded **up**, because a gap shorter than the division allows spends the attempt the ledger is keeping. Nothing measured it, and the reading done by eye came out wrong twice inside one cycle: the **first** `interval = N` a block states is its no-allowance fallback rather than the value it computed, and the blocks that really do lose a second never write the word `floor(` — on this host 19 blocks write it, 17 of those divide evenly so the word decides nothing, while all four that land short state the truncated number by hand. The word and the slip are disjoint sets.
+
+```bash
+uv run --no-sync python3 scripts/check-task-interval.py            # default: ~/.emrg/tasks.yml
+uv run --no-sync python3 scripts/check-task-interval.py --tasks <path> --quiet
+```
+
+It reads a block's **last** stated interval and compares it with both neighbours of the division, which is why a value that is neither is its own verdict rather than a fault: a host order may cap the pace, and the precedence rule governs that case instead of the arithmetic. Exit `0` = no block states the floor; `1` = at least one does, named on its own row with the round-up it should carry; `2` = the task table or a block could not be measured — **never a pass**. A block that states neither an allowance nor a pace (a promote or scouting task) is counted as such and does not fail the run, or a clean verdict would be unreachable on a host that runs one. The table is the host's own file and the tool measures it without ever writing to it.
+
 **The host-side counterpart of the workflow gate.** CI runs `actionlint` over
 `.github/workflows/` on every push (in `test.yml`: the pinned release binary, downloaded
 into `$RUNNER_TEMP` with the version taken from that step's `ACTIONLINT_VERSION` — before
