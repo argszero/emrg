@@ -343,6 +343,15 @@ NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE = {
 #: Answers about something other than a working tree, so the rule does not apply - each
 #: with what it reads instead, because "not a tree reader" is a claim like any other.
 NOT_TREE_READERS = {
+    "check-task-interval.py": (
+        "reads the host's own task table (`~/.emrg/tasks.yml` by default, `--tasks` to name "
+        "another) and compares the pace each block states with the round-up the competition "
+        "template requires - a task table is not a working tree, and the one this runs against "
+        "is the host's, which no checkout carries (issue #3171: the reading was done by eye "
+        "every cycle and answered wrongly twice in one cycle, once by taking a block's "
+        "no-allowance fallback sentence for its computed value and once by counting the word "
+        "`floor(`, which the four blocks that actually lose a second never write)"
+    ),
     "check-release-artifact-version.py": (
         "reads the artifact it is given as an argument (a runtime tarball, an .app bundle, "
         "an expanded payload directory, an .asar or a version.txt) and compares the version "
