@@ -114,12 +114,24 @@ export async function languageSupportFor(choice: LanguageChoice): Promise<Extens
 /** Past this many bytes the editor opens the file read only. */
 export const LARGE_FILE_BYTES = 4 * 1024 * 1024;
 
+/**
+ * How many lines the renderer asks for in one page.
+ *
+ * The daemon caps a page at 2000 lines and at 1 MB anyway, so this is a request rather than
+ * a bound: asking for more changes nothing, and asking for less would page a 2000-line file
+ * in two requests for no reason. It lives here because both the first read and every later
+ * page have to agree about it.
+ */
+export const PAGE_LINES = 2000;
+
 /** What the reader answered about a file, reduced to the facts the read-only gate needs. */
 export interface ReadShape {
   binary: boolean;
   truncated: boolean;
   /** The file's size on disk, when the panel managed to probe it. */
   size: number | null;
+  /** The 1-based line this buffer starts at. Absent or `1` for a whole-file read. */
+  startLine?: number;
 }
 
 /** Why a file is read only. The panel turns each into its own sentence. */
@@ -136,8 +148,58 @@ export type ReadOnlyReason = "binary" | "truncated" | "large";
 export function readOnlyReason(shape: ReadShape): ReadOnlyReason | null {
   if (shape.binary) return "binary";
   if (shape.truncated) return "truncated";
+  // A fragment is a fragment even when nothing follows it. The last page of a long file
+  // reports `truncated: false` — correctly, there is no next page — and an editable buffer
+  // holding lines 99,001-100,000 would then write back a 1,000-line file over a
+  // 100,000-line one. The place a page starts is the only fact that separates the two.
+  if ((shape.startLine ?? 1) > 1) return "truncated";
   if (shape.size !== null && shape.size > LARGE_FILE_BYTES) return "large";
   return null;
+}
+
+/**
+ * Which sentence a failed read gets, from the daemon's own code.
+ *
+ * The code crosses the wire because the renderer must not match prose: the daemon's
+ * sentences are English, they carry a path, and an unrecognised one would silently become
+ * the generic line again — which is the defect this replaces. An unknown or absent code
+ * falls back to that generic line deliberately, so a newer daemon is not unreadable here.
+ */
+export function readFailureKey(code: string | null | undefined): string {
+  switch (code) {
+    case "not_found":
+      return "editor.failed.notFound";
+    case "is_directory":
+      return "editor.failed.isDirectory";
+    case "not_regular":
+      return "editor.failed.notRegular";
+    case "unreadable":
+      return "editor.failed.unreadable";
+    case "window_invalid":
+      return "editor.failed.window";
+    default:
+      return "editor.failed";
+  }
+}
+
+/**
+ * A byte count in units a reader scans, e.g. `52.3 MB`.
+ *
+ * One decimal place above a kilobyte: `1.0 KB` and `1 KB` are the same file, and a
+ * number with no unit is the thing this replaces. A count under a kilobyte stays exact,
+ * because at that size the digit is information.
+ */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(1)} ${units[unit]}`;
 }
 
 /** What the panel recorded about a file it read or wrote. */
