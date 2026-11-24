@@ -619,6 +619,56 @@ def test_the_default_table_still_reads_a_store_that_did_not_migrate(mod, tmp_pat
     assert "1 unchanged" in out
 
 
+def test_a_store_that_has_only_begun_migrating_is_still_read(mod, tmp_path, monkeypatch, capsys):
+    """`ref/` existing is not the same fact as the table having moved into it.
+
+    A store migrates detail files one at a time, so between "no `ref/`" and "everything in `ref/`"
+    there is a state where the directory exists and the table is still at the top. Measured
+    2026-11-24 (`cyc20261124-214718`) on this checkout: `ref/` held two detail files, the table was
+    among the six still at the top, and a resolver that asked whether `ref/` exists answered exit 2
+    for a file it could open. The question therefore belongs to the **file**.
+    """
+    text = "x" * 40
+    tasks = _tasks(tmp_path, [_record("zeta", text=text)])
+    memory = tmp_path / ".emrg" / "memory"
+    moved = memory / mod.MEMORY_REF_DIRNAME
+    moved.mkdir(parents=True)
+    # a file that HAS migrated, so `ref/` exists while the table has not moved
+    (moved / "some-other-detail-file.md").write_text("# moved\n", encoding="utf-8")
+    table = _table(memory, {"zeta": _row(text)}, name=mod.TABLE_NAME)
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    assert mod.main(["--tasks", str(tasks)]) == 0
+    out = capsys.readouterr().out
+    assert f"table: {table} (1 row(s))" in out
+    assert "1 unchanged" in out
+
+
+def test_a_run_pointed_at_the_empty_spelling_names_the_one_that_has_the_table(
+    mod, tmp_path, monkeypatch, capsys
+):
+    """A wrong spelling is answered as a wrong spelling, not as a host with no table.
+
+    `--init` writes a skeleton at the path this run was pointed at, so printing it here would have
+    the reader build a second, unclassified table beside the one they already have. The remedy is
+    the readable path, named.
+    """
+    text = "x" * 40
+    tasks = _tasks(tmp_path, [_record("zeta", text=text)])
+    memory = tmp_path / ".emrg" / "memory"
+    moved = memory / mod.MEMORY_REF_DIRNAME
+    moved.mkdir(parents=True)
+    readable = _table(memory, {"zeta": _row(text)}, name=mod.TABLE_NAME)
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    empty = moved / mod.TABLE_NAME
+    assert mod.main(["--tasks", str(tasks), "--table", str(empty)]) == 2
+    err = capsys.readouterr().err
+    assert "no table at" in err, err
+    assert str(readable) in err, f"the readable path is the remedy:\n{err}"
+    assert "--init" not in err, f"a table exists; do not tell the reader to build another:\n{err}"
+
+
 def test_the_script_runs_as_a_subprocess_without_reaching_for_an_installed_package():
     """The entry point a cycle actually uses: `python3 scripts/…`, not an import from pytest.
 
