@@ -158,6 +158,6 @@ Run commands in the foreground, one at a time, with a generous `timeout`, and wa
 
 The chain has real side effects — a releases request, a version file, the upgrade session — and a green run shows none of them. Never write, restore or introduce a test, script or code path that runs it: stub every side-effecting endpoint, and let the existing hermeticity guard fail the one that misses.
 
-## Plan before every call
+## Plan before every call (#RULE_PBEC)
 
 - **Plan before every call.** The opening lines of your reply list the tool calls the request needs in total. A round is billed for re-sending the whole conversation, so five planned calls in one round cost one fifth of what five calls in five rounds cost. A round therefore has two shapes and no third: **no call at all**, or **five or more calls**. Below five, the round must answer for it and say why it is wasting money.

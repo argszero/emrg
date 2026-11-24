@@ -6,15 +6,23 @@ round or two, after which the model went back to one call per round: a
 requirement stated in the prompt sits too far from the point where the next
 round's calls are decided.
 
-So the daemon appends `{"role": "system", "content": "batch call"}` to the
-**request** that follows a round dispatching exactly one call. A **system** turn
-and not a user one: the reminder is the daemon's instruction, while a user turn
-is the host's voice — the role a client renders as the host's bubble and a
-transcript attributes to the host. The readings here
-are the `messages` lists the provider was actually handed — captured where the
+So the daemon appends a **system** message naming `#RULE_PBEC` — the tag on the
+rule's heading in `system.j2` — to the **request** that follows a round whose call
+count is below five. A **system** turn and not a user one: the reminder is the
+daemon's instruction, while a user turn is the host's voice — the role a client
+renders as the host's bubble and a transcript attributes to the host. The readings
+here are the `messages` lists the provider was actually handed — captured where the
 stream is consumed — so nothing asserts the shape of the code that built them:
 removing the append, inverting its condition, or moving it ahead of the tool
 results each reddens a test below.
+
+Issue #3193 is the second half, and it is what the first version got wrong. The
+body was `batch call` — a name the prompt never used, so the model had to invent a
+meaning for it and then quoted its own invention back in later rounds. A **tag**
+answers that by being a locator rather than an abbreviation: the reminder says where
+to read the rule, and the rule is what the reader reads. The same report measured
+the condition as narrower than the rule it refers to — `== 1` reminded a one-call
+round and left two, three and four alone, though all four are sub-five.
 
 `request_messages` is a **copy**, which is what keeps the reminder out of every
 file: session history, `llm.jsonl` and a rebuilt request are all read from the
@@ -34,12 +42,15 @@ from pathlib import Path
 from emrg.config import LlmConfig
 from emrg.protocol import TaskRequest
 from emrg.server import daemon as daemon_mod
-from emrg.server.daemon import BATCH_CALL_NUDGE, EmrgServer
+from emrg.server.daemon import BATCH_CALL_NUDGE, BATCH_CALL_RULE_TAG, EmrgServer
 from emrg.server.tool_types import ToolResult
 from emrg.session import Session
 
 SESSION_ID = "batch-call-nudge"
 NUDGE = {"role": "system", "content": BATCH_CALL_NUDGE}
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SYSTEM_PROMPT = REPO_ROOT / "emrg" / "server" / "prompts" / "system.j2"
 
 
 class _StubTool:
@@ -153,16 +164,38 @@ def test_the_request_after_a_single_call_round_ends_in_the_reminder(tmp_path, mo
     assert _nudges(requests[1]) == 1, _describe(requests[1])
 
 
-# ── requirement 2: nothing after a round that did not dispatch exactly one ─────
+# ── requirement 2: the condition is the rule's range — one to four, not exactly one ──
 
 
-def test_no_reminder_follows_a_round_that_dispatched_two_calls(tmp_path, monkeypatch):
-    """Requirement 2, the batch arm: several calls already did what is asked."""
+def test_a_two_call_round_is_reminded_like_a_one_call_round(tmp_path, monkeypatch):
+    """Requirement 2, rewritten: two calls is a sub-five round, so it owes an answer.
+
+    This arm used to assert the opposite — "several calls already did what is asked" — which read
+    "several" as the shape the rule wants. The shape is five or more, so a two-call round is a round
+    that owes an answer, and withholding the reminder from it is the half of the rule the old
+    condition dropped (reported 2026-11-24).
+    """
     requests, _, _ = _drive(tmp_path, monkeypatch, [2, 0])
 
     assert len(requests) == 2
+    assert requests[1][-1] == NUDGE, (
+        f"a two-call round went unreminded: {_describe(requests[1])}"
+    )
+    assert _nudges(requests[1]) == 1, _describe(requests[1])
+
+
+def test_no_reminder_follows_a_round_that_reached_the_rules_shape(tmp_path, monkeypatch):
+    """The upper end of the range: five calls is the shape the rule asks for, and it is left alone.
+
+    Both ends are asserted because a condition widened to "any round at all" would pass the test above
+    while reminding the round that already complied — the reminder would then be noise, and noise is
+    what a model learns to skip.
+    """
+    requests, _, _ = _drive(tmp_path, monkeypatch, [5, 0])
+
+    assert len(requests) == 2
     assert _nudges(requests[1]) == 0, (
-        f"a two-call round was reminded anyway: {_describe(requests[1])}"
+        f"a five-call round was reminded anyway: {_describe(requests[1])}"
     )
 
 
@@ -279,4 +312,52 @@ def test_the_reminder_is_derived_without_touching_the_loops_own_list():
     assert source == [{"role": "user", "content": "go"}], (
         "the reminder was written into the list the loop keeps, so the next "
         f"round would inherit it: {source!r}"
+    )
+
+
+# ── requirement 6: the condition is the rule's whole range ───────────────────
+
+
+def test_the_condition_is_the_rules_range_at_the_seam():
+    """One to four reminded, zero and five-or-more not — the range read at the helper.
+
+    The loop arms above read two counts each; this reads the whole range, so a condition that moved one
+    end without the other is visible as the count it is wrong for rather than as a passing pair.
+    """
+    source = [{"role": "user", "content": "go"}]
+    reminded = [n for n in range(0, 8) if _nudges(daemon_mod._with_batch_call_nudge(source, n))]
+
+    assert reminded == [1, 2, 3, 4], (
+        f"the reminder fires for {reminded}, not the rule's sub-five range 1-4: a round that issued "
+        "nothing took no action to batch, and a round of five or more already has the shape the rule "
+        "asks for"
+    )
+
+
+# ── requirement 7: the tag it names is one the prompt actually carries ───────
+
+
+def test_the_reminder_names_the_tag_the_prompt_carries():
+    """The two carriers of one identifier, compared in both directions.
+
+    The reminder is the model's only pointer to the rule, and the heading is where it lands. Either half
+    can move alone — a reminder naming a tag no heading carries leaves the model exactly where `batch
+    call` left it, inventing a meaning for a name the prompt never uses; a heading whose tag the reminder
+    stopped naming leaves the rule unreachable from the one place it is needed. So both are read here,
+    and the reminder's opener is asserted too: a system turn that does not say it is a reminder reads as
+    one more thing the host said.
+    """
+    assert BATCH_CALL_RULE_TAG in BATCH_CALL_NUDGE, (
+        f"the reminder does not name its locator: {BATCH_CALL_NUDGE!r}"
+    )
+    assert BATCH_CALL_NUDGE.startswith("reminder:"), (
+        f"the reminder does not say what it is: {BATCH_CALL_NUDGE!r}"
+    )
+
+    prompt = SYSTEM_PROMPT.read_text(encoding="utf-8")
+    tagged = [line for line in prompt.splitlines()
+              if line.startswith("## ") and BATCH_CALL_RULE_TAG in line]
+    assert len(tagged) == 1, (
+        f"`{BATCH_CALL_RULE_TAG}` is on {len(tagged)} headings in the prompt, not one, so the reminder "
+        f"resolves to nothing a reader can find: {tagged}"
     )
