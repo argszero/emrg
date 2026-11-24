@@ -155,27 +155,61 @@ TABLE_NAME = "task-extra-prompt-rotation.md"
 
 
 def default_table() -> Path:
-    """The rotation table inside this repository's memory store: `ref/` when it is there.
+    """The rotation table inside this repository's memory store: the file that is there.
 
-    The store keeps every detail file in `ref/` and leaves only the index at the top
-    (`emrg.memory.MEMORY_REF_DIRNAME`), and `MemoryStore.migrate_flat_layout()` moves a store
-    that predates that layout the first time it is constructed. This table is a detail file, so
-    it walks the rule the store walks - the same one `check-memory-index.py` resolves its rows
-    against and `check-cycle-record.py` resolves its two subjects against.
+    The store keeps detail files in `ref/` and leaves the index at the top
+    (`emrg.memory.MEMORY_REF_DIRNAME`), and `MemoryStore.migrate_flat_layout()` moves a store that
+    predates that layout. This table is one of those detail files, so **the question is asked of the
+    file, not of the directory**: `ref/<name>` when that file exists, `<memory>/<name>` otherwise.
+    That is the rule `check-issue-links.py` states as `prefer_existing` ("the one of the two that is
+    on disk") and the rule this very file already applies to the **task** table below, where two root
+    spellings are resolved by `Path(...).exists()`.
 
-    Measured 2026-11-22 (`cyc20261122-142416`): while the table sat at its pre-migration path
-    this reading answered `8 unchanged`, and the moment the store was migrated it answered
-    exit 2, `cannot measure: ... is unreadable ([Errno 2] ...)` - for a file that was present
-    one directory down. Step 1.7 of a cycle then cannot be taken at all, and the answer it
-    prints reads like a missing rotation table rather than a wrong path.
+    Measured twice, and the two readings are why this is the file and not the directory:
 
-    Resolved at call time, never at import: `REPO_ROOT` is the subject this reads, and a
-    fixture that moves it must move the answer with it. `--table` still overrides the whole
-    question, which is how a reading is taken on a fixture.
+    * 2026-11-22 (`cyc20261122-142416`): while the table sat at its pre-migration path a reading that
+      asked for `ref/` answered exit 2 for a file present one directory down.
+    * 2026-11-24 (`cyc20261124-214718`): a store with `ref/` present and **two** detail files moved
+      into it, the table still among the six at the top, answered exit 2 again - and printed `--init`
+      as the remedy, which would have written a *second*, unclassified table at the path it named.
+      Asking whether `ref/` exists cannot tell a finished migration from one that has begun.
+
+    Resolved at call time, never at import: `REPO_ROOT` is the subject this reads, and a fixture that
+    moves it must move the answer with it. `--table` still overrides the whole question, which is how
+    a reading is taken on a fixture.
     """
     memory_root = REPO_ROOT / ".emrg" / "memory"
     ref = memory_root / MEMORY_REF_DIRNAME
-    return (ref if ref.is_dir() else memory_root) / TABLE_NAME
+    migrated = ref / TABLE_NAME
+    return migrated if migrated.is_file() else memory_root / TABLE_NAME
+
+def _other_spelling(table_path: Path) -> Path | None:
+    """The same table under the store's other spelling, when that file exists.
+
+    The store has two spellings - `<memory>/ref/<name>` and `<memory>/<name>` - and a run can be
+    pointed at either. Returns the one that is **not** `table_path` and is a readable file, or
+    `None` when the table really is absent from both. Only the store's own two spellings are
+    considered: a `--table` naming somewhere else entirely is a fixture or a deliberate choice, and
+    guessing a twin for it would be inventing an answer.
+    """
+    memory_root = REPO_ROOT / ".emrg" / "memory"
+    candidates = (memory_root / MEMORY_REF_DIRNAME / TABLE_NAME, memory_root / TABLE_NAME)
+    if table_path not in candidates:
+        # Pointed somewhere that is not the store at all: a fixture, or a deliberate choice. A twin
+        # guessed for that is an invented answer, and this suite's own `absent.md` arm is the case -
+        # it failed against a helper that looked for a twin without first asking whether the path
+        # was one of the two it could twin.
+        return None
+    for candidate in candidates:
+        if candidate == table_path:
+            continue
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
 
 #: The default task table, which is this host's. `--tasks` exists so the reading can be taken
 #: on a fixture, and the default is never exercised by a test.
@@ -558,6 +592,17 @@ def main(argv=None):
 
     text = _load_table(table_path)
     if text is None:
+        # A table at the other spelling is not a missing table, and `--init` there would write a
+        # second, unclassified one at the path this run was pointed at. Answer the fact instead.
+        other = _other_spelling(table_path)
+        if other is not None:
+            print(
+                f"cannot measure: no table at {table_path}, but one is readable at {other} - this "
+                f"run was pointed at the wrong spelling of the store's path, so nothing was "
+                f"compared. Read it with `--table {other}`",
+                file=sys.stderr,
+            )
+            return 2
         print(
             "the rotation table is this host's memory and nothing creates it: run `--init` to "
             f"print a skeleton for every block that renders, write it to {table_path}, then "
