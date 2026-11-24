@@ -76,6 +76,7 @@ import yaml
 
 from emrg.server.atomic import atomic_write_yaml
 from emrg.server.git_utils import ensure_local_exclude
+from emrg.server.life import total_of
 from emrg.tools.base import non_regular_kind
 
 logger = logging.getLogger(__name__)
@@ -91,7 +92,7 @@ _ROW_FIELDS = ("path", "name", "last_active")
 #: keep the shape it always had. Projecting them onto the row and then dropping the
 #: absent ones is what lets a reader ask ``row.get("life")`` without every existing
 #: row growing four null keys the first time anything rewrites the register.
-_LIFE_FIELDS = ("life", "life_at", "life_delta", "life_reason")
+_LIFE_FIELDS = ("life", "life_at", "life_delta", "life_reason", "life_items")
 
 
 def _unique_name(base_name: str, taken: set[str]) -> str:
@@ -331,19 +332,32 @@ class AgentRegistry:
         self._write(rows)
         return row
 
-    def set_life(self, name: str, value: int, reason: str,
+    def set_life(self, name: str, items: list, reason: str,
+                 searched: str | None = None,
                  at: datetime | None = None) -> dict | None:
-        """Write one agent's life value, and say what the write did.
+        """Write one agent's life judgement, and say what the write did.
 
-        The only writer of the four life fields, and the judge's tool is its only
-        caller — which is what makes "no agent can edit its own score" a property of
-        the tool list rather than a rule this method has to keep re-checking.
+        The only writer of the life fields, and the judge's tool is its only caller —
+        which is what makes "no agent can edit its own score" a property of the tool
+        list rather than a rule this method has to keep re-checking.
 
-        The change's size is **derived here, from the row**, never taken from the
-        caller: a delta the caller supplies is a second claim about the same fact, and
-        the two would eventually disagree. A first judgement has no previous value, so
-        it stores no delta — an absence, not a zero, because a jump from nothing to
-        something is not a change of nought.
+        A judgement arrives as a list of weighted items, and **the value is that list's
+        sum**, never a figure stated beside it: a total supplied along with the items is
+        a second claim about the same fact, and the two drift into a number the judged
+        agent cannot explain. The items are stored as they arrive, because they are what
+        the judged agent reads to know what to keep doing and what to stop.
+
+        ``total_of`` is the one reader of an item's shape, so a malformed list raises
+        here instead of storing a value nobody can account for — the tool validates with
+        the same function, and a register that guessed differently would be a second
+        idea of what a judgement is.
+
+        A first judgement has no previous value, so it stores no delta — an absence, not
+        a zero, because a jump from nothing to something is not a change of nought.
+
+        ``searched`` is folded into the stored reason when it is given. It is the search
+        report an all-positive judgement owes, and a reader of the register should see
+        what was looked at rather than take the absence of a deduction on faith.
 
         :returns: the rewritten row, or ``None`` when nothing was decided — the
             register could not be read, or no row carries ``name``. The two are
@@ -351,6 +365,12 @@ class AgentRegistry:
             because a caller that cannot tell them apart reports "no such agent" about
             a file it never read.
         """
+        total = total_of(items)
+        if total is None:
+            raise ValueError(
+                "set_life needs items shaped as "
+                f"[{{'points': int (non-zero), 'what': str}}]; it was {items!r}"
+            )
         rows = self._read()
         if rows is None:
             return None
@@ -359,19 +379,26 @@ class AgentRegistry:
             return None
         previous = row.get("life")
         moment = at or datetime.now().astimezone()
-        row["life"] = int(value)
+        first = not isinstance(previous, int) or isinstance(previous, bool)
+        row["life"] = total if first else previous + total
         row["life_at"] = moment.isoformat()
-        row["life_reason"] = reason
-        if isinstance(previous, int) and not isinstance(previous, bool):
-            row["life_delta"] = row["life"] - previous
-        else:
+        stored = reason
+        if isinstance(searched, str) and searched.strip():
+            stored = f"{reason} (looked for a deduction: {searched.strip()})"
+        row["life_reason"] = stored
+        row["life_items"] = [
+            {"points": item["points"], "what": item["what"].strip()} for item in items
+        ]
+        if first:
             row.pop("life_delta", None)
+        else:
+            row["life_delta"] = total
         self._write(rows)
         logger.info(
             "register: life of %r set to %d (%s) — %s",
             name, row["life"],
-            "first judgement" if row.get("life_delta") is None else f"{row['life_delta']:+d}",
-            reason,
+            "first judgement" if first else f"{total:+d}",
+            stored,
         )
         return row
 
