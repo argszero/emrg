@@ -35,6 +35,7 @@ from emrg.server.life_review import (
     render_roster,
     roster,
     skip_reason,
+    span_key,
     watermark_path,
     write_watermark,
 )
@@ -88,6 +89,74 @@ def test_the_judge_is_not_on_its_own_roster() -> None:
         _row("other", NOW - datetime.timedelta(minutes=1)),
     ]
     assert [e["name"] for e in roster(rows, since, NOW)] == ["other"]
+
+
+def test_a_quiet_row_comes_back_once_what_the_judge_reads_has_grown() -> None:
+    """A dormant row is presented again when its absence reads one unit longer.
+
+    Membership used to be activity inside the window alone, and the window advances every
+    round — so a quiet row's value stood for ever, and the agent the prompt tells the judge
+    to score down for a long absence was the one row a round never carried. The rhythm is
+    not a second interval: it is the unit `describe_span` already words, so a row judged
+    while absent a day is presented again at two.
+    """
+    since = NOW - datetime.timedelta(minutes=30)
+    seen = NOW - datetime.timedelta(days=5)
+    judged = seen + datetime.timedelta(days=1)  # absent a day when it was judged
+    rows = [_row("quiet", seen, life=40, life_at=judged.isoformat())]
+    entry = roster(rows, since, NOW)[0]
+    assert entry["name"] == "quiet"
+    assert describe_span(entry["span"]) == "4 days", (
+        "the row is back for the stretch since its last judgement, not the window"
+    )
+
+
+def test_a_quiet_row_stays_off_while_what_it_reads_is_unchanged() -> None:
+    """The other direction: one wake is not a reason to judge the same stretch twice.
+
+    A row judged hours ago presents the absence it presented then, so it is not on this
+    round's roster — the gate's saving is that an unchanged reading costs no request.
+    """
+    since = NOW - datetime.timedelta(minutes=30)
+    seen = NOW - datetime.timedelta(days=5, hours=3)
+    judged = NOW - datetime.timedelta(hours=3)  # absent five days when it was judged
+    rows = [_row("quiet", seen, life=40, life_at=judged.isoformat())]
+    assert roster(rows, since, NOW) == []
+
+
+def test_a_long_absent_row_comes_back_a_week_after_its_last_judgement() -> None:
+    """Past a fortnight the unit is the week, so the row's rhythm slows to that.
+
+    The rows frozen at the register's seeding batch have been absent for months and were
+    judged once; without this they keep that value for ever.
+    """
+    since = NOW - datetime.timedelta(minutes=30)
+    seen = NOW - datetime.timedelta(days=90)
+    judged = NOW - datetime.timedelta(days=8)  # absent 82 days when it was judged
+    rows = [_row("gone", seen, life=50, life_at=judged.isoformat())]
+    assert [e["name"] for e in roster(rows, since, NOW)] == ["gone"]
+
+
+def test_a_long_absent_row_waits_inside_its_own_week() -> None:
+    """The same row is not presented twice in one week of absence."""
+    since = NOW - datetime.timedelta(minutes=30)
+    seen = NOW - datetime.timedelta(days=88)
+    judged = NOW - datetime.timedelta(days=3)  # absent 85 days when it was judged
+    rows = [_row("gone", seen, life=50, life_at=judged.isoformat())]
+    assert roster(rows, since, NOW) == []
+
+
+def test_a_row_that_worked_after_its_last_judgement_comes_back() -> None:
+    """A judgement older than the activity it should cover settles nothing.
+
+    The row was judged, then worked, then went quiet before this window: the stretch it
+    now presents has never been judged, so it is presented again.
+    """
+    since = NOW - datetime.timedelta(minutes=30)
+    seen = NOW - datetime.timedelta(days=3)
+    judged = seen - datetime.timedelta(days=2)
+    rows = [_row("worked", seen, life=40, life_at=judged.isoformat())]
+    assert [e["name"] for e in roster(rows, since, NOW)] == ["worked"]
 
 
 # ── 2. reach ─────────────────────────────────────────────────────────
@@ -150,6 +219,38 @@ def test_a_span_of_one_unit_says_the_singular() -> None:
     assert describe_span(datetime.timedelta(minutes=120)) == "2 hours"
     assert describe_span(datetime.timedelta(hours=48)) == "2 days"
     assert describe_span(datetime.timedelta(days=14)) == "2 weeks"
+
+
+def test_the_unit_table_never_orders_a_longer_span_below_a_shorter_one() -> None:
+    """`span_key`'s ordering is what makes "the reading has grown" a comparison.
+
+    Every boundary is walked: a key that crossed would present a quiet row for a stretch
+    reading *shorter* than the one it was judged on, which is a re-judgement nothing
+    asked for.
+    """
+    spans = sorted([
+        datetime.timedelta(seconds=0),
+        datetime.timedelta(seconds=89),
+        datetime.timedelta(seconds=90),
+        datetime.timedelta(seconds=120),
+        datetime.timedelta(minutes=89),
+        datetime.timedelta(minutes=90),
+        datetime.timedelta(minutes=120),
+        datetime.timedelta(hours=47),
+        datetime.timedelta(hours=48),
+        datetime.timedelta(days=13),
+        datetime.timedelta(days=14),
+        datetime.timedelta(days=21),
+    ])
+    keys = [span_key(delta) for delta in spans]
+    assert keys == sorted(keys), f"the unit table orders a longer span below a shorter: {keys}"
+    assert keys[0] == (0, 0)
+    assert keys[-1] == (4, 3), "three weeks is not worded as three weeks"
+    above_the_first_band = [key for key in keys if key != (0, 0)]
+    assert above_the_first_band == sorted(set(above_the_first_band)), (
+        "two boundaries above the first band answer one key, so a longer span can read "
+        f"as the same stretch: {keys}"
+    )
 
 
 # ── 3. the gate ──────────────────────────────────────────────────────
@@ -388,11 +489,15 @@ def _review_handler(tmp_path: Path, monkeypatch, *agents: tuple[str, datetime.da
         tmp_path / "tasks.yml",
     )
     rows = []
-    for name, active in agents:
+    for name, active, *rest in agents:
         (tmp_path / name).mkdir(exist_ok=True)
         row = {"path": str(tmp_path / name), "name": name}
         if active is not None:
             row["last_active"] = active.isoformat()
+        if rest and rest[0] is not None:
+            row["life"] = rest[0]
+        if len(rest) > 1 and rest[1] is not None:
+            row["life_at"] = rest[1].isoformat()
         rows.append(row)
     (tmp_path / "agents.yml").write_text(yaml.safe_dump(rows), encoding="utf-8")
     handler = make_handler(name="life-judge-task", config={}, interval=60,
@@ -454,6 +559,36 @@ def test_an_admitted_round_hands_over_the_roster_and_advances_the_window(
         "the window was not advanced, so the next round would present it again"
     )
     assert read_watermark(written) is not None
+
+
+def test_a_settled_window_with_only_a_quiet_row_still_opens_a_round(
+    tmp_path: Path, monkeypatch, caplog,
+) -> None:
+    """The dormant row is the whole point, and it is measured where a round really starts.
+
+    The row has been silent a week and was last judged while it was absent four days, so
+    the stretch it now presents has grown — the reading the judge would give has changed,
+    and the round is owed. The register without that judgement is the case the gate above
+    already covers, where nobody to judge costs no request: the difference between the two
+    tests is one `life_at`, which is what makes this the second way in rather than a
+    wider window.
+    """
+    settled = datetime.datetime.now().astimezone() - datetime.timedelta(minutes=30)
+    written = tmp_path / "life-review" / "life-judge-task.json"
+    write_watermark(written, settled)
+    seen = datetime.datetime.now().astimezone() - datetime.timedelta(days=7)
+    judged = seen + datetime.timedelta(days=4)
+    handler = _review_handler(tmp_path, monkeypatch, ("quiet-agent", seen, 40, judged))
+    ran: list[str] = []
+    handler._run_cycle_bounded = lambda: _record(ran)
+
+    with caplog.at_level(logging.INFO):
+        _drive(handler, lambda: False, caplog_text=lambda: _said(caplog, "no round"))
+
+    assert ran, "a quiet row whose reading had grown was never presented to the judge"
+    assert "quiet-agent" in handler._life_roster_text, (
+        f"the round started without the row it exists for: {handler._life_roster_text!r}"
+    )
 
 
 async def _record(sink: list[str]) -> str:
