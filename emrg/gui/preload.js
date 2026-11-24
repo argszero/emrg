@@ -103,6 +103,10 @@ const api = {
   saveSettings: (payload) => ipcRenderer.invoke("emrg:saveSettings", payload),
   getSettings: () => ipcRenderer.invoke("emrg:getSettings"),
   cancel: (sessionId) => ipcRenderer.invoke("emrg:cancel", sessionId),
+  // issue #3204：撤掉**一条**排队消息。此前每条删除路径都 pop 整个列表，客户端只能表达
+  // 「整队丢掉」——所以界面上连一个删除控件都没有：按钮没有协议可发，就是按下去什么
+  // 也不发生的按钮。
+  cancelQueued: (payload) => ipcRenderer.invoke("emrg:cancelQueued", payload),
   pickAgentDir: () => ipcRenderer.invoke("emrg:pickAgentDir"),
   // 额外可写根的系统选择器（rant 2026-11-20T10:13:12）：只开对话框取一条路径，
   // 不写盘、不发命令——填进输入框不等于添加，那一跳仍由用户点「添加」。

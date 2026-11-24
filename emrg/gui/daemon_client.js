@@ -217,6 +217,10 @@ const RESPONSE_TYPES = {
   delete_session: "session_deleted",
   set_model: "model_set",
   clear_session: "clear_result", // 修正：daemon 命令名是 clear_session（原 clear 匹配不上）
+  // issue #3204：撤掉一条排队消息。daemon 用 `queued_removed` 回答（回执里带整条队列），
+  // 命令名与帧名不同 —— 缺这一行，客户端会按 `cancel_queued` 等一个永不出现的帧，
+  // 删除按钮于是等满超时后报失败，而消息其实早就撤掉了。
+  cancel_queued: "queued_removed",
   rename_session: "rename_result", // 修正：daemon 命令名是 rename_session
   trigger_task: "trigger_result", // 修正：daemon 命令名是 trigger_task
   compact: "compact_result",
@@ -1300,7 +1304,13 @@ class DaemonClient {
       this._emit(frame.type, frame);
       return;
     }
-    if (frame.type === "queued_requeue" || frame.type === "queued_cancelled") {
+    if (frame.type === "queued_requeue" || frame.type === "queued_cancelled"
+        || frame.type === "queue_changed") {
+      // `queue_changed` 是这条缝上的第四个成员（再往前三对见下面那段注释）：撤销一条
+      // 排队消息时 daemon 把新的整条队列广播给订阅该会话的每个连接（issue #3204），
+      // 渲染层有它的 `case`（`daemonBridge.ts` 的 `case "queue_changed"`）。中间层
+      // 不转发，删除就只在动手的那个客户端生效，别的客户端继续画一条已经不存在的队列。
+      // 绕过兜底、按原名转发。
       // 同一条缝上的第三对（#2189 同一类）。daemon 的队列排空契约把这两个帧
       // `_broadcast` 给订阅该会话的每个连接：干净收尾时 `queued_requeue`
       // （`daemon.py:3873`，带 `request_ids`，即「该重发的那些请求」），

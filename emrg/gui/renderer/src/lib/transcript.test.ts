@@ -556,3 +556,56 @@ describe("条目级订阅：流式只脏一条", () => {
     expect(b.getEntries("s1")[0].id).not.toBe(id);
   });
 });
+
+/**
+ * 排队是消息行自己的状态（issue #3204）。
+ *
+ * 旧形状把排队提示追加成一条 `system` 条目 —— 只追加的 transcript 撤不掉它，于是那句
+ * 「还没发出去」在消息真的发出去之后仍留在屏幕上，唯一要说的意思由真变假。这组测试钉住
+ * 新形状的两个方向：标上去会显示，撤销之后**没有那个字段**（不是留个空值）。
+ */
+describe("排队标记长在消息行上（#3204）", () => {
+  const userRow = (s: ReturnType<typeof store>, sid = "s1") => {
+    const e = s.getEntries(sid).find((x) => x.kind === "user");
+    return e?.kind === "user" ? e : undefined;
+  };
+
+  it("setQueuedPosition 标到 rid 那一行；没有这条 rid 时什么也不做", () => {
+    const s = store();
+    s.addUserMessage("first", "s1", { requestId: "r1" });
+    s.setQueuedPosition("r1", 2, "s1");
+    expect(userRow(s, "s1")?.queuedPosition).toBe(2);
+
+    // 认不到的 rid 绝不能退化成「改最后一行」——那句规则与 stampUserMessage 同一条。
+    s.addUserMessage("second", "s1", { requestId: "r2" });
+    s.setQueuedPosition("nope", 9, "s1");
+    expect(userRow(s, "s1")?.queuedPosition).toBe(2);
+    expect(s.getEntries("s1").filter((e) => e.kind === "user").map((e) => (e.kind === "user" ? e.queuedPosition : null)))
+      .toEqual([2, undefined]);
+  });
+
+  it("传 null 之后字段消失，而不是留一个空值（那会让「在不在队列里」有两种假）", () => {
+    const s = store();
+    s.addUserMessage("hello", "s1", { requestId: "r1" });
+    s.setQueuedPosition("r1", 1, "s1");
+    s.setQueuedPosition("r1", null, "s1");
+    expect(userRow(s, "s1")?.queuedPosition).toBeUndefined();
+  });
+
+  it("clearQueuedMarkers 只清排队中的行，且没有标记时不触发重渲染", () => {
+    const s = store();
+    s.addUserMessage("sent", "s1", { requestId: "r1" });
+    s.addUserMessage("waiting", "s1", { requestId: "r2" });
+    s.setQueuedPosition("r2", 1, "s1");
+    const before = s.getVersion();
+    s.clearQueuedMarkers("s1");
+    const rows = s.getEntries("s1").filter((e) => e.kind === "user");
+    expect(rows.map((e) => (e.kind === "user" ? e.queuedPosition : null))).toEqual([undefined, undefined]);
+    expect(s.getVersion()).toBeGreaterThan(before);
+
+    // 已经没有人排队时再清一次：不该把版本推上去（否则每次断连都重渲染一遍聊天区）
+    const v = s.getVersion();
+    s.clearQueuedMarkers("s1");
+    expect(s.getVersion()).toBe(v);
+  });
+});

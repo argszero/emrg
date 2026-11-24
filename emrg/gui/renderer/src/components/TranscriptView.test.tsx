@@ -1419,3 +1419,57 @@ describe("重渲染不许重写已完成的正文", () => {
     expect(r.container.querySelectorAll(".assistant-html").length).toBeGreaterThan(0);
   });
 });
+
+/**
+ * 排队标记长在消息行上（issue #3204）。
+ *
+ * 旧形状把「已排队」追加成一条 system 记录：只追加的 transcript 撤不掉它，于是消息真的
+ * 发出去之后那句「还没发出去」仍留在屏幕上。现在它是那一行自己的状态 —— 在就有，不在就
+ * 没有，没有任何人需要记得去撤一条记录。
+ */
+describe("排队标记（#3204）", () => {
+  afterEach(() => {
+    delete (window as unknown as { emrg?: unknown }).emrg;
+  });
+
+  it("排队中的行带位置、queued 类名与删除按钮", () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("hello", "s1", { requestId: "r1" });
+    store.setQueuedPosition("r1", 2, "s1");
+    const { container } = setup(store, "s1");
+
+    const row = container.querySelector(".msg.user");
+    expect(row).not.toBeNull();
+    // 与已发出的消息视觉上不同（要求 5）：靠类名，样式表里是虚线边 + 半透明。
+    expect(row!.className).toContain("queued");
+    expect(container.querySelector(".msg-queued-pos")?.textContent).toContain("2");
+    expect(container.querySelector(".msg-queued-del")).not.toBeNull();
+  });
+
+  it("已发出的行没有排队标记，也没有多出一条 system 记录", () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("hello", "s1", { requestId: "r1" });
+    const { container } = setup(store, "s1");
+
+    expect(container.querySelector(".msg-queued")).toBeNull();
+    expect(container.querySelector(".msg.user")!.className).not.toContain("queued");
+    expect(store.getEntries("s1").filter((e) => e.kind === "system")).toHaveLength(0);
+  });
+
+  it("点删除：本地标记立刻撤掉，同时请 daemon 撤（不等往返）", async () => {
+    const cancelQueued = vi.fn().mockResolvedValue({ ok: true });
+    (window as unknown as { emrg?: unknown }).emrg = { cancelQueued };
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("hello", "s1", { requestId: "r1" });
+    store.setQueuedPosition("r1", 1, "s1");
+    const { container } = setup(store, "s1");
+
+    fireEvent.click(container.querySelector(".msg-queued-del")!);
+
+    await waitFor(() =>
+      expect(cancelQueued).toHaveBeenCalledWith({ sessionId: "s1", requestId: "r1" }),
+    );
+    const row = store.getEntries("s1").find((e) => e.kind === "user");
+    expect(row?.kind === "user" ? row.queuedPosition : null).toBeUndefined();
+  });
+});

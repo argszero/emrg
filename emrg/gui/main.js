@@ -1529,6 +1529,32 @@ vision = false
       return { ok: true };
     });
 
+    ipcMain.handle("emrg:cancelQueued", async (_e, { sessionId, requestId } = {}) => {
+      // issue #3204: withdraw ONE queued message. Every removal path before this one
+      // popped the whole pending list, so a client could only express "drop the queue"
+      // — which is why the interface had no delete control to offer.
+      //
+      // The acknowledgement carries the queue as it now stands, so the renderer redraws
+      // from the daemon's answer instead of renumbering its own copy. A failure is
+      // reported rather than thrown across IPC: a rejected invoke becomes an unhandled
+      // rejection in the renderer (the same guard `emrg:cancel` keeps).
+      if (!validateSessionId(sessionId)) return { ok: false, error: "invalid session_id" };
+      if (typeof requestId !== "string" || requestId.length < 1 || requestId.length > 64) {
+        return { ok: false, error: "invalid request_id" };
+      }
+      try {
+        const res = await requireConn().sendCommandAndWait(
+          "cancel_queued",
+          { session_id: sessionId, request_id: requestId },
+          5000,
+        );
+        return { ok: true, queue: res?.queue ?? null };
+      } catch (err) {
+        logger.warn(`[gui:cancelQueued] sid=${sessionId} rid=${requestId} failed: ${err?.message || err}`);
+        return { ok: false, error: String(err?.message || err) };
+      }
+    });
+
     ipcMain.handle("emrg:pickAgentDir", async () => {
       // G70/G115：只选不写盘（保存才落盘）
       const res = await dialog.showOpenDialog(win, { properties: ["openDirectory"] });
