@@ -6,6 +6,7 @@ import { EditorSelection, EditorState } from "@codemirror/state";
 import { I18nProvider } from "../lib/i18n";
 import { EditorPanel, type EditorPanelHandle } from "./EditorPanel";
 import { LeftTrees } from "./LeftTrees";
+import { DEFAULT_FONT_SIZE } from "../lib/editorDoc";
 
 /**
  * EditorPanel — the right-hand column as an editor (issue #3068).
@@ -21,6 +22,10 @@ const FILES: Record<string, string> = {
   "/p/emrg/sub/c.txt": "c",
   "/p/emrg/a.py": "alpha\nbeta\ngamma",
   "/p/emrg/notes.zzz": "plain words",
+  // 四空格缩进的文件：状态角标读的是这份文件自己的缩进，不是常量
+  "/p/emrg/wide.py": "def f():\n    return 1\n",
+  // CRLF 的文件：行尾那一格跟着它变
+  "/p/emrg/win.txt": "one\r\ntwo\r\n",
 };
 
 interface PanelOptions {
@@ -518,14 +523,16 @@ describe("EditorPanel as an editor (rant 2026-11-20T18:01:52)", () => {
     expect(screen.getByTestId("editor-minimap")).toBeInTheDocument();
   });
 
-  it("缩略图把整份文件收成一列条，不按文件长度变长", async () => {
+  it("缩略图画的是文件自己的文字：一行一条，不是每行长度的条形", async () => {
     const { open } = renderPanel();
     open("/p/emrg/a.txt", "/p/emrg", false);
     await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
     fireEvent.click(screen.getByTestId("editor-toggle-minimap"));
     const map = screen.getByTestId("editor-minimap");
-    // 三行的文件，三条；每一条都不是按钮
-    expect(map.querySelectorAll(".editor-minimap-bar")).toHaveLength(3);
+    // 三行的文件，三条；每一条都是那一行自己的字，读得出来（issue #3200 第 3 条）
+    const lines = map.querySelectorAll(".editor-minimap-line");
+    expect(lines).toHaveLength(3);
+    expect([...lines].map((el) => el.textContent)).toEqual(["alpha", "beta", "gamma"]);
     expect(within(map).queryByRole("button")).toBeNull();
   });
 
@@ -602,5 +609,180 @@ describe("EditorPanel as an editor (rant 2026-11-20T18:01:52)", () => {
       });
     });
     expect(editor().state.selection.ranges).toHaveLength(2);
+  });
+});
+
+/**
+ * The ten gaps issue #3200 names (2026-11-24).
+ *
+ * One test per item, and each drives the surface the host drives: a click on the button the
+ * item says is missing, a right-click on a tab, a keystroke through CodeMirror's own keymap.
+ * Nothing here reads the source it is testing — a grep would pass for a panel whose new
+ * button is wired to nothing, which is the shape the ten items are about.
+ *
+ * Items 1, 4 and 5 have no test in this file: the first is a stylesheet rule (see
+ * `cockpit.test.ts`), and the other two are CodeMirror wiring (see `CodeEditor.test.tsx`).
+ */
+describe("EditorPanel's ten gaps (issue #3200)", () => {
+  it("2. 保存与重载都在工具栏上，重载遇到未保存改动先问", async () => {
+    const saveFile = vi.fn(
+      async (_path: string, _content: string, _sid: string) => ({ mtime: 200, size: 20 }),
+    );
+    const { open, loadFile } = renderPanel({ saveFile });
+    open("/p/emrg/a.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+
+    // 有改动时点重载：先问，答「取消」就把改动留着
+    typeInto("?");
+    expect(screen.getByTestId("editor-tab-dirty")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("editor-action-reload"));
+    expect(screen.getByTestId("editor-reload-ask")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("editor-reload-cancel"));
+    expect(screen.queryByTestId("editor-reload-ask")).toBeNull();
+    expect(surface()).toHaveTextContent("gamma?");
+
+    // 保存按钮与 Cmd+S 是同一条路径：写出去的是缓冲区里的那一份
+    fireEvent.click(screen.getByTestId("editor-action-save"));
+    await waitFor(() => expect(saveFile).toHaveBeenCalledTimes(1));
+    expect(saveFile.mock.calls[0][0]).toBe("/p/emrg/a.txt");
+    expect(String(saveFile.mock.calls[0][1])).toContain("gamma?");
+    // 写入回来之前标签还是脏的：等那个点消失，才是「已经没有可丢的东西」
+    await waitFor(() => expect(screen.queryByTestId("editor-tab-dirty")).toBeNull());
+
+    // 干净了再点重载：没有可丢的东西，就不问
+    const reads = loadFile.mock.calls.length;
+    fireEvent.click(screen.getByTestId("editor-action-reload"));
+    expect(screen.queryByTestId("editor-reload-ask")).toBeNull();
+    await waitFor(() => expect(loadFile.mock.calls.length).toBe(reads + 1));
+  });
+
+  it("3. 缩略图画的是文件的文字，点它仍然跳到那一行", async () => {
+    const { open } = renderPanel();
+    open("/p/emrg/a.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+    fireEvent.click(screen.getByTestId("editor-toggle-minimap"));
+    const code = screen.getByTestId("editor-minimap-code");
+    // 图上读得出文件自己的字：这一条就是「不是长度直方图」的判据
+    expect(code.textContent).toContain("alpha");
+    expect(code.textContent).toContain("gamma");
+
+    // 点在下半部分：光标往下走，不是停在第一行。jsdom 不算布局，所以框是给出来的
+    vi.spyOn(code, "getBoundingClientRect").mockReturnValue({
+      top: 0,
+      bottom: 90,
+      left: 0,
+      right: 40,
+      width: 40,
+      height: 90,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    } as DOMRect);
+    fireEvent.click(code, { clientY: 85 });
+    await waitFor(() => expect(editor().state.selection.main.head).toBeGreaterThan(0));
+  });
+
+  it("6. 换标签回来 Cmd+Z 还能走回去，走的只是这份文件自己的历史", async () => {
+    const { open } = renderPanel();
+    open("/p/emrg/a.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+    typeInto("!");
+    expect(surface()).toHaveTextContent("gamma!");
+
+    // 两份文件两个标签，点回去等于换标签（编辑器随之重新挂载）
+    open("/p/emrg/b.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("one"));
+    fireEvent.click(screen.getAllByTestId("editor-tab")[0]);
+    await waitFor(() => expect(surface()).toHaveTextContent("gamma!"));
+
+    fireEvent.keyDown(editor().contentDOM, { key: "z", ctrlKey: true });
+    await waitFor(() => expect(surface()).not.toHaveTextContent("gamma!"));
+    expect(surface()).toHaveTextContent("alpha");
+    // 撤销里没有另一份文件的文字
+    expect(surface()).not.toHaveTextContent("two");
+  });
+
+  it("7. 标签右键有菜单，能关掉右侧标签；标签能拖着换位", async () => {
+    const { open } = renderPanel();
+    open("/p/emrg/a.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+    open("/p/emrg/b.txt", "/p/emrg", false);
+    open("/p/emrg/notes.zzz", "/p/emrg", false);
+    await waitFor(() => expect(screen.getAllByTestId("editor-tab")).toHaveLength(3));
+
+    // 右键第二个标签：菜单出来了，选「关闭右侧标签」——第三个没了，前两个还在
+    fireEvent.contextMenu(screen.getAllByTestId("editor-tab")[1]);
+    expect(screen.getByTestId("editor-tab-menu")).toBeInTheDocument();
+    fireEvent.mouseDown(screen.getByTestId("editor-tab-menu-close-right"));
+    expect(screen.getAllByTestId("editor-tab")).toHaveLength(2);
+
+    // 把第一个标签拖到第二个上：它排到后面去，顺序是面板自己的状态
+    const before = screen.getAllByTestId("editor-tab");
+    fireEvent.dragStart(before[0]);
+    fireEvent.dragOver(before[1]);
+    fireEvent.drop(before[1]);
+    const after = screen.getAllByTestId("editor-tab").map((el) => el.textContent ?? "");
+    expect(after[0]).toContain("b.txt");
+    expect(after[1]).toContain("a.txt");
+  });
+
+  it("8. 状态角标写着缩进宽度、行尾与编码", async () => {
+    const { open } = renderPanel();
+    open("/p/emrg/wide.py", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("return 1"));
+    // 宽度是这份文件自己的：四空格，不是常量 2
+    expect(screen.getByTestId("editor-status-indent")).toHaveTextContent("Spaces: 4");
+    expect(screen.getByTestId("editor-status-eol")).toHaveTextContent("LF");
+    expect(screen.getByTestId("editor-status-encoding")).toHaveTextContent("UTF-8");
+
+    // 换成 CRLF 的文件：行尾那一格跟着这份文件变
+    open("/p/emrg/win.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("two"));
+    expect(screen.getByTestId("editor-status-eol")).toHaveTextContent("CRLF");
+  });
+
+  it("9. 字号能放大、缩小、归位，换标签也还是那个字号", async () => {
+    const { open } = renderPanel();
+    open("/p/emrg/a.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+    const size = (): number =>
+      Number.parseFloat(surface().style.getPropertyValue("--editor-font-size"));
+    const press = (key: string): void => {
+      fireEvent.keyDown(editor().contentDOM, { key, ctrlKey: true });
+    };
+    expect(size()).toBe(DEFAULT_FONT_SIZE);
+
+    press("=");
+    await waitFor(() => expect(size()).toBe(DEFAULT_FONT_SIZE + 1));
+    press("-");
+    press("-");
+    await waitFor(() => expect(size()).toBe(DEFAULT_FONT_SIZE - 1));
+    press("0");
+    await waitFor(() => expect(size()).toBe(DEFAULT_FONT_SIZE));
+
+    // 换标签回来还是这个字号：它属于这个面板，不属于某一个标签
+    press("=");
+    await waitFor(() => expect(size()).toBe(DEFAULT_FONT_SIZE + 1));
+    open("/p/emrg/b.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("one"));
+    expect(size()).toBe(DEFAULT_FONT_SIZE + 1);
+  });
+
+  it("10. 放弃改动是自己的入口：先问，确认后回到磁盘那份；没改动时不问", async () => {
+    const { open } = renderPanel();
+    open("/p/emrg/a.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+    typeInto("!");
+    expect(surface()).toHaveTextContent("gamma!");
+
+    fireEvent.click(screen.getByTestId("editor-action-discard"));
+    expect(screen.getByTestId("editor-discard-ask")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("editor-discard-confirm"));
+    await waitFor(() => expect(surface()).not.toHaveTextContent("gamma!"));
+    expect(surface()).toHaveTextContent("alpha");
+
+    // 已经和磁盘一样了：再点不问
+    fireEvent.click(screen.getByTestId("editor-action-discard"));
+    expect(screen.queryByTestId("editor-discard-ask")).toBeNull();
   });
 });

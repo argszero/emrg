@@ -13,17 +13,26 @@ import {
   EMPTY_EDITOR,
   NO_FILE_OPEN,
   activate,
+  closeOthers,
   closeTab,
+  closeToTheRight,
+  moveTab,
   openFile,
   pinTab,
   type EditorState,
 } from "../lib/editor";
 import {
+  DEFAULT_FONT_SIZE,
   EditorPrefsStore,
+  MAX_FONT_SIZE,
+  MIN_FONT_SIZE,
+  applyLineEnding,
   diskChange,
+  indentUnitFor,
   languageFor,
+  lineEndingFor,
   lineForRatio,
-  minimapBars,
+  minimapLines,
   readOnlyReason,
   type CursorPosition,
   type DiskChange,
@@ -31,6 +40,8 @@ import {
   type ReadOnlyReason,
 } from "../lib/editorDoc";
 import { CodeEditor, type CodeEditorHandle } from "./CodeEditor";
+import { ContextMenu } from "./ContextMenu";
+import type { EditorState as CodeMirrorState } from "@codemirror/state";
 
 /**
  * EditorPanel — the cockpit's right-hand column, an editor rather than a tabbed reader
@@ -147,6 +158,25 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
   // A close request held back by unsaved changes. The three answers are save / discard /
   // cancel, and cancel is the one that must leave the tab and its text exactly as they are.
   const [closeAsk, setCloseAsk] = useState<string | null>(null);
+  // Two more questions with the same shape as the close one and different sentences: "reload
+  // from disk, losing your edits" and "revert to disk, losing your edits" are the same act
+  // reached from two buttons, so each asks in its own words rather than sharing a kind.
+  const [reloadAsk, setReloadAsk] = useState<string | null>(null);
+  const [discardAsk, setDiscardAsk] = useState<string | null>(null);
+  // The open tab menu: which tab it was opened on, and where the pointer was.
+  const [tabMenu, setTabMenu] = useState<{
+    id: string;
+    path: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const tabMenuRef = useRef<HTMLDivElement | null>(null);
+  // The tab a drag started on, so the drop knows what it is moving.
+  const dragFrom = useRef<string | null>(null);
+  // Each path's CodeMirror state, kept across the remount a tab switch causes. Here rather
+  // than in the editor because the editor is what unmounts: this map is the thing that has
+  // to outlive the very event it exists for.
+  const editorStates = useRef<Map<string, CodeMirrorState>>(new Map());
   // Which paths the panel has already asked about. A ref, not state, on purpose: as state
   // it would be a dependency of the load effect, so the effect would re-run the moment the
   // request was recorded, tear down the closure waiting on the answer, and the answer
@@ -220,9 +250,14 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
     [activeText],
   );
   const bars = useMemo(
-    () => (display.minimap && activeContent ? minimapBars(activeText) : []),
+    () => (display.minimap && activeContent ? minimapLines(activeText) : []),
     [display.minimap, activeContent, activeText],
   );
+  // What the document itself says about its indentation and its line endings. Read from the
+  // buffer rather than the snapshot: these are readings of the text the reader is looking at,
+  // and the text they are about to save is the buffer.
+  const indent = useMemo(() => indentUnitFor(activeText), [activeText]);
+  const eol = useMemo(() => lineEndingFor(activeText), [activeText]);
 
   /**
    * Record what a read answered, as both snapshot and buffer.
@@ -457,6 +492,85 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
     [closeAsk, save],
   );
 
+  /**
+   * The toolbar's reload: a question only when there is something to lose.
+   *
+   * An untouched buffer is reloaded straight away — asking "reload and lose your edits?" over
+   * a file with no edits is a dialog that trains the reader to click through the one that
+   * matters.
+   */
+  const requestReload = useCallback(
+    (path: string): void => {
+      if (isDirty(path)) {
+        setReloadAsk(path);
+        return;
+      }
+      void reloadFromDisk(path);
+    },
+    [isDirty, reloadFromDisk],
+  );
+
+  /** Discard is the same act as a reload: the disk copy replaces both buffer and snapshot. */
+  const requestDiscard = useCallback(
+    (path: string): void => {
+      if (isDirty(path)) {
+        setDiscardAsk(path);
+        return;
+      }
+      void reloadFromDisk(path);
+    },
+    [isDirty, reloadFromDisk],
+  );
+
+  const zoom = useCallback(
+    (direction: -1 | 0 | 1): void => {
+      const current = prefs.current.get(sid).fontSize;
+      const next =
+        direction === 0
+          ? DEFAULT_FONT_SIZE
+          : Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, current + direction));
+      prefs.current.set(sid, { fontSize: next });
+      setPrefsTick((n) => n + 1);
+    },
+    [sid],
+  );
+
+  const closeMany = useCallback((id: string, how: "others" | "right"): void => {
+    setState((prev) => (how === "others" ? closeOthers(prev, id) : closeToTheRight(prev, id)));
+    setTabMenu(null);
+  }, []);
+
+  /**
+   * Copy a tab's path.
+   *
+   * The clipboard is the window's, not this panel's, and a build can have none — so the
+   * absence is a no-op rather than a second failure surface: the menu's job is the copy, and
+   * there is nothing here that could report a missing clipboard usefully.
+   */
+  const copyTabPath = useCallback((path: string): void => {
+    setTabMenu(null);
+    void navigator.clipboard?.writeText(path).catch(() => {});
+  }, []);
+
+  // A menu anchored at a pointer has to go when the surface under it moves or the reader
+  // presses Escape. The menu's own buttons stop their mousedown, so a pick is not an outside
+  // click — which is why this listener is a plain one rather than a capture.
+  useEffect(() => {
+    if (!tabMenu) return;
+    const close = (): void => setTabMenu(null);
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") setTabMenu(null);
+    };
+    window.addEventListener("mousedown", close);
+    window.addEventListener("resize", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [tabMenu]);
+
   const toggle = useCallback(
     (patch: { wrap?: boolean; minimap?: boolean }): void => {
       prefs.current.set(sid, patch);
@@ -507,6 +621,27 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
               title={tab.path}
               style={{ flex: "0 0 auto" }}
               onClick={() => setState((prev) => activate(prev, tab.id))}
+              // A drag moves the tab; the drop names the tab it landed on and `moveTab`
+              // decides which side of it that is.
+              draggable
+              onDragStart={() => {
+                dragFrom.current = tab.id;
+              }}
+              onDragOver={(e) => {
+                // Only a tab drag is one: a file dragged in from the tree must not reorder.
+                if (!dragFrom.current || dragFrom.current === tab.id) return;
+                e.preventDefault();
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                const from = dragFrom.current;
+                dragFrom.current = null;
+                if (from) setState((prev) => moveTab(prev, from, tab.id));
+              }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setTabMenu({ id: tab.id, path: tab.path, x: e.clientX, y: e.clientY });
+              }}
               // A double click pins, so the next single click on another file opens a second
               // tab instead of replacing this one.
               onDoubleClick={() => setState((prev) => pinTab(prev, tab.id))}
@@ -562,6 +697,48 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
           );
         })}
       </div>
+      {tabMenu ? (
+        <ContextMenu
+          anchor={{ x: tabMenu.x, y: tabMenu.y }}
+          testId="editor-tab-menu"
+          menuRef={tabMenuRef}
+          active={-1}
+          onHover={() => {
+            /* the tab menu is pointer and keyboard-shortcut only: no arrow-key highlight */
+          }}
+          items={[
+            {
+              id: "close" as const,
+              label: t("editor.close"),
+              testId: "editor-tab-menu-close",
+            },
+            {
+              id: "closeOthers" as const,
+              label: t("editor.closeOthers"),
+              testId: "editor-tab-menu-close-others",
+            },
+            {
+              id: "closeRight" as const,
+              label: t("editor.closeRight"),
+              testId: "editor-tab-menu-close-right",
+            },
+            {
+              id: "copyPath" as const,
+              label: t("editor.copyPath"),
+              testId: "editor-tab-menu-copy-path",
+            },
+          ]}
+          onPick={(id) => {
+            const path = tabMenu.path;
+            if (id === "close") {
+              setTabMenu(null);
+              requestClose(path);
+            } else if (id === "closeOthers") closeMany(path, "others");
+            else if (id === "closeRight") closeMany(path, "right");
+            else copyTabPath(path);
+          }}
+        />
+      ) : null}
       {/* The breadcrumb follows the active tab, not the read: which file this is is known
           the moment the tab exists, and waiting for the text would make the header flicker
           in after the code. The two toggles sit at its right end. */}
@@ -575,6 +752,37 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
               </span>
             ))}
           </nav>
+          <div className="editor-actions" data-testid="editor-actions">
+            {/* The two acts that had no button. A mouse-only reader can save and can pick up
+                a file that changed underneath them; the keyboard paths are unchanged. */}
+            <button
+              type="button"
+              className="editor-toggle"
+              data-testid="editor-action-save"
+              title={t("editor.save")}
+              onClick={() => void save(activeFile.path)}
+            >
+              {t("editor.save")}
+            </button>
+            <button
+              type="button"
+              className="editor-toggle"
+              data-testid="editor-action-reload"
+              title={t("editor.reload")}
+              onClick={() => requestReload(activeFile.path)}
+            >
+              {t("editor.reload")}
+            </button>
+            <button
+              type="button"
+              className="editor-toggle"
+              data-testid="editor-action-discard"
+              title={t("editor.discard")}
+              onClick={() => requestDiscard(activeFile.path)}
+            >
+              {t("editor.discard")}
+            </button>
+          </div>
           <div className="editor-toggles">
             <button
               type="button"
@@ -630,6 +838,60 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
           </button>
         </div>
       ) : null}
+      {reloadAsk ? (
+        <div className="editor-ask" data-testid="editor-reload-ask">
+          <span className="editor-ask-text">
+            {t("editor.reloadUnsaved", { name: baseName(reloadAsk) })}
+          </span>
+          <button
+            type="button"
+            className="editor-ask-btn primary"
+            data-testid="editor-reload-confirm"
+            onClick={() => {
+              const path = reloadAsk;
+              setReloadAsk(null);
+              void reloadFromDisk(path);
+            }}
+          >
+            {t("editor.reload")}
+          </button>
+          <button
+            type="button"
+            className="editor-ask-btn"
+            data-testid="editor-reload-cancel"
+            onClick={() => setReloadAsk(null)}
+          >
+            {t("editor.cancel")}
+          </button>
+        </div>
+      ) : null}
+      {discardAsk ? (
+        <div className="editor-ask" data-testid="editor-discard-ask">
+          <span className="editor-ask-text">
+            {t("editor.discardUnsaved", { name: baseName(discardAsk) })}
+          </span>
+          <button
+            type="button"
+            className="editor-ask-btn primary"
+            data-testid="editor-discard-confirm"
+            onClick={() => {
+              const path = discardAsk;
+              setDiscardAsk(null);
+              void reloadFromDisk(path);
+            }}
+          >
+            {t("editor.discard")}
+          </button>
+          <button
+            type="button"
+            className="editor-ask-btn"
+            data-testid="editor-discard-cancel"
+            onClick={() => setDiscardAsk(null)}
+          >
+            {t("editor.cancel")}
+          </button>
+        </div>
+      ) : null}
       {activeFile && conflict ? (
         <div className="editor-ask" data-testid="editor-disk-conflict">
           <span className="editor-ask-text">
@@ -667,12 +929,33 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
         <div className="editor-body" data-testid="editor-code">
           <CodeEditor
             ref={editorApi}
+            // One key per path. A tab switch therefore remounts the editor, and the mount
+            // adopts this path's state back out of `editorStates` — which is what keeps the
+            // undo history, the selection and the folds of a tab that was switched away from.
+            key={activeFile.path}
+            docKey={activeFile.path}
+            stateStore={editorStates.current}
             text={activeText}
             language={activeLanguage}
             readOnly={readOnlyWhy !== null}
             wrap={display.wrap}
+            indent={indent}
+            fontSize={display.fontSize}
+            onZoom={zoom}
             onCursor={setCursor}
-            onChange={(next) => setBuffers((prev) => ({ ...prev, [activeFile.path]: next }))}
+            onChange={(next) =>
+              setBuffers((prev) => ({
+                ...prev,
+                // The buffer keeps the ending its file has. The editor works in `\n`
+                // internally, so without this a typed CRLF file comes back as LF and the
+                // next save rewrites every line of it — the change the status corner's
+                // line-ending reading exists to make visible before it happens.
+                [activeFile.path]: applyLineEnding(
+                  next,
+                  lineEndingFor(docs[activeFile.path]?.content?.content ?? next),
+                ),
+              }))
+            }
             onSave={() => void save(activeFile.path)}
             // Written through on every scroll, so a silent reload can put the reader back.
             onScrollTop={(top) => scrollByTab.current.set(activeFile.path, top)}
@@ -685,23 +968,27 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
             testId="editor-surface"
           />
           {display.minimap ? (
-            <div
-              className="editor-minimap"
-              data-testid="editor-minimap"
-              onClick={(e) => {
-                const box = e.currentTarget.getBoundingClientRect();
-                if (box.height <= 0) return;
-                const ratio = (e.clientY - box.top) / box.height;
-                editorApi.current?.jumpToLine(lineForRatio(ratio, lineCount));
-              }}
-            >
-              {bars.map((bar, i) => (
-                <span
-                  key={i}
-                  className={`editor-minimap-bar${bar.filled ? " filled" : ""}`}
-                  style={{ width: `${Math.max(4, Math.round(bar.width * 100))}%` }}
-                />
-              ))}
+            <div className="editor-minimap" data-testid="editor-minimap">
+              {/* The document's own lines, drawn small. A click on the drawn text jumps to
+                  the line at that position, measured over the text rather than the column so
+                  that a short file — whose map stops before the bottom — is not off by the
+                  empty space below it. */}
+              <div
+                className="editor-minimap-code"
+                data-testid="editor-minimap-code"
+                onClick={(e) => {
+                  const box = e.currentTarget.getBoundingClientRect();
+                  if (box.height <= 0) return;
+                  const ratio = (e.clientY - box.top) / box.height;
+                  editorApi.current?.jumpToLine(lineForRatio(ratio, lineCount));
+                }}
+              >
+                {bars.map((line, i) => (
+                  <span key={i} className="editor-minimap-line">
+                    {line}
+                  </span>
+                ))}
+              </div>
             </div>
           ) : null}
         </div>
@@ -720,6 +1007,24 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
         <div className="editor-status" data-testid="editor-status">
           <span className="editor-status-lang" data-testid="editor-status-language">
             {languageLabel}
+          </span>
+          {/* Three readings the panel owes a file it is about to write back: what one level
+              of indentation is, which line ending every line has, and the encoding the text
+              came through. A whole-file save carries all three, so a change to any of them is
+              a change to every line and has to be visible before it happens. */}
+          <span className="editor-status-indent" data-testid="editor-status-indent">
+            {indent.kind === "tabs"
+              ? t("editor.indentTabs", { width: indent.width })
+              : t("editor.indentSpaces", { width: indent.width })}
+          </span>
+          <span className="editor-status-eol" data-testid="editor-status-eol">
+            {eol === "crlf" ? "CRLF" : eol === "cr" ? "CR" : "LF"}
+          </span>
+          <span className="editor-status-encoding" data-testid="editor-status-encoding">
+            UTF-8
+          </span>
+          <span className="editor-status-font" data-testid="editor-status-font">
+            {display.fontSize} px
           </span>
           <span className="editor-status-cursor" data-testid="editor-status-cursor">
             {t("editor.cursor", { line: cursor.line, column: cursor.column })}

@@ -127,11 +127,13 @@ describe("词典完整性守卫（防漂移）", () => {
   // 三条文案中英各删一条 → 541 - 3 = 538。
   // 2026-11-22 rant 2026-11-22T13:43:13：关于页加「重启守护进程」入口，标题 / 说明 /
   // 按钮 / 进行中 / 失败前缀 / 无通道 六条中英各加一条 → 538 + 6 = 544。
-  it("zh/en 各 544 个 key 且完全对齐", () => {
+  // 2026-11-24 issue #3200：右栏编辑器补齐十项差距，重载确认、放弃改动、放弃确认、关闭
+  // 其他标签、关闭右侧标签、复制路径、缩进宽度（空格 / Tab）八条中英各加一条 → 544 + 8 = 552。
+  it("zh/en 各 552 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(544);
-    expect(enKeys.length).toBe(544);
+    expect(zhKeys.length).toBe(552);
+    expect(enKeys.length).toBe(552);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);

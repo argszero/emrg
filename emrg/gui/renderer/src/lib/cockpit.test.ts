@@ -598,3 +598,44 @@ describe("会话栏的高度只有一处说了算（issue #3087）", () => {
     expect(block(".left-trees")).toContain("flex: 1");
   });
 });
+
+/**
+ * 选区与当前行是两个状态，不能是同一个颜色（issue #3200 第 1 条）。
+ *
+ * jsdom 不算布局也解不出 `color-mix()`，所以这里读的是样式表文本本身（`?raw`）——调色板
+ * 这条规则就住在样式表里，读它才是读这次修改本身。两条断言各钉一个方向：两者取值不同、
+ * 选区的两个强度有先后。第一条先证明读到的是规则本身，而不是一段空串。
+ */
+describe("编辑器的选区不是当前行（issue #3200 第 1 条）", () => {
+  it("当前行还是 hover 色，选区是强调色：两个状态两个颜色", () => {
+    const activeLine = blockIn(cssSource, ".editor-body .cm-activeLine");
+    // 选区那条规则列了两个选择器，`blockIn` 认的是以 `{` 收尾的那个拼法，所以读第二个；
+    // 两个拼法同属一条规则，读到的是同一段声明。
+    const selection = blockIn(cssSource, ".editor-body .cm-editor .cm-selectionBackground");
+    // 空片段会让下面每条断言都白白通过
+    expect(activeLine.length).toBeGreaterThan(20);
+    expect(selection.length).toBeGreaterThan(20);
+    expect(activeLine).toContain("var(--bg-hover)");
+    // 同一个颜色就是这一条要修的毛病：选区画成了整行
+    expect(selection).not.toContain("var(--bg-hover)");
+    expect(selection).toContain("var(--accent)");
+    // 当前行只声明 background-color：`background` 简写会把缩进参考线一起清掉
+    expect(activeLine).toContain("background-color");
+    expect(activeLine).not.toMatch(/(^|[;\s])background\s*:/);
+  });
+
+  it("有焦点时选区更重，不是一个色均匀到底", () => {
+    const strength = (body: string): number => {
+      const found = /(\d+)%/.exec(body);
+      expect(found).not.toBeNull();
+      return Number.parseInt((found as RegExpExecArray)[1], 10);
+    };
+    const idle = strength(
+      blockIn(cssSource, ".editor-body .cm-editor .cm-selectionBackground"),
+    );
+    const focused = strength(
+      blockIn(cssSource, ".editor-body .cm-focused .cm-editor .cm-selectionBackground"),
+    );
+    expect(focused).toBeGreaterThan(idle);
+  });
+});

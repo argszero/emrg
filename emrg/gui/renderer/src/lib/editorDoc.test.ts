@@ -1,17 +1,21 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_FONT_SIZE,
   DEFAULT_PREFS,
   EditorPrefsStore,
   LARGE_FILE_BYTES,
-  MINIMAP_BARS,
+  MINIMAP_LINES,
   PLAIN_TEXT,
   catalogueNames,
   cursorPositionAt,
   diskChange,
+  indentUnitFor,
+  indentWidthFor,
   languageFor,
   languageSupportFor,
+  lineEndingFor,
   lineForRatio,
-  minimapBars,
+  minimapLines,
   readOnlyReason,
 } from "./editorDoc";
 import { EditorState } from "@codemirror/state";
@@ -137,7 +141,7 @@ describe("EditorPrefsStore (item 8)", () => {
   it("默认不折行、缩略图关", () => {
     const store = new EditorPrefsStore();
     expect(store.get("s1")).toEqual(DEFAULT_PREFS);
-    expect(DEFAULT_PREFS).toEqual({ wrap: false, minimap: false });
+    expect(DEFAULT_PREFS).toEqual({ wrap: false, minimap: false, fontSize: DEFAULT_FONT_SIZE });
   });
 
   it("按会话各记各的：s1 打开折行不影响 s2", () => {
@@ -150,7 +154,11 @@ describe("EditorPrefsStore (item 8)", () => {
   it("改一个开关不动另一个", () => {
     const store = new EditorPrefsStore();
     store.set("s1", { minimap: true });
-    expect(store.get("s1")).toEqual({ wrap: false, minimap: true });
+    expect(store.get("s1")).toEqual({
+      wrap: false,
+      minimap: true,
+      fontSize: DEFAULT_FONT_SIZE,
+    });
   });
 
   it("两个面板不共享：一个 store 的设置不会出现在另一个 store 里", () => {
@@ -179,45 +187,64 @@ describe("cursorPositionAt (item 10)", () => {
   });
 });
 
-describe("minimapBars (item 8)", () => {
-  it("长文件也画得下：条数被条带上限压住，文档再长也不涨", () => {
-    const fourThousand = minimapBars(
-      Array.from({ length: 4000 }, (_, i) => `line ${i}`).join("\n"),
-    );
-    const fortyThousand = minimapBars(
-      Array.from({ length: 40000 }, (_, i) => `line ${i}`).join("\n"),
-    );
-    // 上限是「不超过」：按 ceil 分组时装不满整条带，所以钉死等于 120 反而是错的口径
-    expect(fourThousand.length).toBeLessThanOrEqual(MINIMAP_BARS);
-    expect(fortyThousand.length).toBeLessThanOrEqual(MINIMAP_BARS);
-    // 十倍的文档，条数不涨
-    expect(fortyThousand.length).toBeLessThanOrEqual(fourThousand.length + 2);
+describe("minimapLines (issue #3200)", () => {
+  it("画的是文件自己的行，不是每行长度的条形", () => {
+    expect(minimapLines("const a = 1;\n\n  return a;")).toEqual([
+      "const a = 1;",
+      "",
+      "  return a;",
+    ]);
   });
 
-  it("聚合而不是截断：文件末尾的长行在图上一样看得见", () => {
-    const text = `${"x\n".repeat(119)}${"y".repeat(400)}`;
-    const bars = minimapBars(text);
-    // 最后一条代表文件末尾，宽度满格
-    expect(bars[bars.length - 1].width).toBeCloseTo(1, 5);
+  it("行尾空白不进图：带二十个尾随空格的一行与不带的那一行画出来一样", () => {
+    expect(minimapLines("a   \nb\t\n")).toEqual(["a", "b", ""]);
   });
 
-  it("宽度按文档自己最长的一行归一：短文件也用满整列", () => {
-    const bars = minimapBars("ab\nabcd");
-    expect(Math.max(...bars.map((b) => b.width))).toBeCloseTo(1, 5);
+  it("长文件抽样而不是截断：文件末尾的行一样出现在图上", () => {
+    const text = Array.from({ length: 4000 }, (_, i) => `line ${i}`).join("\n");
+    const lines = minimapLines(text);
+    expect(lines).toHaveLength(MINIMAP_LINES);
+    // 抽样到的是文件末尾附近，不是第 600 行：截断会让每个大文件都长得像自己的第一页
+    const last = Number(lines[lines.length - 1].split(" ")[1]);
+    expect(last).toBeGreaterThan(3600);
+    // 抽到的行仍然按文件顺序排列
+    const first = Number(lines[0].split(" ")[1]);
+    const second = Number(lines[1].split(" ")[1]);
+    expect(second).toBeGreaterThan(first);
   });
 
-  it("空行是空行：没内容的位置不画，只留空白的行也算空", () => {
-    const bars = minimapBars("abc\n\n   \nxyz");
-    expect(bars.map((b) => b.filled)).toEqual([true, false, false, true]);
+  it("短文件一行一条，不凑数也不留空", () => {
+    expect(minimapLines("a\nb\nc")).toHaveLength(3);
+  });
+});
+
+describe("indentUnitFor / lineEndingFor (issue #3200)", () => {
+  it("四空格的文件报 4，八空格是它的倍数，不算第二种缩进", () => {
+    expect(indentUnitFor("def a():\n    if x:\n        return 1\n").width).toBe(4);
   });
 
-  it("没有内容的文档给空图，不给 120 条零宽", () => {
-    expect(minimapBars("")).toEqual([]);
-    expect(minimapBars("\n\n  \n")).toEqual([]);
+  it("两空格的文件报 2，不因为有一行缩进更深就跳到 4", () => {
+    expect(indentUnitFor("a\n  b\n    c\n").width).toBe(2);
   });
 
-  it("短文件一行一条，不硬凑 120 条", () => {
-    expect(minimapBars("a\nb\nc")).toHaveLength(3);
+  it("制表符就是制表符：这类文件不问宽度，宽度是读者的制表位", () => {
+    expect(indentUnitFor("a\n\tb\n\t\tc\n").kind).toBe("tabs");
+  });
+
+  it("没有缩进的文件给默认宽度，不是 0", () => {
+    expect(indentUnitFor("a\nb\n")).toEqual({ kind: "spaces", width: 4 });
+  });
+
+  it("全是视觉对齐（5 / 9 / 13）时回落到默认宽度，不报 1", () => {
+    expect(indentWidthFor([5, 9, 13])).toBe(4);
+  });
+
+  it("CRLF 必须先判：CRLF 里也含 CR，先问 CR 会把每个 Windows 文件都报成裸 CR", () => {
+    expect(lineEndingFor("a\r\nb\r\n")).toBe("crlf");
+    expect(lineEndingFor("a\nb\n")).toBe("lf");
+    expect(lineEndingFor("a\rb\r")).toBe("cr");
+    // 混着的时候说的是各行的行尾，不是文中那一个孤立的 CR
+    expect(lineEndingFor("a\r\nb\rc\r\n")).toBe("crlf");
   });
 });
 

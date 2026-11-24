@@ -1281,6 +1281,18 @@ body.col-resizing * {
   padding: 0 4px;
 }
 
+/* The two acts that had no button sit apart from the two display toggles: saving and
+   reloading change the file, wrapping and the minimap change only the view, and the divider
+   is what says so. */
+.editor-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px;
+  border-right: 1px solid var(--border);
+}
+
 .editor-toggle {
   padding: 1px 6px;
   border: 1px solid transparent;
@@ -1398,13 +1410,43 @@ body.col-resizing * {
   color: var(--text-2);
 }
 
+/* The active line is a *position*; the selection is a *range*. They used to share
+   `var(--bg-hover)`, so selecting two characters painted exactly the block the caret's line
+   already painted and the selection could not be read. The active line keeps the hover
+   colour and declares it as `background-color` rather than `background`, because the
+   shorthand would also reset the indent guides drawn on the line. */
 .editor-body .cm-activeLine {
-  background: var(--bg-hover);
+  background-color: var(--bg-hover);
 }
 
+/* The selection is the accent, at two strengths: opaque enough to read over the active line
+   it usually sits on, and stronger still when the editor has focus. `drawSelection()` is what
+   paints it, and it must stay mounted — a native selection would break `EditorSelection`
+   ranges and the multi-cursor the panel relies on. */
 .editor-body .cm-selectionBackground,
 .editor-body .cm-editor .cm-selectionBackground {
-  background: var(--bg-hover);
+  background: color-mix(in srgb, var(--accent) 34%, transparent);
+}
+
+.editor-body .cm-focused .cm-selectionBackground,
+.editor-body .cm-focused .cm-editor .cm-selectionBackground {
+  background: color-mix(in srgb, var(--accent) 52%, transparent);
+}
+
+/* Indentation guides: one 1px rule at every indent stop inside a line that is indented past
+   its first level. The stylesheet owns the geometry, and everything it needs arrives as a
+   custom property — the count from the line's own decoration (`--indent-guides`), the width
+   of one level from the editor (`--indent-unit-w`, in `ch`, so it follows the face and the
+   zoom without a measurement in JavaScript). A line at the first level carries no decoration
+   and therefore paints nothing. */
+.editor-body .cm-line {
+  background-image: repeating-linear-gradient(
+    to right,
+    transparent 0 calc(var(--indent-unit-w, 4ch) - 1px),
+    var(--border) calc(var(--indent-unit-w, 4ch) - 1px) var(--indent-unit-w, 4ch)
+  );
+  background-repeat: no-repeat;
+  background-size: calc(var(--indent-guides, 0) * var(--indent-unit-w, 4ch)) 100%;
 }
 
 /* Token colours. The theme's own palette decides them, so switching the theme recolours
@@ -1452,11 +1494,13 @@ body.col-resizing * {
   text-decoration: underline wavy;
 }
 
-/* The minimap: one thin column of bars, drawn from the whole document rather than its
-   first page (see `minimapBars`). It is a control, so it answers a click. */
+/* The minimap renders the document's own text at a size no one reads, because what a reader
+   navigates by is shape: indentation, blank gaps, where the long lines are. It is a control,
+   so it answers a click — the click lands on the drawn text, which is the element whose box
+   the position is measured against. */
 .editor-minimap {
   flex: none;
-  width: 44px;
+  width: 56px;
   overflow: hidden;
   padding: 4px 3px;
   border-left: 1px solid var(--border);
@@ -1464,16 +1508,27 @@ body.col-resizing * {
   cursor: pointer;
 }
 
-.editor-minimap-bar {
-  display: block;
-  height: 2px;
-  margin: 0 0 1px;
-  border-radius: 1px;
-  background: transparent;
+/* Each line is a flex item with a zero basis, so the rows share the column's height; the
+   `max-height` keeps a short file short, which is the difference between a map of a file and
+   a stretch of one. Text past the row is clipped rather than wrapped — a minimap row is one
+   line of the file, and wrapping would draw structure the file does not have. */
+.editor-minimap-code {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 3px;
+  line-height: 3px;
+  color: var(--text-2);
 }
 
-.editor-minimap-bar.filled {
-  background: var(--text-3);
+.editor-minimap-line {
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: 4px;
+  overflow: hidden;
+  white-space: pre;
 }
 
 /* The status corner: which language this is, and where the caret is. Both are readings, so
