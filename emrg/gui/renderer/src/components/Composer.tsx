@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { parseInput } from "../lib/commands";
 import {
   CMD_MENU_CLOSED,
@@ -15,6 +15,7 @@ import {
   resolveSendImages,
   filePlaceholder,
   expandFileMarkers,
+  withdrawQueued,
   type CmdMenuState,
   type ImageAttach,
   type ImageCarrier,
@@ -276,6 +277,28 @@ export function Composer({
   insertRequest = null,
 }: ComposerProps) {
   const { t } = useI18n();
+  // 队列摘要（issue #3204 要求 4）读的是**消息行自己的** `queuedPosition` —— 也就是
+  // daemon 那条队列在这一端唯一的副本。签名只在这些标记变化时才变：打字、流式输出、工具
+  // 行都不会让它变，所以这个订阅不会把每个 delta 变成一次输入框重渲染。
+  const queueSignature = useSyncExternalStore(store.subscribe, () => {
+    const parts: string[] = [];
+    for (const e of store.getEntries(sid)) {
+      if (e.kind === "user" && e.queuedPosition !== undefined) {
+        parts.push(`${e.rid ?? e.id}:${e.queuedPosition}`);
+      }
+    }
+    return parts.join("|");
+  });
+  const queuedRows = useMemo(() => {
+    const out: Array<{ rid: string; position: number; text: string }> = [];
+    for (const e of store.getEntries(sid)) {
+      if (e.kind === "user" && e.queuedPosition !== undefined && e.rid) {
+        out.push({ rid: e.rid, position: e.queuedPosition, text: e.text });
+      }
+    }
+    return out.sort((a, b) => a.position - b.position);
+    // queueSignature 是这条依赖的全部信号：它不变 ⇒ 上面那次遍历的结果就不变。
+  }, [store, sid, queueSignature]);
   const [menu, setMenu] = useState<CmdMenuState>(CMD_MENU_CLOSED);
   const [text, setText] = useState("");
   const [hasText, setHasText] = useState(false);
@@ -1007,6 +1030,39 @@ export function Composer({
         {modelChip}
       </div>
       <div className="composer-card">
+        {queuedRows.length > 0 ? (
+          // 输入框上方的队列摘要（issue #3204 要求 4）：收起时是条数与每条的开头几个字，
+          // 展开是全文，每条各有一个删除按钮。用 `<details>` 而不是自管开关：它自己的
+          // 展开/收起就是浏览器的状态，键盘可达、无需另存一份 open。
+          <details className="queue-strip" data-testid="queue-strip">
+            <summary className="queue-strip-head">
+              <span className="queue-strip-count">{t("app.queuedSummary", { n: queuedRows.length })}</span>
+              <span className="queue-strip-peek">
+                {queuedRows.map((q) => q.text.replace(/\s+/g, " ").trim().slice(0, 40)).join(" · ")}
+              </span>
+            </summary>
+            <ul className="queue-strip-list">
+              {queuedRows.map((q) => (
+                <li key={q.rid} className="queue-strip-item">
+                  <span className="queue-strip-pos">{q.position}</span>
+                  <span className="queue-strip-text">{q.text}</span>
+                  <button
+                    type="button"
+                    className="queue-strip-del"
+                    title={t("app.queuedRemove")}
+                    aria-label={t("app.queuedRemove")}
+                    data-testid={`queue-del-${q.rid}`}
+                    onClick={() => {
+                      void withdrawQueued(store, sid, q.rid);
+                    }}
+                  >
+                    ✕
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </details>
+        ) : null}
         <textarea
           ref={taRef}
           className="composer-textarea"

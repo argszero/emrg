@@ -11,6 +11,7 @@ import {
   menuNavigate,
   partitionRequeue,
   queueSend,
+  removeQueued,
   resolveSendImages,
   steerCommitted,
   toSafeImageLabel,
@@ -346,5 +347,34 @@ describe("declaredTypes / declaresImageOrFile — 「声明了却没取到」要
     expect(declaresImageOrFile(["image/tiff"])).toBe(true);
     expect(declaresImageOrFile(["text/plain", "text/html"])).toBe(false);
     expect(declaresImageOrFile([])).toBe(false);
+  });
+});
+
+/**
+ * 撤掉**一条**排队消息（issue #3204）：此前只能整队丢弃，所以界面上也没有删除控件
+ * —— 一个发不出协议消息的按钮，按下去什么都不会发生。
+ */
+describe("removeQueued", () => {
+  it("只摘掉点名的那一条，别的不动", () => {
+    const q = new Map<string, Array<{ requestId: string; text: string }>>();
+    queueSend(q, "s1", { requestId: "r1", text: "a" });
+    queueSend(q, "s1", { requestId: "r2", text: "b" });
+    expect(removeQueued(q, "s1", "r1")).toBe(true);
+    expect((q.get("s1") ?? []).map((e) => e.requestId)).toEqual(["r2"]);
+  });
+
+  it("摘掉最后一条时连键一起删（不留一个空数组冒充「还有队列」）", () => {
+    const q = new Map();
+    queueSend(q, "s1", { requestId: "r1", text: "a" });
+    expect(removeQueued(q, "s1", "r1")).toBe(true);
+    expect(q.has("s1")).toBe(false);
+  });
+
+  it("没有这个 id / 没有这个会话时返回 false —— 那不是错误", () => {
+    const q = new Map();
+    queueSend(q, "s1", { requestId: "r1", text: "a" });
+    expect(removeQueued(q, "s1", "nope")).toBe(false);
+    expect(removeQueued(q, "other", "r1")).toBe(false);
+    expect(removeQueued(new Map(), "s1", "r1")).toBe(false);
   });
 });

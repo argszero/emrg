@@ -13,6 +13,7 @@ function setup() {
     if (key === "app.queued") return `queued:${params?.pos}`;
     if (key === "app.queuedResent") return `resent:${params?.n}`;
     if (key === "app.queuedCancelled") return "cancelled";
+    if (key === "app.queuedDropped") return `dropped:${params?.n}`;
     if (key === "app.error") return `err:${params?.msg}`;
     return key;
   });
@@ -193,10 +194,76 @@ describe("createDaemonBridge", () => {
     expect(bridge.store.get().vision).toBe(true);
   });
 
-  it("task_queued → 排队系统消息（sid 路由）", () => {
+  /**
+   * 队列是那一行消息的状态（issue #3204）。
+   *
+   * 旧行为把 `task_queued` 追加成一条 `system` 记录，而这份 transcript 只追加——
+   * 消息真的发出去之后那句「还没发出去」还留在屏幕上，撤不掉，也没人负责撤。
+   */
+  const rowOf = (store: ReturnType<typeof createTranscriptStore>, sid: string, rid: string) => {
+    const e = store.getEntries(sid).find((x) => x.kind === "user" && x.rid === rid);
+    return e?.kind === "user" ? e : undefined;
+  };
+
+  it("task_queued → 标在那一行上，且不再追加系统消息（sid 路由）", () => {
     const { emit, transcript } = setup();
-    emit({ type: "task_queued", data: { position: 3 }, sid: "s2" });
-    expect(entriesText(transcript, "s2")).toContain("s:queued:3");
+    transcript.addUserMessage("hello", "s2", { requestId: "r1" });
+    emit({
+      type: "task_queued",
+      data: { request_id: "r1", position: 1, queue: [{ request_id: "r1", position: 1, preview: "hello" }] },
+      sid: "s2",
+    });
+    expect(transcript.getEntries("s2").filter((e) => e.kind === "system")).toHaveLength(0);
+    expect(rowOf(transcript, "s2", "r1")?.queuedPosition).toBe(1);
+  });
+
+  it("queue_changed 按 daemon 的整条队列重排，而不是自己把后面的位置减一", () => {
+    const { emit, transcript } = setup();
+    transcript.addUserMessage("a", "s2", { requestId: "r1" });
+    transcript.addUserMessage("b", "s2", { requestId: "r2" });
+    emit({
+      type: "task_queued",
+      data: {
+        request_id: "r1",
+        position: 1,
+        queue: [{ request_id: "r1", position: 1 }, { request_id: "r2", position: 2 }],
+      },
+      sid: "s2",
+    });
+    expect(rowOf(transcript, "s2", "r2")?.queuedPosition).toBe(2);
+
+    // 撤掉排在前面那条：daemon 说 r2 现在是第 1 位。
+    emit({ type: "queue_changed", data: { removed: "r1", queue: [{ request_id: "r2", position: 1 }] }, sid: "s2" });
+    expect(rowOf(transcript, "s2", "r1")?.queuedPosition).toBeUndefined();
+    expect(rowOf(transcript, "s2", "r2")?.queuedPosition).toBe(1);
+  });
+
+  it("不带 queue 的帧不动标记：undefined 不是「队列空了」", () => {
+    const { emit, transcript } = setup();
+    transcript.addUserMessage("a", "s2", { requestId: "r1" });
+    emit({ type: "task_queued", data: { request_id: "r1", position: 1 }, sid: "s2" });
+    expect(rowOf(transcript, "s2", "r1")?.queuedPosition).toBe(1);
+    // 老形状的 queue_changed（没有 queue 字段）不该抹掉屏幕上真实的排队标记。
+    emit({ type: "queue_changed", data: { removed: "rX" }, sid: "s2" });
+    expect(rowOf(transcript, "s2", "r1")?.queuedPosition).toBe(1);
+  });
+
+  it("steer_committed 之后标记自己消失，且没有留下任何排队字样", () => {
+    const { emit, transcript } = setup();
+    transcript.addUserMessage("a", "s2", { requestId: "r1" });
+    emit({ type: "task_queued", data: { request_id: "r1", position: 1 }, sid: "s2" });
+    emit({ type: "steer_committed", data: { request_id: "r1", timestamp: "2026-11-24T21:00:00" }, sid: "s2" });
+    expect(rowOf(transcript, "s2", "r1")?.queuedPosition).toBeUndefined();
+    expect(entriesText(transcript, "s2").some((x) => x.startsWith("s:"))).toBe(false);
+  });
+
+  it("queued_cancelled 带 count 时说清走了几条，并清掉所有标记", () => {
+    const { emit, transcript } = setup();
+    transcript.addUserMessage("a", "s2", { requestId: "r1" });
+    emit({ type: "task_queued", data: { request_id: "r1", position: 1 }, sid: "s2" });
+    emit({ type: "queued_cancelled", data: { count: 2 }, sid: "s2" });
+    expect(rowOf(transcript, "s2", "r1")?.queuedPosition).toBeUndefined();
+    expect(entriesText(transcript, "s2")).toContain("s:dropped:2");
   });
 
   it("turn_start → busy + turnStartBySid（epoch ms 换算，含后台/其他客户端 turn）", () => {

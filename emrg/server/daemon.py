@@ -906,6 +906,23 @@ def build_tool_registry(
     return tools
 
 
+_QUEUE_PREVIEW_CHARS = 60
+
+
+def _queue_preview(prompt: str) -> str:
+    """A queued prompt's opening words: one line, short enough for a summary row.
+
+    The client typed this text and already has it in full in the transcript, so a
+    summary only needs enough to tell two queued messages apart (issue #3204). Newlines
+    collapse because the summary is a single row, and the ellipsis marks a cut rather
+    than leaving a fragment that reads like a whole sentence.
+    """
+    flat = " ".join(str(prompt or "").split())
+    if len(flat) <= _QUEUE_PREVIEW_CHARS:
+        return flat
+    return flat[:_QUEUE_PREVIEW_CHARS] + "…"
+
+
 class EmrgServer:
     """EMRG daemon — listens on Unix socket, processes tasks with tool calling."""
 
@@ -1926,12 +1943,17 @@ class EmrgServer:
                     allow_tools = True
                     if self._session_busy.get(session_id):
                         # Queue the task; injected at the next round boundary.
-                        self._session_pending.setdefault(session_id, []).append((req, allow_tools))
+                        queued = self._session_pending.setdefault(session_id, [])
+                        queued.append((req, allow_tools))
                         await self._broadcast(session_id, {
                             "type": "task_queued",
                             "request_id": req.id,
                             "session_id": session_id,
-                            "position": len(self._session_pending[session_id]),
+                            "position": len(queued),
+                            # The whole queue, not just this message's place in it
+                            # (issue #3204): a client that has to add one to a number
+                            # it remembers keeps two answers to one question.
+                            "queue": self._queued_view(session_id, queued),
                         })
                         continue
                     # Cancel previous task if still running
@@ -3734,6 +3756,54 @@ class EmrgServer:
             result = await self._github_connect_web_start()
             await self._send(ws, {"type": "github_connect_web_result", **result})
 
+        elif msg_type == "cancel_queued":
+            # Withdraw **one** queued message (issue #3204). Every removal path before
+            # this one popped the whole list, so a client could express only "drop the
+            # queue" — and the interface offered no control at all, because a delete
+            # button with no protocol behind it would leave the daemon still holding the
+            # message and still injecting it at the next round boundary.
+            #
+            # The ack carries the queue as it now stands. A withdrawal by a second
+            # client is broadcast for the same reason the enqueue is: a queue belongs to
+            # the session, not to the connection that typed into it.
+            session_id = msg.get("session_id", "")
+            request_id = msg.get("request_id", "")
+            if not session_id or not request_id:
+                await self._send(ws, {
+                    "type": "queued_removed",
+                    "error": "cancel_queued requires session_id and request_id",
+                })
+                return
+            pending = self._session_pending.get(session_id) or []
+            kept = [(req, allow) for req, allow in pending if req.id != request_id]
+            removed = len(pending) - len(kept)
+            if kept:
+                self._session_pending[session_id] = kept
+            else:
+                # Leave no empty list behind: every other reader treats "absent" and
+                # "empty" alike, and an empty entry would make `_session_pending` grow
+                # one key per session that ever queued.
+                self._session_pending.pop(session_id, None)
+            queue = self._queued_view(session_id, kept)
+            if removed:
+                await self._broadcast(session_id, {
+                    "type": "queue_changed",
+                    "session_id": session_id,
+                    "removed": request_id,
+                    "queue": queue,
+                })
+            await self._send(ws, {
+                "type": "queued_removed",
+                "session_id": session_id,
+                "request_id": request_id,
+                # `removed == 0` is not an error: the message may have been injected or
+                # withdrawn between the click and this frame, and the queue in the answer
+                # says what is true now either way.
+                "ok": True,
+                "changed": bool(removed),
+                "queue": queue,
+            })
+
         elif msg_type == "clear_session":
             session_id = msg.get("session_id", "")
             cwd = msg.get("cwd", "")
@@ -3752,6 +3822,10 @@ class EmrgServer:
                 await self._broadcast(session_id, {
                     "type": "queued_cancelled",
                     "session_id": session_id,
+                    # How many went with it (issue #3204). A bare "cancelled" leaves the
+                    # interface unable to say whether one message or six disappeared.
+                    "count": len(dropped),
+                    "queue": [],
                 })
             await self._send(ws, {
                 "type": "clear_result",
@@ -3787,6 +3861,8 @@ class EmrgServer:
                     await self._broadcast(session_id, {
                         "type": "queued_cancelled",
                         "session_id": session_id,
+                        "count": len(dropped),
+                        "queue": [],
                     })
                 await self._send(ws, {
                     "type": "session_deleted",
@@ -4489,7 +4565,37 @@ class EmrgServer:
                     await self._broadcast(session_id, {
                         "type": "queued_cancelled",
                         "session_id": session_id,
+                        # The count is what lets a stopped round say how many queued
+                        # messages it took with it (issue #3204 requirement 6): cancelling
+                        # still drops the queue — injection only happens at a round
+                        # boundary, so a survivor would have no caller to drain it — but
+                        # a silent drop makes "stop" look like it did nothing.
+                        "count": len(pending),
+                        "queue": [],
                     })
+
+    @staticmethod
+    def _queued_view(session_id: str, pending: list[tuple[TaskRequest, bool]]) -> list[dict]:
+        """The queue as a client draws it: one row per request, numbered from 1.
+
+        Positions are computed **here, now**, and never carried on the message. A
+        position sent once at enqueue time goes stale the moment anything ahead of it
+        leaves the queue, and a stale position reports a place that no longer exists
+        (issue #3204). Every frame that can change the queue therefore carries this
+        whole view, and the client redraws from it rather than renumbering its own
+        guess — two computers of one number is how they come to disagree.
+
+        `session_id` is accepted for the caller's symmetry with the broadcast sites and
+        is not read: the list passed in *is* the queue.
+        """
+        return [
+            {
+                "request_id": request.id,
+                "position": index,
+                "preview": _queue_preview(request.prompt),
+            }
+            for index, (request, _) in enumerate(pending, start=1)
+        ]
 
     @staticmethod
     def _inject_tool_arguments(

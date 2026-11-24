@@ -118,6 +118,16 @@ export interface UserEntry {
   timestamp?: string;
   /** 发起这一行的 request id —— 帧按它认领自己那一行（见 `stampUserMessage`）。 */
   rid?: string;
+  /**
+   * 这一行还在 daemon 的待注入队列里时，它在队列中的位置（从 1 起算）；被注入、被撤销
+   * 或整队丢弃之后**没有这个字段**（issue #3204）。
+   *
+   * 这是**这一行自己的状态**，不是另一条记录。旧实现把排队提示追加成一条 `system` 条目，
+   * 而这份 transcript 是只追加的，于是那句「还没发出去」在消息真的发出去之后仍留在屏幕上，
+   * 它唯一要说的意思由真变假、并且再也改不回来。位置一律由 daemon 给：同一条队列在两端
+   * 各算一次，必然有一天算出两个数。
+   */
+  queuedPosition?: number;
 }
 export interface SystemEntry {
   kind: "system";
@@ -255,6 +265,14 @@ export interface TranscriptStore {
    * 就什么也不做 —— 绝不退化成「给最后一行盖章」。
    */
   stampUserMessage(rid: string, timestamp?: string | null, sid?: string | null): void;
+  /**
+   * 把 `rid` 那一行标成「排队中，第 N 位」，或传 `null` 撤销这个标记（issue #3204）。
+   * 位置只来自 daemon 的队列帧；找不到该行就什么也不做 —— 与 `stampUserMessage` 同一条
+   * 规则：绝不退化成「改最后一行」。
+   */
+  setQueuedPosition(rid: string, position: number | null, sid?: string | null): void;
+  /** 整队丢弃：清掉本会话所有行的排队标记（位置也随队列一起失去意义）。 */
+  clearQueuedMarkers(sid?: string | null): void;
   addSystemMessage(text: string, sid?: string | null): void;
   /**
    * 把一段回放出来的条目整块插到最前（rant 2026-09-20T18:58:44：更早一页由实时 handler
@@ -748,6 +766,34 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
         }
       }
       // 找不到就不动：`st(sid)` 已经在上面建过桶，不该为了补一个时刻而触发一次渲染。
+    },
+    setQueuedPosition: (rid, position, sid) => {
+      if (!rid) return;
+      const s = st(sid);
+      for (let i = s.entries.length - 1; i >= 0; i--) {
+        const e = s.entries[i];
+        if (e.kind !== "user" || e.rid !== rid) continue;
+        mutate(() => {
+          if (position === null) delete e.queuedPosition;
+          else e.queuedPosition = position;
+          touchEntry(e);
+        });
+        return;
+      }
+    },
+    clearQueuedMarkers: (sid) => {
+      const s = st(sid);
+      // 先看有没有要清的：这个方法会在每次断连、每帧整队丢弃时被调用，而没有标记是常态。
+      // 空跑一次 `mutate` 会把版本推上去，聊天区就为一次「什么也没改」整片重渲染。
+      if (!s.entries.some((e) => e.kind === "user" && e.queuedPosition !== undefined)) return;
+      mutate(() => {
+        for (const e of s.entries) {
+          if (e.kind === "user" && e.queuedPosition !== undefined) {
+            delete e.queuedPosition;
+            touchEntry(e);
+          }
+        }
+      });
     },
     addSystemMessage: (text, sid) => {
       mutate(() => {

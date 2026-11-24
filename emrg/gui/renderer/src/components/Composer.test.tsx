@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
@@ -1505,5 +1505,57 @@ describe("Composer — 标记是边界，所以不需要换行（issue #3111）"
     expect(sent[0].images?.[0]?.position).toBe("/tmp/deep/dir/f.txt".length);
     // 展开前它是 10（`[📄 f.txt]` 的长度）；先量后展开会留下这个短了的偏移
     expect(sent[0].images?.[0]?.position).not.toBe("[📄 f.txt]".length);
+  });
+});
+
+/**
+ * 输入框上方的队列摘要（issue #3204 要求 4）。
+ *
+ * 它读的是消息行自己的 `queuedPosition` —— daemon 那条队列在这一端唯一的副本 —— 而不是
+ * 另存一份队列。所以这里先给条目打上标记，再看摘要是否照它出现：两个来源就是一个来源。
+ */
+describe("队列摘要（#3204）", () => {
+  afterEach(() => {
+    delete (window as unknown as { emrg?: unknown }).emrg;
+  });
+
+  it("有排队消息时出现在输入框上方，条数与开头几个字都在", () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("first queued", "s1", { requestId: "r1" });
+    store.addUserMessage("second queued", "s1", { requestId: "r2" });
+    store.setQueuedPosition("r1", 1, "s1");
+    store.setQueuedPosition("r2", 2, "s1");
+    const { container } = setup(store);
+
+    const strip = screen.getByTestId("queue-strip");
+    expect(strip.textContent).toContain("2");
+    expect(strip.textContent).toContain("first queued");
+    expect(container.querySelectorAll(".queue-strip-item")).toHaveLength(2);
+  });
+
+  it("没有排队消息时整块不出现（不留一个空摘要）", () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("already sent", "s1", { requestId: "r1" });
+    setup(store);
+    expect(screen.queryByTestId("queue-strip")).toBeNull();
+  });
+
+  it("逐条删除：删掉点名那条，前面的位置不动、后面的随之更新", async () => {
+    const cancelQueued = vi.fn().mockResolvedValue({ ok: true });
+    (window as unknown as { emrg?: unknown }).emrg = { cancelQueued };
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("keep me", "s1", { requestId: "r1" });
+    store.addUserMessage("drop me", "s1", { requestId: "r2" });
+    store.setQueuedPosition("r1", 1, "s1");
+    store.setQueuedPosition("r2", 2, "s1");
+    setup(store);
+
+    fireEvent.click(screen.getByTestId("queue-del-r2"));
+
+    await waitFor(() =>
+      expect(cancelQueued).toHaveBeenCalledWith({ sessionId: "s1", requestId: "r2" }),
+    );
+    const rows = store.getEntries("s1").filter((e) => e.kind === "user");
+    expect(rows.map((e) => (e.kind === "user" ? e.queuedPosition : null))).toEqual([1, undefined]);
   });
 });

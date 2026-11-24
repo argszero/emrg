@@ -1457,6 +1457,11 @@ class TestWSBroadcast:
                         assert resp.get("request_id") == "t-busy-b"
                         assert resp.get("session_id") == "s_busy"
                         assert resp.get("position") == 1
+                        # The whole queue rides on the frame (issue #3204), so a client
+                        # never computes a position of its own: one array says who is
+                        # queued and where each one sits.
+                        assert [row["request_id"] for row in resp.get("queue", [])] == ["t-busy-b"], resp
+                        assert [row["position"] for row in resp.get("queue", [])] == [1], resp
                         # A's stop branch injects B's message into the same turn
                         fsc = await _recv_until(
                             ws_b, lambda f: f.get("type") == "steer_committed",

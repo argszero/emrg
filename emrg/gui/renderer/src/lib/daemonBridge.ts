@@ -56,10 +56,24 @@ export interface PongData {
 }
 
 /** 队列注入协议帧（#655：busy 排队） */
+/** 队列里的一条，daemon 算好的位置与开头几个字（issue #3204） */
+export interface QueuedItem {
+  request_id: string;
+  position: number;
+  preview?: string;
+}
+
 export interface QueuedData {
   position?: number;
   request_id?: string;
   request_ids?: string[];
+  /**
+   * 这条帧之后队列的**目标状态**：谁还在队列里、各自第几位（issue #3204）。带了它是
+   * 「照这个重画」，不带是「这个帧没说」——两者不能读成同一件事，见 `applyQueue`。
+   */
+  queue?: QueuedItem[];
+  /** 整队丢弃时走了几条（`queued_cancelled`）。旧 daemon 不带这个字段。 */
+  count?: number;
   /**
    * daemon 写下这条消息时那一刻。`steer_committed`（排队消息被注入当前回合）与
    * `user_message`（新消息落盘）都带它 —— 用户行的时刻只从这里来（rant 2026-10-17T10:03:08）。
@@ -903,6 +917,25 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
     }
   }
 
+  /**
+   * 按 daemon 给出的整条队列重画本地标记（issue #3204）。
+   *
+   * 队列是**目标状态**，不是增量：一个数组说完谁还在队列里、各自第几位，所以这里先清掉
+   * 本会话所有行的标记，再把数组贴回去。自己「把后面的位置减一」是同一个问题的第二个
+   * 答案，两个答案里总有一个会先错。
+   *
+   * `undefined` 不等于空数组：老 daemon 的帧不带 `queue`，那是「这个帧没说」，照空数组
+   * 处理会抹掉屏幕上真实的排队标记。
+   */
+  function applyQueue(queue: QueuedItem[] | undefined, sid: string | null): void {
+    if (!Array.isArray(queue)) return;
+    transcript.clearQueuedMarkers(sid);
+    for (const item of queue) {
+      if (!item || !item.request_id) continue;
+      transcript.setQueuedPosition(item.request_id, item.position, sid);
+    }
+  }
+
   /** 按 sid 重发排队消息（vanilla queued_requeue 协议，含 wasBusy 收敛修正 #695） */
   async function resendQueued(sid: string | null, ids: Set<string>): Promise<void> {
     const k = KEY(sid);
@@ -1148,8 +1181,18 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
         releaseOwnStream(sid, null, true);
         clearTurnTimer(sid);
         break;
-      case "task_queued":
-        transcript.addSystemMessage(tt("app.queued", { pos: (data as QueuedData).position ?? 0 }), sid);
+      case "task_queued": {
+        const qd = data as QueuedData;
+        // 排队是那一行消息自己的状态，不再是一条独立的 system 记录（issue #3204）：
+        // 只追加的 transcript 撤不掉一条记录，那句「还没发出去」会留在已经发出去的消息
+        // 旁边。位置取 daemon 给的数。
+        if (qd.request_id) transcript.setQueuedPosition(qd.request_id, qd.position ?? 1, sid);
+        applyQueue(qd.queue, sid);
+        break;
+      }
+      case "queue_changed":
+        // 被撤销了一条（可能来自另一个客户端）：照 daemon 的整条队列重画。
+        applyQueue((data as QueuedData).queue, sid);
         break;
       case "steer_committed": {
         // 已注入当前回合 → 从待重发记录移除
@@ -1164,6 +1207,9 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
         // 排队的消息被注入时，daemon 才把它写进会话并记下那一刻 —— 这一行从发送起就在
         // 屏幕上（乐观绘制），时间到这里才补得上（rant 2026-10-17T10:03:08）。
         if (rid) transcript.stampUserMessage(rid, (data as QueuedData).timestamp, sid);
+        // 这一行被注入进当前回合了 ⇒ 它不再是排队中的消息，标记随事实自己消失
+        // （issue #3204 要求 1）：没有任何人需要记得去撤掉它。
+        if (rid) transcript.setQueuedPosition(rid, null, sid);
         break;
       }
       case "queued_requeue": {
@@ -1171,11 +1217,19 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
         void resendQueued(sid, ids);
         break;
       }
-      case "queued_cancelled":
-        if (queuedSends.delete(KEY(sid))) {
+      case "queued_cancelled": {
+        const qd = data as QueuedData;
+        const had = queuedSends.delete(KEY(sid));
+        // 整队没了，位置也一起失去意义；剩下要说的是**走了几条**（issue #3204 要求 6）。
+        // 帧带 count ⇒ 说那个数；不带（老 daemon）⇒ 保留原来那句通用话，不编数字。
+        transcript.clearQueuedMarkers(sid);
+        if (qd.count != null && qd.count > 0) {
+          transcript.addSystemMessage(tt("app.queuedDropped", { n: qd.count }), sid);
+        } else if (had) {
           transcript.addSystemMessage(tt("app.queuedCancelled"), sid);
         }
         break;
+      }
       case "error": {
         // A failed turn is announced as a bare `{error}` frame (`daemon.py`), which is
         // the same shape every command refusal uses — the sentence rides `error`, not
@@ -1257,6 +1311,7 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
         sidDisconnected(sid, true);
         clearTurnTimer(sid);
         queuedSends.delete(KEY(sid));
+        transcript.clearQueuedMarkers(sid);
         if (!sid) {
           store.update((s) => ({ ...s, connected: false }));
         }

@@ -18,6 +18,7 @@ import {
 import { seedSelection, selectionIn } from "../lib/selection";
 import { canLoadOlder, scrollCompensation, shouldLoadOlder } from "../lib/history";
 import { formatMessageTime, messageTimeTitle } from "../lib/utils";
+import { withdrawQueued } from "../lib/composer";
 import { toolPhrases } from "../lib/copywriting";
 import { useI18n, type TranslateFn } from "../lib/i18n";
 import { MARKDOWN_HTML_CLASS, MARKDOWN_PLAIN_CLASS, MarkdownText } from "./MarkdownText";
@@ -510,15 +511,37 @@ function EntryView({ entry, index, t, md, store, sid }: EntryViewProps): ReactNo
   // 这一条的语言：只有它自己被写过时才重渲染（流式隔离的落点）
   useEntryVersion(store, entry.id);
   switch (entry.kind) {
-    case "user":
+    case "user": {
       // Stage 1（rant 2026-08-28T14:07:29）：用户消息为 markdown 字符串（tiptap 序列化），
       // 与 TUI 的 UserMarkdown 对齐渲染——否则 **bold** 会字面显示
+      //
+      // 排队是**这一行的状态**（issue #3204）：还在队列里就带上位置与删除按钮，被注入或
+      // 被撤销之后 `queuedPosition` 就不在了，标记随之消失——不需要任何人去撤掉一条记录，
+      // 因为根本没有那条记录。`queued` 类名让它在样式上也就与已发出的消息不同（要求 5）。
+      const pos = entry.queuedPosition;
       return (
-        <div className="msg user">
+        <div className={`msg user${pos !== undefined ? " queued" : ""}`}>
+          {pos !== undefined && (
+            <div className="msg-queued">
+              <span className="msg-queued-pos">{t("app.queued", { pos })}</span>
+              <button
+                type="button"
+                className="msg-queued-del"
+                title={t("app.queuedRemove")}
+                aria-label={t("app.queuedRemove")}
+                onClick={() => {
+                  if (entry.rid) void withdrawQueued(store, sid, entry.rid);
+                }}
+              >
+                ✕
+              </button>
+            </div>
+          )}
           <MarkdownText text={entry.text} md={md} stripMark={false} />
           <MessageTime stamp={entry.timestamp} />
         </div>
       );
+    }
     case "system":
       return <div className="msg system">{entry.text}</div>;
     case "assistant":

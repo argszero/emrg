@@ -144,6 +144,63 @@ export function clearQueued(queuedSends: Map<string, QueuedSend[]>, sid: string)
   return queuedSends.delete(sid);
 }
 
+/**
+ * 撤掉**一条**排队消息（issue #3204）：从待重发清单里按 requestId 摘掉它，空则删键。
+ * 返回是否真摘到了 —— `false` 不是错误：那条消息可能刚被注入、或另一个客户端已经撤了。
+ *
+ * 这条只改**本地重发清单**。屏幕上那个「排队中」标记不归它管：标记是那一行消息的状态，
+ * 由 daemon 的队列帧驱动（见 `applyQueue`）。两者分开是因为它们回答不同的问题 ——
+ * 「我手上还有什么要重发」和「daemon 的队列里现在有谁」，后者才是宿主看到的东西。
+ */
+export function removeQueued(
+  queuedSends: Map<string, QueuedSend[]>,
+  sid: string,
+  requestId: string,
+): boolean {
+  const q = queuedSends.get(sid);
+  if (!q) return false;
+  const idx = q.findIndex((e) => e.requestId === requestId);
+  if (idx < 0) return false;
+  q.splice(idx, 1);
+  if (q.length === 0) queuedSends.delete(sid);
+  return true;
+}
+
+/**
+ * 撤掉一条排队消息（issue #3204）：先在本地把那一行的标记撤掉，再请 daemon 撤。
+ *
+ * 顺序是刻意的。宿主点了删除，屏幕必须立刻应答；daemon 随后用 `queue_changed` 里
+ * **它自己的**队列重画一遍标记，两边不一致时以后者为准 —— 所以这里先撤本地只是让界面
+ * 不等一个往返，不是另立一个事实。IPC 不存在（单测、旧 preload）时只做本地那一半。
+ *
+ * 两个组件（消息行上的删除按钮、输入框上方的队列摘要）共用这一个函数：删除的语义只有
+ * 一份，否则两个入口迟早有一处忘了向 daemon 报。
+ */
+export function cancelQueuedViaIpc(payload: {
+  sessionId: string | null;
+  requestId: string;
+}): Promise<unknown> {
+  const api = (window as unknown as {
+    emrg?: { cancelQueued?: (p: { sessionId: string | null; requestId: string }) => Promise<unknown> };
+  }).emrg;
+  // 没有 preload 时（单测、旧壳）不发：本地标记照样撤，daemon 下一帧会纠正它。
+  return api?.cancelQueued?.(payload) ?? Promise.resolve();
+}
+
+export async function withdrawQueued(
+  store: { setQueuedPosition(rid: string, position: number | null, sid?: string | null): void },
+  sid: string | null,
+  rid: string,
+  send: (payload: { sessionId: string | null; requestId: string }) => Promise<unknown> = cancelQueuedViaIpc,
+): Promise<void> {
+  store.setQueuedPosition(rid, null, sid);
+  try {
+    await send({ sessionId: sid, requestId: rid });
+  } catch {
+    /* daemon 侧没撤成：留下的状态由它下一帧队列说明，本地不另编一个 */
+  }
+}
+
 /* ── 图片附加（rant 2026-09-02T15:23:53：GUI 粘贴/拖拽图片，语义对齐 TUI）── */
 
 /**

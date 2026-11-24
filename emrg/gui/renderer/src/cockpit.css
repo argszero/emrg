@@ -30,6 +30,90 @@
   line-height: 1.62;
 }
 
+/* Queued, and not yet sent (issue #3204). The marker is a state of *this row*, so it is
+ * styled as part of the bubble rather than as a separate notice: dimmer than a sent
+ * message so the two are told apart at a glance, with a dashed edge that reads as "not
+ * settled yet". The delete control sits on the row it deletes. */
+.react-shell .msg.user.queued {
+  opacity: 0.62;
+  border-left: 2px dashed var(--accent, #6aa9ff);
+  padding-left: 8px;
+}
+
+.react-shell .msg-queued {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--fg-dim, #8b93a7);
+  user-select: none;
+}
+
+.react-shell .msg-queued-del,
+.react-shell .queue-strip-del {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 4px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.react-shell .msg-queued-del:hover,
+.react-shell .queue-strip-del:hover {
+  color: var(--danger, #ff6b6b);
+}
+
+/* The queue summary above the composer (issue #3204 requirement 4): collapsed it is the
+ * count plus the opening words of each, opened it is the full text with a delete control
+ * per message. */
+.react-shell .queue-strip {
+  border-bottom: 1px solid var(--line, #2a2f3a);
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--fg-dim, #8b93a7);
+}
+
+.react-shell .queue-strip-head {
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+}
+
+.react-shell .queue-strip-peek {
+  opacity: 0.75;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.react-shell .queue-strip-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.react-shell .queue-strip-item {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.react-shell .queue-strip-pos {
+  opacity: 0.6;
+  min-width: 1.2em;
+}
+
+.react-shell .queue-strip-text {
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* ✦、消息时间、工具行、工具组摘要条与系统消息不可选：它们贴着正文的头和尾，被拖进选区只会
    把复制到的正文弄脏。不可选不等于按不动——按在这些件上起手时，`.transcript-content` 的
    pointerdown 会先在最近的正文位置放一个折叠选区，拖动从那里延伸（issue #3034）。 */
