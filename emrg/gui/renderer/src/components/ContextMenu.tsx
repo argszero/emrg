@@ -16,27 +16,43 @@ import { placeMenu, type MenuPlacement } from "../lib/contextMenu";
  */
 export type ContextMenuId = "copy" | "open";
 
-export interface ContextMenuItem {
-  id: ContextMenuId;
+export interface ContextMenuItem<Id extends string = ContextMenuId> {
+  id: Id;
   /** Already translated: the menu renders what it is given. */
   label: string;
   testId: string;
 }
 
-export interface ContextMenuProps {
+export interface ContextMenuProps<Id extends string = ContextMenuId> {
   /** Pointer position, in viewport coordinates. */
   anchor: { x: number; y: number };
-  items: ContextMenuItem[];
+  items: ContextMenuItem<Id>[];
   /** Index the arrow keys light up. */
   active: number;
   testId: string;
   /** The caller's ref, so it can tell a click inside the menu from a click outside it. */
   menuRef: RefObject<HTMLDivElement | null>;
-  onPick: (id: ContextMenuId) => void;
+  onPick: (id: Id) => void;
   onHover: (index: number) => void;
 }
 
-export function ContextMenu({ anchor, items, active, testId, menuRef, onPick, onHover }: ContextMenuProps) {
+/**
+ * One menu for every surface that has one.
+ *
+ * The item ids are the caller's: a tree has `copy` / `open`, a tab strip has its own set,
+ * and the union of the two would force every caller to handle ids it never renders. The
+ * generic parameter keeps each caller's `onPick` exhaustive over the ids it actually
+ * passes, which is the property a shared `string` would lose.
+ */
+export function ContextMenu<Id extends string = ContextMenuId>({
+  anchor,
+  items,
+  active,
+  testId,
+  menuRef,
+  onPick,
+  onHover,
+}: ContextMenuProps<Id>) {
   // The first render knows only the pointer; the size is the browser's answer, read
   // before the frame is painted so the menu never appears off-window first.
   const [placement, setPlacement] = useState<MenuPlacement>(() =>

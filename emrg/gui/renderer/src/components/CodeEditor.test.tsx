@@ -2,8 +2,9 @@ import { createRef } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { EditorView } from "@codemirror/view";
+import { foldState } from "@codemirror/language";
 import { CodeEditor, type CodeEditorHandle } from "./CodeEditor";
-import { PLAIN_TEXT, type CursorPosition } from "../lib/editorDoc";
+import { PLAIN_TEXT, languageFor, type CursorPosition } from "../lib/editorDoc";
 
 /**
  * CodeEditor — the editing surface and its key bindings (rant 2026-11-20T18:01:52).
@@ -404,5 +405,75 @@ describe("CodeEditor input method (item 11)", () => {
     expect(editor().state.doc.toString()).toBe("中文alpha");
     press("z");
     expect(editor().state.doc.toString()).toBe("alpha");
+  });
+});
+
+/**
+ * 折叠与缩进参考线（issue #3200 第 4、5 条）。
+ *
+ * 两条都是 CodeMirror 的接线，而这正是最容易「看着接好了」的地方：折叠少装一半，效果会被
+ * 接受然后被忽略；参考线的单位若不是文件自己的，画出来的位置只是碰巧对。所以一条断言折起来
+ * 之后折叠状态真的非空，一条断言两空格与四空格的文件各自对齐。
+ */
+describe("CodeEditor 的折叠与缩进参考线（issue #3200）", () => {
+  it("4. 代码能折叠：折叠槽画出箭头，折叠键把这一段收起来", async () => {
+    const { editor, surface, press } = mountEditor({
+      text: "def f():\n    a = 1\n    b = 2\n",
+      language: languageFor("/x.py"),
+    });
+    // 折叠状态字段在：少了它，折叠效果会被接受然后被忽略
+    expect(editor().state.field(foldState, false)).toBeDefined();
+    // 语言是异步装上去的，折叠槽的箭头要等它到了才有
+    await waitFor(() => {
+      const gutter = surface().querySelector(".cm-foldGutter");
+      expect(gutter).not.toBeNull();
+      expect(gutter?.textContent ?? "").toContain("⌄");
+    });
+    // 折之前一处也没折
+    expect(editor().state.field(foldState).size).toBe(0);
+    // 真键盘上 Shift+[ 报出来的就是 `{`，并且带这个键位的 keyCode：CodeMirror 的 shift 回退
+    // 读的正是这两样，缺一样这条组合键就无处可寻（实测：只给 `[`，或只加 keyCode，都不折）
+    fireEvent.keyDown(editor().contentDOM, {
+      key: "{",
+      ctrlKey: true,
+      shiftKey: true,
+      keyCode: 219,
+    });
+    await waitFor(() => expect(editor().state.field(foldState).size).toBeGreaterThan(0));
+  });
+
+  it("5. 缩进参考线画在每一行自己的缩进里，单位来自文件", () => {
+    const guides = (line: HTMLElement | undefined): string =>
+      line?.style.getPropertyValue("--indent-guides") ?? "missing";
+    const linesOf = (surface: HTMLElement): HTMLElement[] =>
+      [...surface.querySelectorAll(".cm-line")] as HTMLElement[];
+
+    // 两空格的文件：第一层不带参考线（它前面那一段就是这一层），第二层一条
+    const two = mountEditor({
+      text: "a\n  b\n    c\n",
+      indent: { kind: "spaces", width: 2 },
+    });
+    expect(two.editor().state.tabSize).toBe(2);
+    const twoLines = linesOf(two.surface());
+    expect(guides(twoLines[1])).toBe("");
+    expect(guides(twoLines[2])).toBe("1");
+    two.unmount();
+
+    // 四空格的文件：同样是两层缩进，4 空格的缩进就是第一层，8 空格才有一条
+    const four = mountEditor({
+      text: "a\n    b\n        c\n",
+      indent: { kind: "spaces", width: 4 },
+    });
+    expect(four.editor().state.tabSize).toBe(4);
+    const fourLines = linesOf(four.surface());
+    expect(guides(fourLines[1])).toBe("");
+    expect(guides(fourLines[2])).toBe("1");
+  });
+
+  it("1. 选区仍然由 CodeMirror 自己画：拿掉它，多选区和列选会一起失效", () => {
+    const { surface } = mountEditor();
+    // `drawSelection()` 装着时文档里有一层它自己的选区容器；少了这一层，样式表里的选区
+    // 规则一个元素都命中不了，选区退回浏览器原生那一个——而原生的撑不住多选区与列选。
+    expect(surface().querySelector(".cm-selectionLayer")).not.toBeNull();
   });
 });

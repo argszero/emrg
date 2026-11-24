@@ -97,3 +97,50 @@ export function closeTab(state: EditorState, id: string): EditorState {
   const neighbour = tabs[index] ?? tabs[index - 1] ?? null;
   return { tabs, active: neighbour ? neighbour.id : NO_FILE_OPEN };
 }
+
+/**
+ * Close every tab but this one.
+ *
+ * An id that names no open tab changes nothing, rather than emptying the strip: the caller
+ * is a menu drawn from a tab that existed when the menu opened, and "close the others of a
+ * tab that is gone" has no answer that is better than doing nothing.
+ */
+export function closeOthers(state: EditorState, id: string): EditorState {
+  if (!state.tabs.some((tab) => tab.id === id)) return state;
+  return { tabs: state.tabs.filter((tab) => tab.id === id), active: id };
+}
+
+/**
+ * Close every tab to the right of this one.
+ *
+ * The tabs left of it keep their order, and the named tab stays active — closing what is
+ * *after* a tab cannot make a different one current.
+ */
+export function closeToTheRight(state: EditorState, id: string): EditorState {
+  const index = state.tabs.findIndex((tab) => tab.id === id);
+  if (index < 0) return state;
+  const tabs = state.tabs.slice(0, index + 1);
+  const activeStillOpen = tabs.some((tab) => tab.id === state.active);
+  return { tabs, active: activeStillOpen ? state.active : id };
+}
+
+/**
+ * Move one tab to where another one is, which is what a drag between two tabs means.
+ *
+ * The moved tab takes the target's **index**, so dropping on a tab to the right lands
+ * before it in the original order and a drop to the left lands after it — the two cases a
+ * single "insert at the target index" gets wrong when the source sits to the left, because
+ * removing the source first shifts every later index down by one. That is why the index is
+ * read from the list the move is applied to, after the removal.
+ */
+export function moveTab(state: EditorState, fromId: string, toId: string): EditorState {
+  if (fromId === toId) return state;
+  const from = state.tabs.findIndex((tab) => tab.id === fromId);
+  const to = state.tabs.findIndex((tab) => tab.id === toId);
+  if (from < 0 || to < 0) return state;
+  const moved = state.tabs[from];
+  const rest = state.tabs.filter((_, i) => i !== from);
+  const at = rest.findIndex((tab) => tab.id === toId);
+  const insertAt = from < to ? at + 1 : at;
+  return { tabs: [...rest.slice(0, insertAt), moved, ...rest.slice(insertAt)], active: state.active };
+}

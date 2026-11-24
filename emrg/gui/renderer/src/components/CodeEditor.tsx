@@ -1,6 +1,13 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
-import { Compartment, EditorSelection, EditorState, type Extension } from "@codemirror/state";
 import {
+  Compartment,
+  EditorSelection,
+  EditorState,
+  type Extension,
+  type Range,
+} from "@codemirror/state";
+import {
+  Decoration,
   EditorView,
   crosshairCursor,
   drawSelection,
@@ -12,12 +19,18 @@ import {
   lineNumbers,
   rectangularSelection,
   ViewPlugin,
+  type DecorationSet,
+  type ViewUpdate,
 } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import {
   HighlightStyle,
   bracketMatching,
+  codeFolding,
+  foldGutter,
+  foldKeymap,
   indentOnInput,
+  indentUnit,
   syntaxHighlighting,
 } from "@codemirror/language";
 import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
@@ -33,7 +46,9 @@ import { tags } from "@lezer/highlight";
 import {
   cursorPositionAt,
   languageSupportFor,
+  normalizeNewlines,
   type CursorPosition,
+  type IndentUnit,
   type LanguageChoice,
 } from "../lib/editorDoc";
 
@@ -81,6 +96,29 @@ export interface CodeEditorProps {
   onScrollTop?: (top: number) => void;
   /** The interface language, for CodeMirror's own search panel labels. */
   uiLang?: string;
+  /**
+   * Identity of the document in this surface — the file's path.
+   *
+   * The editor is remounted per tab (a `key` on this component), and a remount is what
+   * used to throw the undo history away. With a key, this names the entry in `stateStore`
+   * that the mount adopts and the unmount writes back, so the history, the selection and
+   * the folds live as long as the tab does.
+   */
+  docKey?: string;
+  /**
+   * Where a document's `EditorState` is kept between mounts, owned by the caller.
+   *
+   * A `Map` rather than component state because the whole point is to outlive the
+   * component: a tab switch unmounts this editor, and a cache that lived here would be
+   * destroyed by the very event it exists to survive.
+   */
+  stateStore?: Map<string, EditorState>;
+  /** The text size in pixels, per session. A reading the panel owns and this applies. */
+  fontSize?: number;
+  /** What the document indents with, so `Enter` indents the way the file already does. */
+  indent?: IndentUnit;
+  /** `Mod-=` / `Mod+-` / `Mod+0`. `0` means "back to the default size". */
+  onZoom?: (direction: -1 | 0 | 1) => void;
   testId?: string;
 }
 
@@ -239,6 +277,95 @@ const matchCount = ViewPlugin.fromClass(
   },
 );
 
+/**
+ * The extension slots that change while a view lives, at module scope.
+ *
+ * A `Compartment` is an identity carried inside an `EditorState`, not an object owned by a
+ * view, so one instance can serve every view — and here it *has* to. A state adopted from
+ * the caller's store was built by an earlier mount, and its compartments must be the same
+ * keys this mount reconfigures; a per-instance compartment would leave a returned tab
+ * holding the read-only flag, the wrap setting and the language of the mount that built it,
+ * with every toggle appearing to do nothing.
+ *
+ * A tab switch is a new document (the panel keys on the path), but a toggle, a language
+ * flap or a locale change is not — those are what these five slots exist for.
+ */
+const languageCompartment = new Compartment();
+const readOnlyCompartment = new Compartment();
+const wrapCompartment = new Compartment();
+const phrasesCompartment = new Compartment();
+const indentCompartment = new Compartment();
+
+/** The indent unit and tab stop together: they are one decision about one document. */
+function indentExtensions(indent: IndentUnit): Extension {
+  return [
+    EditorState.tabSize.of(indent.width),
+    indentUnit.of(indent.kind === "tabs" ? "\t" : " ".repeat(indent.width)),
+  ];
+}
+
+/**
+ * Indentation guides, drawn as a background rather than as widgets.
+ *
+ * The alternative — a widget or a marker element per level — puts DOM inside the text and
+ * then has to keep it in step with every re-measure. A guide is not content: it belongs to
+ * the line, so it is a line decoration carrying one number and the stylesheet does the rest.
+ *
+ * The number is a **count of levels past the first**, and the stylesheet multiplies it by the
+ * width of one level in `ch`. Two consequences fall out for free: nothing in JavaScript has
+ * to measure a font, and the guides follow a zoom or a proportional face without being told.
+ */
+const indentGuides = ViewPlugin.fromClass(
+  class {
+    decorations: DecorationSet;
+    constructor(view: EditorView) {
+      this.decorations = guidesFor(view);
+    }
+    update(update: ViewUpdate): void {
+      if (update.docChanged || update.viewportChanged || update.geometryChanged) {
+        this.decorations = guidesFor(update.view);
+      }
+    }
+  },
+  { decorations: (plugin) => plugin.decorations },
+);
+
+/**
+ * One line decoration per visible line that is indented past its first level.
+ *
+ * `levels - 1` and not `levels`: a line at the first level has no guide inside it, because
+ * the space before it *is* the level. What a reader sees on a three-deep line is the two
+ * boundaries it sits inside, which is the structure being read. A line whose indentation is
+ * a mix of tabs and spaces is counted in columns — the tab stop is the same facet the editor
+ * itself indents by, so the guides and `Enter` cannot disagree.
+ */
+function guidesFor(view: EditorView): DecorationSet {
+  const unit = view.state.facet(indentUnit);
+  const step = unit === "\t" ? view.state.tabSize : unit.length || 1;
+  const ranges: Range<Decoration>[] = [];
+  for (const { from, to } of view.visibleRanges) {
+    for (let pos = from; pos <= to; ) {
+      const line = view.state.doc.lineAt(pos);
+      let columns = 0;
+      for (const ch of line.text) {
+        if (ch === " ") columns += 1;
+        else if (ch === "\t") columns += step;
+        else break;
+      }
+      const levels = Math.floor(columns / step);
+      if (levels > 1) {
+        ranges.push(
+          Decoration.line({
+            attributes: { style: `--indent-guides:${levels - 1}` },
+          }).range(line.from),
+        );
+      }
+      pos = line.to + 1;
+    }
+  }
+  return Decoration.set(ranges, true);
+}
+
 export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function CodeEditor(
   {
     text,
@@ -251,24 +378,24 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function
     initialScrollTop,
     onScrollTop,
     uiLang,
+    docKey,
+    stateStore,
+    fontSize,
+    indent = { kind: "spaces", width: 2 },
+    onZoom,
     testId,
   },
   ref,
 ) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
-  // The extensions that can change while the view lives. A tab switch is a new document
-  // (the panel keys on the path), but a toggle, a language flap or a locale change is not.
-  const languageCompartment = useRef(new Compartment());
-  const readOnlyCompartment = useRef(new Compartment());
-  const wrapCompartment = useRef(new Compartment());
-  const phrasesCompartment = useRef(new Compartment());
   // The callbacks as of this render. CodeMirror holds its extensions once, so a handler
   // captured at mount would call the first render's closure for ever.
   const onSaveRef = useRef(onSave);
   const onChangeRef = useRef(onChange);
   const onCursorRef = useRef(onCursor);
   const onScrollTopRef = useRef(onScrollTop);
+  const onZoomRef = useRef(onZoom);
   // True while this view is the one changing the document, so the `text` prop coming back
   // as an echo does not replace the buffer under the caret.
   const emitting = useRef(false);
@@ -277,6 +404,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function
   onChangeRef.current = onChange;
   onCursorRef.current = onCursor;
   onScrollTopRef.current = onScrollTop;
+  onZoomRef.current = onZoom;
 
   useImperativeHandle(
     ref,
@@ -310,31 +438,53 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function
     const host = hostRef.current;
     if (!host) return;
 
+    // A state this key already had: the undo history, the selection and the folds of the tab
+    // this one replaced. Adopting it is the whole fix for a returned tab's dead `Cmd+Z` —
+    // remounting used to build a fresh state, and a document replaced through a dispatch
+    // records the *replacement* rather than restoring what the reader typed. The alignment
+    // effects below then bring the five compartments up to this render's props, and mount is
+    // one of the runs they make, so an adopted state is reconfigured rather than trusted.
+    const adopted = docKey ? stateStore?.get(docKey) : undefined;
+    const zoom = (direction: -1 | 0 | 1): boolean => {
+      onZoomRef.current?.(direction);
+      return true;
+    };
+
     const view = new EditorView({
       parent: host,
-      state: EditorState.create({
-        doc: text,
-        extensions: [
-          lineNumbers(),
-          highlightActiveLineGutter(),
-          highlightSpecialChars(),
-          history(),
-          drawSelection(),
-          dropCursor(),
-          EditorState.allowMultipleSelections.of(true),
-          indentOnInput(),
-          bracketMatching(),
-          closeBrackets(),
-          rectangularSelection(),
-          crosshairCursor(),
-          highlightActiveLine(),
-          highlightSelectionMatches(),
-          matchCount,
-          syntaxHighlighting(highlightStyle),
-          phrasesCompartment.current.of(EditorState.phrases.of(phrasesFor(uiLang))),
-          languageCompartment.current.of([]),
-          readOnlyCompartment.current.of(readOnlyExtensions(readOnly)),
-          wrapCompartment.current.of(wrap ? EditorView.lineWrapping : []),
+      state:
+        adopted ??
+        EditorState.create({
+          doc: text,
+          extensions: [
+            lineNumbers(),
+            highlightActiveLineGutter(),
+            highlightSpecialChars(),
+            // Both halves of folding: the gutter draws the arrows, and `foldGutter` brings the
+            // fold state field with it (measured: `state.field(foldState, false)` is present
+            // with it alone). Without the field the effects are accepted and ignored, which is
+            // the shape of a feature that looks wired and folds nothing.
+            foldGutter(),
+            codeFolding(),
+            history(),
+            drawSelection(),
+            dropCursor(),
+            EditorState.allowMultipleSelections.of(true),
+            indentCompartment.of(indentExtensions(indent)),
+            indentOnInput(),
+            bracketMatching(),
+            closeBrackets(),
+            rectangularSelection(),
+            crosshairCursor(),
+            highlightActiveLine(),
+            highlightSelectionMatches(),
+            indentGuides,
+            matchCount,
+            syntaxHighlighting(highlightStyle),
+            phrasesCompartment.of(EditorState.phrases.of(phrasesFor(uiLang))),
+            languageCompartment.of([]),
+            readOnlyCompartment.of(readOnlyExtensions(readOnly)),
+            wrapCompartment.of(wrap ? EditorView.lineWrapping : []),
           // Alt-click adds a caret; the platform's own click still moves the single one.
           EditorView.domEventHandlers({
             mousedown(event, view) {
@@ -383,6 +533,16 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function
                 return opened;
               },
             },
+            // Folding before the defaults, because a keymap only ever gets a key the earlier
+            // ones left alone: `foldKeymap` owns the bracket spellings and would be shadowed.
+            ...foldKeymap,
+            { key: "Mod-=", preventDefault: true, run: () => zoom(1) },
+            // The same key with the shift most layouts add for `+`, which is what a reader
+            // presses when they mean "bigger".
+            { key: "Mod-Shift-=", preventDefault: true, run: () => zoom(1) },
+            { key: "Mod--", preventDefault: true, run: () => zoom(-1) },
+            { key: "Mod-_", preventDefault: true, run: () => zoom(-1) },
+            { key: "Mod-0", preventDefault: true, run: () => zoom(0) },
             ...closeBracketsKeymap,
             ...defaultKeymap,
             ...searchKeymap,
@@ -408,6 +568,10 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function
     const head = view.state.selection.main.head;
     onCursorRef.current?.(cursorPositionAt(view.state.doc, head));
     return () => {
+      // Before `destroy`, because the state is the only thing that outlives this view and it
+      // is the tab's: its history, its selection, its folds. A caller that passes no `docKey`
+      // is a caller with one editor and nothing to keep, so the store is left alone.
+      if (docKey && stateStore) stateStore.set(docKey, view.state);
       view.destroy();
       viewRef.current = null;
     };
@@ -422,7 +586,12 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function
   useEffect(() => {
     const view = viewRef.current;
     if (!view || emitting.current) return;
-    if (view.state.doc.toString() === text) return;
+    // Compared in one line ending, because the editor keeps one: CodeMirror splits a
+    // document on `\r\n?|\n` and its own text is always `\n`. Comparing the raw strings made
+    // a CRLF file look stale the moment it mounted, so the panel replaced the whole buffer
+    // and reported the normalized text back up — which is how a Windows file quietly became
+    // a Unix one without anybody typing.
+    if (view.state.doc.toString() === normalizeNewlines(text)) return;
     view.dispatch({
       changes: { from: 0, to: view.state.doc.length, insert: text },
       selection: { anchor: Math.min(view.state.selection.main.head, text.length) },
@@ -433,7 +602,17 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function
     const view = viewRef.current;
     if (!view) return;
     view.dispatch({
-      effects: readOnlyCompartment.current.reconfigure(readOnlyExtensions(readOnly)),
+      effects: indentCompartment.reconfigure(indentExtensions(indent)),
+    });
+    // The two numbers, not the object: a caller may build `{kind, width}` inline on every
+    // render, and depending on its identity would reconfigure the view on every keystroke.
+  }, [indent.kind, indent.width]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: readOnlyCompartment.reconfigure(readOnlyExtensions(readOnly)),
     });
   }, [readOnly]);
 
@@ -441,7 +620,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function
     const view = viewRef.current;
     if (!view) return;
     view.dispatch({
-      effects: wrapCompartment.current.reconfigure(wrap ? EditorView.lineWrapping : []),
+      effects: wrapCompartment.reconfigure(wrap ? EditorView.lineWrapping : []),
     });
   }, [wrap]);
 
@@ -449,7 +628,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function
     const view = viewRef.current;
     if (!view) return;
     view.dispatch({
-      effects: phrasesCompartment.current.reconfigure(
+      effects: phrasesCompartment.reconfigure(
         EditorState.phrases.of(phrasesFor(uiLang)),
       ),
     });
@@ -463,7 +642,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function
       const support: Extension | null = await languageSupportFor(language);
       if (cancelled || !viewRef.current) return;
       viewRef.current.dispatch({
-        effects: languageCompartment.current.reconfigure(support ?? []),
+        effects: languageCompartment.reconfigure(support ?? []),
       });
     })();
     return () => {
@@ -478,6 +657,15 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function
       data-language={language.name ?? "plain"}
       data-readonly={readOnly ? "true" : "false"}
       data-wrap={wrap ? "true" : "false"}
+      // The two numbers CSS cannot know: the reader's chosen text size, and how wide one
+      // indent level is. Both are custom properties rather than a style on `.cm-content`,
+      // because CodeMirror rewrites its own children and this element is the one React owns.
+      style={
+        {
+          "--editor-font-size": fontSize === undefined ? undefined : `${fontSize}px`,
+          "--indent-unit-w": indent === undefined ? undefined : `${indent.width}ch`,
+        } as React.CSSProperties
+      }
       ref={hostRef}
     />
   );
