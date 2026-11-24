@@ -487,11 +487,16 @@ def test_the_task_message_carries_its_tool_list_into_the_turn(tmp_path, monkeypa
     type` — so a test that hands a `task` frame to it certifies a door production
     does not use.
 
-    `HOME` and `TMPDIR` are pinned **for this test alone**: a `task` frame creates
-    a session, and creating one writes the machine-wide session index under the
-    home directory. Pinning them for the whole suite would turn every unrelated
-    test red (a home under a temporary root is itself a writable area); pinning
-    them here keeps this test's writes inside the test's own directory.
+    The machine-wide session index a `task` frame's session writes is kept inside
+    this test's own directory by two autouse fixtures in `tests/conftest.py`:
+    `_redirect_sessions_index` replaces `sessions_index_path` with
+    `tmp_path / "sessions_index.json"`, and `_root_the_daemon_in_a_scratch_tree`
+    patches `emrg.home_layout.home_root`, so every path derived through
+    `config_dir()` is under `tmp_path` before any environment variable is read.
+    `HOME` and `TMPDIR` are pinned **for this test alone** for the paths that
+    resolve `Path.home()` directly rather than through `home_layout`; pinning them
+    for the whole suite would turn every unrelated test red (a home under a
+    temporary root is itself a writable area).
     """
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("TMPDIR", str(tmp_path / "tmpdir"))
