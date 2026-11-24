@@ -1494,27 +1494,34 @@ body.col-resizing * {
   color: var(--text-2);
 }
 
-/* The active line is a *position*; the selection is a *range*. They used to share
-   `var(--bg-hover)`, so selecting two characters painted exactly the block the caret's line
-   already painted and the selection could not be read. The active line keeps the hover
-   colour and declares it as `background-color` rather than `background`, because the
-   shorthand would also reset the indent guides drawn on the line. */
-.editor-body .cm-activeLine {
-  background-color: var(--bg-hover);
+/* The active line is a *position*; the selection is a *range*. The active line is *translucent*
+   rather than an opaque colour, because CodeMirror paints the selection in a layer below the
+   text (its markers carry `z-index: -1`): an opaque active line hides exactly the stretch a drag
+   ends on, which is the stretch a reader wants to check. It declares `background-color` and not
+   `background`, because the shorthand would also reset the indent guides drawn on the line.
+   `.cm-editor` is in the selector to out-specify the base theme, which matches the same element
+   with two classes — a tie would be decided by whichever sheet the browser loaded last. */
+.editor-body .cm-editor .cm-activeLine {
+  background-color: color-mix(in srgb, var(--bg-hover) 45%, transparent);
 }
 
-/* The selection is the accent, at two strengths: opaque enough to read over the active line
-   it usually sits on, and stronger still when the editor has focus. `drawSelection()` is what
-   paints it, and it must stay mounted — a native selection would break `EditorSelection`
-   ranges and the multi-cursor the panel relies on. */
-.editor-body .cm-selectionBackground,
-.editor-body .cm-editor .cm-selectionBackground {
-  background: color-mix(in srgb, var(--accent) 34%, transparent);
+/* The selection is the accent, at two strengths: readable on its own, and stronger still when
+   the editor has focus. Two things decide whether the browser paints these instead of
+   CodeMirror's own lavender, and both are in the selector:
+   - specificity: the base theme's focused rule is five classes
+     (`&light.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground`, where
+     `&light` expands at mount into a generated class on `.cm-editor`), so the focused rule here
+     carries six and the idle one five;
+   - the chain down to `.cm-selectionLayer`, which is where CodeMirror actually draws a selection:
+     a rule naming `.cm-selectionBackground` alone never matches it.
+   `drawSelection()` must stay mounted — a native selection would break `EditorSelection` ranges
+   and the multi-cursor the panel relies on. */
+.editor-body .cm-editor > .cm-scroller > .cm-selectionLayer .cm-selectionBackground {
+  background-color: color-mix(in srgb, var(--accent) 34%, transparent);
 }
 
-.editor-body .cm-focused .cm-selectionBackground,
-.editor-body .cm-focused .cm-editor .cm-selectionBackground {
-  background: color-mix(in srgb, var(--accent) 52%, transparent);
+.editor-body .cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground {
+  background-color: color-mix(in srgb, var(--accent) 52%, transparent);
 }
 
 /* Indentation guides: one 1px rule at every indent stop inside a line that is indented past
