@@ -500,21 +500,21 @@ describe("EditorPanel as an editor (rant 2026-11-20T18:01:52)", () => {
     const { open } = renderPanel({ sid: "s1" });
     open("/p/emrg/a.txt", "/p/emrg", false);
     await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
-    // 默认：折行开、缩略图关
-    expect(screen.getByTestId("editor-toggle-wrap")).toHaveAttribute("aria-pressed", "true");
-    expect(surface()).toHaveAttribute("data-wrap", "true");
+    // 默认：不折行、缩略图关
+    expect(screen.getByTestId("editor-toggle-wrap")).toHaveAttribute("aria-pressed", "false");
+    expect(surface()).toHaveAttribute("data-wrap", "false");
     expect(screen.queryByTestId("editor-minimap")).toBeNull();
 
     fireEvent.click(screen.getByTestId("editor-toggle-wrap"));
-    expect(screen.getByTestId("editor-toggle-wrap")).toHaveAttribute("aria-pressed", "false");
-    expect(surface()).toHaveAttribute("data-wrap", "false");
+    expect(screen.getByTestId("editor-toggle-wrap")).toHaveAttribute("aria-pressed", "true");
+    expect(surface()).toHaveAttribute("data-wrap", "true");
     fireEvent.click(screen.getByTestId("editor-toggle-minimap"));
     expect(screen.getByTestId("editor-toggle-minimap")).toHaveAttribute("aria-pressed", "true");
 
     // 同一会话里换个标签再回来，两个开关都还记着
     open("/p/emrg/b.txt", "/p/emrg", false);
     await waitFor(() => expect(surface()).toHaveTextContent("one"));
-    expect(surface()).toHaveAttribute("data-wrap", "false");
+    expect(surface()).toHaveAttribute("data-wrap", "true");
     expect(screen.getByTestId("editor-minimap")).toBeInTheDocument();
   });
 

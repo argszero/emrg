@@ -134,23 +134,23 @@ describe("diskChange (item 5)", () => {
 });
 
 describe("EditorPrefsStore (item 8)", () => {
-  it("默认折行开、缩略图关", () => {
+  it("默认不折行、缩略图关", () => {
     const store = new EditorPrefsStore();
     expect(store.get("s1")).toEqual(DEFAULT_PREFS);
-    expect(DEFAULT_PREFS).toEqual({ wrap: true, minimap: false });
+    expect(DEFAULT_PREFS).toEqual({ wrap: false, minimap: false });
   });
 
-  it("按会话各记各的：s1 关掉折行不影响 s2", () => {
+  it("按会话各记各的：s1 打开折行不影响 s2", () => {
     const store = new EditorPrefsStore();
-    store.set("s1", { wrap: false });
-    expect(store.get("s1").wrap).toBe(false);
-    expect(store.get("s2").wrap).toBe(true);
+    store.set("s1", { wrap: true });
+    expect(store.get("s1").wrap).toBe(true);
+    expect(store.get("s2").wrap).toBe(false);
   });
 
   it("改一个开关不动另一个", () => {
     const store = new EditorPrefsStore();
     store.set("s1", { minimap: true });
-    expect(store.get("s1")).toEqual({ wrap: true, minimap: true });
+    expect(store.get("s1")).toEqual({ wrap: false, minimap: true });
   });
 
   it("两个面板不共享：一个 store 的设置不会出现在另一个 store 里", () => {
