@@ -187,7 +187,13 @@ def _home(tmp_path: Path, monkeypatch, *, migrated: bool) -> Path:
             "- name: t\n  config:\n    extra_prompt: 'allowance n = 1, interval = 43200'\n",
             encoding="utf-8",
         )
-    monkeypatch.setenv("HOME", str(home))
+    # Both spellings: Windows' `ntpath` reads `USERPROFILE` and ignores `HOME`, so pinning
+    # `HOME` alone leaves `expanduser("~")` answering the machine's real profile on a Windows
+    # runner - the stand-in table below is then never the one read, and the three tests that
+    # ask which file the default resolves to were red on `test-windows` with
+    # `WindowsPath('C:/Users/runneradmin/.emrg/tasks.yml')`.
+    for var in ("HOME", "USERPROFILE"):  # ntpath reads USERPROFILE, posixpath reads HOME
+        monkeypatch.setenv(var, str(home))
     return home
 
 
