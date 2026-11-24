@@ -1283,14 +1283,17 @@ class TestWSBroadcast:
                     ws_a = await connect_to_server()
                     ws_b = await connect_to_server()
                     try:
-                        # B subscribes to the session first (any message carrying
-                        # session_id triggers the subscription in the read loop).
+                        # B subscribes to the session first. The carrier must be an
+                        # *attaching* message (rant 2026-11-24T14:29:19): this used to
+                        # be a `list_history`, and it was the read loop's habit of
+                        # subscribing on any message at all — a query included — that
+                        # the fix removes. Opening the session is what subscribes.
                         await ws_b.send(json.dumps({
-                            "type": "list_history",
+                            "type": "resume_session",
                             "session_id": "s_bcast",
                             "cwd": str(cwd),
                         }))
-                        await asyncio.wait_for(ws_b.recv(), timeout=5)  # history_list
+                        await asyncio.wait_for(ws_b.recv(), timeout=5)  # resume_result
                         task = {
                             "type": "task",
                             "id": "t-bcast",
@@ -1528,6 +1531,11 @@ class TestWSBroadcast:
         Note: server-side subscription holds ServerConnection objects (the
         handler's ws), which differ from the client-side ClientConnection
         handles. We assert by subscriber-set size: 2 before, 1 after B closes.
+
+        The carrier is `resume_session`, and it has to be an *attaching* message:
+        this test used to drive `list_history`, a query about a session, which no
+        longer moves a connection's subscription (rant 2026-11-24T14:29:19) — that
+        move is the defect, so a query is no longer a way to subscribe.
         """
         async def _test():
             with tempfile.TemporaryDirectory() as tmp:
@@ -1539,7 +1547,7 @@ class TestWSBroadcast:
                     try:
                         for w in (ws_a, ws_b):
                             await w.send(json.dumps({
-                                "type": "list_history",
+                                "type": "resume_session",
                                 "session_id": "s_unsub",
                                 "cwd": str(cwd),
                             }))
@@ -1552,6 +1560,117 @@ class TestWSBroadcast:
                     subs = server._session_subscribers.get("s_unsub", set())
                     assert len(subs) == 1  # B removed, A still subscribed
                     await ws_a.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_a_query_naming_another_session_does_not_move_the_subscription(self):
+        """A message *about* another session leaves this connection where it was.
+
+        The daemon used to move a connection's subscription on **any** message
+        carrying a `session_id`, so a single query naming a different session —
+        list its history, rename it, resolve its cwd — dragged the connection onto
+        that session and never brought it back. From then on the client received a
+        session's broadcast stream it was not displaying, and stopped receiving its
+        own: the foreign frames were drawn as the open session's (and a tool card
+        opened by one arrived with no end frame, so it spun for ever), while the
+        missing ones looked like a turn that never finishes.
+
+        Each query below is read to its own reply before the assertion, because the
+        subscription write happens in the read loop **before** dispatch: a reply on
+        the wire is proof the gate was passed over, not proof it was not reached.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                server, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        await ws.send(json.dumps({
+                            "type": "resume_session",
+                            "session_id": "s_mine",
+                            "cwd": str(cwd),
+                        }))
+                        await _recv_until(ws, lambda f: f.get("type") == "resume_result",
+                                          what="resume_result")
+                        before = dict(server._session_subscribers["s_mine"])
+
+                        for query, reply in (
+                            ({"type": "list_history", "session_id": "s_theirs",
+                              "cwd": str(cwd)}, "history_list"),
+                            ({"type": "rename_session", "session_id": "s_theirs",
+                              "cwd": str(cwd), "title": "a title"},
+                             "rename_result"),
+                            ({"type": "resolve_session_cwd", "session_id": "s_theirs",
+                              "cwd": str(cwd)}, "session_cwd_result"),
+                        ):
+                            await ws.send(json.dumps(query))
+                            await _recv_until(ws, lambda f, t=reply: f.get("type") == t,
+                                              what=f"{reply} for s_theirs")
+
+                        assert server._session_subscribers["s_mine"] == before, (
+                            "a query about another session moved this connection's "
+                            "subscription: it will now receive that session's stream "
+                            f"and miss its own — {server._session_subscribers['s_mine']}"
+                        )
+                        assert "s_theirs" not in server._session_subscribers, (
+                            "a query about another session subscribed this connection to "
+                            f"it: {server._session_subscribers.get('s_theirs')}"
+                        )
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_tool_frames_name_their_own_session(self):
+        """Both tool frames carry the session they belong to, as `turn_start` does.
+
+        `turn_start`, `turn_progress` and the `done` frames all named their
+        session; the two tool frames did not. A client therefore had to fill the
+        gap with "the session this connection was opened for", which is a guess
+        that cannot be checked and is wrong exactly when it matters — when a frame
+        from another session reaches the connection. The card it opens then has no
+        session of its own to be closed under, so it never closes.
+
+        The assertion is consistency within one stream, not just presence: a frame
+        that named some other session would satisfy "the key exists" and still
+        route the card wrongly.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                server, _, cleanup = await _boot_server(cwd)
+                try:
+                    server.llm.chat_stream = _make_fake_chat_stream()
+                    ws = await connect_to_server()
+                    try:
+                        await ws.send(json.dumps({
+                            "type": "task", "id": "t-tool-sid",
+                            "session_id": "s_tool_sid", "cwd": str(cwd),
+                            "prompt": "run a command", "stream": True,
+                            "timestamp": "2026-11-24T00:00:00",
+                        }))
+                        named: dict[str, str] = {}
+                        while True:
+                            frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                            kind = frame.get("type")
+                            if kind in ("turn_start", "tool_start", "tool_end"):
+                                named.setdefault(kind, frame.get("session_id"))
+                            if frame.get("done"):
+                                break
+
+                        assert set(named) == {"turn_start", "tool_start", "tool_end"}, (
+                            f"the stream did not produce all three frame kinds: {named}"
+                        )
+                        for kind, sid in named.items():
+                            assert sid == "s_tool_sid", (
+                                f"{kind} names session {sid!r}, not the turn's "
+                                f"'s_tool_sid' — a client cannot route it"
+                            )
+                    finally:
+                        await ws.close()
                 finally:
                     await cleanup()
         asyncio.run(_test())
@@ -3110,13 +3229,17 @@ class TestWSHistoryRecords:
                     asker = await connect_to_server()
                     watcher = await connect_to_server()
                     try:
-                        # Subscribing is what the read loop records: any frame naming
-                        # the session does it, and this one is answered by a pong.
+                        # Subscribing is what the read loop records, and only an
+                        # *attaching* message does it (rant 2026-11-24T14:29:19).
+                        # This used to be a `ping` carrying the session id — a
+                        # heartbeat is a message about a session, not a way to open
+                        # one, so opening is the carrier now.
                         for ws in (asker, watcher):
                             await ws.send(json.dumps({
-                                "type": "ping", "session_id": sid, "cwd": str(cwd),
+                                "type": "resume_session", "session_id": sid,
+                                "cwd": str(cwd),
                             }))
-                            await _drain(ws, "pong")
+                            await _drain(ws, "resume_result")
 
                         await asker.send(json.dumps({
                             "type": "rewind_session", "session_id": sid,

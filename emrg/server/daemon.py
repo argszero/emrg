@@ -455,6 +455,22 @@ def _static_memory_context(data: dict[str, Any]) -> dict[str, Any]:
 # this frame pin membership in both directions.
 BROADCAST_ON_RELOAD = frozenset({"vision"})
 
+#: The messages allowed to **move a connection's session subscription**
+#: (rant 2026-11-24T14:29:19). Membership is a statement about the message's purpose,
+#: not about whether it happens to carry a `session_id`: these four are the ways a
+#: client attaches its view to a session — it starts a turn there (`task`), switches
+#: to it (`resume_session`), or acts on that session's live turn (`cancel`,
+#: `approval_response`). A message *about* another session — list its history, rename
+#: it, resolve its cwd, compact it, delete it — is answered on its own reply path and
+#: must leave this connection where it was, or it spends the rest of its life
+#: receiving a session's stream it is not showing and missing the one it is.
+SESSION_ATTACHING_MESSAGE_TYPES = frozenset({
+    "task",
+    "resume_session",
+    "cancel",
+    "approval_response",
+})
+
 # Windows TIME_WAIT retry: SO_EXCLUSIVEADDRUSE (the only anti-hijack option on
 # Windows) blocks rebinding while accepted connections linger in TIME_WAIT.
 # serve() treats EADDRINUSE-with-no-listener as a TIME_WAIT remnant and retries
@@ -1719,7 +1735,22 @@ class EmrgServer:
                 # Phase 2 broadcast: maintain subscription on session_id change
                 # (protocol-contract §2.6.2 — the read loop is the only place
                 # last_session_id is updated; task/cancel/compact all pass here).
-                if data.get("session_id"):
+                # Only a message that **switches this connection's view** to a session
+                # may move its subscription (rant 2026-11-24T14:29:19). Every message
+                # naming a session used to move it, so a query about *another* session —
+                # list its history, rename it, resolve its cwd — dragged the connection
+                # onto that session and left it there: from then on that session's
+                # broadcasts arrived at a client displaying a different one, and the
+                # original session's own frames stopped arriving. Silent in both
+                # directions: the foreign frames were drawn as the open session's, and
+                # the missing ones as a turn that never ends.
+                #
+                # The allowlist is the messages whose *purpose* is to attach: a turn
+                # (`task`), a view switch (`resume_session`), and the two that act on a
+                # session's live turn from this connection (`cancel`, `approval_response`).
+                # Everything else is served and answers on its own reply path
+                # (`_send`), which is why it needs no subscription to be answered.
+                if data.get("session_id") and data.get("type") in SESSION_ATTACHING_MESSAGE_TYPES:
                     new_sid = data["session_id"]
                     if new_sid != last_session_id:
                         if last_session_id:  # unsubscribe from previous session
@@ -5439,6 +5470,15 @@ class EmrgServer:
                     # Notify client (broadcast to all session subscribers)
                     await self._broadcast(session.session_id, {
                         "type": "tool_start",
+                        # The frame says which session it belongs to (rant
+                        # 2026-11-24T14:29:19). `turn_start`, `turn_progress` and the
+                        # `done` frames all name theirs; the two tool frames were the
+                        # only ones that could not, so a client had to fill the gap
+                        # with "the session this connection was opened for" — which
+                        # paints a foreign frame as the open session's own card and
+                        # leaves it spinning for ever. Same value as `turn_start`'s,
+                        # because both are built from the turn's session.
+                        "session_id": session.session_id,
                         "request_id": req.id,
                         "tool_name": tc_name,
                         "tool_call_id": tc_id,
@@ -5534,6 +5574,11 @@ class EmrgServer:
                     # Notify client of result (broadcast to all session subscribers)
                     await self._broadcast(session.session_id, {
                         "type": "tool_end",
+                        # Names its own session, for the same reason as `tool_start`
+                        # above (rant 2026-11-24T14:29:19): a card opened by a frame
+                        # addressed to one session and closed by one the client
+                        # attributed to another is a card that never closes.
+                        "session_id": session.session_id,
                         "request_id": req.id,
                         "tool_name": tc_name,
                         "tool_call_id": tc_id,
