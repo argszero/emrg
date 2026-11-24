@@ -344,8 +344,9 @@ NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE = {
 #: with what it reads instead, because "not a tree reader" is a claim like any other.
 NOT_TREE_READERS = {
     "check-task-interval.py": (
-        "reads the host's own task table (`~/.emrg/tasks.yml` by default, `--tasks` to name "
-        "another) and compares the pace each block states with the round-up the competition "
+        "reads the host's own task table (`~/.emrg/global/tasks.yml` once the home-root "
+        "migration has run, `~/.emrg/tasks.yml` before it; `--tasks` to name another) and "
+        "compares the pace each block states with the round-up the competition "
         "template requires - a task table is not a working tree, and the one this runs against "
         "is the host's, which no checkout carries (issue #3171: the reading was done by eye "
         "every cycle and answered wrongly twice in one cycle, once by taking a block's "

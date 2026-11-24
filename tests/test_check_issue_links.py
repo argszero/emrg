@@ -3118,18 +3118,22 @@ def test_every_script_that_resolves_a_split_default_answers_the_same_way() -> No
     would be made in one of them and the others would keep answering the old way, in silence,
     which is the whole defect this pins.
 
-    Three copies now, and the third is why the rule is stated as "every" rather than counted:
-    `check-issue-links.py` and `check-memory-rotation.py` were held to one answer while
-    `check-extra-prompt-rotation.py` went on naming only the post-split path, so the
-    task-configuration rotation answered "cannot measure" on this host every cycle (issue
-    #3145). A number in a test's name would have read as complete at two.
+    Four copies now, and the count stays written out as a warning rather than a rule: every
+    addition has been the same defect found one program later. `check-issue-links.py` and
+    `check-memory-rotation.py` were held to one answer while `check-extra-prompt-rotation.py`
+    went on naming only the post-split path, so the task-configuration rotation answered
+    "cannot measure" on this host every cycle (issue #3145); `check-task-interval.py` carried
+    no resolver at all until it was held here, and answered "No such file" every cycle on the
+    same host (issue #3181). A number in a test's name would have read as complete at two.
     """
     rotation = _load_sibling("check-memory-rotation.py")
     extra = _load_sibling("check-extra-prompt-rotation.py")
+    interval = _load_sibling("check-task-interval.py")
     links = _load_module()
 
     for other, name in ((rotation, "check-memory-rotation.py"),
-                        (extra, "check-extra-prompt-rotation.py")):
+                        (extra, "check-extra-prompt-rotation.py"),
+                        (interval, "check-task-interval.py")):
         assert other.ROOT_PREFIX == links.ROOT_PREFIX, name
         assert other.GLOBAL_PREFIX == links.GLOBAL_PREFIX, name
     for path in (
@@ -3148,4 +3152,8 @@ def test_every_script_that_resolves_a_split_default_answers_the_same_way() -> No
         assert links.post_split(path) == extra.post_split(path), (
             f"check-issue-links and check-extra-prompt-rotation disagree on {path!r}: "
             f"{links.post_split(path)!r} vs {extra.post_split(path)!r}"
+        )
+        assert links.post_split(path) == interval.post_split(path), (
+            f"check-issue-links and check-task-interval disagree on {path!r}: "
+            f"{links.post_split(path)!r} vs {interval.post_split(path)!r}"
         )

@@ -169,6 +169,72 @@ def test_a_missing_table_is_exit_2_and_says_so(tmp_path, capsys):
     assert "could not measure" in out
 
 
+# ---------------------------------------------------- the default follows the host it asks about
+
+
+def _home(tmp_path: Path, monkeypatch, *, migrated: bool) -> Path:
+    """A stand-in home holding the task table in one of the two spellings the split left."""
+    home = tmp_path / "home"
+    if migrated:
+        (home / ".emrg" / "global").mkdir(parents=True)
+        (home / ".emrg" / "global" / "tasks.yml").write_text(
+            "- name: t\n  config:\n    extra_prompt: 'allowance n = 1, interval = 43200'\n",
+            encoding="utf-8",
+        )
+    else:
+        (home / ".emrg").mkdir(parents=True)
+        (home / ".emrg" / "tasks.yml").write_text(
+            "- name: t\n  config:\n    extra_prompt: 'allowance n = 1, interval = 43200'\n",
+            encoding="utf-8",
+        )
+    # Both spellings: Windows' `ntpath` reads `USERPROFILE` and ignores `HOME`, so pinning
+    # `HOME` alone leaves `expanduser("~")` answering the machine's real profile on a Windows
+    # runner - the stand-in table below is then never the one read, and the three tests that
+    # ask which file the default resolves to were red on `test-windows` with
+    # `WindowsPath('C:/Users/runneradmin/.emrg/tasks.yml')`.
+    for var in ("HOME", "USERPROFILE"):  # ntpath reads USERPROFILE, posixpath reads HOME
+        monkeypatch.setenv(var, str(home))
+    return home
+
+
+def test_the_default_is_the_table_a_migrated_host_keeps(tmp_path, monkeypatch, capsys):
+    """The daemon reads `config_dir() / "tasks.yml"`, which is under `global/` once the home
+    root has moved. A default frozen at import asked for the pre-migration spelling instead, so
+    every run on a migrated host answered exit 2 with "No such file" and the pace was never
+    measured at all (issue #3181)."""
+    home = _home(tmp_path, monkeypatch, migrated=True)
+
+    assert mod.resolve_tasks_path() == home / ".emrg" / "global" / "tasks.yml"
+    code = mod.main([])
+    out = capsys.readouterr().out
+    assert str(home / ".emrg" / "global" / "tasks.yml") in out, "the file read is named first"
+    assert code == mod.EXIT_CLEAN
+
+
+def test_a_host_that_has_not_migrated_keeps_the_old_spelling(tmp_path, monkeypatch):
+    home = _home(tmp_path, monkeypatch, migrated=False)
+
+    assert mod.resolve_tasks_path() == home / ".emrg" / "tasks.yml"
+
+
+def test_the_choice_is_the_file_and_not_the_directory(tmp_path, monkeypatch):
+    """A `global/` directory with no table in it is not a migrated host: the move is
+    all-or-nothing, but a host can also have created `global/` from some other start."""
+    home = _home(tmp_path, monkeypatch, migrated=False)
+    (home / ".emrg" / "global").mkdir()
+
+    assert mod.resolve_tasks_path() == home / ".emrg" / "tasks.yml"
+
+
+def test_an_override_is_measured_where_the_caller_put_it(tmp_path, monkeypatch):
+    """A caller naming a path is measuring that path - resolving its post-split twin would
+    answer a file the caller did not name."""
+    _home(tmp_path, monkeypatch, migrated=True)
+    named = tmp_path / "elsewhere.yml"
+
+    assert mod.resolve_tasks_path(str(named)) == named
+
+
 def test_a_table_that_is_not_yaml_is_exit_2_not_an_empty_clean_run(tmp_path, capsys):
     path = tmp_path / "tasks.yml"
     path.write_text("this: is: not: yaml\n", encoding="utf-8")

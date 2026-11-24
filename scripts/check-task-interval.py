@@ -65,6 +65,12 @@ What it reads, and what it never does
 One file: the task table, the host's own, named before any verdict. It **measures and never
 repairs** - the table is rewritten by the scheduler through its own dumper, and a tool that
 wrote to it would be editing the file this reading exists to describe.
+
+The file is asked for **wherever the home-root migration left it** - `~/.emrg/global/tasks.yml`
+once it has run, `~/.emrg/tasks.yml` before - because the daemon reads it from `config_dir()`,
+which answers the former on a migrated host. Resolving the default is not a convenience: a
+constant spelled the pre-migration way made every run on this host answer exit ``2`` with "No
+such file", so the pace was never measured at all (issue #3181).
 """
 
 from __future__ import annotations
@@ -79,8 +85,62 @@ EXIT_CLEAN = 0
 EXIT_SHORT = 1
 EXIT_UNMEASURABLE = 2
 
-#: The task table this installation keeps, and the default subject.
-DEFAULT_TASKS = "~/.emrg/tasks.yml"
+#: The task table spelled the way it was **before** the home-root migration. Not the default
+#: subject on its own: :func:`resolve_tasks_path` turns it into whichever spelling the host
+#: actually has, which is what the daemon reads.
+PRE_SPLIT_TASKS = "~/.emrg/tasks.yml"
+
+#: The home-level root, and the directory the root migration puts everything EMRG owns under.
+#: Both are spelled here because this script runs stdlib-only apart from `yaml`, so it cannot
+#: ask `emrg.config` or `emrg.home_layout` where a file lives. `check-issue-links.py`,
+#: `check-memory-rotation.py` and `check-extra-prompt-rotation.py` carry the same pair and the
+#: same three functions below for the same reason, and
+#: `tests/test_check_issue_links.py::test_every_script_that_resolves_a_split_default_answers_the_same_way`
+#: holds every copy to one set of answers rather than trusting them to stay in step.
+ROOT_PREFIX = "~/.emrg/"
+GLOBAL_PREFIX = "~/.emrg/global/"
+
+
+def post_split(path: str) -> str:
+    """Where ``path`` lives once the root migration has run.
+
+    The migration moves every entry EMRG owns from ``~/.emrg/<name>`` to
+    ``~/.emrg/global/<name>``, keeping the relative path, so the transformation is the one
+    prefix and nothing else. :data:`ROOT_PREFIX` itself is untouched: it is the root, not an
+    entry under it, which is why a path that does not start with it comes back as it was.
+    """
+    if not path.startswith(ROOT_PREFIX):
+        return path
+    return GLOBAL_PREFIX + path[len(ROOT_PREFIX):]
+
+
+def prefer_existing(pre_split: str, post_split_path: str) -> str:
+    """The one of the two that is on disk, preferring the migrated path."""
+    try:
+        return post_split_path if Path(post_split_path).expanduser().exists() else pre_split
+    except OSError:
+        return pre_split
+
+
+def resolve_default(path: str) -> str:
+    """``path``'s post-migration twin when that file exists, and ``path`` otherwise.
+
+    Resolved against the **file**, not against the ``global/`` directory: a host can have the
+    directory without the table in it, and the directory is then the wrong thing to ask.
+    """
+    return prefer_existing(path, post_split(path))
+
+
+def resolve_tasks_path(override=None) -> Path:
+    """The task table: ``--tasks`` when given, else the host's own wherever it is.
+
+    Read **per call**, so the answer follows the host it is asked about rather than the state
+    of the tree when this module was imported. An override is taken as given - a caller naming
+    a path is measuring that path.
+    """
+    if override is not None:
+        return Path(os.path.expanduser(str(override)))
+    return Path(resolve_default(PRE_SPLIT_TASKS)).expanduser()
 
 #: The value the template divides: one day, in seconds.
 DAY = 86400
@@ -205,13 +265,18 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Compare each task block's stated interval with the template's round-up.",
     )
-    parser.add_argument("--tasks", default=DEFAULT_TASKS, help=f"the task table (default: {DEFAULT_TASKS})")
+    parser.add_argument(
+        "--tasks",
+        default=None,
+        help="the task table (default: the host's own, wherever the root migration left it)",
+    )
     parser.add_argument("--quiet", action="store_true", help="print only the blocks that are not exact")
     args = parser.parse_args(argv)
 
-    print(f"tasks: {Path(args.tasks).expanduser()}")
+    tasks_path = resolve_tasks_path(args.tasks)
+    print(f"tasks: {tasks_path}")
 
-    readings, failure = rows(args.tasks)
+    readings, failure = rows(str(tasks_path))
     if failure:
         print(f"  {failure}")
         print("could not measure: the task table was not read, which is not a clean result")
