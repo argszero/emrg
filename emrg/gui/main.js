@@ -24,6 +24,7 @@ const {
   DEFAULT_CAP,
 } = require("./gui-state");
 const { externalNavPolicy } = require("./nav-policy");
+const { frameSessionId } = require("./frame-route");
 const { makeConfigPrivate } = require("./config_mode");
 // issue #2774：aitokenpool 的 GitHub 账号登录。协议与 config 合并全在这个纯模块里
 // （main.js 只被 `node --check` 看、不被单测跑），这里只把 fetch 与 fs 接上去。
@@ -1558,7 +1559,12 @@ vision = false
         if (win && !win.isDestroyed()) {
           // 主动关闭（切走/删除）不触发断线横幅——真断连/daemon 重启照常转发
           if (type === "disconnected" && conn._intentionalClose) return;
-          win.webContents.send("emrg:event", { type, data, sid });
+          // 这一帧落在哪个会话下：帧自报的 `session_id` 胜过连接的（rant
+          // 2026-11-24T14:29:19，规则与它的取舍在 `frame-route.js`）。`sid` 是这条
+          // **连接**为哪个会话开的，无条件盖上去会让一条别人的帧和这个会话自己的帧
+          // 在信封上完全一样，而渲染层就是按 `sid` 分桶的 —— 于是那张工具卡被画进
+          // 了错误的会话，且它开卡的帧到了、关卡的帧没到，永远转圈。
+          win.webContents.send("emrg:event", { type, data, sid: frameSessionId(data, sid) });
         }
       });
       // 打开会话时 daemon 的那份快照（issue #2982）。上面的桥是**现在**才挂上的，
