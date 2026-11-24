@@ -110,6 +110,13 @@ class ToolStart:
     #: the call ends (rant 2026-11-19T09:31:00). `0.0` when absent: an older frame names
     #: no instant, and a client must then show no time rather than count from zero.
     started_at: float = 0.0
+    #: Which session this call belongs to — the value the daemon puts in the frame, and
+    #: the same one `turn_start` carries in that stream. Declared here because a field on
+    #: the wire and absent from this class is a field `from_dict` silently drops, which is
+    #: how the frame and its declared reader came apart with every test still green
+    #: (issue #3198). `""` when the frame names none: the absence marker a client reads as
+    #: "this frame names no session", never a fabricated id.
+    session_id: str = ""
 
     @classmethod
     def from_dict(cls, d: dict) -> ToolStart:
@@ -121,6 +128,7 @@ class ToolStart:
             intent=d.get("intent", ""),
             call_label=d.get("call_label", ""),
             started_at=d.get("started_at", 0.0),
+            session_id=d.get("session_id", ""),
         )
 
 
@@ -132,6 +140,10 @@ class ToolEnd:
     tool_call_id: str = ""
     content: str = ""
     error: bool = False
+    #: The session its start frame named — the two are one call, and a client that
+    #: received both must be able to see they belong together (issue #3198). `""` when
+    #: the frame names none.
+    session_id: str = ""
 
     @classmethod
     def from_dict(cls, d: dict) -> ToolEnd:
@@ -141,6 +153,7 @@ class ToolEnd:
             tool_call_id=d.get("tool_call_id", ""),
             content=d.get("content", ""),
             error=d.get("error", False),
+            session_id=d.get("session_id", ""),
         )
 
 
