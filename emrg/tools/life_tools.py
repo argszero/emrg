@@ -24,7 +24,7 @@ from pathlib import Path
 
 from emrg.config import agents_file
 from emrg.server.agents import AgentRegistry
-from emrg.server.life import parse_instant, tier_of
+from emrg.server.life import item_lines, parse_instant, tier_of, total_of
 from emrg.server.tool_types import ToolDefinition, ToolResult
 from emrg.tools.base import ToolExecutor
 
@@ -45,6 +45,9 @@ def _describe(row: dict) -> str:
         if isinstance(reason, str) and reason.strip():
             tail += f" — {reason.strip()}"
         line += f"; {tail}"
+    items = item_lines(row.get("life_items"))
+    if items:
+        line += ". What it was made of: " + "; ".join(items)
     return line + "."
 
 
@@ -107,13 +110,16 @@ class SetAgentLifeTool(ToolExecutor):
         return ToolDefinition(
             name="set_agent_life",
             description=(
-                "Write an agent's life value into the agent register. The judge "
-                "decides the number; this tool records it and derives the size of "
-                "the change from the value already there, so the caller never states "
-                "a delta. `reason` is what the judged agent will read in its next "
-                "round, so it says why the number moved rather than restating it. "
-                "A first judgement records no delta: a jump from nothing to something "
-                "is not a change of nought."
+                "Write an agent's life judgement into the agent register. A judgement "
+                "is a list of `items` — each pairing a signed weight with what it was "
+                "for — and the stored value is derived from that list: the caller never "
+                "states a total, so there is no second claim about the same fact to "
+                "disagree with the items. Negative items are what the judged agent "
+                "should stop doing, and a judgement that finds none says what it read "
+                "while looking (`searched`) instead of reporting silence as a clean "
+                "bill. `reason` is the one line the judged agent reads in its next "
+                "round. A first judgement records no delta: a jump from nothing to "
+                "something is not a change of nought."
             ),
             parameters={
                 "type": "object",
@@ -122,22 +128,54 @@ class SetAgentLifeTool(ToolExecutor):
                         "type": "string",
                         "description": "The agent's registered name, e.g. 'emrg'.",
                     },
-                    "value": {
-                        "type": "integer",
+                    "items": {
+                        "type": "array",
                         "description": (
-                            "The new life value: an integer, higher is better, with "
-                            "no upper bound."
+                            "What this judgement is made of: one entry per thing that "
+                            "counted, in the order that tells the story. The value is "
+                            "the sum of the entries, and the judged agent reads them "
+                            "one by one — so each `what` names the thing that happened "
+                            "rather than restating its weight."
                         ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "points": {
+                                    "type": "integer",
+                                    "description": (
+                                        "This entry's weight: a non-zero integer, "
+                                        "negative for a deduction."
+                                    ),
+                                },
+                                "what": {
+                                    "type": "string",
+                                    "description": (
+                                        "What the weight is for — the work delivered, "
+                                        "or the thing the agent should stop doing."
+                                    ),
+                                },
+                            },
+                            "required": ["points", "what"],
+                        },
                     },
                     "reason": {
                         "type": "string",
                         "description": (
-                            "Why the value is what it is — a sentence the judged "
-                            "agent reads in its next round."
+                            "What the judgement rests on, in one line — a sentence the "
+                            "judged agent reads in its next round."
+                        ),
+                    },
+                    "searched": {
+                        "type": "string",
+                        "description": (
+                            "What you read while looking for something to deduct, and "
+                            "why you found none. Required when every item is positive: "
+                            "a round of nothing but credit is a claim about the search, "
+                            "not an absence of evidence."
                         ),
                     },
                 },
-                "required": ["agent", "value", "reason"],
+                "required": ["agent", "items", "reason"],
             },
         )
 
@@ -148,14 +186,18 @@ class SetAgentLifeTool(ToolExecutor):
                 content="set_agent_life needs `agent`: the registered name to write.",
                 error=True,
             )
-        value = arguments.get("value")
-        # `isinstance(True, int)` is true, and a boolean is not a score: refuse it
-        # rather than store 1 for a model that answered `true`.
-        if not isinstance(value, int) or isinstance(value, bool):
+        items = arguments.get("items")
+        # One validator for the list, in the module that owns the arithmetic: the write
+        # below sums the same list, and two ideas of "a well-formed item" would end up
+        # as a value nobody can explain.
+        if total_of(items) is None:
             return ToolResult(
                 content=(
-                    f"set_agent_life needs `value` as an integer; it was "
-                    f"{value!r} ({type(value).__name__})."
+                    "set_agent_life needs `items`: a non-empty list of "
+                    "{`points`, `what`} entries, each with a non-zero integer weight "
+                    "and the thing it is for. An entry that moved nothing is refused "
+                    "rather than ignored — the judged agent would read it as work that "
+                    f"counted. It was {items!r}."
                 ),
                 error=True,
             )
@@ -168,8 +210,35 @@ class SetAgentLifeTool(ToolExecutor):
                 ),
                 error=True,
             )
+        searched = arguments.get("searched")
+        if searched is not None and not isinstance(searched, str):
+            return ToolResult(
+                content=(
+                    f"set_agent_life needs `searched` as text; it was {searched!r} "
+                    f"({type(searched).__name__})."
+                ),
+                error=True,
+            )
+        # A judgement with no deduction is a claim about the search, so the search is
+        # what it has to report. Read from the items rather than from their sum: +4 and
+        # -2 net +2, which is a round that did find something to deduct.
+        if all(item["points"] > 0 for item in items) and not (
+            isinstance(searched, str) and searched.strip()
+        ):
+            return ToolResult(
+                content=(
+                    "set_agent_life needs `searched` when every item is positive: say "
+                    "what you read while looking for something to deduct, and why you "
+                    "found none. A round of nothing but credit is a claim about the "
+                    "search, not an absence of evidence."
+                ),
+                error=True,
+            )
         path = Path(self._register_path) if self._register_path else agents_file()
-        row = AgentRegistry(path).set_life(name.strip(), value, reason.strip())
+        row = AgentRegistry(path).set_life(
+            name.strip(), items, reason.strip(),
+            searched=searched.strip() if isinstance(searched, str) else None,
+        )
         if row is None:
             return ToolResult(
                 content=(

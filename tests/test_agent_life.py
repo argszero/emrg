@@ -62,6 +62,16 @@ def _register_with(tmp_path: Path, *names: str) -> tuple[AgentRegistry, Path]:
     return registry, path
 
 
+def _items(*points: int) -> list[dict]:
+    """A judgement's items: one entry per weight, each naming what it was for.
+
+    The write takes a list rather than a total, so every caller here builds the list it
+    means. A weight of zero is deliberately not reachable through this helper — the tests
+    that assert its refusal write the entry out in full.
+    """
+    return [{"points": p, "what": f"work worth {p:+d}"} for p in points]
+
+
 # ── 1. the bands ──────────────────────────────────────────────────────
 
 def test_the_bands_fall_where_the_boundaries_read() -> None:
@@ -144,7 +154,7 @@ def test_a_first_judgement_records_no_delta_and_a_later_one_derives_it(
 ) -> None:
     """The size of a change is derived from the row, never supplied by the caller."""
     registry, _ = _register_with(tmp_path, "emrg")
-    first = registry.set_life("emrg", 40, "kept shipping")
+    first = registry.set_life("emrg", _items(40), "kept shipping")
     assert first is not None
     assert first["life"] == 40
     assert "life_delta" not in first, (
@@ -152,7 +162,7 @@ def test_a_first_judgement_records_no_delta_and_a_later_one_derives_it(
         "judgement stores an absence rather than a zero"
     )
 
-    second = registry.set_life("emrg", 37, "nothing landed")
+    second = registry.set_life("emrg", _items(-3), "nothing landed")
     assert second is not None and second["life"] == 37
     assert second["life_delta"] == -3
     assert second["life_reason"] == "nothing landed"
@@ -161,7 +171,7 @@ def test_a_first_judgement_records_no_delta_and_a_later_one_derives_it(
 def test_an_unjudged_row_keeps_the_shape_it_always_had(tmp_path: Path) -> None:
     """The register is the host's file: a row nobody judged must not grow null keys."""
     registry, path = _register_with(tmp_path, "emrg", "seek")
-    registry.set_life("emrg", 12, "still here")
+    registry.set_life("emrg", _items(12), "still here")
     rows = registry.entries()
     seek = next(r for r in rows if r["name"] == "seek")
     assert set(seek) == {"path", "name", "last_active"}, (
@@ -174,7 +184,7 @@ def test_an_unjudged_row_keeps_the_shape_it_always_had(tmp_path: Path) -> None:
 def test_writing_a_value_for_an_unknown_agent_writes_nothing(tmp_path: Path) -> None:
     registry, path = _register_with(tmp_path, "emrg")
     before = path.read_text(encoding="utf-8")
-    assert registry.set_life("nobody", 5, "why not") is None
+    assert registry.set_life("nobody", _items(5), "why not") is None
     assert path.read_text(encoding="utf-8") == before
 
 
@@ -182,7 +192,7 @@ def test_writing_a_value_for_an_unknown_agent_writes_nothing(tmp_path: Path) -> 
 
 def test_the_read_tool_answers_a_value_and_a_refusal(tmp_path: Path) -> None:
     registry, path = _register_with(tmp_path, "emrg")
-    registry.set_life("emrg", 55, "steady")
+    registry.set_life("emrg", _items(55), "steady")
     reader = GetAgentLifeTool(path)
     answered = asyncio.run(reader.execute({"agent": "emrg"}))
     assert not answered.error and "55" in answered.content and "healthy" in answered.content
@@ -191,13 +201,30 @@ def test_the_read_tool_answers_a_value_and_a_refusal(tmp_path: Path) -> None:
     assert refused.error and "nobody" in refused.content
 
 
+_ONE_ITEM = [{"points": 4, "what": "delivered the result"}]
+
+
 @pytest.mark.parametrize(
     "arguments, why",
     [
-        ({"agent": "emrg", "value": True, "reason": "x"}, "a boolean is not a score"),
-        ({"agent": "emrg", "value": "40", "reason": "x"}, "a string is not a number"),
-        ({"agent": "emrg", "value": 40, "reason": "   "}, "an empty reason hides why"),
-        ({"value": 40, "reason": "x"}, "no agent named"),
+        ({"agent": "emrg", "items": [], "reason": "x", "searched": "read it"},
+         "an empty list is not a judgement"),
+        ({"agent": "emrg", "items": [{"points": 0, "what": "nothing"}], "reason": "x",
+          "searched": "read it"},
+         "a zero-point item would be read as work that counted"),
+        ({"agent": "emrg", "items": [{"points": True, "what": "x"}], "reason": "x",
+          "searched": "read it"},
+         "a boolean is not a weight"),
+        ({"agent": "emrg", "items": [{"points": "4", "what": "x"}], "reason": "x",
+          "searched": "read it"},
+         "a string is not a number"),
+        ({"agent": "emrg", "items": [{"points": 4}], "reason": "x", "searched": "read it"},
+         "an item that names nothing says nothing"),
+        ({"agent": "emrg", "items": _ONE_ITEM, "reason": "   ", "searched": "read it"},
+         "an empty reason hides why"),
+        ({"agent": "emrg", "items": _ONE_ITEM, "reason": "x"},
+         "an all-positive judgement with no search report is a clean bill on faith"),
+        ({"items": _ONE_ITEM, "reason": "x", "searched": "read it"}, "no agent named"),
     ],
 )
 def test_the_write_tool_refuses_a_call_it_cannot_honour(
@@ -230,7 +257,7 @@ def test_a_score_written_inside_the_refresh_window_is_readable_next_round(
     before = server._build_context_message(session)
     assert before is not None and "unjudged" in before["content"]
 
-    registry.set_life("emrg", 55, "kept the work moving")
+    registry.set_life("emrg", _items(55), "kept the work moving")
 
     after = server._build_context_message(session)
     assert after is not None
@@ -251,7 +278,7 @@ def test_the_life_section_stays_out_of_the_system_prefix(
     """The prefix is what a provider's cache matches on; a mutable value may not ride there."""
     server = _make_server()
     registry, path = _register_with(tmp_path, "emrg")
-    registry.set_life("emrg", 55, "kept the work moving")
+    registry.set_life("emrg", _items(55), "kept the work moving")
     monkeypatch.setattr(daemon_module, "register_for_reading", lambda base=None: path)
     session = Session.create_with_id("life-prefix", tmp_path / "emrg")
 
@@ -316,3 +343,106 @@ def test_a_second_install_leaves_the_judge_row_where_it_was() -> None:
     server._install_life_judge()
 
     assert AgentRegistry(path).entries() == first
+
+
+# ── 6. the items are the judgement ───────────────────────────────────
+
+def test_the_value_is_the_sum_of_the_items_and_not_a_stated_total(
+    tmp_path: Path,
+) -> None:
+    """The number a judged agent reads is arithmetic on a list, never a figure beside it.
+
+    +4 and -2 in one judgement is a net +2, which is the shape a ledger has to have: a
+    round that delivered something and repeated a complaint reads as both, and the sum is
+    what the value moves by.
+    """
+    registry, _ = _register_with(tmp_path, "emrg")
+    first = registry.set_life(
+        "emrg",
+        [{"points": 4, "what": "delivered the result"},
+         {"points": -2, "what": "asked again to say it plainly"}],
+        "delivered, but the same complaint came back",
+    )
+    assert first is not None
+    assert first["life"] == 2, "the value is not the sum of its items"
+    assert [item["points"] for item in first["life_items"]] == [4, -2]
+
+    second = registry.set_life("emrg", _items(3), "kept going")
+    assert second is not None
+    assert second["life"] == 5
+    assert second["life_delta"] == 3
+
+
+def test_a_malformed_item_list_raises_rather_than_storing_a_number(
+    tmp_path: Path,
+) -> None:
+    """The register refuses a list it cannot sum, and writes nothing.
+
+    Raising rather than answering ``None`` keeps the two "nothing was decided" answers
+    meaning what they say: ``None`` is an unreadable register or no such row, and a caller
+    that also received ``None`` for a malformed list could not tell the three apart.
+    """
+    registry, path = _register_with(tmp_path, "emrg")
+    before = path.read_text(encoding="utf-8")
+    with pytest.raises(ValueError):
+        registry.set_life("emrg", [{"points": 0, "what": "nothing"}], "why not")
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_the_agent_reads_what_moved_its_value(tmp_path: Path) -> None:
+    """The item list reaches the judged agent, not just its total.
+
+    A value the agent can feel but cannot attribute is the defect this list exists to
+    cure, so both readers that answer it are asserted here — the per-round context and
+    the read tool — each on the text a person wrote rather than on a weight alone.
+    """
+    registry, path = _register_with(tmp_path, "emrg")
+    registry.set_life(
+        "emrg",
+        [{"points": 4, "what": "delivered the result"},
+         {"points": -2, "what": "asked again to say it plainly"}],
+        "both happened",
+    )
+    section = life_section(next(r for r in registry.entries() if r["name"] == "emrg"))
+    assert "+4  delivered the result" in section
+    assert "-2  asked again to say it plainly" in section
+
+    answered = asyncio.run(GetAgentLifeTool(path).execute({"agent": "emrg"}))
+    assert not answered.error
+    assert "delivered the result" in answered.content
+    assert "asked again to say it plainly" in answered.content
+
+
+def test_an_all_positive_judgement_must_report_its_search(tmp_path: Path) -> None:
+    """A deduction has to be looked for, and the search is what proves it was."""
+    registry, path = _register_with(tmp_path, "emrg")
+    tool = SetAgentLifeTool(path)
+    refused = asyncio.run(tool.execute(
+        {"agent": "emrg", "items": _items(5), "reason": "kept shipping"}
+    ))
+    assert refused.error and "searched" in refused.content
+    assert registry.entries()[0].get("life") is None, (
+        "a refused judgement wrote a value anyway"
+    )
+
+    accepted = asyncio.run(tool.execute({
+        "agent": "emrg", "items": _items(5), "reason": "kept shipping",
+        "searched": "read the session's replies for objections, and the requirement "
+                    "was stated once and honoured",
+    }))
+    assert not accepted.error, accepted.content
+    row = registry.entries()[0]
+    assert row["life"] == 5
+    assert "read the session's replies for objections" in row["life_reason"], (
+        "the search report was thrown away, so a reader cannot see what was looked at"
+    )
+
+
+def test_a_judgement_that_deducts_needs_no_search_report(tmp_path: Path) -> None:
+    """The requirement reads the items, not their sum: +4 and -2 does find a deduction."""
+    registry, path = _register_with(tmp_path, "emrg")
+    answered = asyncio.run(SetAgentLifeTool(path).execute({
+        "agent": "emrg", "items": _items(4, -2), "reason": "both happened",
+    }))
+    assert not answered.error, answered.content
+    assert registry.entries()[0]["life"] == 2

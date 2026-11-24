@@ -4,11 +4,13 @@ An agent's life value answers "is this agent still alive?" in one integer that a
 judge agent writes and nothing else does. It belongs to the agent, not to a
 session: a session ends, the agent goes on, and the value is about the agent.
 
-**The arithmetic here is a boundary table and nothing more.** Everything about
-*how* a score is decided belongs to the judge's own prompt as prose, because the
-moment a rule for "what is alive" is spelled as a formula, the judge stops
-judging and starts computing. What code owns is what a reader needs: which of the
-four bands a number falls in, and what the per-round context says about it.
+**Code owns two pieces of arithmetic and no third.** One is the boundary table: which
+of the four bands a number falls in. The other is the sum of a judgement's items, which
+is what a value *is* — the items are the judgement, each weight of it decided by the
+judge, and adding them up is the whole of what this file does with them. Everything
+about *how* a weight is decided belongs to the judge's own prompt as prose, because the
+moment a rule for "what is alive" is spelled as a formula, the judge stops judging and
+starts computing.
 
 **The bands, and where the edges live.** Four words: dying, surviving, healthy,
 thriving — the four the per-round context prints and the read tool answers. The
@@ -96,6 +98,59 @@ def parse_instant(moment: object) -> datetime.datetime | None:
     return parsed if parsed.tzinfo else parsed.astimezone()
 
 
+def total_of(items: object) -> int | None:
+    """The sum a judgement's items add up to, or ``None`` for a list this cannot read.
+
+    One producer for this arithmetic, because two — the write tool's validation and the
+    register's own write — would eventually disagree about what a malformed item is, and
+    the disagreement would show up as a value nobody can explain.
+
+    The shape is narrow on purpose: an item is a mapping with a non-zero integer
+    ``points`` and a non-empty ``what``. Zero points is **refused** rather than ignored:
+    an item that moved nothing is a line the judge wrote for its own sake, and the judged
+    agent would read it as work that counted.
+    """
+    if not isinstance(items, list) or not items:
+        return None
+    total = 0
+    for item in items:
+        if not isinstance(item, dict):
+            return None
+        points = item.get("points")
+        # `isinstance(True, int)` is true, and a boolean is not a weight.
+        if not isinstance(points, int) or isinstance(points, bool) or points == 0:
+            return None
+        what = item.get("what")
+        if not isinstance(what, str) or not what.strip():
+            return None
+        total += points
+    return total
+
+
+def item_lines(items: object) -> list[str]:
+    """A judgement's items as ``+4  what it was for`` lines, or none for no list.
+
+    The judged agent reads these, so what this renders is the pairing of a number with
+    its reason — a bare number is the thing the items exist to replace. Both readers (the
+    per-round context and the read tool) take their lines from here, because two
+    renderings of one fact drift, and this one is read by the agent that has to act on it.
+    """
+    if not isinstance(items, list):
+        return []
+    out: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        points = item.get("points")
+        what = item.get("what")
+        if not isinstance(points, int) or isinstance(points, bool):
+            continue
+        if not isinstance(what, str) or not what.strip():
+            continue
+        out.append(f"{points:+d}  {what.strip()}")
+    return out
+
+
 def life_section(row: dict) -> str:
     """The life section of the per-round context for one agent's register row.
 
@@ -103,6 +158,10 @@ def life_section(row: dict) -> str:
     and its band, and the last change's instant, size and reason. A row with no
     value reads as unjudged rather than as a number, because a zero and "nobody has
     looked yet" are different states and only one of them is a judgement.
+
+    The items follow, when the row carries any: a value with no attribution is a score
+    an agent can feel but cannot act on, and these lines are the whole reason the write
+    takes a list instead of one number.
 
     The section is built here rather than in the context builder for one reason: it
     has one producer, so the context, the tests that hold its placement and any
@@ -125,4 +184,5 @@ def life_section(row: dict) -> str:
         if isinstance(reason, str) and reason.strip():
             change += f" — {reason.strip()}"
         lines.append(change)
+    lines.extend(item_lines(row.get("life_items")))
     return "\n".join(lines)
