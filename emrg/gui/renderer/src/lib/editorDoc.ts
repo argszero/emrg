@@ -177,8 +177,11 @@ export interface EditorPrefs {
   minimap: boolean;
 }
 
-/** Wrap is on by default: a log with a 400-column line is the common case in this panel. */
-export const DEFAULT_PREFS: EditorPrefs = { wrap: true, minimap: false };
+/**
+ * Wrap is off by default: this panel is opened to read code, and a wrapped line of code is
+ * harder to follow than a long one — the toggle turns wrapping on, per session.
+ */
+export const DEFAULT_PREFS: EditorPrefs = { wrap: false, minimap: false };
 
 /**
  * One preference store per panel, keyed by session id.
