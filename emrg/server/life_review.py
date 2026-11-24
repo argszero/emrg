@@ -10,12 +10,22 @@ has no subject has already spent the request.
 
 Two facts decide the roster, and they are different questions:
 
-* **who is on it** — the agents whose register row shows activity inside the window.
+* **who is on it** — the agents whose register row shows activity inside the window,
+  plus the quiet ones whose value has gone stale.
 * **how much each one presents** — the whole absence, from the instant it was last
   judged. An agent that has been away a fortnight and comes back presents those two
   weeks, not the half hour that happens to be the schedule. That span is why the
   window's own start is not the answer: the window decides *membership*, and the last
   judgement decides *reach*.
+
+A quiet row is on the roster too, on a slower clock. The window advances every round, so
+activity alone would freeze a dormant agent's value for ever — and the prompt asks the
+judge to score a long absence down, which makes that agent the one row a round never
+carries. The clock it comes back on is not a new interval: it is the unit `describe_span`
+already words, so a row reads "5 days" and is presented again once it would read
+"6 days". Under a fortnight that is once a day; past one, once a week. The rhythm and
+the sentence the judge reads are therefore one table, which is why `span_key` is the only
+place the thresholds live.
 
 The watermark is written **before** the round runs, not after it. A round that dies
 mid-way has then consumed its window, which sounds like a loss and is not: the agents
@@ -128,10 +138,15 @@ def roster(
     ``since`` is the last settled window's start; ``None`` means nothing has been
     settled, so every row that has ever recorded activity is on the roster.
 
-    A row with no readable ``last_active`` is not on it: activity is the only thing
-    that decides membership, and an instant that cannot be read is not evidence of
-    any. It stays in the register with whatever value it has — being absent from one
-    round is not a judgement, and the roster is not the register.
+    Two ways in, and both start from activity: the row was active inside the window, or
+    it has been quiet and the absence the judge would read for it has grown past the unit
+    it read at the last judgement. The second way is what keeps a dormant row's value
+    from standing for ever, and `span_key` is the unit it is measured in — the same table
+    `describe_span` words, so the rhythm cannot drift from the sentence.
+
+    A row with no readable ``last_active`` is not on it: an instant that cannot be read is
+    not evidence of any. It stays in the register with whatever value it has — being
+    absent from one round is not a judgement, and the roster is not the register.
     """
     moment = now or datetime.datetime.now().astimezone()
     out: list[dict] = []
@@ -142,9 +157,14 @@ def roster(
         active = parse_instant(row.get("last_active"))
         if active is None:
             continue
-        if since is not None and active < since:
-            continue
         judged = parse_instant(row.get("life_at"))
+        if since is not None and active < since:
+            # Quiet through the window. It is still presented when what the judge would
+            # read for it has grown since the last judgement — the comparison that makes
+            # a dormant row's value fall rather than stand. A row nobody has judged has
+            # no such reading to grow, so it waits for activity like it always has.
+            if judged is None or span_key(moment - active) <= span_key(judged - active):
+                continue
         # The reach is the last judgement, or the window's own start for a row nobody
         # has judged — the only instant this module can honestly name for it.
         start = judged or since or active
@@ -189,6 +209,41 @@ def _counted(count: int, unit: str) -> str:
     return f"{count} {unit}" if count == 1 else f"{count} {unit}s"
 
 
+#: The word each unit `span_key` can answer carries. The key's first element is the
+#: unit and its second the count, so the sentence is worded without deciding a unit
+#: a second time.
+_SPAN_WORDS = {1: "minute", 2: "hour", 3: "day", 4: "week"}
+
+
+def span_key(delta: datetime.timedelta) -> tuple[int, int]:
+    """A span as the unit and count `describe_span` words, ordered by the span itself.
+
+    One producer for the unit table, because it has two readers that must not disagree:
+    the sentence the judge reads, and the comparison that presents a quiet row again once
+    that sentence would say something longer. A second copy of these thresholds would let
+    the rhythm drift from the words it is measured in.
+
+    Ordering is the arithmetic's own — a longer span never answers a smaller key, which
+    `tests/test_life_review.py::test_the_unit_table_never_orders_a_longer_span_below_a_shorter_one`
+    walks at every boundary — so ``span_key(a) > span_key(b)`` reads as "a is the longer
+    stretch". A negative or zero span is "just now" rather than a duration that has not
+    happened.
+    """
+    seconds = int(delta.total_seconds())
+    if seconds < 90:
+        return (0, 0)
+    minutes = seconds // 60
+    if minutes < 90:
+        return (1, minutes)
+    hours = minutes // 60
+    if hours < 48:
+        return (2, hours)
+    days = hours // 24
+    if days < 14:
+        return (3, days)
+    return (4, days // 7)
+
+
 def describe_span(delta: datetime.timedelta) -> str:
     """A span in the words a reader uses, coarse on purpose.
 
@@ -199,21 +254,12 @@ def describe_span(delta: datetime.timedelta) -> str:
 
     Every unit word follows its count, singular included: this string is read as a
     sentence ("the stretch to settle is …"), where the wrong number is a wrong word
-    rather than a rounding.
+    rather than a rounding. The unit and its count are `span_key`'s.
     """
-    seconds = int(delta.total_seconds())
-    if seconds < 90:
+    unit, count = span_key(delta)
+    if unit == 0:
         return "just now"
-    minutes = seconds // 60
-    if minutes < 90:
-        return _counted(minutes, "minute")
-    hours = minutes // 60
-    if hours < 48:
-        return _counted(hours, "hour")
-    days = hours // 24
-    if days < 14:
-        return _counted(days, "day")
-    return _counted(days // 7, "week")
+    return _counted(count, _SPAN_WORDS[unit])
 
 
 def render_roster(entries: list[dict]) -> str:
