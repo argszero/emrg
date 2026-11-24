@@ -455,6 +455,27 @@ def _static_memory_context(data: dict[str, Any]) -> dict[str, Any]:
 # this frame pin membership in both directions.
 BROADCAST_ON_RELOAD = frozenset({"vision"})
 
+# The only inbound messages that may move a connection's session subscription.
+#
+# Subscribing is what makes a connection a *target* for a session's broadcasts, so it
+# is a statement about which session this connection is watching — and only a message
+# that says so may make it. Each member is here because its purpose is to attach this
+# connection to the session it names: `task` starts a turn in it, `resume_session`
+# opens it, `cancel` interrupts its turn, and `approval_response` answers a question
+# asked inside it.
+#
+# A *query* that happens to name another session — `list_history`, `rename_session`,
+# `delete_session`, `compact`, a rewind, a cwd resolution — is served exactly as
+# before and leaves the subscription where it was. Measured 2026-11-24: a
+# `list_history` for session B moved the connection off session A, which is why A's
+# own `turn_start` / stream / `tool_end` then reached nobody and the client showed a
+# turn that never finished (issue #3191). The move was silent in both directions,
+# because nothing errors: the connection is simply no longer in the set the next
+# broadcast reads.
+_SUBSCRIBING_MESSAGE_TYPES = frozenset(
+    {"task", "resume_session", "cancel", "approval_response"}
+)
+
 # Windows TIME_WAIT retry: SO_EXCLUSIVEADDRUSE (the only anti-hijack option on
 # Windows) blocks rebinding while accepted connections linger in TIME_WAIT.
 # serve() treats EADDRINUSE-with-no-listener as a TIME_WAIT remnant and retries
@@ -1718,8 +1739,14 @@ class EmrgServer:
                 # Track session for disconnect-time consolidation
                 # Phase 2 broadcast: maintain subscription on session_id change
                 # (protocol-contract §2.6.2 — the read loop is the only place
-                # last_session_id is updated; task/cancel/compact all pass here).
-                if data.get("session_id"):
+                # last_session_id is updated). Only a message whose purpose is to
+                # attach this connection to a session may move it; a query naming
+                # another session is served below and leaves the subscription
+                # alone (issue #3191, `_SUBSCRIBING_MESSAGE_TYPES`).
+                if (
+                    data.get("type") in _SUBSCRIBING_MESSAGE_TYPES
+                    and data.get("session_id")
+                ):
                     new_sid = data["session_id"]
                     if new_sid != last_session_id:
                         if last_session_id:  # unsubscribe from previous session
@@ -5439,6 +5466,15 @@ class EmrgServer:
                     # Notify client (broadcast to all session subscribers)
                     await self._broadcast(session.session_id, {
                         "type": "tool_start",
+                        # The frame names its own session, like `turn_start` and
+                        # `done` beside it (issue #3191). Without it a client could
+                        # only use "the session this connection was opened for",
+                        # and a frame that reached the wrong connection — a
+                        # subscription that had moved — was indistinguishable from
+                        # the open session's own: its card was drawn in the wrong
+                        # transcript and never finished, because its `tool_end`
+                        # went to a different subscriber set.
+                        "session_id": session.session_id,
                         "request_id": req.id,
                         "tool_name": tc_name,
                         "tool_call_id": tc_id,
@@ -5534,6 +5570,11 @@ class EmrgServer:
                     # Notify client of result (broadcast to all session subscribers)
                     await self._broadcast(session.session_id, {
                         "type": "tool_end",
+                        # Same field as its start frame, and for the same reason:
+                        # the pair must be routable by the session each names, or a
+                        # client that received one of them cannot tell whose call
+                        # it describes (issue #3191).
+                        "session_id": session.session_id,
                         "request_id": req.id,
                         "tool_name": tc_name,
                         "tool_call_id": tc_id,

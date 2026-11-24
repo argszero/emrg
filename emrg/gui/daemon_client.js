@@ -1443,8 +1443,24 @@ function generateSessionId(seed) {
   return sid;
 }
 
+// 一帧属于哪个会话：帧自己说的算，只有它没说的时候才退回连接所在的会话。
+//
+// 桥把每一帧交给渲染层时都带一个 sid，而在此之前那个 sid 恒等于"这条连接是为哪个
+// 会话打开的"——于是任何到达这条连接的别的会话的帧，都与打开会话自己的帧无法区分
+// （issue #3191：A 的工具卡画进 B 的对话里，且永远转下去，因为它的 start 到了而
+// end 去了另一组订阅者）。
+//
+// 回退不是宽容，是兼容：`turn_start`、`turn_progress`、`done`、`tool_start`、
+// `tool_end` 都带 `session_id`，但一条来自更早 daemon 的帧不带，那时退回连接会话是
+// 唯一能做的事——也正是这层回退让"帧没带"与"帧带了另一个"必须分开判。
+function frameSessionId(data, fallback) {
+  const named = data && typeof data === "object" ? data.session_id : "";
+  return typeof named === "string" && named ? named : fallback;
+}
+
 module.exports = {
   DaemonClient, generateSessionId, isSessionId, pickSessionCwd,
+  frameSessionId,
   TOKEN_FILE, MAX_PAYLOAD, EMRGD_PORT, EMRGD_START_ERR,
   installedPrefix, installedPython, installedPythonPath,
 };

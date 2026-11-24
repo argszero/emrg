@@ -404,3 +404,23 @@ test("#3172: 「重启生效」用的是安装树自己的解释器，不是宿�
     );
   }
 });
+
+test("bridge: 每帧按它自报的会话投递（issue #3191）", () => {
+  // 桥是 daemon 帧进入渲染层的唯一通道，而这一层没有运行时测试覆盖（renderer 测试
+  // 全部 mock window.emrg）。渲染层按 evt.sid 归档，所以这里若恒填连接会话，一帧
+  // 到达错误连接时就无法与打开会话自己的帧区分——A 的工具卡画进 B 的对话，且永远
+  // 转下去（start 到了、end 去了另一组订阅者）。
+  const mainSrc = read("main.js");
+  assert.ok(
+    /sid:\s*frameSessionId\(\s*data\s*,\s*sid\s*\)/.test(mainSrc),
+    "main.js 的 daemon→renderer 桥必须以 frameSessionId(data, sid) 作为 sid"
+  );
+  // 规则只许有一个家：main.js 自己拼一遍就会与 daemon_client 的那份分叉，而行为
+  // 单测量的是 daemon_client 那份。
+  const calls = mainSrc.match(/function frameSessionId\(/g) || [];
+  assert.equal(
+    calls.length,
+    0,
+    "frameSessionId 必须在 daemon_client.js 里定义一次，main.js 只调用它"
+  );
+});

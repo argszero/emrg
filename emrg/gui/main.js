@@ -13,7 +13,7 @@ const { pathToFileURL } = require("url");
 const { spawn } = require("child_process");
 const crypto = require("crypto");
 const { parse: parseToml, stringify: stringifyToml } = require("smol-toml");
-const { generateSessionId, isSessionId, pickSessionCwd, installedPython, installedPythonPath } = require("./daemon_client");
+const { generateSessionId, isSessionId, pickSessionCwd, frameSessionId, installedPython, installedPythonPath } = require("./daemon_client");
 const { ConnManager } = require("./conn-manager");
 const {
   guiStatePath,
@@ -1558,7 +1558,13 @@ vision = false
         if (win && !win.isDestroyed()) {
           // 主动关闭（切走/删除）不触发断线横幅——真断连/daemon 重启照常转发
           if (type === "disconnected" && conn._intentionalClose) return;
-          win.webContents.send("emrg:event", { type, data, sid });
+          // 帧自报的会话优先（issue #3191）：这条连接只该收到它订阅会话的帧，但
+          // 订阅曾经会被一个指向别的会话的查询搬走，那时到达的帧与自己的帧形状完
+          // 全相同。渲染层按 sid 归档，所以这里若恒填连接会话，那张工具卡就画进
+          // 了错误的对话。帧没带 `session_id` 时才退回连接所在的会话。
+          win.webContents.send("emrg:event", {
+            type, data, sid: frameSessionId(data, sid),
+          });
         }
       });
       // 打开会话时 daemon 的那份快照（issue #2982）。上面的桥是**现在**才挂上的，

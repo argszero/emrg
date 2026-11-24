@@ -66,7 +66,7 @@ Module._load = function (request, parent, isMain) {
   if (request === "ws") return MockWs;
   return origLoad.apply(this, arguments);
 };
-const { DaemonClient, generateSessionId, isSessionId, pickSessionCwd, TOKEN_FILE, EMRGD_PORT, EMRGD_START_ERR, installedPrefix, installedPython, installedPythonPath } = require("../daemon_client.js");
+const { DaemonClient, generateSessionId, isSessionId, pickSessionCwd, frameSessionId, TOKEN_FILE, EMRGD_PORT, EMRGD_START_ERR, installedPrefix, installedPython, installedPythonPath } = require("../daemon_client.js");
 let tmpHome = null;
 let origHome = null;
 let origUserProfile = null;
@@ -2379,4 +2379,26 @@ test("issue #3103：五条回包真的被等待它的调用方认领", async () 
     const got = await p; // 认领不到就在这里等到 2000 ms 后 reject
     assert.strictEqual(got.type, frame.type, `${cmd} 等的是 ${frame.type}`);
   }
+});
+
+// ── 帧自报的会话优先（issue #3191）─────────────────────────────────
+//
+// 桥把每一帧交给渲染层时都带一个 sid，渲染层按它归档。此前那个 sid 恒等于「这条
+// 连接是为哪个会话打开的」：订阅会被一个指向别的会话的查询搬走，之后到达的帧形状
+// 与自己的帧完全相同 ⇒ A 的工具卡画进 B 的对话。帧自报的 session_id 优先，只有帧
+// 没说的时候才退回连接会话。
+test("frameSessionId: 帧自报的 session_id 胜过连接所在的会话", () => {
+  assert.equal(frameSessionId({ session_id: "s-b" }, "s-a"), "s-b");
+});
+
+test("frameSessionId: 帧没说会话时退回连接会话（旧 daemon 的帧）", () => {
+  assert.equal(frameSessionId({ type: "done" }, "s-a"), "s-a");
+  assert.equal(frameSessionId({ session_id: "" }, "s-a"), "s-a");
+  assert.equal(frameSessionId(null, "s-a"), "s-a");
+  assert.equal(frameSessionId(undefined, "s-a"), "s-a");
+});
+
+test("frameSessionId: 非字符串不是会话名——不能让一帧被投到别处", () => {
+  assert.equal(frameSessionId({ session_id: 42 }, "s-a"), "s-a");
+  assert.equal(frameSessionId({ session_id: { id: "x" } }, "s-a"), "s-a");
 });

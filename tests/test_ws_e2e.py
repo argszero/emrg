@@ -1283,14 +1283,16 @@ class TestWSBroadcast:
                     ws_a = await connect_to_server()
                     ws_b = await connect_to_server()
                     try:
-                        # B subscribes to the session first (any message carrying
-                        # session_id triggers the subscription in the read loop).
+                        # B subscribes to the session first. Opening it is what makes a
+                        # connection a target for its broadcasts; a *query* naming a
+                        # session is answered and leaves the subscription where it was
+                        # (issue #3191), so the attach is spelled as an attach.
                         await ws_b.send(json.dumps({
-                            "type": "list_history",
+                            "type": "resume_session",
                             "session_id": "s_bcast",
                             "cwd": str(cwd),
                         }))
-                        await asyncio.wait_for(ws_b.recv(), timeout=5)  # history_list
+                        await asyncio.wait_for(ws_b.recv(), timeout=5)  # resume_result
                         task = {
                             "type": "task",
                             "id": "t-bcast",
@@ -1539,7 +1541,7 @@ class TestWSBroadcast:
                     try:
                         for w in (ws_a, ws_b):
                             await w.send(json.dumps({
-                                "type": "list_history",
+                                "type": "resume_session",
                                 "session_id": "s_unsub",
                                 "cwd": str(cwd),
                             }))
@@ -3110,13 +3112,17 @@ class TestWSHistoryRecords:
                     asker = await connect_to_server()
                     watcher = await connect_to_server()
                     try:
-                        # Subscribing is what the read loop records: any frame naming
-                        # the session does it, and this one is answered by a pong.
+                        # Subscribing is what the read loop records, and only a message
+                        # whose purpose is to attach this connection may do it (issue
+                        # #3191): opening the session is that message, and it is
+                        # answered by a `resume_result`.
                         for ws in (asker, watcher):
                             await ws.send(json.dumps({
-                                "type": "ping", "session_id": sid, "cwd": str(cwd),
+                                "type": "resume_session",
+                                "session_id": sid,
+                                "cwd": str(cwd),
                             }))
-                            await _drain(ws, "pong")
+                            await _drain(ws, "resume_result")
 
                         await asker.send(json.dumps({
                             "type": "rewind_session", "session_id": sid,

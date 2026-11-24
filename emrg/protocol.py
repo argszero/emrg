@@ -97,6 +97,13 @@ class ToolStart:
     tool_call_id: str = ""
     arguments: dict = field(default_factory=dict)
     intent: str = ""
+    #: Which session this call belongs to — the value `turn_start` carries in the
+    #: same stream, so a client routes the card by the frame rather than by the
+    #: connection it arrived on (issue #3191). Absent on an older frame ⇒ `""`,
+    #: which a client reads as "this frame names no session" and falls back to the
+    #: connection's own; that fallback is why the field had to exist for a frame
+    #: that reached the wrong connection to be tellable apart at all.
+    session_id: str = ""
     #: Which call of its batch this is, as a finished string — `"(2/3) "` — or `""`
     #: when the response issued a single call. Composed by the daemon
     #: (`daemon._tool_call_labels`) and printed verbatim by every client: a client
@@ -121,6 +128,7 @@ class ToolStart:
             intent=d.get("intent", ""),
             call_label=d.get("call_label", ""),
             started_at=d.get("started_at", 0.0),
+            session_id=d.get("session_id", ""),
         )
 
 
@@ -132,6 +140,9 @@ class ToolEnd:
     tool_call_id: str = ""
     content: str = ""
     error: bool = False
+    #: The same session its start frame named (issue #3191). `""` when absent, for
+    #: a record or frame older than the field.
+    session_id: str = ""
 
     @classmethod
     def from_dict(cls, d: dict) -> ToolEnd:
@@ -141,6 +152,7 @@ class ToolEnd:
             tool_call_id=d.get("tool_call_id", ""),
             content=d.get("content", ""),
             error=d.get("error", False),
+            session_id=d.get("session_id", ""),
         )
 
 
