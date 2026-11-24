@@ -88,7 +88,7 @@ EXPECTED_H2 = [
     "## Rants",
     "## Your own prompt",
     "## Hard limits",
-    "## Plan before every call",
+    "## Plan before every call (#RULE_PBEC)",
 ]
 
 #: The two permanent principles, quoted from the charter — `MANIFESTO.md` 第四条附则二 and

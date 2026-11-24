@@ -763,7 +763,20 @@ def _tool_call_labels(tool_calls) -> list[str]:
     return [f"({index}/{total}) " for index in range(1, total + 1)]
 
 
-BATCH_CALL_NUDGE = "batch call"
+#: The identifier the reminder and the prompt share. A **locator**, not an abbreviation: the model is
+#: told where to go and read the rule, so nothing here has to compress a rule into a phrase — which is
+#: what `batch call` was, and a name the prompt never used left the model inventing a meaning for it
+#: and quoting its own invention back (reported 2026-11-24). Taken from the rule's own title rather
+#: than its position, because inserting a section above a rule renumbers an ordinal without telling
+#: either carrier it moved.
+BATCH_CALL_RULE_TAG = "#RULE_PBEC"
+
+#: The reminder's whole body. It names the tag and says what it is: a system turn that opens with an
+#: instruction and no subject reads as one more thing the host said.
+BATCH_CALL_NUDGE = (
+    f'reminder: see "{BATCH_CALL_RULE_TAG}" in the system prompt; '
+    "don't mention this reminder."
+)
 
 
 def _with_batch_call_nudge(
@@ -794,12 +807,16 @@ def _with_batch_call_nudge(
     by reopening the session, and cannot accumulate — every round derives its
     request from the same list, so each carries exactly one, or none.
 
-    Exactly one call is the condition, not "fewer than two": a round that issued
-    none took no action to batch, and a round that already issued several did the
-    thing being asked for.
+    The condition is the rule's own range, not a narrower guess at it: a round that
+    issued no call took no action to batch, and a round that reached five already
+    has the shape the rule asks for. One, two, three or four is a sub-five round —
+    the round the rule requires to answer for itself — so it is exactly the round a
+    reminder is owed to. "Exactly one" withheld it from two to four, which are
+    sub-five too, so the reminder missed most of the rounds the rule covers
+    (reported 2026-11-24).
     """
     request = [dict(m) for m in messages]
-    if previous_round_tool_calls == 1:
+    if 0 < previous_round_tool_calls < 5:
         request.append({"role": "system", "content": BATCH_CALL_NUDGE})
     return request
 
@@ -5588,8 +5605,9 @@ class EmrgServer:
                     })
 
                 # Issue #2683: this response's own count, recorded for the next
-                # request only. The reminder is about a single call, so a batch
-                # of two or more clears it as surely as an empty round does.
+                # request only. The reminder is owed to a round below the rule's
+                # shape, so five or more clears it as surely as an empty round
+                # does.
                 previous_round_tool_calls = len(openai_tool_calls)
 
                 # Log LLM request for this round (before continuing).

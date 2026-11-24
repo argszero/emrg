@@ -92,9 +92,18 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SYSTEM_PROMPT = REPO_ROOT / "emrg" / "server" / "prompts" / "system.j2"
 
-#: The section the rule owns, as its whole heading line. It is the file's last section, and that is a
-#: property this file asserts rather than a fact about today's layout.
-RULE_SECTION = "## Plan before every call"
+#: The section the rule owns, as its whole heading line — the tag included. It is the file's last
+#: section, and that is a property this file asserts rather than a fact about today's layout.
+#:
+#: `(#RULE_PBEC)` is the rule's cross-carrier identity: the daemon's reminder for a sub-five round names
+#: it and nothing else, so this heading is where a reader who follows that reminder lands. It is taken
+#: from the rule's own title, not from its position, because an ordinal renumbers the first time a
+#: section above it is inserted and neither carrier would notice. `tests/test_batch_call_nudge.py`
+#: reads the other side of the pair.
+RULE_SECTION = "## Plan before every call (#RULE_PBEC)"
+
+#: The tag on its own, so a test can name the locator rather than the whole line.
+RULE_TAG = "#RULE_PBEC"
 
 #: The rule's identity: the bullet's lead phrase. Written as the phrase a rewrite would keep, so a second
 #: copy anywhere in the template is visible as a count of 2 rather than as longer prose.
@@ -309,6 +318,38 @@ def test_the_rule_is_its_own_section_and_the_files_last_block() -> None:
             f"in {name} the rule is still a bullet of `{FORMER_SECTION}`: it was removed from that list "
             "because a condition on every round is not one habit beside seven others"
         )
+
+
+def test_the_rule_carries_a_tag_the_reminder_can_point_at() -> None:
+    """The rule's cross-carrier identity: one tag, on the heading line, and nowhere else.
+
+    Issue #3193. A reminder that names a rule has to name something the reader can find, and the tag is
+    the whole of that promise — the model is told `#RULE_PBEC` and reaches the rule by it. Four ways the
+    pair comes apart, so four readings: deleted (no heading carries it), moved off the heading into the
+    body (a reader following the reminder lands on a section whose title says nothing), stated twice (two
+    spellings leave the reader choosing), and left in the template while the rule it named was replaced
+    (a locator resolving to the wrong subject). The count is over the whole file because a locator that
+    also appears in prose is no longer unambiguous; the render is read because a marker inside a
+    conditional nobody renders locates a section the model never receives.
+    """
+    text = SYSTEM_PROMPT.read_text(encoding="utf-8")
+    assert text.count(RULE_TAG) == 1, (
+        f"`{RULE_TAG}` appears {text.count(RULE_TAG)} times in system.j2: it locates one section, so a "
+        "second spelling — or none — leaves the reminder pointing at something a reader cannot resolve"
+    )
+    tagged = [heading for heading in re.findall(r"^## .*$", text, re.MULTILINE)
+              if RULE_TAG in heading]
+    assert tagged == [RULE_SECTION], (
+        f"`{RULE_TAG}` is not on the rule's heading line: found {tagged}, expected {[RULE_SECTION]}"
+    )
+    assert "five or more calls" in _rule_block(text), (
+        "the tagged section no longer states the shape the reminder is about: the tag outlived the rule "
+        "it names, which is a locator resolving to the wrong subject"
+    )
+    assert RULE_TAG in _render_system_prompt(), (
+        "the tag is in the template and not in the rendered prompt: a marker inside a conditional nobody "
+        "renders locates a section the model never receives"
+    )
 
 
 def test_the_retired_bullet_is_gone_and_not_shadowed() -> None:

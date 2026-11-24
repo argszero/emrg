@@ -62,7 +62,7 @@ RULE_SECTION = "## Before work that costs the host time"
 
 #: The section the round-cost rule owns. It must stay the file's last block, so this section may not
 #: sit after it — `tests/test_several_calls_rule_reach.py` asserts that position from its own side.
-ROUND_RULE_SECTION = "## Plan before every call"
+ROUND_RULE_SECTION = "## Plan before every call (#RULE_PBEC)"
 
 #: The section the rule may not be a bullet of.
 HABITS_SECTION = "## How you work"
