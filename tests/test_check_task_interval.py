@@ -77,11 +77,27 @@ def _table(tmp_path: Path, records: list[dict]) -> Path:
 # --------------------------------------------------------------------------- the four verdicts
 
 
-def test_an_exact_division_is_not_a_fault_whatever_the_block_writes():
-    """86400 / (5 + 1) is exact, so the word `floor` cannot change the answer."""
+def test_an_exact_division_the_block_states_is_not_a_fault():
+    """86400 / (5 + 1) is exact and the block states it, so the word `floor` cannot decide."""
     n, stated, expected, verdict, _ = mod.classify("n = 5 ... interval = floor(86400 / (n+1)) ... interval = 14400")
     assert (n, stated, expected) == (5, 14400, 14400)
     assert verdict == mod.EVEN
+
+
+def test_an_exact_division_the_block_does_not_state_is_not_agreement():
+    """The division being exact settles the rounding, not the pace.
+
+    86400 / 12 is 7200 exactly. A block that states 3600 states half the allowance, which
+    spends the ledger's attempts early - the fault the template's sentence is about - so
+    reading the exactness alone as agreement would call it clean.
+    """
+    _, stated, expected, verdict, why = mod.classify("n = 11 ... interval = 7200")
+    assert (stated, expected, verdict) == (7200, 7200, mod.EVEN)
+
+    _, stated, expected, verdict, why = mod.classify("n = 11 ... interval = 3600")
+    assert (stated, expected) == (3600, 7200)
+    assert verdict == mod.OTHER, "an exact division the block does not state is not agreement"
+    assert "another pace" in why
 
 
 def test_the_floor_of_a_non_exact_division_is_the_defect():
@@ -254,6 +270,22 @@ def test_a_truncating_block_is_exit_1_and_names_the_round_up(tmp_path, capsys):
     assert code == mod.EXIT_SHORT
     assert "one second short" in out
     assert "rounds the interval UP" in out
+
+
+def test_the_summary_counts_an_unstated_exact_division_as_another_source(tmp_path, capsys):
+    """The run's own counting, not just the classification: 86400 / 12 is 7200 exactly."""
+    path = _table(
+        tmp_path,
+        [
+            _record("states-it", "n = 11 ... interval = 7200"),
+            _record("states-half", "n = 11 ... interval = 3600"),
+        ],
+    )
+    code = mod.main(["--tasks", str(path)])
+    out = capsys.readouterr().out
+    assert code == mod.EXIT_CLEAN, "a pace from another source is not a fault"
+    assert "1 divide evenly" in out and "1 from another source" in out
+    assert "2 divide evenly" not in out, "the exactness alone is not agreement"
 
 
 def test_a_top_level_block_renders_when_config_carries_none(tmp_path):
