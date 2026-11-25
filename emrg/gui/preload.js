@@ -69,6 +69,9 @@ const api = {
   showBrowser: (payload) => ipcRenderer.invoke("emrg:showBrowser", payload),
   hideBrowser: () => ipcRenderer.invoke("emrg:hideBrowser"),
   browserNavigate: (payload) => ipcRenderer.invoke("emrg:browserNavigate", payload),
+  // issue #3229：第五个通道——重读当前地址。前四个都改不了屏幕上那一页，所以文件在磁盘上改了
+  // 之后，界面里没有任何一处可以点。
+  browserReload: (payload) => ipcRenderer.invoke("emrg:browserReload", payload),
   browserBounds: (payload) => ipcRenderer.invoke("emrg:browserBounds", payload),
   // `{ sessionId }` 决定 daemon 读哪个会话的技能树 —— 缺了参数，主进程只能当"没有会话"，
   // 于是每个会话看到的都是同一个根（issue #2569 判据 2）。

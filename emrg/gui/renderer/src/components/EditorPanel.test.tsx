@@ -916,6 +916,7 @@ describe("HTML tab 的浏览器模式（issue #3214）", () => {
       show: vi.fn(async (_payload: { path: string }) => answer),
       hide: vi.fn(async (_payload?: undefined) => ({ ok: true })),
       navigate: vi.fn(async (_payload: { target: string }) => answer),
+      reload: vi.fn(async (_payload: { target?: string }) => answer),
       bounds: vi.fn(
         async (_payload: { x: number; y: number; width: number; height: number }) => ({ ok: true }),
       ),
@@ -924,6 +925,7 @@ describe("HTML tab 的浏览器模式（issue #3214）", () => {
       showBrowser: calls.show,
       hideBrowser: calls.hide,
       browserNavigate: calls.navigate,
+      browserReload: calls.reload,
       browserBounds: calls.bounds,
     };
     return calls;
@@ -1020,5 +1022,26 @@ describe("HTML tab 的浏览器模式（issue #3214）", () => {
     fireEvent.click(screen.getByTestId("editor-toggle-browser"));
     await waitFor(() => expect(screen.getByTestId("editor-browser")).toBeInTheDocument());
     expect(screen.queryByTestId("editor-browser-error")).toBeNull();
+  });
+
+  it("「重载」要的是把屏幕上的那一页再读一次，不交地址栏里那段没生效的文本（issue #3229）", async () => {
+    const calls = stubBridge();
+    const { open } = renderPanel();
+    open("/p/emrg/index.html");
+    await waitFor(() => expect(screen.getByTestId("editor-toggle-browser")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("editor-toggle-browser"));
+    await waitFor(() => expect(screen.getByTestId("editor-address")).toBeInTheDocument());
+    // 地址栏里已经打了一段、但没回车：重载要读的是正在显示的那一页，不是这段还没生效的文本
+    fireEvent.change(screen.getByTestId("editor-address"), { target: { value: "example.com" } });
+
+    fireEvent.click(screen.getByTestId("editor-browser-reload"));
+    // 不带目标：屏幕上是什么，是主进程知道的事
+    await waitFor(() => expect(calls.reload).toHaveBeenCalledWith({}));
+    expect(calls.navigate).not.toHaveBeenCalled();
+
+    // 重读失败也要有话说，不能只是原地不动
+    calls.reload.mockResolvedValueOnce({ ok: false, error: "invalid" });
+    fireEvent.click(screen.getByTestId("editor-browser-reload"));
+    await waitFor(() => expect(screen.getByTestId("editor-browser-error")).toBeInTheDocument());
   });
 });

@@ -164,6 +164,7 @@ interface BrowserBridge {
   browserNavigate?: (
     payload: { target: string },
   ) => Promise<{ ok: boolean; error?: string } | null>;
+  browserReload?: (payload: { target?: string }) => Promise<{ ok: boolean; error?: string } | null>;
   browserBounds?: (payload: {
     x: number;
     y: number;
@@ -739,6 +740,16 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
     setBrowserError(answer?.ok === false ? answer.error ?? "invalid" : null);
   }, [address]);
 
+  /** The bar's reload: re-read the address the view is showing (issue #3229). No argument —
+   *  what is on screen is the main process's to know, and asking it to re-read the text in the
+   *  bar would reload whatever was typed but never opened. */
+  const reloadBrowserPage = useCallback(async (): Promise<void> => {
+    const pending = browserBridge()?.browserReload?.({});
+    if (!pending) return;
+    const answer = await pending;
+    setBrowserError(answer?.ok === false ? answer.error ?? "invalid" : null);
+  }, []);
+
   const toggle = useCallback(
     (patch: { wrap?: boolean; minimap?: boolean }): void => {
       prefs.current.set(sid, patch);
@@ -1037,6 +1048,18 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
             onClick={() => void goToAddress()}
           >
             {t("editor.go")}
+          </button>
+          {/* Re-reading the page is the whole reason this mode exists beside an editor
+              (issue #3229): without it, a file edited on disk is only visible after the GUI
+              restarts. Same verb as the editor's own reload, because it is the same act. */}
+          <button
+            type="button"
+            className="editor-toggle"
+            data-testid="editor-browser-reload"
+            title={t("editor.reload")}
+            onClick={() => void reloadBrowserPage()}
+          >
+            {t("editor.reload")}
           </button>
         </div>
       ) : null}

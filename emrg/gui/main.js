@@ -9,7 +9,7 @@ const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, session, shell, We
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { pathToFileURL } = require("url");
+const { pathToFileURL, fileURLToPath } = require("url");
 const { spawn } = require("child_process");
 const crypto = require("crypto");
 const { parse: parseToml, stringify: stringifyToml } = require("smol-toml");
@@ -33,6 +33,7 @@ const {
   browserRect,
   certificateResult,
   newWindowTarget,
+  pageStillCurrent,
   permissionGranted,
   saveDialogOptions,
 } = require("./browser-policy");
@@ -156,7 +157,8 @@ function main() {
   let browserView = null;
   let browserAdded = false;
   let browserVisible = false;
-  let browserUrl = null;        // 当前页面地址（同一个地址不重新 load）
+  let browserUrl = null;        // 当前页面地址（同一个地址、文件也没变，就不重新 load）
+  let browserMtimeMs = null;    // 那个地址是本地文件时，load 它那一刻的 mtime（issue #3229）
   let browserBox = null;        // renderer 量出的那一格（CSS px）
 
   // ── 窗口 ────────────────────────────────────────────────
@@ -1140,6 +1142,9 @@ vision = false
       return { ok: true };
     });
     ipcMain.handle("emrg:browserNavigate", async (_e, { target } = {}) => navigateBrowser(target));
+    // issue #3229：第五个通道。前四个都改不了屏幕上的页面，于是「磁盘上改了、浏览器里还是旧的」
+    // 在界面上无处可点。
+    ipcMain.handle("emrg:browserReload", async (_e, { target } = {}) => reloadBrowser(target));
     ipcMain.handle("emrg:browserBounds", async (_e, box = {}) => {
       browserBox = box;
       updateBrowserBounds();
@@ -2227,20 +2232,67 @@ vision = false
     browserView.setVisible(true);
   }
 
-  /** 把同一个地址装进视图。地址没变就不重新 load——这就是「切回来页面还在原处」。 */
-  async function loadBrowserUrl(target) {
+  /** 本地文件那一刻的 mtime；不是文件、读不到，都答 null（答案只用来判断「还是不是那一份」）。 */
+  function fileMtimeMs(url) {
+    if (typeof url !== "string" || !/^file:/i.test(url)) return null;
     try {
-      const view = ensureBrowserView();
-      attachBrowserView(view);
-      if (browserUrl !== target) {
-        await view.webContents.loadURL(target);
-        browserUrl = target;
-      }
+      return fs.statSync(fileURLToPath(url)).mtimeMs;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 把地址装进视图。同一个地址、磁盘上那份文件也没变，就不重新 load——「切回来页面还在原处」。
+   * 文件变了就必须重读（issue #3229）：本地面板存在的理由就是边改边看，视图里那一份是旧的，
+   * 面板就白开了。判断在 browser-policy.js 里，这里只把 mtime 交上去。
+   */
+  async function loadBrowserUrl(target) {
+    const view = ensureBrowserView();
+    attachBrowserView(view);
+    // 屏幕上现在是什么。一次失败的导航以前会留下一个已挂上、空白的视图，把本来能用的页面
+    // 一起带走（issue #3229），所以失败时要能放回去。
+    const previous = browserUrl;
+    const mtimeMs = fileMtimeMs(target);
+    if (pageStillCurrent({ target, loaded: browserUrl, loadedMtimeMs: browserMtimeMs, mtimeMs })) {
+      return { ok: true, url: target };
+    }
+    try {
+      await view.webContents.loadURL(target);
+      browserUrl = target;
+      browserMtimeMs = mtimeMs;
       return { ok: true, url: target };
     } catch (e) {
       logger.warn(`[gui] browser load failed: ${e.message}`);
+      if (previous && previous !== target) {
+        try {
+          await view.webContents.loadURL(previous);
+        } catch (restoreError) {
+          logger.warn(`[gui] browser restore failed: ${restoreError.message}`);
+        }
+      }
       return { ok: false, error: String(e.message || "load_failed") };
     }
+  }
+
+  /**
+   * 重载当前地址（issue #3229）：说「重载」的人要的就是再读一次，所以「同一个地址不再 load」
+   * 这条规则在这里被显式绕过。本地文件绕开缓存，改过的内容才会出现。
+   */
+  async function reloadBrowser(raw) {
+    if (!browserView || !browserUrl) return { ok: false, error: "nothing_loaded" };
+    let target = browserUrl;
+    if (typeof raw === "string" && raw.trim()) {
+      const parsed = addressTarget(raw);
+      if (!parsed.ok) return { ok: false, error: parsed.error };
+      target = parsed.url;
+    }
+    if (target === browserUrl) {
+      browserView.webContents.reloadIgnoringCache();
+      browserMtimeMs = fileMtimeMs(target);
+      return { ok: true, url: target };
+    }
+    return loadBrowserUrl(target);
   }
 
   /** 打开（或切回）浏览器 tab：`url` 优先，否则是这个 HTML 文件的 file:// 地址。 */
@@ -2348,6 +2400,7 @@ vision = false
     browserAdded = false;
     browserVisible = false;
     browserUrl = null;
+    browserMtimeMs = null;
     browserBox = null;
     if (process.platform !== "darwin") app.quit();
   });
