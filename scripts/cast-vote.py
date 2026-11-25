@@ -621,7 +621,7 @@ def revision_without_tree_refusal(body: str, pr: int) -> str:
         "\n"
         f"Run `{RUNNER} scripts/check-merge-plan-suite.py {pr}` and name the tree it "
         "reports beside the revision, or name no revision at all if the approval is not "
-        "about a landing tree.",
+        "about a landing tree."
     )
 
 

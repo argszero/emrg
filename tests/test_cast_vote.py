@@ -1800,6 +1800,16 @@ def test_an_approval_that_cites_a_revision_must_name_the_tree_it_lands(
     assert "name no revision at all" in err, (
         "an approval that is not about a landing tree must be told the way out"
     )
+    # The return value is printed with an f-string, so its **type** is part of what the
+    # voter reads: a parenthesised return whose last line carries a trailing comma is a
+    # one-element tuple, and `print(f"refusing to post: {refusal}")` then hands the voter
+    # `('the body approves, …',)` — every substring assertion below still passes, because
+    # a substring of the sentence is a substring of its repr. Measured on this clause
+    # before this line existed: `revision_without_tree_refusal` answered a `tuple` while
+    # its annotation said `str`. The seam is the printed line, not the sentence.
+    assert "refusing to post: the body approves" in err, (
+        f"the refusal must print as one sentence, not a repr: {err.splitlines()[:2]!r}"
+    )
 
 
 def test_a_rejection_that_cites_a_revision_is_posted_without_a_tree(
