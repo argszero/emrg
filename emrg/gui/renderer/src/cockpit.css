@@ -1201,12 +1201,36 @@ body.col-resizing * {
   padding: 0 8px;
   display: flex;
   align-items: center;
+  gap: 8px;
   border-bottom: 1px solid var(--border);
   color: var(--text-3);
   font-size: var(--fs-small);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 「目录」加一个刷新：标题让位，按钮常驻（issue #3226）。每组一条工具条仍不回来。 */
+.left-trees-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.left-trees-refresh {
+  flex: none;
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.left-trees-refresh:hover,
+.left-trees-refresh:focus-visible {
+  color: var(--text-1);
 }
 
 /* 唯一的滚动条在这里：三组共用一条，滚动时整棵树是一体的。 */

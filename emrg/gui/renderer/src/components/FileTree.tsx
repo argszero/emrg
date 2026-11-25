@@ -65,6 +65,9 @@ export type LoadDir = (path: string) => Promise<{ entries: TreeEntry[]; truncate
  */
 export type OpenFile = (req: { path: string; root: string; pin: boolean }) => void;
 
+/** The tree's menu ids: the shared pair, plus re-reading the directory it was opened on. */
+type FileTreeMenuId = ContextMenuId | "refresh";
+
 export interface FileTreeProps {
   /** Absolute path the tree is rooted at; `null` = no session to root at. */
   root: string | null;
@@ -91,6 +94,12 @@ export interface FileTreeProps {
   expanded?: Set<string>;
   /** The whole next set, whenever a folder is opened, closed, or all collapsed. */
   onExpandedChange?: (next: Set<string>) => void;
+  /**
+   * A counter the panel bumps when the host asks for a re-read (issue #3226): the tree
+   * re-reads its root and every level already loaded, keeping which folders are open and
+   * which row is selected. Omitted = this tree reads only when its root changes.
+   */
+  refreshKey?: number;
 }
 
 /** The glyph each kind draws. The kind is the contract; the character is decoration. */
@@ -224,6 +233,7 @@ export function FileTree({
   expanded,
   onExpandedChange,
   onOpenFile,
+  refreshKey = 0,
 }: FileTreeProps) {
   const { t } = useI18n();
   const [dirs, setDirs] = useState<DirMap>({});
@@ -305,6 +315,22 @@ export function FileTree({
     // event this effect answers.
   }, [root]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // A refresh the panel asked for (issue #3226). The tree re-reads its root and every
+  // level already on screen, so a file written, renamed or deleted since the last read
+  // appears — and nothing else moves: the open folders, the selected row and the rows
+  // stay as they are rather than being cleared and drawn again. The counter is what makes
+  // a second refresh a second event; the same request read twice would otherwise be one.
+  const refreshSeen = useRef(refreshKey);
+  useEffect(() => {
+    if (!root) return;
+    if (refreshKey === refreshSeen.current) return;
+    refreshSeen.current = refreshKey;
+    void read(root);
+    for (const path of Object.keys(dirs)) {
+      if (path !== root) void read(path);
+    }
+  }, [refreshKey, root, dirs, read]);
+
   const rows = useMemo(() => rowsFor(root, dirs, openSet), [root, dirs, openSet]);
 
   // An open folder is a promise that its children are drawn, and the listings behind
@@ -383,10 +409,12 @@ export function FileTree({
     }
   };
 
-  const pick = (id: ContextMenuId): void => {
+  const pick = (id: FileTreeMenuId): void => {
     const path = menu?.path;
     if (!path) return;
-    if (id === "copy") void copyPath(path);
+    // One level, so a single directory answers without rebuilding the panel (#3226).
+    if (id === "refresh") void read(path);
+    else if (id === "copy") void copyPath(path);
     else void openWithDefault(path);
   };
 
@@ -406,6 +434,11 @@ export function FileTree({
         id: "open" as const,
         label: t("inspector.treeOpenDefault"),
         testId: `${testId}-menu-open`,
+      },
+      {
+        id: "refresh" as const,
+        label: t("inspector.treeRefresh"),
+        testId: `${testId}-menu-refresh`,
       },
     ],
     [copyState, t, testId],
@@ -605,6 +638,8 @@ export interface FileTreeRootsProps {
   onOpenFile?: OpenFile;
   /** Forwarded to every tree it draws; see `FileTreeProps.depthOffset`. */
   depthOffset?: number;
+  /** Forwarded to every tree it draws; see `FileTreeProps.refreshKey`. */
+  refreshKey?: number;
 }
 
 export function FileTreeRoots({
@@ -615,6 +650,7 @@ export function FileTreeRoots({
   onExpandedChange,
   onOpenFile,
   depthOffset,
+  refreshKey,
 }: FileTreeRootsProps) {
   const [own, setOwn] = useState<Set<string>>(() => new Set());
   const openSet = expanded ?? own;
@@ -648,6 +684,7 @@ export function FileTreeRoots({
         onExpandedChange={setOpenSet}
         onOpenFile={onOpenFile}
         depthOffset={depthOffset}
+        refreshKey={refreshKey}
       />
     );
   }
@@ -664,6 +701,7 @@ export function FileTreeRoots({
           expanded={openSet}
           onExpandedChange={setOpenSet}
           onOpenFile={onOpenFile}
+          refreshKey={refreshKey}
         />
       ))}
     </div>
