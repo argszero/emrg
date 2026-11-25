@@ -1265,6 +1265,7 @@ export function Shell() {
                 projectSessionsError={projectSessionsError}
                 currentSid={activeSid}
                 version={appState.currentVersion}
+                latestRelease={appState.latestRelease}
                 evolutionCount={appState.evolutionCount}
                 onViewAgentSessions={(p) => void loadProjectSessions(p)}
                 onSelectAgentSession={(p, sid) => void selectProjectSession(p, sid)}

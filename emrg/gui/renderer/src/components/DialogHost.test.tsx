@@ -27,6 +27,9 @@ function appState(over: Partial<DaemonAppState> = {}): DaemonAppState {
     // the state a real renderer is in until a frame arrives (rant 2026-09-17T16:53:02).
     vision: null,
     currentVersion: "0.2.81",
+    // No on-demand release reading has reached this fixture: `null` is "never asked",
+    // which is what a window that has not pressed the button is holding (issue #3212).
+    latestRelease: null,
     evolutionCount: 115,
     sessions: [],
     openSessions: [],

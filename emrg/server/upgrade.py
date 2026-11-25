@@ -103,6 +103,11 @@ TICK_INTERVAL = 300
 INEFFECTIVE_ATTEMPT_BACKOFF_SECONDS = 30 * 60
 MAX_INEFFECTIVE_ATTEMPT_BACKOFF_SECONDS = 6 * 60 * 60
 CHECK_TIMEOUT_SECONDS = 10.0
+# How long an on-demand reading of the releases feed is reused before it is asked again
+# (issue #3212). The unauthenticated endpoint allows 60 requests an hour, and the reading
+# sits behind a button a host can press as often as they like — so the cache is not an
+# optimisation, it is what keeps the button from becoming the rate limit's cause.
+CHECK_CACHE_SECONDS = 300
 # Fixed upgrade session id — traceable, one session per upgrade.
 SESSION_ID = "emrg-upgrade"
 # How many pre-upgrade snapshots survive a prune, counted newest-first **by
@@ -354,6 +359,11 @@ class UpgradeManager:
         self._attempted_tag: Optional[str] = None
         self._attempted_at: float = 0.0
         self._ineffective_attempts = 0
+        # The last successful on-demand reading of the releases feed (issue #3212), as
+        # `{"tag", "version", "published_at", "checked_at"}`, or None for "never asked".
+        # In-memory by design: it caches an *answer*, and a daemon restart is a good
+        # reason to ask again rather than a reason to remember what was true before.
+        self._latest_reading: Optional[dict] = None
 
     # ── Public: called by the daemon every 5 minutes ──────────────────────
     async def tick(self) -> None:
@@ -467,12 +477,13 @@ class UpgradeManager:
         )
 
     # ── Target discovery ──────────────────────────────────────────────────
-    async def _find_target_tag(self) -> Optional[str]:
-        """Delay-filtered newest eligible release tag, or None.
+    async def _fetch_releases(self) -> Optional[list]:
+        """The releases feed, or ``None`` for a reading that could not be taken.
 
-        Network failure / non-200 / 429 → None (silent, retried next tick —
-        5-minute cadence is well below the unauthenticated 60/h rate limit,
-        no complex backoff needed).
+        Network failure, a non-200 and a body that is not a list are one answer here,
+        because every caller does the same thing with them: say nothing this round and ask
+        again later. Named once so the automatic path and the on-demand one (issue #3212)
+        cannot drift about what "could not read" means.
         """
         try:
             async with httpx.AsyncClient(
@@ -484,8 +495,20 @@ class UpgradeManager:
                 data = resp.json()
                 if not isinstance(data, list):
                     return None
+                return data
         except Exception:
             logger.debug("upgrade: releases fetch failed (retry next tick)", exc_info=True)
+            return None
+
+    async def _find_target_tag(self) -> Optional[str]:
+        """Delay-filtered newest eligible release tag, or None.
+
+        Network failure / non-200 / 429 → None (silent, retried next tick —
+        5-minute cadence is well below the unauthenticated 60/h rate limit,
+        no complex backoff needed).
+        """
+        data = await self._fetch_releases()
+        if data is None:
             return None
 
         cutoff = time.time() - self._config.delay_minutes * 60
@@ -505,6 +528,129 @@ class UpgradeManager:
                 best_tag = tag
                 best_ver = ver
         return best_tag
+
+    # ── On demand: what exists, not what may be installed (issue #3212) ───
+    async def check_latest(self, compare_to: str, *, force: bool = False) -> dict:
+        """The newest published release, and whether it is newer than ``compare_to``.
+
+        **Deliberately not gated on ``[update] enabled``.** That switch governs whether
+        this daemon installs a release by itself; it has never governed whether the host
+        may learn that one exists. The host who turned it off is exactly the host with no
+        other way to find out, so gating this reading on it would answer only the hosts who
+        do not need it.
+
+        **Deliberately not `_find_target_tag`.** That method answers "what may I install
+        now" and drops everything inside `delay_minutes`. This answers "what exists", so a
+        release still inside its window is reported: a host asking about the world is not
+        asking about the part this daemon has already cleared to install. That window is
+        the only difference between the two, and it is the point of the second method.
+
+        The reading is cached for `CHECK_CACHE_SECONDS`, and the cache holds the **remote
+        facts only** — `is_newer` is judged against `compare_to` on every call, so a
+        reading of "newer" cannot outlive the version it was about.
+
+        :param compare_to: the version to judge against, without a leading ``v``.
+        :param force: bypass the cache, for a caller with its own reason to re-ask.
+        :returns: a frame-shaped dict. ``ok`` is False for a reading that was **not taken**,
+            and such a failure is never stored: the next press should try again.
+        """
+        # `time.time`, not `_now()`: this instant is compared against a cache window *and*
+        # shown to the host as "when this was read", and a wall-clock number is the one
+        # both readers understand. A clock step costs at most one extra request.
+        now = time.time()
+        held = self._latest_reading
+        if (
+            held is not None
+            and not force
+            and now - held["checked_at"] < CHECK_CACHE_SECONDS
+        ):
+            return self._reading_frame(held, compare_to, fresh=False)
+
+        data = await self._fetch_releases()
+        if data is None:
+            # The last good reading is not replaced: "I could not ask" must not turn into
+            # "there is nothing", and must not lose an answer that was already right.
+            return self._no_reading(
+                "could not reach the releases endpoint", compare_to, held
+            )
+
+        best_tag: Optional[str] = None
+        best_ver: tuple = ()
+        best_published: Optional[str] = None
+        for rel in data:
+            if not isinstance(rel, dict):
+                continue
+            published_at = rel.get("published_at") or ""
+            if _published_epoch(published_at) is None:
+                continue  # no publish date: not a release this daemon can reason about
+            ver = parse_version(rel.get("tag_name") or "")
+            if not ver:
+                continue
+            if ver > best_ver:
+                best_tag, best_ver, best_published = rel.get("tag_name") or "", ver, published_at
+        if best_tag is None:
+            # An empty or unreadable list is not "you are current", and saying so would be
+            # the one answer a host would act on.
+            return self._no_reading(
+                "no released version could be read from the releases endpoint",
+                compare_to,
+                held,
+            )
+
+        self._latest_reading = {
+            "tag": best_tag,
+            "version": ".".join(str(n) for n in best_ver),
+            "published_at": best_published,
+            "checked_at": now,
+        }
+        return self._reading_frame(self._latest_reading, compare_to, fresh=True)
+
+    @staticmethod
+    def _no_reading(error: str, compare_to: str, held: Optional[dict]) -> dict:
+        """One failure as the answer to :meth:`check_latest`.
+
+        The last good `checked_at` rides along, because "last read 4 minutes ago" is the
+        useful fact when this attempt failed — a client can then say how stale what it
+        still shows has become.
+        """
+        return {
+            "ok": False,
+            "error": error,
+            "tag": None,
+            "version": None,
+            "published_at": None,
+            "checked_at": held["checked_at"] if held else None,
+            "cached": False,
+            "is_newer": False,
+            "compare_version": compare_to,
+        }
+
+    @staticmethod
+    def _reading_frame(held: dict, compare_to: str, *, fresh: bool) -> dict:
+        """One stored reading as the answer to :meth:`check_latest`.
+
+        Shared by the cache branch and the just-taken branch so a cached answer cannot
+        differ from the answer it cached.
+        """
+        return {
+            "ok": True,
+            "tag": held["tag"],
+            "version": held["version"],
+            "published_at": held["published_at"],
+            "checked_at": held["checked_at"],
+            "cached": not fresh,
+            "is_newer": is_newer(parse_version(held["tag"]), parse_version(compare_to)),
+            "compare_version": compare_to,
+        }
+
+    def last_reading(self) -> Optional[dict]:
+        """The last successful reading, for a client that has only just connected.
+
+        No network, ever: `pong` is answered on connect and must never wait on GitHub. A
+        daemon that has not been asked answers ``None``, which a client must read as "not
+        asked" rather than as "current".
+        """
+        return dict(self._latest_reading) if self._latest_reading else None
 
     # ── Local state ───────────────────────────────────────────────────────
     def _read_local_version(self) -> str:
