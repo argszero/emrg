@@ -119,12 +119,23 @@ test("a certificate error is left to Chromium, not accepted and not blanket-reje
 
 test("a download's dialog is pre-filled with the file's name and with no directory", () => {
   assert.deepStrictEqual(saveDialogOptions("report.zip"), { defaultPath: "report.zip" });
-  // Nothing to name → nothing pre-filled; the dialog is still the dialog's to ask.
-  assert.deepStrictEqual(saveDialogOptions(""), {});
-  assert.deepStrictEqual(saveDialogOptions(undefined), {});
-  // The one thing this must never carry: a directory that would make the write silent.
+  // The name comes from the response's Content-Disposition, so the page, not the person
+  // clicking Save, chose it: the last segment is the only part that can be a file's own name.
+  assert.deepStrictEqual(saveDialogOptions("../../evil.sh"), { defaultPath: "evil.sh" });
+  assert.deepStrictEqual(saveDialogOptions("dir/name.txt"), { defaultPath: "name.txt" });
+  assert.deepStrictEqual(saveDialogOptions("/etc/passwd"), { defaultPath: "passwd" });
+  assert.deepStrictEqual(saveDialogOptions("a\\..\\b.txt"), { defaultPath: "b.txt" });
+  // No file name holds a control character, and a newline is how one name becomes two.
+  assert.deepStrictEqual(saveDialogOptions("x\ny"), { defaultPath: "xy" });
+  assert.deepStrictEqual(saveDialogOptions("a\u0000b.zip"), { defaultPath: "ab.zip" });
+  assert.deepStrictEqual(saveDialogOptions("trailing\u007f.zip"), { defaultPath: "trailing.zip" });
+  // Nothing left to name → nothing pre-filled; the dialog is still the dialog's to ask.
+  for (const nothing of ["", "   ", "..", ".", "...", "/", "\\", "//", undefined, null, 42, {}]) {
+    assert.deepStrictEqual(saveDialogOptions(nothing), {}, `${JSON.stringify(nothing)} pre-filled a path`);
+  }
+  // The ordinary name must survive all of the above: a fix that strips everything fails here.
   assert.deepStrictEqual(Object.keys(saveDialogOptions("a.zip")), ["defaultPath"]);
-  assert.doesNotMatch(JSON.stringify(saveDialogOptions("a.zip")), /\//, "a path would choose for the user");
+  assert.doesNotMatch(JSON.stringify(saveDialogOptions("../../evil.sh")), /[\\/]/, "a path would choose for the user");
 });
 
 test("the view's box comes from the renderer's measurement, rounded", () => {
