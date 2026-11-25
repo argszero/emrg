@@ -135,11 +135,13 @@ describe("词典完整性守卫（防漂移）", () => {
   // 检查更新十条，中英各加一条 → 555 + 8 + 10 = 573。这个数是数合并后的字典量出来的。
   // 2026-11-25 rant 2026-11-25T11:10:45：HTML tab 的浏览器模式——开关、地址、地址提示、
   // 打开、空地址、地址打不开六条中英各加一条 → 573 + 6 = 579。
-  it("zh/en 各 579 个 key 且完全对齐", () => {
+  // 2026-11-25 issue #3221：十二个配置字段有了界面入口——十一个控件的名称与含义、两个分组
+  // 标题、一条间隔说明、一条拒绝原话，中英各加二十六条 → 579 + 26 = 605。
+  it("zh/en 各 605 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(579);
-    expect(enKeys.length).toBe(579);
+    expect(zhKeys.length).toBe(605);
+    expect(enKeys.length).toBe(605);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);

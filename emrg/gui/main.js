@@ -43,6 +43,8 @@ const { makeConfigPrivate } = require("./config_mode");
 const atpLogin = require("./atp_login");
 // 主题的唯一读写（issue #3013）：`[client] theme` 是唯一真源，面板上的 `system` 即 `auto`。
 const themeSetting = require("./theme_setting");
+// 配置字段清单（issue #3221）：`config-fields.json` 是唯一一份，本文件只照它校验、读回和落盘。
+const configFields = require("./config_fields");
 // 窗口标题的唯一组合规则（issue #3040）：main 进程只调它，绝不自己拼标题字符串。
 const { APP_NAME } = require("./window-title");
 const APP_VERSION = require("./package.json").version;
@@ -388,10 +390,18 @@ vision = false
     return true;
   }
 
+  // 走自定义控件的字符串键，从字段清单取，不再手写一份——手写白名单正是缺陷本身
+  // （issue #3221）：没被列出的键被静默丢掉，保存却报成功，于是表单说"已保存"而文件没动。
+  // `models` 下面有自己一段；`lang` 落在 `[gui]`、不是 `config.py` 的字段，也不在四节清单里。
+  const CUSTOM_STRING_IPC = configFields.FIELDS
+    .filter((f) => f.control === "custom" && f.widget !== "models")
+    .map((f) => f.ipc)
+    .concat(["lang"]);
+
   function validateConfig(c) {
     // 设计 §7.1：直接接收所需字段 + 基本类型检查（防写坏 config.toml 的健壮性，非安全设计）
     const out = {};
-    for (const k of ["apiKey", "baseUrl", "model", "theme", "lang"]) {
+    for (const k of CUSTOM_STRING_IPC) {
       if (c[k] !== undefined) out[k] = typeof c[k] === "string" ? c[k] : String(c[k]);
     }
     if (Array.isArray(c.models)) {
@@ -1515,12 +1525,26 @@ vision = false
         ...(m.model && m.model !== (m.name || "") ? { model: m.model } : {}),
         ...(m.vision !== undefined ? { vision: m.vision } : {}),
       }));
+      // issue #3221：表单里每个自动控件都照这份清单画，值也从这里读回。文件没有的键答声明的
+      // 默认值、不是空框——空框读起来像"没设置"，而 daemon 正跑在默认值上。
+      const fields = configFields.AUTO_FIELDS.map((entry) => ({
+        ipc: entry.ipc,
+        section: entry.section,
+        field: entry.field,
+        kind: entry.kind,
+        tab: entry.tab,
+        default: entry.default,
+        ...(entry.min !== undefined ? { min: entry.min } : {}),
+        ...(entry.max !== undefined ? { max: entry.max } : {}),
+        value: configFields.readField(cfg, entry),
+      }));
       return {
         apiKey: isKeyConfigured(key) ? key : "",
         baseUrl: cfg.llm?.base_url || "",
         model: cfg.llm?.model || "",
         models,
         modelDetails,
+        fields,
         // 一个键（issue #3013）：`[client] theme` 是唯一真源，TUI 读的也是它；老安装里的
         // `[gui] theme` 仍然被读，于是升级后宿主原来的选择不会丢。
         theme: themeSetting.themeForUi(cfg),
@@ -1561,6 +1585,11 @@ vision = false
           return { ...(prev || {}), ...item };
         });
       }
+      // 自动控件的字段（issue #3221）：校验**全部**通过才落笔，任何一个不合法就整份不写，并把
+      // 拒绝原话交回界面。`applyAll` 先全量校验再写，所以拒绝时内存里的 toml 与磁盘上的文件
+      // 都是原文——"不合法就地报错、文件不变"由这里保证，不是由界面自觉。
+      const applied = configFields.applyAll(toml, rawConfig || {});
+      if (!applied.ok) return { ok: false, field: applied.field, message: applied.message };
       writeConfig(toml);
       // 保存后不需要重启：运行中的 daemon 自己监视该文件，并在原地应用新版本
       // （emrg/server/config_reload.py，2s 轮询读字节+sha256；变更键会写进
