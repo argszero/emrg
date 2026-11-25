@@ -614,6 +614,29 @@ vision = false
       return { path: finalPath };
     });
 
+    // 宿主 2026-11-25T18:17:18：聊天区里的图能点开之后，「另存一份」与「在文件夹中显示」
+    // 这两步只能落在主进程 —— renderer 既没有 file system 也没有 shell。
+    //
+    // 两个 handler 都只接受**绝对路径**：路径就是记录里 `images[].path` 那一项，源文件
+    // 已经在会话的 images/ 下，这里不猜目录、不重命名、不复制到别处（去重命名是落盘那一侧
+    // 的职责，两个入口各造一套名字迟早会分叉）。
+    ipcMain.handle("emrg:saveImageCopy", async (_e, { path: src } = {}) => {
+      if (typeof src !== "string" || !path.isAbsolute(src)) throw new Error("invalid image path");
+      if (!fs.existsSync(src)) throw new Error("the image is gone from disk");
+      const res = await dialog.showSaveDialog(win, { defaultPath: path.basename(src) });
+      if (res.canceled || !res.filePath) return { saved: false };
+      fs.copyFileSync(src, res.filePath);
+      logger.info(`[gui:saveImageCopy] ${src} -> ${res.filePath}`);
+      return { saved: true, path: res.filePath };
+    });
+
+    ipcMain.handle("emrg:revealPath", async (_e, { path: src } = {}) => {
+      if (typeof src !== "string" || !path.isAbsolute(src)) throw new Error("invalid path");
+      if (!fs.existsSync(src)) throw new Error("the file is gone from disk");
+      shell.showItemInFolder(src);
+      return { ok: true };
+    });
+
     // rant 2026-09-30T09:35:04 要求 4：「系统给的图不受白名单所限」。
     //
     // macOS 把菜单栏、截图工具给的图声明为 `image/tiff`，而 renderer 不能解码 TIFF

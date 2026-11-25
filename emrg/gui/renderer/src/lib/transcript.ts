@@ -1,3 +1,4 @@
+import type { ImageAttach } from "./composer";
 import type { TranslateFn } from "./utils";
 
 /**
@@ -110,6 +111,12 @@ export interface UserEntry {
   /** 稳定条目标识（说明见 `AssistantEntry.id`） */
   id: string;
   text: string;
+  /**
+   * 这条消息带的图（宿主 2026-11-25T18:17:18）。正文里对应位置是一段 `[📷 label]`
+   * 占位符 —— 那是发送时写进去的，不是渲染失败的痕迹 —— 渲染层按 `position` 把它换成
+   * 缩略图。没有这个字段的消息（压缩前的老记录、别的客户端发的）仍照旧只显示文字。
+   */
+  images?: ImageAttach[];
   /**
    * 这一行的时刻 —— daemon 写记录的那一刻（`user_message` / `steer_committed` 帧带来）。
    * 客户端自己点击发送时并不知道它，所以先留空、由帧补上；补不上的行（老记录、别的
@@ -259,7 +266,11 @@ export interface TranscriptStore {
    * 帧认领这一行（`stampUserMessage`）；`meta.timestamp` 只有回放那一路用得上 —— 那是
    * 记录里 daemon 写下的时刻，不是客户端时钟（rant 2026-10-17T10:03:08）。
    */
-  addUserMessage(text: string, sid?: string | null, meta?: { requestId?: string; timestamp?: string }): void;
+  addUserMessage(
+    text: string,
+    sid?: string | null,
+    meta?: { requestId?: string; timestamp?: string; images?: ImageAttach[] },
+  ): void;
   /**
    * 给 `rid` 那一行用户消息补上 daemon 的时刻。找不到该行（例如别的客户端发的消息）
    * 就什么也不做 —— 绝不退化成「给最后一行盖章」。
@@ -747,6 +758,7 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
         const entry: UserEntry = { kind: "user", id: nextEntryId(), text };
         if (meta?.requestId) entry.rid = meta.requestId;
         if (meta?.timestamp) entry.timestamp = meta.timestamp;
+        if (meta?.images?.length) entry.images = meta.images;
         st(sid).entries.push(entry);
         structural();
       });

@@ -148,6 +148,64 @@ describe("TranscriptView", () => {
     expect(container.querySelector(".history-load-bar")).toHaveTextContent("加载历史中…");
   });
 
+  /**
+   * 宿主 2026-11-25T18:17:18：发出去的图在聊天区只剩 `[📷 label]` 一行字。这里断言的是
+   * 渲染出来的东西 —— 一个带 `file://` 源的 `<img>`、占位符文字让位给它、点开有覆盖层、
+   * ESC 关掉 —— 因为「字段传到了」与「屏幕上看得见」是两件事。
+   */
+  it("带图的消息把占位符换成缩略图，点开能看原图（宿主 2026-11-25T18:17:18）", async () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    const text = "看看 [📷 shot] 是什么原因";
+    store.addUserMessage(text, "s1", {
+      requestId: "r1",
+      images: [{ path: "/tmp/shot.png", label: "[📷 shot]", mime: "image/png", position: text.indexOf("[📷 shot]") }],
+    });
+    const { container } = setup(store, "s1");
+
+    const button = container.querySelector(".msg-image-btn") as HTMLElement;
+    expect(button).not.toBeNull();
+    const img = button.querySelector("img")!;
+    expect(img.getAttribute("src")).toBe("file:///tmp/shot.png");
+    // 占位符不再是屏幕上的一段文字（它被缩略图取代，而不是与缩略图并肩出现）
+    expect(container.querySelector(".msg.user")!.textContent).not.toContain("[📷 shot]");
+    // 图两边的文字仍在
+    expect(container.querySelector(".msg.user")!.textContent).toContain("看看");
+
+    fireEvent.click(button);
+    const overlay = container.querySelector(".img-overlay");
+    expect(overlay).not.toBeNull();
+    expect(overlay!.querySelector("img")!.getAttribute("src")).toBe("file:///tmp/shot.png");
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(container.querySelector(".img-overlay")).toBeNull());
+  });
+
+  it("覆盖层里的两个动作走主进程，参数是这张图的绝对路径（宿主 2026-11-25T18:17:18）", async () => {
+    const saveImageCopy = vi.fn().mockResolvedValue({ saved: true });
+    const revealPath = vi.fn().mockResolvedValue({ ok: true });
+    (window as unknown as { emrg?: unknown }).emrg = { saveImageCopy, revealPath };
+    try {
+      const store = createTranscriptStore({ t: (k) => k });
+      store.addUserMessage("[📷 shot]", "s1", {
+        requestId: "r1",
+        images: [{ path: "/tmp/shot.png", label: "[📷 shot]", position: 0 }],
+      });
+      const { container } = setup(store, "s1");
+      fireEvent.click(container.querySelector(".msg-image-btn") as HTMLElement);
+
+      const buttons = Array.from(container.querySelectorAll(".img-overlay-bar button"));
+      expect(buttons).toHaveLength(3);
+      fireEvent.click(buttons[0]);
+      expect(saveImageCopy).toHaveBeenCalledWith({ path: "/tmp/shot.png" });
+      fireEvent.click(buttons[1]);
+      expect(revealPath).toHaveBeenCalledWith({ path: "/tmp/shot.png" });
+      fireEvent.click(buttons[2]);
+      await waitFor(() => expect(container.querySelector(".img-overlay")).toBeNull());
+    } finally {
+      delete (window as unknown as { emrg?: unknown }).emrg;
+    }
+  });
+
   it("顶部历史条可加载更早历史时是一个真按钮，点击触发上翻回调（宿主报障 2026-10-08）", () => {
     // 宿主原话：「另外点击加载更早消息，没有任何效果」。CSS 一直有 `cursor: pointer`、文案一直
     // 是祈使句，实体却是一个没有 onClick 的 div —— 可点的样子、不可点的实体。

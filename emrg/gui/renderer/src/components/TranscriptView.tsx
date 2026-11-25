@@ -12,13 +12,15 @@ import {
 import {
   createMarkdownRenderer,
   installCodeCopy,
+  normalizeImageSrc,
   type MarkdownRenderer,
   type StreamState,
 } from "../lib/markdown";
 import { seedSelection, selectionIn } from "../lib/selection";
 import { canLoadOlder, scrollCompensation, shouldLoadOlder } from "../lib/history";
 import { formatMessageTime, messageTimeTitle } from "../lib/utils";
-import { withdrawQueued } from "../lib/composer";
+import { withdrawQueued, type ImageAttach } from "../lib/composer";
+import { splitUserText } from "../lib/userImages";
 import { toolPhrases } from "../lib/copywriting";
 import { useI18n, type TranslateFn } from "../lib/i18n";
 import { MARKDOWN_HTML_CLASS, MARKDOWN_PLAIN_CLASS, MarkdownText } from "./MarkdownText";
@@ -537,7 +539,11 @@ function EntryView({ entry, index, t, md, store, sid }: EntryViewProps): ReactNo
               </button>
             </div>
           )}
-          <MarkdownText text={entry.text} md={md} stripMark={false} />
+          {entry.images?.length ? (
+            <UserBody text={entry.text} images={entry.images} md={md} t={t} />
+          ) : (
+            <MarkdownText text={entry.text} md={md} stripMark={false} />
+          )}
           <MessageTime stamp={entry.timestamp} />
         </div>
       );
@@ -551,6 +557,101 @@ function EntryView({ entry, index, t, md, store, sid }: EntryViewProps): ReactNo
     case "tool-group":
       return <ToolGroupView group={entry.group} entryIndex={index} t={t} store={store} sid={sid} />;
   }
+}
+
+/** 主进程侧与这张图有关的两条通道（`preload.js` 白名单里的同名方法）。 */
+interface ImageBridge {
+  saveImageCopy?: (payload: { path: string }) => Promise<{ saved: boolean; path?: string }>;
+  revealPath?: (payload: { path: string }) => Promise<{ ok: boolean }>;
+}
+
+/**
+ * 用户气泡的正文：正文里每个 `[📷 label]` 在**它自己的位置**换成缩略图，其余文字照旧走
+ * markdown（宿主 2026-11-25T18:17:18）。切分在 `lib/userImages.ts`，这里只管画。
+ *
+ * 缩略图直接读原文件 —— 会话 `images/` 里那张就是宿主发出去的那张。再派生一份缩略图只会
+ * 多出一处能与原件不一致的东西；尺寸由 CSS 限，原图一个字节都不改。
+ */
+function UserBody({
+  text,
+  images,
+  md,
+  t,
+}: {
+  text: string;
+  images: ImageAttach[];
+  md: MarkdownRenderer;
+  t: TranslateFn;
+}) {
+  const parts = useMemo(() => splitUserText(text, images), [text, images]);
+  const [open, setOpen] = useState<ImageAttach | null>(null);
+  return (
+    <>
+      {parts.map((part, index) =>
+        part.kind === "image" ? (
+          <button
+            key={`img-${index}`}
+            type="button"
+            className="msg-image-btn"
+            title={t("app.imageOpen")}
+            aria-label={t("app.imageOpen")}
+            onClick={() => setOpen(part.image)}
+          >
+            <img src={normalizeImageSrc(part.image.path)} alt={part.image.label} loading="lazy" />
+          </button>
+        ) : (
+          <MarkdownText key={`txt-${index}`} text={part.text} md={md} stripMark={false} />
+        ),
+      )}
+      {open && <ImageOverlay image={open} t={t} onClose={() => setOpen(null)} />}
+    </>
+  );
+}
+
+/**
+ * 一张图的覆盖层：原尺寸看，两个动作（另存一份 / 在文件夹中显示），ESC 或点背景关闭。
+ *
+ * 两个动作走主进程（渲染层没有 file system 与 shell），失败只留主进程日志：界面上没有
+ * 第三个状态可显示，静默比编一句「保存成功」更诚实。
+ */
+function ImageOverlay({ image, t, onClose }: { image: ImageAttach; t: TranslateFn; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const bridge = () => (window as unknown as { emrg?: ImageBridge }).emrg;
+  const run = (pending: Promise<unknown> | undefined) => {
+    if (pending && typeof pending.catch === "function") pending.catch(() => {});
+  };
+  return (
+    <div
+      className="img-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label={t("app.imageOpen")}
+      onClick={onClose}
+    >
+      <img
+        src={normalizeImageSrc(image.path)}
+        alt={image.label}
+        onClick={(e) => e.stopPropagation()}
+      />
+      <div className="img-overlay-bar" onClick={(e) => e.stopPropagation()}>
+        <button type="button" onClick={() => run(bridge()?.saveImageCopy?.({ path: image.path }))}>
+          {t("app.imageSaveCopy")}
+        </button>
+        <button type="button" onClick={() => run(bridge()?.revealPath?.({ path: image.path }))}>
+          {t("app.imageReveal")}
+        </button>
+        <button type="button" onClick={onClose}>
+          {t("app.imageClose")}
+        </button>
+      </div>
+    </div>
+  );
 }
 
 /**

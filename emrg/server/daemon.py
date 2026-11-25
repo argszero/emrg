@@ -912,6 +912,28 @@ def _tool_call_labels(tool_calls) -> list[str]:
     return [f"({index}/{total}) " for index in range(1, total + 1)]
 
 
+def _projected_images(record: dict):
+    """The pictures a projected record carries, as a copy of that record's own list.
+
+    `list_history` hands these items to a client, so a list handed out by reference is
+    the session's record in a client's hands — the rule the neighbouring `tool_calls`
+    branch already states ("Copies …, never a mutation of the record").
+
+    The copy is also what makes the property measurable. A frame is serialised before
+    it reaches anyone, so a test reading the frame holds fresh objects and can never
+    tell a reference from a copy: the test that claimed to was passing on the
+    serialisation. Call this, or read nothing about it.
+
+    `None` when the record carries none, so the caller adds no key at all and a record
+    written before attachments existed projects exactly as it did — the #2980 rule, one
+    field over.
+    """
+    images = record.get("images")
+    if not images:
+        return None
+    return [dict(entry) if isinstance(entry, dict) else entry for entry in images]
+
+
 #: The identifier the reminder and the prompt share. A **locator**, not an abbreviation: the model is
 #: told where to go and read the rule, so nothing here has to compress a rule into a phrase — which is
 #: what `batch call` was, and a name the prompt never used left the model inventing a meaning for it
@@ -4122,6 +4144,16 @@ class EmrgServer:
                             "content": r.get("content", "") or "",
                             "timestamp": r.get("timestamp", ""),
                         }
+                        # The record has carried `images` since attachments existed
+                        # (`user_record["images"]` on the write side), but this projection
+                        # dropped it, so a reopen replayed a message whose picture the
+                        # interface had nothing to draw (host 2026-11-25T18:17:18).
+                        # Written only when the record has them: a record from before
+                        # this projects exactly as it did — the #2980 rule.
+                        images = _projected_images(r)
+                        if images is not None:
+                            item["images"] = images
+
                         tool_calls = r.get("tool_calls")
                         if tool_calls:
                             # Copies carrying the batch label, never a mutation of the
