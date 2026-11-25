@@ -265,7 +265,7 @@ def test_the_tool_call_log_masks_the_intent(tmp_path, monkeypatch, caplog):
     session = Session.create_with_id("redaction-intent", tmp_path)
     rounds = {"n": 0}
 
-    async def fake_stream(messages, tools=None):
+    async def fake_stream(messages, tools=None, exchange=None):
         rounds["n"] += 1
         if rounds["n"] == 1:
             yield {

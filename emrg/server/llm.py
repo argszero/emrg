@@ -479,15 +479,37 @@ class LlmClient:
     def __init__(self, config: LlmConfig) -> None:
         self.config = config
         self._client: Optional[httpx.AsyncClient] = None
-        # Last request/response metadata for llm.jsonl logging
-        self.last_payload: dict = {}
-        self.last_response_status: int = 0
-        self.last_response_headers: dict = {}
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=120.0)
         return self._client
+
+    @staticmethod
+    def _begin_exchange(exchange: Optional[dict], payload: dict) -> None:
+        """Record the exact body about to be sent on the caller's own record.
+
+        The client is shared by every session in the server, so a field on it can
+        only ever hold *some* request's metadata — under concurrency, whichever
+        request wrote last, which is not the one being logged (issue #3225: 63 of
+        175 records carried another session's body). The record therefore belongs
+        to the call, not to the client: one dict per call, filled here before the
+        request goes out, rewritten in place by a retry, and read back by the
+        caller once the call has returned.
+        """
+        if exchange is None:
+            return
+        exchange["payload"] = dict(payload)
+        exchange["status"] = 0
+        exchange["headers"] = {}
+
+    @staticmethod
+    def _note_response(exchange: Optional[dict], resp) -> None:
+        """Record the status and headers of the response this very call received."""
+        if exchange is None:
+            return
+        exchange["status"] = resp.status_code
+        exchange["headers"] = dict(resp.headers)
 
     def _make_payload(
         self,
@@ -552,6 +574,7 @@ class LlmClient:
         *,
         streaming: bool,
         already_streamed: int = 0,
+        exchange: Optional[dict] = None,
     ) -> int:
         """Answer a filter-blocked answer with the next rung — or report honestly.
 
@@ -592,13 +615,14 @@ class LlmClient:
             stage + 1, len(CONTENT_RISK_LADDER), CONTENT_RISK_RUNG_DESCRIPTION[rung],
         )
         payload["messages"] = content_filter_retry_messages(rung_messages)
-        self.last_payload = dict(payload)
+        self._begin_exchange(exchange, payload)
         return stage + 1
 
     async def chat(
         self,
         messages: list[dict],
         tools: Optional[list[dict]] = None,
+        exchange: Optional[dict] = None,
     ) -> dict:
         """Non-streaming chat completion with optional tool calling.
 
@@ -612,10 +636,9 @@ class LlmClient:
         payload = self._make_payload(messages, tools, stream=False)
         headers = self._headers()
 
-        # Store for llm.jsonl logging
-        self.last_payload = dict(payload)
-        self.last_response_status = 0
-        self.last_response_headers = {}
+        # This call's own record, for llm.jsonl logging (issue #3225): the client
+        # is shared by every session, so no field on it can hold "my" request.
+        self._begin_exchange(exchange, payload)
 
         last_error = None
         # One-shot per rung: after a content-filter refusal the request is re-sent
@@ -641,8 +664,7 @@ class LlmClient:
             resp = await client.post(url, headers=headers, json=payload)
 
             if resp.status_code == 200:
-                self.last_response_status = resp.status_code
-                self.last_response_headers = dict(resp.headers)
+                self._note_response(exchange, resp)
                 try:
                     data = _parse_json_body(resp.content)
                 except (json.JSONDecodeError, UnicodeDecodeError, OSError, EOFError) as exc:
@@ -679,6 +701,7 @@ class LlmClient:
                     content_risk_stage = self._advance_content_filter_ladder(
                         payload, original_messages, content_risk_stage,
                         streaming=False,
+                        exchange=exchange,
                     )
                     continue
                 # Nothing came back and nothing was asked for: refuse, rather
@@ -709,7 +732,7 @@ class LlmClient:
                         CONTENT_RISK_RUNG_DESCRIPTION[rung], _redact_text(text)[:200],
                     )
                     payload["messages"] = messages
-                    self.last_payload = dict(payload)
+                    self._begin_exchange(exchange, payload)
                     continue
                 logger.error(
                     "LLM content-filter refusal again after %d retries "
@@ -763,6 +786,7 @@ class LlmClient:
         self,
         messages: list[dict],
         tools: Optional[list[dict]] = None,
+        exchange: Optional[dict] = None,
     ) -> AsyncIterator[dict]:
         """Streaming chat with optional tool calling.
 
@@ -794,10 +818,9 @@ class LlmClient:
         payload = self._make_payload(messages, tools, stream=True)
         headers = {**self._headers(), "Accept": "text/event-stream"}
 
-        # Store for llm.jsonl logging
-        self.last_payload = dict(payload)
-        self.last_response_status = 0
-        self.last_response_headers = {}
+        # This call's own record, for llm.jsonl logging (issue #3225): the client
+        # is shared by every session, so no field on it can hold "my" request.
+        self._begin_exchange(exchange, payload)
 
         logger.debug("LLM stream: url=%s model=%s", _redact_text(url), self.config.model)
 
@@ -852,7 +875,7 @@ class LlmClient:
                                     _redact_text(text)[:200],
                                 )
                                 payload["messages"] = messages
-                                self.last_payload = dict(payload)
+                                self._begin_exchange(exchange, payload)
                                 continue
                             logger.error(
                                 "LLM stream content-filter refusal again after %d "
@@ -899,8 +922,7 @@ class LlmClient:
                         )
 
                     # Capture response metadata for llm.jsonl logging
-                    self.last_response_status = resp.status_code
-                    self.last_response_headers = dict(resp.headers)
+                    self._note_response(exchange, resp)
 
                     # True when this attempt's verdict was the provider's content
                     # filter rather than an answer; decided inside the loop, acted
@@ -1036,6 +1058,7 @@ class LlmClient:
                         content_risk_stage = self._advance_content_filter_ladder(
                             payload, original_messages, content_risk_stage,
                             streaming=True,
+                            exchange=exchange,
                         )
                         continue
             except httpx.TransportError as exc:

@@ -659,7 +659,7 @@ def _drive_shell_call(
 
     calls: list[list[dict]] = []
 
-    async def fake_stream(messages, tools=None):
+    async def fake_stream(messages, tools=None, exchange=None):
         calls.append(list(messages))
         if len(calls) == 1:
             yield {
@@ -859,7 +859,7 @@ def test_the_widening_belongs_to_one_call_and_not_to_the_next(tmp_path, monkeypa
     ]
     calls: list[list[dict]] = []
 
-    async def fake_stream(messages, tools=None):
+    async def fake_stream(messages, tools=None, exchange=None):
         calls.append(list(messages))
         if len(calls) <= len(rounds):
             n = len(calls) - 1
@@ -1091,7 +1091,7 @@ def _drive_two_file_calls(tmp_path, monkeypatch, *, first: dict, second: dict):
     payloads = [first, second]
     round_no = 0
 
-    async def fake_stream(messages, tools=None):
+    async def fake_stream(messages, tools=None, exchange=None):
         nonlocal round_no
         if round_no < len(payloads):
             index = round_no

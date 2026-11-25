@@ -186,7 +186,7 @@ def _drive_tool_loop(tmp_path, monkeypatch, name, requested, call_name,
     offered: dict = {"tools": None}
     state = {"round": 0}
 
-    async def fake_stream(messages, tools=None):
+    async def fake_stream(messages, tools=None, exchange=None):
         state["round"] += 1
         if state["round"] == 1:
             offered["tools"] = [
@@ -361,7 +361,7 @@ def test_the_memory_reflection_loop_honours_the_same_set(tmp_path):
         tables: list[list[str]] = []
         rounds = {"n": 0}
 
-        async def fake_chat(messages, tools=None):
+        async def fake_chat(messages, tools=None, exchange=None):
             rounds["n"] += 1
             if rounds["n"] == 1:
                 tables.append([entry["function"]["name"] for entry in (tools or [])])
@@ -428,7 +428,7 @@ def test_the_reflection_loop_reads_silence_as_the_default_set(tmp_path):
         server.tools.register(unlisted)
         tables: list[list[str]] = []
 
-        async def fake_chat(messages, tools=None):
+        async def fake_chat(messages, tools=None, exchange=None):
             tables.append([entry["function"]["name"] for entry in (tools or [])])
             return {"content": "no new memories", "tool_calls": None}
 

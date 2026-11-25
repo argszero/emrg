@@ -91,7 +91,7 @@ def _drive(
     frames: list[dict] = []
     state = {"round": 0}
 
-    async def fake_stream(messages, tools=None):
+    async def fake_stream(messages, tools=None, exchange=None):
         index = state["round"]
         state["round"] += 1
         requests.append([dict(m) for m in messages])

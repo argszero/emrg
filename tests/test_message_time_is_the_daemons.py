@@ -80,7 +80,7 @@ def _drive_one_turn(tmp_path, monkeypatch) -> tuple[list[dict], Session]:
     server = _make_server()
     session = Session.create_with_id("message-time-test", tmp_path)
 
-    async def fake_stream(messages, tools=None):
+    async def fake_stream(messages, tools=None, exchange=None):
         yield {"content": "the reply", "tool_calls": None, "finish_reason": "stop",
                "usage": {"prompt_tokens": 5, "completion_tokens": 2}}
 
