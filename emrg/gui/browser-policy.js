@@ -70,6 +70,22 @@ function browserNavPolicy(url) {
 }
 
 /**
+ * Whether a `will-frame-navigate` is to be cancelled, from the event Electron actually passes.
+ *
+ * The listener receives **one** argument — the event object, carrying `url` and `isMainFrame`
+ * as properties (`WebContentsWillFrameNavigateEventParams` in Electron 31's own declarations) —
+ * and not the older `(event, url, isInPlace, isMainFrame)`. Reading the positional form leaves
+ * both names `undefined`, so the test collapses to `undefined && …`: falsy, and every main-frame
+ * navigation the policy exists to refuse is quietly allowed. Taking the object keeps the
+ * decision pure, so a test can hand it the shape the runtime hands it.
+ */
+function blocksMainFrameNavigation(details) {
+  if (!details || typeof details !== "object") return false;
+  if (details.isMainFrame !== true) return false;
+  return browserNavPolicy(details.url) !== "allow";
+}
+
+/**
  * What a page's request for a new window becomes: the URL to load **in the same view**, or
  * `null` when the request is refused outright.
  *
@@ -185,6 +201,7 @@ module.exports = {
   BROWSER_PARTITION,
   NAV_SCHEMES,
   addressTarget,
+  blocksMainFrameNavigation,
   browserNavPolicy,
   browserRect,
   certificateResult,

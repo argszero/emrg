@@ -14,6 +14,7 @@ const assert = require("node:assert");
 const {
   BROWSER_PARTITION,
   addressTarget,
+  blocksMainFrameNavigation,
   browserNavPolicy,
   browserRect,
   certificateResult,
@@ -144,4 +145,29 @@ test("the view's box comes from the renderer's measurement, rounded", () => {
   assert.strictEqual(browserRect({ x: 0, y: 0, width: "300", height: 400 }), null);
   // One pixel is a box: the smallest visible view is still a view.
   assert.deepStrictEqual(browserRect({ x: 0, y: 0, width: 1, height: 1 }), { x: 0, y: 0, width: 1, height: 1 });
+});
+
+test("a main-frame navigation is judged from the event object, not from positional arguments", () => {
+  // What Electron 31 actually passes: one object carrying `url` and `isMainFrame`.
+  assert.strictEqual(
+    blocksMainFrameNavigation({ url: "https://example.com/", isMainFrame: true }),
+    false,
+    "a page this browser draws is not blocked",
+  );
+  assert.strictEqual(
+    blocksMainFrameNavigation({ url: "javascript:alert(1)", isMainFrame: true }),
+    true,
+    "a scheme outside NAV_SCHEMES must be cancelled in the main frame",
+  );
+  assert.strictEqual(blocksMainFrameNavigation({ url: "data:text/html,<p>x", isMainFrame: true }), true);
+  // A subframe is not this policy's subject: a page may frame what it likes.
+  assert.strictEqual(blocksMainFrameNavigation({ url: "javascript:alert(1)", isMainFrame: false }), false);
+  // The shape the wiring once assumed — four positional arguments — reaches here as no details
+  // at all. Answering `false` for it is the whole defect: the guard silently allowed
+  // everything, so this arm is the regression, not a nicety.
+  assert.strictEqual(blocksMainFrameNavigation(undefined, "javascript:alert(1)", false, true), false);
+  assert.strictEqual(blocksMainFrameNavigation(null), false);
+  assert.strictEqual(blocksMainFrameNavigation({}), false);
+  // `isMainFrame` must be the boolean true, not a truthy stand-in.
+  assert.strictEqual(blocksMainFrameNavigation({ url: "javascript:alert(1)", isMainFrame: "yes" }), false);
 });

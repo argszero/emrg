@@ -29,7 +29,7 @@ const { externalNavPolicy } = require("./nav-policy");
 const {
   BROWSER_PARTITION,
   addressTarget,
-  browserNavPolicy,
+  blocksMainFrameNavigation,
   browserRect,
   certificateResult,
   newWindowTarget,
@@ -2053,8 +2053,12 @@ vision = false
       webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
     });
     previewView.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-    previewView.webContents.on("will-frame-navigate", (event, url, isInPlace, isMainFrame) => {
-      if (isMainFrame && !url.startsWith("file:")) event.preventDefault();
+    // 同一条：Electron 31 传的是 details 对象，位置参数读出来全是 undefined——这道
+    // 「只许 file:// 主框架导航」的防线在写成位置参数时一次都没生效。
+    previewView.webContents.on("will-frame-navigate", (details) => {
+      if (details.isMainFrame === true && !String(details.url).startsWith("file:")) {
+        details.preventDefault();
+      }
     });
     return previewView;
   }
@@ -2138,8 +2142,12 @@ vision = false
       if (target) void contents.loadURL(target);
       return { action: "deny" };
     });
-    contents.on("will-frame-navigate", (event, url, _isInPlace, isMainFrame) => {
-      if (isMainFrame && browserNavPolicy(url) !== "allow") event.preventDefault();
+    // Electron 31 给这个事件的监听器只传**一个** details 对象（`.d.ts` 的
+    // `WebContentsWillFrameNavigateEventParams`：url / isMainFrame 是它的属性）。写成
+    // `(event, url, isInPlace, isMainFrame)` 会让这两个名字都是 undefined，判断恒假，
+    // 策略静默失效——所以判断搬进纯函数，这里只负责把对象交给它。
+    contents.on("will-frame-navigate", (details) => {
+      if (blocksMainFrameNavigation(details)) details.preventDefault();
     });
     // 开发者工具：F12 与 ⌥⌘I（其它平台 Ctrl+Alt+I），右键菜单的 Inspect 走 inspectElement。
     contents.on("before-input-event", (event, input) => {

@@ -117,3 +117,39 @@ test("leaving the tab hides the view and does not destroy it", () => {
     "the renderer needs a channel to hide it when the tab is switched away",
   );
 });
+
+test("both views read frame navigation off the event object Electron 31 passes", () => {
+  // The defect this pins was live and silent: `will-frame-navigate`'s listener receives ONE
+  // argument (`WebContentsWillFrameNavigateEventParams` — url and isMainFrame are properties),
+  // so a handler written `(event, url, isInPlace, isMainFrame)` reads `undefined` twice, the
+  // condition is falsy, and every navigation it was written to refuse is allowed. A source
+  // shape is all a test can reach here, because main.js is never executed by a suite.
+  // A comment may quote the broken shape — the one in main.js explains it, in prose — so the
+  // shape is looked for in code with its comment lines removed, and only where an arrow's
+  // parameter list ends in `=>`. Matching the comment is how this guard first failed itself.
+  const codeOnly = (text) => text.replace(/^\s*\/\/.*$/gm, "");
+  const POSITIONAL = /\(\s*(?:event|details|_?e)\s*,\s*_?url\s*,\s*_?isInPlace\s*,\s*_?isMainFrame\s*\)\s*=>/;
+
+  const browser = functionRegion("applyBrowserPolicy");
+  assert.match(browser, /will-frame-navigate/, "the browser view installs the handler");
+  assert.match(
+    browser,
+    /blocksMainFrameNavigation\(/,
+    "the browser's verdict comes from the policy module, which a test can call",
+  );
+  assert.doesNotMatch(
+    codeOnly(browser),
+    POSITIONAL,
+    "positional arguments are undefined in Electron 31 — the policy then never fires",
+  );
+
+  const preview = functionRegion("ensurePreviewView");
+  assert.match(preview, /will-frame-navigate/, "the preview view installs the handler");
+  assert.match(preview, /details\.isMainFrame/, "isMainFrame is read off the event object");
+  assert.match(preview, /details\.url/, "the URL is read off the event object");
+  assert.doesNotMatch(
+    codeOnly(preview),
+    POSITIONAL,
+    "the preview's file-only rule was dead while it read positional arguments",
+  );
+});
