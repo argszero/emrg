@@ -127,6 +127,39 @@ test("a download's dialog is pre-filled with the file's name and with no directo
   assert.doesNotMatch(JSON.stringify(saveDialogOptions("a.zip")), /\//, "a path would choose for the user");
 });
 
+test("a download's name comes from the server, so a directory in it never survives", () => {
+  // `main.js` passes the download item's own name, which Electron derives from the
+  // response's `Content-Disposition` — the page supplies it, not the person clicking Save.
+  // So the property is asserted over the class and not over one sample: `a.zip` carries no
+  // separator, and an assertion fed only that passes for a function that keeps everything.
+  const named = [
+    ["../../evil.sh", "evil.sh"],
+    ["dir/name.txt", "name.txt"],
+    ["dir\\name.txt", "name.txt"],
+    ["..\\..\\evil.exe", "evil.exe"],
+    ["/etc/passwd", "passwd"],
+    ["resume\u0000.pdf", "resume.pdf"],
+    ["report.zip", "report.zip"],
+  ];
+  for (const [wire, name] of named) {
+    const answer = saveDialogOptions(wire);
+    assert.deepStrictEqual(answer, { defaultPath: name }, JSON.stringify(wire));
+    // The contract, for every one of them: a separator and a control character are the two
+    // things a file's own name cannot hold, so neither may be carried.
+    assert.doesNotMatch(answer.defaultPath, /[/\\]/, `${JSON.stringify(wire)} carried a separator`);
+    assert.doesNotMatch(
+      answer.defaultPath,
+      /[\u0000-\u001f\u007f]/,
+      `${JSON.stringify(wire)} carried a control character`,
+    );
+  }
+  // Nothing left to name: a trailing separator names no file, `.`/`..` are directories, and
+  // a name of spaces is a name of nothing.
+  for (const wire of ["trailing/", "dir\\", "..", ".", "   "]) {
+    assert.deepStrictEqual(saveDialogOptions(wire), {}, JSON.stringify(wire));
+  }
+});
+
 test("the view's box comes from the renderer's measurement, rounded", () => {
   assert.deepStrictEqual(
     browserRect({ x: 10.4, y: 20.6, width: 300.5, height: 400.4 }),

@@ -171,10 +171,25 @@ function certificateResult() {
  * Only the file's own name: the directory stays the dialog's to ask. `main.js` must never
  * call `setSavePath`, because calling it is what turns the dialog into a silent write; the
  * typing leaves the path unset, and Electron's own routine then shows the dialog.
+ *
+ * The name is the **server's**, not the reader's: `main.js` hands this the download item's
+ * own name, which Electron derives from the response's `Content-Disposition`. So it is
+ * reduced to its last segment rather than trusted — a `dir/name.txt` or a `../../evil.sh`
+ * would otherwise let the page choose the directory the dialog opens in, which is the one
+ * thing this contract says may not happen. Both separators count, because a name crosses no
+ * filesystem boundary this code can see, and control characters go with them: no file name
+ * contains one, so any that does came from the wire.
  */
 function saveDialogOptions(filename) {
-  const name = typeof filename === "string" ? filename.trim() : "";
-  return name.length > 0 ? { defaultPath: name } : {};
+  if (typeof filename !== "string") return {};
+  const name = filename
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .split(/[/\\]/)
+    .pop()
+    .trim();
+  // Nothing left to name, or a name that is only `.`/`..` — a directory, not a file.
+  if (name.length === 0 || /^\.+$/.test(name)) return {};
+  return { defaultPath: name };
 }
 
 /**
