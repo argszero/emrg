@@ -137,11 +137,12 @@ describe("词典完整性守卫（防漂移）", () => {
   // 打开、空地址、地址打不开六条中英各加一条 → 573 + 6 = 579。
   // 2026-11-25 issue #3221：十二个配置字段有了界面入口——十一个控件的名称与含义、两个分组
   // 标题、一条间隔说明、一条拒绝原话，中英各加二十六条 → 579 + 26 = 605。
-  it("zh/en 各 605 个 key 且完全对齐", () => {
+  // 同日 issue #3226：目录面板头部加回一个「刷新」，中英各加一条 → 605 + 1 = 606。
+  it("zh/en 各 606 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(605);
-    expect(enKeys.length).toBe(605);
+    expect(zhKeys.length).toBe(606);
+    expect(enKeys.length).toBe(606);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);

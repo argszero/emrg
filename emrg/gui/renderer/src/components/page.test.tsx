@@ -274,11 +274,28 @@ describe("LeftTrees — 分组节点是树里的第一行（rant 2026-11-20T21:2
     expect(body).toContainElement(screen.getAllByTestId("left-tree-session-row")[0]);
   });
 
-  it("清单 5：分组工具条删除——面板里没有刷新、没有全部收起，一个按钮都没有", () => {
+  it("清单 5：分组工具条删除——每组一条的刷新/全部收起不再有，面板头部只有一个刷新（#3108 / #3226）", () => {
     renderTrees({ sessionRoots: ["/p/other"] });
     const panel = screen.getByTestId("left-trees");
+    // #3108 否掉的是每组一条工具条，连同装按钮的 .ft-tool 一起不许回来
     expect(panel.querySelectorAll(".ft-toolbar, .ft-tool, .left-group-header")).toHaveLength(0);
-    expect(panel.querySelectorAll("button")).toHaveLength(0);
+    // 这条主张在 #3226 里改了口径：当时是「一个按钮都没有」，因为刷新随工具条一起被删；
+    // 现在整块面板头部有一个刷新，它不属于任何一组，也不在树里
+    const buttons = panel.querySelectorAll("button");
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0]).toBe(screen.getByTestId("left-trees-refresh"));
+    expect(screen.getByTestId("left-trees-header")).toContainElement(buttons[0]);
+  });
+
+  it("清单 5b：头部的刷新点一下，画出来的那棵树重读自己（issue #3226）", async () => {
+    const load = vi.fn(async () => ({ entries: [], truncated: false }));
+    renderTrees({ loadDir: load });
+    await waitFor(() => expect(load).toHaveBeenCalled());
+    const before = load.mock.calls.length;
+    fireEvent.click(screen.getByTestId("left-trees-refresh"));
+    // 只重读画出来的东西：agent 那一组默认收起，没有树，就没有它的读盘
+    await waitFor(() => expect(load.mock.calls.length).toBe(before + 1));
+    expect(load).toHaveBeenLastCalledWith("/p/emrg/.emrg/sessions/s1");
   });
 
   it("清单 6：「没有」也是一行 22px：斜体、次要字色、按不动", () => {

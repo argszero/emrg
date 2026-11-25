@@ -75,6 +75,9 @@ export function LeftTrees({
   // folding the same directory in one group keeps it folded in the others, and a path
   // belonging to no root contributes nothing.
   const [openFolders, setOpenFolders] = useState<Set<string>>(() => new Set());
+  // Bumped by the header's refresh: every tree re-reads what it is showing, so a file
+  // written since the last read appears without switching tabs (issue #3226).
+  const [refreshKey, setRefreshKey] = useState(0);
   // `null` = the bridge has not answered yet, which reads as none: it answers an empty
   // list for a session that added no root, and there is no third thing to draw.
   const extras = sessionRoots ?? [];
@@ -125,7 +128,19 @@ export function LeftTrees({
   return (
     <div className="left-trees" data-testid="left-trees">
       <div className="left-trees-header" data-testid="left-trees-header">
-        {t("leftTree.dirs")}
+        <span className="left-trees-title">{t("leftTree.dirs")}</span>
+        {/* One refresh for the whole panel: the toolbar #3108 removed was one per tree and
+            carried two buttons nobody used, and re-reading the disk was never the part of
+            it that was rejected (issue #3226). */}
+        <button
+          type="button"
+          className="left-trees-refresh"
+          data-testid="left-trees-refresh"
+          title={t("inspector.treeRefresh")}
+          onClick={() => setRefreshKey((n) => n + 1)}
+        >
+          {t("inspector.treeRefresh")}
+        </button>
       </div>
       {/* The one scrollbar: three groups inside a single scrolling column. */}
       <div className="left-trees-scroll" data-testid="left-trees-scroll">
@@ -140,6 +155,7 @@ export function LeftTrees({
             expanded={openFolders}
             onExpandedChange={setOpenFolders}
             onOpenFile={onOpenFile}
+            refreshKey={refreshKey}
           />,
         )}
         {group(
@@ -153,6 +169,7 @@ export function LeftTrees({
             expanded={openFolders}
             onExpandedChange={setOpenFolders}
             onOpenFile={onOpenFile}
+            refreshKey={refreshKey}
           />,
         )}
         {group(
@@ -175,6 +192,7 @@ export function LeftTrees({
               expanded={openFolders}
               onExpandedChange={setOpenFolders}
               onOpenFile={onOpenFile}
+              refreshKey={refreshKey}
             />
           ),
         )}

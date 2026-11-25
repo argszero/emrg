@@ -199,7 +199,7 @@ describe("FileTree", () => {
           : { entries: [e("deep.md")], truncated: false },
       );
 
-    it("右键一行：菜单出现、该行同时被选中，两项按固定顺序；目录不会因此展开", async () => {
+    it("右键一行：菜单出现、该行同时被选中，三项按固定顺序；目录不会因此展开", async () => {
       const load = dirTree();
       renderTree(load);
       await waitFor(() => expect(screen.getAllByTestId("t-row")).toHaveLength(2));
@@ -210,7 +210,9 @@ describe("FileTree", () => {
       const menu = screen.getByTestId(MENU);
       expect(dirRow).toHaveAttribute("aria-selected", "true");
       const labels = Array.from(menu.querySelectorAll("[role='menuitem']")).map((n) => n.textContent);
-      expect(labels).toEqual(["Copy full path", "Open with default app"]);
+      // 第三项「刷新」来自 issue #3226：这棵树只在根变化和首次展开时读盘，所以右键
+      // 重读一层是它自己的入口。前两项的顺序不变，键盘索引因此也不用改。
+      expect(labels).toEqual(["Copy full path", "Open with default app", "Refresh"]);
       // 展开是左键点目录的事：右键不该顺带把它打开，也不该去拉子项
       expect(dirRow).toHaveAttribute("aria-expanded", "false");
       expect(load).toHaveBeenCalledTimes(1);
@@ -493,5 +495,55 @@ describe("FileTreeRoots", () => {
     const names = screen.getAllByTestId("s-row").map((r) => r.textContent);
     expect(names[1]).toContain("leaf.md");
     expect(load).toHaveBeenCalledWith("/s/sub");
+  });
+});
+
+describe("刷新（issue #3226）", () => {
+  /** 一层目录：根下有一个子目录，子目录里有一个文件。 */
+  const subTree = () =>
+    vi.fn(async (p: string) => ({
+      entries:
+        p === "/r"
+          ? [{ name: "sub", path: "/r/sub", type: "dir" as const }]
+          : [{ name: "inner.md", path: "/r/inner.md", type: "file" as const }],
+      truncated: false,
+    }));
+
+  const treeWith = (load: ReturnType<typeof subTree>, key: number) => (
+    <I18nProvider lang="en">
+      <FileTree testId="t" root="/r" loadDir={load} refreshKey={key} />
+    </I18nProvider>
+  );
+
+  it("面板刷新：根与已展开的那一层都重读，展开状态不重来", async () => {
+    const load = subTree();
+    const { rerender } = render(treeWith(load, 0));
+    await waitFor(() => expect(screen.getByText("sub")).toBeInTheDocument());
+    fireEvent.click(screen.getAllByTestId("t-row")[0]);
+    await waitFor(() => expect(screen.getByText("inner.md")).toBeInTheDocument());
+    const before = load.mock.calls.length;
+    // 值没变就不是新事件：同一次刷新被读第二遍，不该再打一次盘
+    rerender(treeWith(load, 0));
+    expect(load.mock.calls.length).toBe(before);
+    rerender(treeWith(load, 1));
+    await waitFor(() => expect(load.mock.calls.length).toBeGreaterThan(before));
+    expect(load).toHaveBeenCalledWith("/r");
+    expect(load).toHaveBeenCalledWith("/r/sub");
+    // 没有清空重画：展开的那一层还画着
+    expect(screen.getByText("inner.md")).toBeInTheDocument();
+  });
+
+  it("右键「刷新」只重读被点的那一层", async () => {
+    const load = subTree();
+    render(treeWith(load, 0));
+    await waitFor(() => expect(screen.getByText("sub")).toBeInTheDocument());
+    fireEvent.click(screen.getAllByTestId("t-row")[0]);
+    await waitFor(() => expect(screen.getByText("inner.md")).toBeInTheDocument());
+    const before = load.mock.calls.length;
+    fireEvent.contextMenu(screen.getAllByTestId("t-row")[0], { clientX: 40, clientY: 60 });
+    // 菜单项在 mouseDown 上执行，不是 click：点下去的瞬间菜单就关了，click 等不到
+    fireEvent.mouseDown(screen.getByTestId("t-menu-refresh"));
+    await waitFor(() => expect(load.mock.calls.length).toBe(before + 1));
+    expect(load).toHaveBeenLastCalledWith("/r/sub");
   });
 });
