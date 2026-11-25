@@ -4,6 +4,7 @@ import type { MarkdownRenderer } from "../lib/markdown";
 import { countLabel, filterByName, sortByName } from "../lib/cockpit";
 import { MarkdownText } from "./MarkdownText";
 import { SettingsPanel } from "./SettingsPanel";
+import type { UpdateCheckReading } from "../lib/daemonBridge";
 import { sessionRowView, type SessionRow } from "../lib/openSession";
 import {
   buildEvolveAgents,
@@ -57,6 +58,8 @@ export interface WorkspaceViewProps {
   onSwitch?: (view: WorkspaceViewId) => void;
   /** 设置面板关于 tab 数据（Shell appState 注入，Batch 5 slice 6） */
   version?: string;
+  /** The daemon's last on-demand release reading (issue #3212); null = not asked. */
+  latestRelease?: UpdateCheckReading | null;
   evolutionCount?: number | null;
   onSelectAgentSession?: (agent: AgentRec, sessionId: string) => void;
   onViewAgentSessions?: (agent: AgentRec) => void;
@@ -94,6 +97,7 @@ export function WorkspaceView({
   activeView,
   onSwitch,
   version,
+  latestRelease = null,
   evolutionCount,
   onSelectAgentSession,
   onViewAgentSessions,
@@ -357,7 +361,11 @@ export function WorkspaceView({
       )}
 
       {activeView === "settings" && (
-        <SettingsPanel version={version} evolutionCount={evolutionCount} />
+        <SettingsPanel
+          version={version}
+          latestRelease={latestRelease}
+          evolutionCount={evolutionCount}
+        />
       )}
     </div>
   );

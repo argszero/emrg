@@ -20,6 +20,9 @@ const api = {
   listSessions: () => ipcRenderer.invoke("emrg:listSessions"),
   // rant 2026-11-19T09:31:00：最近 24 小时的三段 token 读数（daemon 记账）
   usageWindow: (payload) => ipcRenderer.invoke("emrg:usageWindow", payload),
+  // issue #3212：这台机器跑的是不是最新版。按钮按一次问一次；daemon 侧缓存住读数，
+  // 所以连按几次不会连打几次 GitHub。
+  checkUpdate: (payload) => ipcRenderer.invoke("emrg:checkUpdate", payload),
   restartDaemon: () => ipcRenderer.invoke("emrg:restartDaemon"),
   relaunchGui: () => ipcRenderer.invoke("emrg:relaunchGui"),
   switchSession: (payload) => ipcRenderer.invoke("emrg:switchSession", payload),

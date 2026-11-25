@@ -128,6 +128,14 @@ export interface DaemonAppState {
    */
   vision: boolean | null;
   currentVersion: string;
+  /**
+   * The newest published release, as the daemon last read it on demand (issue #3212).
+   *
+   * The third of three version numbers, and the only one that describes the world rather
+   * than this machine: `currentVersion` is what the process runs, the banner's installed
+   * version is what is on disk, and this is what exists upstream. `null` is "not asked".
+   */
+  latestRelease: UpdateCheckReading | null;
   evolutionCount: number | null;
   sessions: SessionSummary[];
   openSessions: OpenSessionEntry[];
@@ -405,6 +413,7 @@ export function createDaemonAppStore(): SnapshotStore<DaemonAppState> {
     // daemon's capability made before any frame arrived (see `DaemonAppState.vision`).
     vision: null,
     currentVersion: "",
+    latestRelease: null,
     evolutionCount: null,
     sessions: [],
     openSessions: [],
@@ -435,6 +444,55 @@ export interface SendMessagePayload {
 }
 
 /** window.emrg.init() 返回值（main.js emrg:init 处理器 → preload.init） */
+/**
+ * One answer to "is there a newer release than the one running" (issue #3212).
+ *
+ * One shape for both carriers — the reading the daemon carries on the opening `init` and
+ * the answer a press brings back. A panel that rendered the two differently would make
+ * the version line mean one thing before a click and another after it.
+ */
+export interface UpdateCheckReading {
+  ok: boolean;
+  /** Why the reading could not be taken. A failure is a state to show, not a throw. */
+  error: string | null;
+  tag: string | null;
+  version: string | null;
+  publishedAt: string | null;
+  /** When the daemon took this reading, epoch seconds; null when it never did. */
+  checkedAt: number | null;
+  /** True when the daemon answered from its cache instead of asking GitHub. */
+  cached: boolean;
+  isNewer: boolean;
+  compareVersion: string;
+}
+
+/**
+ * The daemon's stored reading as the renderer keeps it, or null for "never asked".
+ *
+ * `null` and "current" render differently and must: a daemon that has not been asked
+ * knows nothing about the world, and saying "up to date" on its behalf is the defect the
+ * field exists to fix.
+ */
+export function reportedReading(raw: unknown): UpdateCheckReading | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const version = typeof r.version === "string" ? r.version : "";
+  const tag = typeof r.tag === "string" ? r.tag : "";
+  if (!version && !tag) return null;
+  return {
+    ok: true,
+    error: null,
+    tag: tag || `v${version}`,
+    version: version || tag.replace(/^v/, ""),
+    publishedAt: typeof r.published_at === "string" && r.published_at ? r.published_at : null,
+    checkedAt: typeof r.checked_at === "number" ? r.checked_at : null,
+    // Taken by the daemon at some earlier point, never by the press that is reading this.
+    cached: true,
+    isNewer: r.is_newer === true,
+    compareVersion: typeof r.compare_version === "string" ? r.compare_version : "",
+  };
+}
+
 export interface InitResult {
   config_exists?: boolean;
   api_key_configured?: boolean;
@@ -455,6 +513,8 @@ export interface InitResult {
    * delay at most.
    */
   installed_version?: string;
+  /** The newest published release as last read on demand (issue #3212); see `reportedReading`. */
+  latest_release?: unknown;
   version?: string;
   sessions?: SessionSummary[];
   open_sessions?: OpenSessionEntry[];
@@ -1504,6 +1564,9 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
       vision: typeof result.vision === "boolean" ? result.vision : s.vision,
       evolutionCount: result.evolution_count ?? s.evolutionCount,
       currentVersion: result.current_version || s.currentVersion,
+      // Absent on a main process older than this field, and absent for a daemon that has
+      // never been asked: both leave what was known alone rather than claiming "current".
+      latestRelease: reportedReading(result.latest_release) ?? s.latestRelease,
       // The same test the `upgrade` frame applies, on the opening reading
       // (rant 2026-11-22T13:43:13). One rule, two carriers: the frame arrives every
       // 15 s from a timer, and a timer that never starts used to mean an installed

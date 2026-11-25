@@ -428,6 +428,9 @@ vision = false
         // started）。这里让开局这次读数也带上磁盘版本，由 applyInit 设同一个横幅——
         // 定时器缺席最多让横幅晚到，不再让它缺席。
         installed_version: pong?.installed_version || "",
+        // issue #3212：远端最新版是第三个版本号，与"进程在跑的"和"磁盘上装的"都不同。
+        // 只在确实问过一次之后才有值；为 null 表示没问过，不等于"已是最新"。
+        latest_release: pong?.latest_release ?? null,
         version: APP_VERSION, // WorkBuddy P3：版本号随 package.json 走（此前 renderer 硬编码 v0.2.7）
         sessions,
         open_sessions: openSessionsList(),
@@ -959,6 +962,28 @@ vision = false
               output: Number.isFinite(g?.output) ? g.output : null,
             }))
           : [],
+      };
+    });
+
+    ipcMain.handle("emrg:checkUpdate", async (_e, { force } = {}) => {
+      // 查一次失败是**页面要渲染的一种状态**，不是异常：宿主问了一个问题，"连不上
+      // GitHub" 就是它该看到的答案，并且要和仍然可见的版本号并排显示。所以 ok:false
+      // 作为数据返回，只有通道本身坏了才抛。
+      const frame = await requireConn().sendCommandAndWait(
+        "check_update",
+        force === true ? { force: true } : {},
+        20000,
+      );
+      return {
+        ok: frame.ok === true,
+        error: typeof frame.error === "string" && frame.error ? frame.error : null,
+        tag: typeof frame.tag === "string" ? frame.tag : null,
+        version: typeof frame.version === "string" ? frame.version : null,
+        publishedAt: typeof frame.published_at === "string" ? frame.published_at : null,
+        checkedAt: Number.isFinite(frame.checked_at) ? frame.checked_at : null,
+        cached: frame.cached === true,
+        isNewer: frame.is_newer === true,
+        compareVersion: typeof frame.compare_version === "string" ? frame.compare_version : "",
       };
     });
 

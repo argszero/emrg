@@ -131,11 +131,13 @@ describe("词典完整性守卫（防漂移）", () => {
   // 其他标签、关闭右侧标签、复制路径、缩进宽度（空格 / Tab）八条中英各加一条 → 544 + 8 = 552。
   // 2026-11-24 issue #3204：排队成为消息行自己的状态，`app.queued` 改写为位置标记，
   // 另加删除按钮提示、队列摘要与「走了几条」三条 → 552 + 3 = 555。
-  it("zh/en 各 563 个 key 且完全对齐", () => {
+  // 2026-11-25 两个分支同一天各加键，合并后是并集：编辑器的分页与失败原因八条、关于页的
+  // 检查更新十条，中英各加一条 → 555 + 8 + 10 = 573。这个数是数合并后的字典量出来的。
+  it("zh/en 各 573 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(563);
-    expect(enKeys.length).toBe(563);
+    expect(zhKeys.length).toBe(573);
+    expect(enKeys.length).toBe(573);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);

@@ -3291,6 +3291,13 @@ class EmrgServer:
                 # previous-version.txt 不再参与判断（14:38:27 重构）。
                 "current_version": self._run_version,
                 "installed_version": self._current_installed_version(),
+                # The newest published release, as last read on demand (issue #3212).
+                # Three versions are in play and they are three different numbers:
+                # `current_version` is what this process runs, `installed_version` is what
+                # is on disk, and this is what exists upstream. Showing one in place of
+                # another is claiming a comparison nobody made. Absent means the question
+                # has not been asked in this daemon's life, which is not "current".
+                "latest_release": self._latest_release_reading(),
             })
             return
 
@@ -3494,6 +3501,13 @@ class EmrgServer:
             # so there is no directory a caller could name to narrow it, and none it
             # could forget to name.
             await self._handle_list_all_sessions(ws)
+
+        elif msg_type == "check_update":
+            # The host asking whether a newer release exists (issue #3212). Answered
+            # **independently of `[update] enabled`**: that switch governs whether this
+            # daemon installs a release by itself, never whether the host may know one
+            # exists — and the host who turned it off is the one with no other way to ask.
+            await self._handle_check_update(ws, msg.get("force") is True)
 
         elif msg_type == "usage_window":
             # Rant 2026-11-19T09:31:00: the host-wide last-24-hours totals. The window is
@@ -8134,6 +8148,51 @@ class EmrgServer:
     _MAX_READ_BYTES = 1 * 1024 * 1024
     # 一页的行数上限（对齐 ReadTool.MAX_LINES）：超出预算的文件一次最多给这么多行
     _MAX_READ_LINES = 2000
+
+    def _latest_release_reading(self) -> Optional[dict]:
+        """The last on-demand reading of the releases feed, or None (issue #3212).
+
+        `pong` is answered on every connect and must never wait on GitHub, so this reads
+        the manager's cache and nothing else. The manager is constructed inside the upgrade
+        tick loop, so before that loop starts there is no manager at all — which reads as
+        "not asked", not as a failure to answer.
+        """
+        manager = getattr(self, "_upgrade_manager", None)
+        reading = manager.last_reading() if manager is not None else None
+        if not reading:
+            return None
+        # The stored facts stay the manager's; the judgement is this process's, because
+        # `is_newer` is about the version that is *running*, which only the daemon knows.
+        from emrg.server.upgrade import is_newer, parse_version
+
+        return {
+            **reading,
+            "is_newer": is_newer(
+                parse_version(reading["tag"]), parse_version(self._run_version)
+            ),
+            "compare_version": self._run_version,
+        }
+
+    async def _handle_check_update(self, ws, force: bool = False) -> None:
+        """Answer "is there a newer release than the one I am running" (issue #3212).
+
+        The judgement is the manager's; this supplies the version to judge against —
+        `_run_version`, the same number the About page shows — so that the answer and the
+        version printed next to it are about one thing rather than two.
+        """
+        manager = getattr(self, "_upgrade_manager", None)
+        if manager is None:
+            await self._send(ws, {
+                "type": "check_update",
+                "ok": False,
+                "error": "the upgrade manager has not started in this daemon",
+                "compare_version": self._run_version,
+            })
+            return
+        await self._send(ws, {
+            "type": "check_update",
+            **await manager.check_latest(self._run_version, force=force),
+        })
 
     async def _handle_list_files(self, path_str: str, ws) -> None:
         """List one directory level (workspace file browser data source).

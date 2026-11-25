@@ -4,6 +4,7 @@ import { dialogReducer, initialDialogState, type ConfirmRequest } from "../lib/d
 import { ConfirmDialog } from "./ConfirmDialog";
 import { GithubDeviceDialog } from "./GithubDeviceDialog";
 import { AtpLoginDialog } from "./AtpLoginDialog";
+import type { UpdateCheckReading } from "../lib/daemonBridge";
 
 /**
  * SettingsPanel — Batch 5 slice 6：设置面板接线（vanilla dialogs.js showSettings/
@@ -22,6 +23,16 @@ export type SettingsTab = "model" | "sandbox" | "appearance" | "shortcuts" | "ab
 export interface SettingsPanelProps {
   /** 版本号（Shell appState.currentVersion 注入） */
   version?: string;
+  /**
+   * The daemon's last on-demand release reading, or null for "never asked" (issue #3212).
+   *
+   * `null` and "current" must render differently. A daemon nobody has asked knows nothing
+   * about the world, and printing "up to date" on its behalf is the defect this prop exists
+   * to fix — the running version, the version on disk and the newest published release are
+   * three different numbers, and this is the only one that describes the world rather than
+   * this machine.
+   */
+  latestRelease?: UpdateCheckReading | null;
   /** 进化计数（Shell appState.evolutionCount 注入） */
   evolutionCount?: number | null;
 }
@@ -127,10 +138,103 @@ interface EmrgBridge {
    * 当时一次都没出现，宿主在界面上就没有任何重启入口了。
    */
   restartDaemon?(): Promise<unknown>;
+  /**
+   * Ask the daemon once whether a newer release exists (issue #3212).
+   *
+   * A failed check is an answer, not an exception: "could not reach the releases endpoint"
+   * is something the page shows beside the running version, so it comes back as a reading
+   * with `ok: false` and a reason. Only a broken channel throws.
+   */
+  checkUpdate?(): Promise<UpdateCheckReading | null>;
 }
 
 function bridge(): EmrgBridge | undefined {
   return (window as unknown as { emrg?: EmrgBridge }).emrg;
+}
+
+/**
+ * A failed check as a reading (issue #3212).
+ *
+ * Same shape as a success, because the page renders both from one place: `ok: false` plus
+ * the reason is the whole difference, and a separate error state would give the About tab
+ * two ways to say the same thing.
+ */
+function failedReading(reason: string): UpdateCheckReading {
+  return {
+    ok: false,
+    error: reason,
+    tag: null,
+    version: null,
+    publishedAt: null,
+    checkedAt: null,
+    cached: false,
+    isNewer: false,
+    compareVersion: "",
+  };
+}
+
+/**
+ * The About tab's version reading: one line of state under the running version, and the
+ * button that asks for it (issue #3212).
+ *
+ * Five states, and "never asked" is one of them — the defect this fixes was a page that
+ * could not tell five releases behind from exactly current, so an unasked daemon must not
+ * borrow the wording of an answered one.
+ */
+function VersionReading({
+  reading,
+  checking,
+  onCheck,
+}: {
+  reading: UpdateCheckReading | null;
+  checking: boolean;
+  onCheck: () => void;
+}) {
+  const { t } = useI18n();
+  const state = checking
+    ? "checking"
+    : !reading
+      ? "unasked"
+      : reading.ok === false
+        ? "failed"
+        : reading.isNewer
+          ? "newer"
+          : "current";
+  const text =
+    state === "checking"
+      ? t("settings.updateChecking")
+      : state === "unasked"
+        ? t("settings.updateNotChecked")
+        : state === "failed"
+          ? t("settings.updateFailed", { reason: reading?.error ?? "" })
+          : state === "newer"
+            ? t("settings.updateNewer", {
+                version: reading?.version ?? "",
+                date: String(reading?.publishedAt ?? "").slice(0, 10),
+              })
+            : t("settings.updateCurrent", { version: reading?.version ?? "" });
+  return (
+    <>
+      <div className="hint" data-testid="about-update" data-state={state}>
+        {text}
+      </div>
+      {reading?.checkedAt ? (
+        <div className="hint" data-testid="about-update-checked">
+          {t("settings.updateCheckedAt", {
+            time: new Date(reading.checkedAt * 1000).toISOString().slice(0, 16).replace("T", " "),
+          })}
+        </div>
+      ) : null}
+      <button
+        type="button"
+        data-testid="settings-check-update"
+        onClick={onCheck}
+        disabled={checking}
+      >
+        {checking ? t("settings.updateChecking") : t("settings.updateCheckBtn")}
+      </button>
+    </>
+  );
 }
 
 /** `2026-10-13T08:00:00.123456` → `2026-10-13 08:00`（vanilla 同款：前 16 字符，T→空格） */
@@ -170,7 +274,11 @@ const TABS: { id: SettingsTab; labelKey: string }[] = [
   { id: "about", labelKey: "settings.tabAbout" },
 ];
 
-export function SettingsPanel({ version = "", evolutionCount = null }: SettingsPanelProps) {
+export function SettingsPanel({
+  version = "",
+  latestRelease = null,
+  evolutionCount = null,
+}: SettingsPanelProps) {
   const { t } = useI18n();
   const [tab, setTab] = useState<SettingsTab>("model");
   // model tab 表单态
@@ -196,6 +304,10 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
   // 所以这个动作住在「关于」——那正是“这台机器现在跑的是什么”的那一页。
   const [restarting, setRestarting] = useState(false);
   const [restartError, setRestartError] = useState<string | null>(null);
+  // 版本读数（issue #3212）。pressReading 为 null 时用 daemon 上次的读数（prop）：
+  // 刚打开的窗口不必等宿主点一下才知道有没有新版，点过的则以这次按下的答案为准。
+  const [pressReading, setPressReading] = useState<UpdateCheckReading | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
   // model 行内表单态（vanilla openModelForm/saveModelForm）
   const [formOpen, setFormOpen] = useState(false);
   const [editingName, setEditingName] = useState<string | null>(null);
@@ -495,6 +607,25 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
     } catch (e) {
       setRestarting(false);
       setRestartError(`${t("settings.daemonRestartFailed")}${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /** 查一次远端（issue #3212）。与 `[update] enabled` 无关：那个开关管的是要不要自动装，
+   *  从来不管宿主能不能知道。失败也是一种答案，所以按数据收下、照常渲染。 */
+  async function handleCheckUpdate() {
+    const b = bridge();
+    if (!b?.checkUpdate) {
+      setPressReading(failedReading(t("settings.updateFailedNoChannel")));
+      return;
+    }
+    setCheckingUpdate(true);
+    try {
+      const answer = await b.checkUpdate();
+      setPressReading(answer ?? failedReading(t("settings.updateFailedNoChannel")));
+    } catch (e) {
+      setPressReading(failedReading(e instanceof Error ? e.message : String(e)));
+    } finally {
+      setCheckingUpdate(false);
     }
   }
 
@@ -1079,6 +1210,15 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
                 </div>
                 <div className="hint" style={{ marginTop: 6 }}>{t("settings.aboutDesc")}</div>
               </div>
+            </div>
+            <div className="settings-group">
+              <div className="settings-group-title">{t("settings.updateTitle")}</div>
+              <div className="hint">{t("settings.updateDesc")}</div>
+              <VersionReading
+                reading={pressReading ?? latestRelease}
+                checking={checkingUpdate}
+                onCheck={() => void handleCheckUpdate()}
+              />
             </div>
             <div className="settings-group">
               <div className="settings-group-title">{t("settings.daemonTitle")}</div>

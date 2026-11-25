@@ -52,12 +52,34 @@ function mockEmrg(over: Record<string, unknown> = {}) {
 
 function setup(
   over: Record<string, unknown> = {},
-  props: { version?: string; evolutionCount?: number | null } = {},
+  props: {
+    version?: string;
+    evolutionCount?: number | null;
+    latestRelease?: Record<string, unknown> | null;
+  } = {},
 ) {
   const { bridge, calls } = mockEmrg(over);
   render(
     <I18nProvider lang="en">
-      <SettingsPanel version={props.version} evolutionCount={props.evolutionCount} />
+      <SettingsPanel
+        version={props.version}
+        evolutionCount={props.evolutionCount}
+        latestRelease={
+          props.latestRelease
+            ? {
+                ok: true,
+                error: null,
+                tag: String(props.latestRelease.tag ?? ""),
+                version: String(props.latestRelease.version ?? ""),
+                publishedAt: (props.latestRelease.publishedAt as string | null) ?? null,
+                checkedAt: (props.latestRelease.checkedAt as number | null) ?? null,
+                cached: true,
+                isNewer: props.latestRelease.isNewer === true,
+                compareVersion: "",
+              }
+            : null
+        }
+      />
     </I18nProvider>,
   );
   return { bridge, calls };
@@ -788,5 +810,133 @@ describe("SettingsPanel", () => {
     await waitFor(() =>
       expect(screen.getByTestId("settings-msg").textContent).toContain("aitokenpool.args.fun"),
     );
+  });
+});
+
+/**
+ * 版本读数（issue #3212）。四种状态各有一个用例，且「没问过」不能渲染成「已是最新」——
+ * 那是这次要修的毛病本身。
+ */
+describe("SettingsPanel — version reading (issue #3212)", () => {
+  const reading = (over: Record<string, unknown> = {}) => ({
+    ok: true,
+    error: null,
+    tag: "v0.3.78",
+    version: "0.3.78",
+    publishedAt: "2026-11-24T13:00:00Z",
+    checkedAt: 1_764_000_000,
+    cached: false,
+    isNewer: false,
+    compareVersion: "0.3.78",
+    ...over,
+  });
+
+  it("says it has not asked until it is asked", () => {
+    setup({}, { version: "0.3.78" });
+    fireEvent.click(screen.getByTestId("settings-tab-about"));
+    const line = screen.getByTestId("about-update");
+    expect(line.getAttribute("data-state")).toBe("unasked");
+    expect(line.textContent).toContain("Not checked yet");
+  });
+
+  it("renders 'up to date' from the press's own answer", async () => {
+    const checkUpdate = vi.fn().mockResolvedValue(reading());
+    setup({ checkUpdate }, { version: "0.3.78" });
+    fireEvent.click(screen.getByTestId("settings-tab-about"));
+
+    fireEvent.click(screen.getByTestId("settings-check-update"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("about-update").getAttribute("data-state")).toBe("current"),
+    );
+    expect(screen.getByTestId("about-update").textContent).toContain("Up to date (v0.3.78)");
+    // 运行版本仍然在上一行：查完之后版本号不能被这条状态顶掉。
+    expect(screen.getByTestId("about-line").textContent).toContain("0.3.78");
+  });
+
+  it("renders the newer version and its date", async () => {
+    const checkUpdate = vi
+      .fn()
+      .mockResolvedValue(reading({ tag: "v0.3.79", version: "0.3.79", isNewer: true }));
+    setup({ checkUpdate }, { version: "0.3.78" });
+    fireEvent.click(screen.getByTestId("settings-tab-about"));
+
+    fireEvent.click(screen.getByTestId("settings-check-update"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("about-update").getAttribute("data-state")).toBe("newer"),
+    );
+    expect(screen.getByTestId("about-update").textContent).toContain("v0.3.79 is available");
+  });
+
+  it("shows the reason a check failed and keeps the running version", async () => {
+    const checkUpdate = vi.fn().mockResolvedValue(
+      reading({
+        ok: false,
+        error: "could not reach the releases endpoint",
+        tag: null,
+        version: null,
+        checkedAt: null,
+      }),
+    );
+    setup({ checkUpdate }, { version: "0.3.78" });
+    fireEvent.click(screen.getByTestId("settings-tab-about"));
+
+    fireEvent.click(screen.getByTestId("settings-check-update"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("about-update").getAttribute("data-state")).toBe("failed"),
+    );
+    expect(screen.getByTestId("about-update").textContent).toContain(
+      "could not reach the releases endpoint",
+    );
+    expect(screen.getByTestId("about-line").textContent).toContain("0.3.78");
+  });
+
+  it("says it is checking while the check is in flight", async () => {
+    const checkUpdate = vi.fn().mockReturnValue(new Promise(() => {}));
+    setup({ checkUpdate }, { version: "0.3.78" });
+    fireEvent.click(screen.getByTestId("settings-tab-about"));
+
+    const button = screen.getByTestId("settings-check-update");
+    fireEvent.click(button);
+
+    await waitFor(() => expect(button.textContent).toContain("Checking"));
+    expect(screen.getByTestId("about-update").getAttribute("data-state")).toBe("checking");
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("shows the daemon's earlier reading before any press", () => {
+    // This is the pong carrier (`latest_release` → init → Shell → here): a freshly opened
+    // window knows the answer without the host clicking anything.
+    setup(
+      {},
+      {
+        version: "0.3.78",
+        latestRelease: {
+          tag: "v0.3.79",
+          version: "0.3.79",
+          publishedAt: "2026-11-24T13:00:00Z",
+          checkedAt: 1_764_000_000,
+          isNewer: true,
+        },
+      },
+    );
+    fireEvent.click(screen.getByTestId("settings-tab-about"));
+    const line = screen.getByTestId("about-update");
+    expect(line.getAttribute("data-state")).toBe("newer");
+    expect(line.textContent).toContain("v0.3.79 is available");
+  });
+
+  it("reports a build whose window has no such channel instead of doing nothing", async () => {
+    setup({}, { version: "0.3.78" }); // mockEmrg has no checkUpdate
+    fireEvent.click(screen.getByTestId("settings-tab-about"));
+
+    fireEvent.click(screen.getByTestId("settings-check-update"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("about-update").getAttribute("data-state")).toBe("failed"),
+    );
+    expect(screen.getByTestId("about-update").textContent).toContain("no such channel");
   });
 });
