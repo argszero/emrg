@@ -70,6 +70,8 @@ const EXPECTED_INVOKE_METHODS = [
   "hideBrowser",
   "browserNavigate",
   "browserBounds",
+  // issue #3229：重读当前地址——磁盘上改过的本地页面要有办法再读一次
+  "browserReload",
   "listSkills",
   "listAgents",
   "listAgentSessions",

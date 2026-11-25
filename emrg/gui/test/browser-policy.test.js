@@ -19,6 +19,7 @@ const {
   browserRect,
   certificateResult,
   newWindowTarget,
+  pageStillCurrent,
   permissionGranted,
   saveDialogOptions,
 } = require("../browser-policy");
@@ -87,6 +88,30 @@ test("a typed address is read as an address, not as a string to be parsed", () =
   assert.deepStrictEqual(url("data:text/html,x"), { ok: false, error: "scheme" });
   // A scheme with no host is an error page nobody asked for.
   assert.deepStrictEqual(url("http://"), { ok: false, error: "invalid" });
+
+  // A path on this machine is a file, not a host (issue #3229). Before this branch existed,
+  // `/Users/me/a.html` carried no scheme, its first `[/?#]`-separated segment was empty, and
+  // the built address was `https:///Users/me/a.html` — which Chromium parses with host `users`
+  // and then really navigates to, so the view went blank and the bar said nothing.
+  assert.deepStrictEqual(url("/Users/me/report.html"), {
+    ok: true,
+    url: "file:///Users/me/report.html",
+  });
+  // A path may hold a space or a CJK name; the address carries them percent-encoded.
+  assert.deepStrictEqual(url("  /tmp/a b.html  "), { ok: true, url: "file:///tmp/a%20b.html" });
+  assert.deepStrictEqual(url("/tmp/中文.html"), {
+    ok: true,
+    url: "file:///tmp/%E4%B8%AD%E6%96%87.html",
+  });
+  // A Windows drive is a path, not the one-letter scheme its colon makes it look like.
+  assert.deepStrictEqual(url("C:\\Users\\me\\a.html"), {
+    ok: true,
+    url: "file:///C:/Users/me/a.html",
+  });
+  // Text whose first segment is empty names no host. It is refused where the bar can say so,
+  // rather than navigated to and lost — the protocol-relative spelling included.
+  assert.deepStrictEqual(url("///"), { ok: false, error: "invalid" });
+  assert.deepStrictEqual(url("//example.com/x"), { ok: false, error: "invalid" });
 });
 
 test("every permission is refused, the five named ones included", () => {
@@ -181,4 +206,34 @@ test("a main-frame navigation is judged from the event object, not from position
   assert.strictEqual(blocksMainFrameNavigation({}), false);
   // `isMainFrame` must be the boolean true, not a truthy stand-in.
   assert.strictEqual(blocksMainFrameNavigation({ url: "javascript:alert(1)", isMainFrame: "yes" }), false);
+});
+
+test("the page on screen stays until the file behind it changes (issue #3229)", () => {
+  const stays = (patch) =>
+    pageStillCurrent({ target: "https://a/x", loaded: "https://a/x", loadedMtimeMs: null, mtimeMs: null, ...patch });
+
+  // A different address always loads.
+  assert.strictEqual(stays({ target: "https://b/y" }), false);
+  // A network page is kept: re-fetching it on every tab switch would throw away scroll
+  // position and whatever was typed into it.
+  assert.strictEqual(stays({}), true);
+  // A local file that did not move is kept too, so switching tabs stays as cheap as it was.
+  assert.strictEqual(
+    pageStillCurrent({ target: "file:///t/a.html", loaded: "file:///t/a.html", loadedMtimeMs: 111, mtimeMs: 111 }),
+    true,
+  );
+  // A local file that moved is not: a copy from before the edit is the defect this rule is
+  // for, and the host cannot see it was stale until the whole GUI restarts.
+  assert.strictEqual(
+    pageStillCurrent({ target: "file:///t/a.html", loaded: "file:///t/a.html", loadedMtimeMs: 111, mtimeMs: 222 }),
+    false,
+  );
+  // A stamp that cannot be read is treated as changed: one load too many beats showing an old
+  // page as if it were the current one.
+  assert.strictEqual(
+    pageStillCurrent({ target: "file:///t/a.html", loaded: "file:///t/a.html", loadedMtimeMs: 111, mtimeMs: null }),
+    false,
+  );
+  // Nothing loaded at all is not "still current".
+  assert.strictEqual(pageStillCurrent({ target: null, loaded: null, loadedMtimeMs: null, mtimeMs: null }), false);
 });

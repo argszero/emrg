@@ -97,6 +97,41 @@ function newWindowTarget(url) {
 }
 
 /**
+ * Whether the page already on screen answers a load of `target` (issue #3229).
+ *
+ * `loaded` is the address the view holds, `loadedMtimeMs` the file's stamp when it was loaded,
+ * and `mtimeMs` its stamp now (`null` when the target is not a file). Three answers, and the
+ * third is the one this function exists for:
+ *
+ *  - a different address always loads;
+ *  - a `file:` address loads again when the file on disk changed, because the reason to have
+ *    a local page in the panel at all is that the host is editing it — a copy from before the
+ *    edit is the defect, and it is invisible until the GUI restarts. An unchanged one is not
+ *    reloaded, so switching tabs stays as cheap as it was;
+ *  - a network page is the view's own business: Chromium keeps it, and re-fetching it on every
+ *    tab switch would throw away scroll position and whatever was typed into it.
+ */
+function pageStillCurrent({ target, loaded, loadedMtimeMs, mtimeMs }) {
+  if (typeof target !== "string" || target !== loaded) return false;
+  if (!/^file:/i.test(target)) return true;
+  if (typeof loadedMtimeMs !== "number" || typeof mtimeMs !== "number") return false;
+  return loadedMtimeMs === mtimeMs;
+}
+
+/** Whether typed text names a path on this machine rather than a host (issue #3229). */
+function isLocalPath(text) {
+  // A POSIX absolute path — but not the protocol-relative `//host/path`, which names a host.
+  if (text.startsWith("/")) return !text.startsWith("//");
+  // A Windows drive: `C:\Users\me\a.html` or `C:/Users/me/a.html`.
+  return /^[a-zA-Z]:[\\/]/.test(text);
+}
+
+/** The `file:` address of a local path, keeping the spaces and non-ASCII a path may carry. */
+function fileUrlOf(text) {
+  return new URL(`file://${text.replace(/\\/g, "/")}`).href;
+}
+
+/**
  * What the address bar's text means: `{ ok: true, url }`, or `{ ok: false, error }` with one
  * of `"empty"`, `"scheme"`, `"invalid"`.
  *
@@ -110,6 +145,14 @@ function addressTarget(raw) {
   if (typeof raw !== "string") return { ok: false, error: "empty" };
   const text = raw.trim();
   if (text.length === 0) return { ok: false, error: "empty" };
+
+  // A path on this machine is a file, not a host, and it is read that way before anything
+  // else looks at the text. Why it has to be first: `/Users/me/report.html` carries no
+  // scheme, and the first segment split on `[/?#]` is empty, so the host branch below built
+  // `https:///Users/me/report.html` — an address Chromium parses with host `users`, a name
+  // that does not resolve. The navigation then really happened and really failed, which is
+  // the blank page: the address bar had no path route at all.
+  if (isLocalPath(text)) return { ok: true, url: fileUrlOf(text) };
 
   const match = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(text);
   const scheme = match ? `${match[1].toLowerCase()}:` : null;
@@ -134,6 +177,10 @@ function addressTarget(raw) {
   }
 
   const host = text.split(/[/?#]/)[0].replace(/:\d+$/, "").toLowerCase();
+  // A text whose first segment is empty names no host at all. A path can no longer reach
+  // here (the branch above took it), so what is left is a malformed address — refused where
+  // the bar can say so, instead of navigating the view at something that cannot resolve.
+  if (host.length === 0) return { ok: false, error: "invalid" };
   const local = LOCAL_HOSTS.includes(host) || /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
   const url = `${local ? "http" : "https"}://${text}`;
   if (schemeOf(url) === null) return { ok: false, error: "invalid" };
@@ -219,8 +266,11 @@ module.exports = {
   browserNavPolicy,
   browserRect,
   certificateResult,
+  fileUrlOf,
+  isLocalPath,
   navAllowed,
   newWindowTarget,
+  pageStillCurrent,
   permissionGranted,
   saveDialogOptions,
 };
