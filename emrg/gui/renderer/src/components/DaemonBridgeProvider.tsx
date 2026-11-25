@@ -91,11 +91,18 @@ interface EmrgWindow {
      * a channel missing from this literal reaches the bridge as `undefined`, which the
      * bridge reads as "this build cannot read files".
      */
-    readFile?: (p: { path: string }) => Promise<{
+    readFile?: (p: {
+      path: string;
+      startLine?: number;
+      lineLimit?: number;
+    }) => Promise<{
       content?: string;
       binary?: boolean;
       truncated?: boolean;
       totalLines?: number | null;
+      size?: number | null;
+      error?: string | null;
+      errorCode?: string | null;
     }>;
     /**
      * The right-hand editor's disk probe and its write-back (preload.statFile /

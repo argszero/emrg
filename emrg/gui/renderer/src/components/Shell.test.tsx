@@ -48,6 +48,7 @@ function mockEmrg() {
     binary: false,
     truncated: false,
     totalLines: null,
+    size: null,
   });
   const sessionRoots = vi.fn().mockResolvedValue({
     agentRoot: "/p/emrg",
@@ -1664,6 +1665,7 @@ describe("the cockpit's file-row wire (issue #3070)", () => {
       binary: false,
       truncated: false,
       totalLines: 2,
+      size: 20,
     });
     render(wrapper(<Shell />));
     await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));

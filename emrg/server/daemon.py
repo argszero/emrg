@@ -557,6 +557,155 @@ def _non_regular_kind(path) -> str | None:
         return None
 
 
+def _decode_window_line(raw: bytes) -> str:
+    """One line of a window, with the `\\r` a CRLF ending carries removed.
+
+    ``Path.read_text`` translates ``\\r\\n`` to ``\\n`` on the whole-file path, so a window
+    that kept the ``\\r`` would make the same file show one line ending when it is small
+    and another when it is large. This is that translation, stated for one line.
+    """
+    if raw.endswith(b"\r"):
+        raw = raw[:-1]
+    return raw.decode("utf-8")
+
+
+def _decode_prefix(raw: bytes) -> str:
+    """Decode a byte prefix that was cut at a page boundary, keeping whole characters.
+
+    A page is cut at a **byte** budget, so the cut can land inside a multi-byte character.
+    Dropping up to three trailing bytes repairs that; a `UnicodeDecodeError` earlier than
+    the last three bytes is the file's own content, and it is re-raised so the caller
+    reports a binary file — a prefix filter must not quietly turn a blob into text.
+    """
+    for cut in (0, 1, 2, 3):
+        body = raw[: len(raw) - cut] if cut else raw
+        try:
+            return body.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            if exc.start < len(body) - 3:
+                raise
+    raise UnicodeDecodeError(
+        "utf-8", raw, max(0, len(raw) - 1), len(raw), "incomplete character at the cut"
+    )
+
+
+def _read_line_window(
+    path, start: int, limit: int | None, max_lines: int, max_bytes: int, size: int
+) -> tuple[list[str], int, bool]:
+    """Read one window of a text file without holding the whole file in memory.
+
+    The reader this replaces did ``path.read_text()`` and then sliced it, which is why a
+    size wall had to sit in front of it: a 52 MB file became a 52 MB string and a list of
+    a million more. A window is answerable without either — the file is scanned in
+    chunks, only the requested lines are kept, and every byte is still counted, so
+    ``total_lines`` stays exact and a client can say how much it is not showing.
+
+    A page is bounded **twice** — ``max_lines`` lines and ``max_bytes`` of text,
+    whichever fills first — because a line count alone bounds nothing: two thousand lines
+    of a minified bundle is tens of megabytes, which is the frame size the old refusal
+    existed to avoid.
+
+    A line longer than a page is answered as its own prefix, and the scan **continues past
+    it**: the bytes of that line are dropped, not the file. Stopping there would make every
+    later page empty for as long as the reader kept its position — and a JSONL file with one
+    huge record is exactly the population this reader exists for.
+
+    Line endings are ``\\n``, with one trailing ``\\r`` removed per line by
+    :func:`_decode_window_line`. The one reading that differs from ``read_text``'s
+    universal newlines is a file whose lines end with a lone ``\\r``: it scans as a single
+    line here. No such file exists in this tree, and this function is only reached for a
+    file the whole-file path would have refused.
+
+    ``UnicodeDecodeError`` propagates: a file that is not UTF-8 is reported as binary by
+    the caller, exactly as the whole-file path reports it.
+
+    :returns: ``(lines, total_lines, truncated)`` — the window, the file's exact line
+        count, and whether anything follows the window.
+    """
+    if limit is None:
+        limit = max_lines
+    else:
+        limit = min(limit, max_lines)
+    selected: list[str] = []
+    used = 0
+    seen = 0
+    newlines = 0
+    ends_with_newline = False
+    collecting = True
+    cut = False
+    tail = b""
+    # The first `max_bytes` of a line too long to keep whole, held while the rest of that
+    # line is skipped. Its newline is the only thing that ends it, and until then nothing
+    # more is held: a file of one enormous line must not become a buffer of the same size.
+    overlong = b""
+    with path.open("rb") as fh:
+        while True:
+            chunk = fh.read(65536)
+            if not chunk:
+                break
+            # Counted for every chunk, collected only while the window is unfilled: the
+            # line count is the part that must stay exact after the page is full.
+            newlines += chunk.count(b"\n")
+            ends_with_newline = chunk.endswith(b"\n")
+            if not collecting:
+                continue
+            buf = tail + chunk
+            pos = 0
+            while True:
+                nl = buf.find(b"\n", pos)
+                if nl < 0:
+                    break
+                if overlong:
+                    # The over-budget line ends here. It is one line, so it counts; a page
+                    # that starts at it answers its prefix rather than nothing, and a page
+                    # that starts after it goes on to collect the lines that follow.
+                    pos = nl + 1
+                    seen += 1
+                    if seen < start:
+                        overlong = b""
+                        continue
+                    if not selected:
+                        selected.append(_decode_prefix(overlong))
+                    cut = True
+                    collecting = False
+                    break
+                raw = buf[pos:nl]
+                pos = nl + 1
+                seen += 1
+                if seen < start:
+                    continue
+                if len(selected) >= limit or used + len(raw) > max_bytes:
+                    collecting = False
+                    break
+                selected.append(_decode_window_line(raw))
+                used += len(raw)
+            if collecting:
+                tail = buf[pos:]
+                if overlong:
+                    # Still inside that line: its remaining bytes are dropped, not held.
+                    tail = b""
+                elif len(tail) > max_bytes:
+                    overlong = tail[:max_bytes]
+                    tail = b""
+    if collecting and overlong:
+        # The file ends inside the over-budget line, so it is the last line.
+        seen += 1
+        if seen >= start and not selected:
+            selected.append(_decode_prefix(overlong))
+            cut = True
+    elif collecting and tail:
+        seen += 1
+        if seen >= start and len(selected) < limit and used + len(tail) <= max_bytes:
+            selected.append(_decode_window_line(tail))
+    if size == 0:
+        total = 0
+    elif ends_with_newline:
+        total = newlines
+    else:
+        total = newlines + 1
+    return selected, total, cut or start - 1 + len(selected) < total
+
+
 def _refuse_non_regular_file(path) -> None:
     """Raise, for a subject that cannot be read to an end, the ``OSError`` callers already answer.
 
@@ -7980,9 +8129,10 @@ class EmrgServer:
     # ── GUI workspace panel: list_files / read_file (rant 2026-08-11T12:20:35 P1.1) ──
     # 单目录条目上限：超出截断 + truncated 提示（与 ReadTool 的防爆理念一致）
     _MAX_LIST_ENTRIES = 5000
-    # read_file 1MB 上限：更大文件引导用系统工具打开（避免 WebSocket 帧过大）
-    _MAX_READ_FILE_SIZE = 1 * 1024 * 1024
-    # 显式 line_limit 的上限（对齐 ReadTool.MAX_LINES）
+    # read_file 一页正文的上限（issue #3210）：这不是拒读线，是**一页**的大小。文件超过它就
+    # 按窗口读，不再拒绝——原来的 1 MB 拒读把会话目录里绝大多数 `llm.jsonl` 挡在编辑器外。
+    _MAX_READ_BYTES = 1 * 1024 * 1024
+    # 一页的行数上限（对齐 ReadTool.MAX_LINES）：超出预算的文件一次最多给这么多行
     _MAX_READ_LINES = 2000
 
     async def _handle_list_files(self, path_str: str, ws) -> None:
@@ -8093,6 +8243,7 @@ class EmrgServer:
                         f"{name} must be an integer >= 1 (got {value!r}); this request "
                         "is refused rather than answered with a different window."
                     ),
+                    "error_code": "window_invalid",
                 })
                 return
             window[name] = number
@@ -8103,6 +8254,7 @@ class EmrgServer:
             await self._send(ws, {
                 "type": "file_content",
                 "error": "path must be absolute",
+                "error_code": "path_not_absolute",
             })
             return
         path = raw.resolve()
@@ -8111,12 +8263,14 @@ class EmrgServer:
                 await self._send(ws, {
                     "type": "file_content",
                     "error": f"file not found: {path}",
+                    "error_code": "not_found",
                 })
                 return
             if path.is_dir():
                 await self._send(ws, {
                     "type": "file_content",
                     "error": f"is a directory: {path}",
+                    "error_code": "is_directory",
                 })
                 return
             kind = _non_regular_kind(path)
@@ -8130,14 +8284,39 @@ class EmrgServer:
                     "type": "file_content",
                     "path": str(path),
                     "error": special_file_refusal(path, kind),
+                    "error_code": "not_regular",
                 })
                 return
             file_size = path.stat().st_size
-            if file_size > self._MAX_READ_FILE_SIZE:
+            if file_size > self._MAX_READ_BYTES:
+                # Over the page budget: answer the window instead of refusing the file
+                # (issue #3210). The whole-file branch below stays exactly as it was, so
+                # the reading of every file this daemon could already read is unchanged —
+                # this path is only reached for a file the budget used to turn away.
+                try:
+                    selected, total, truncated = _read_line_window(
+                        path,
+                        start,
+                        limit,
+                        self._MAX_READ_LINES,
+                        self._MAX_READ_BYTES,
+                        file_size,
+                    )
+                except UnicodeDecodeError:
+                    await self._send(ws, {
+                        "type": "file_content",
+                        "path": str(path),
+                        "binary": True,
+                        "size": file_size,
+                    })
+                    return
                 await self._send(ws, {
                     "type": "file_content",
                     "path": str(path),
-                    "error": "文件过大，用系统工具打开",
+                    "content": "\n".join(selected),
+                    "truncated": truncated,
+                    "total_lines": total,
+                    "size": file_size,
                 })
                 return
             try:
@@ -8147,12 +8326,15 @@ class EmrgServer:
                     "type": "file_content",
                     "path": str(path),
                     "binary": True,
+                    "size": file_size,
                 })
                 return
         except OSError as exc:
             await self._send(ws, {
                 "type": "file_content",
+                "path": str(path),
                 "error": f"cannot read file: {exc}",
+                "error_code": "unreadable",
             })
             return
 
@@ -8184,6 +8366,7 @@ class EmrgServer:
             "content": "\n".join(selected),
             "truncated": truncated,
             "total_lines": total,
+            "size": file_size,
         })
 
     async def _handle_stat_file(self, path_str: str, ws) -> None:

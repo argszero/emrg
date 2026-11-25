@@ -630,11 +630,18 @@ export interface DaemonBridgeDeps {
      * `total_lines` — so the editor shows what the tool would have returned rather than
      * a second reading of the same file (issue #3068).
      */
-    readFile?(p: { path: string }): Promise<{
+    readFile?(p: {
+      path: string;
+      startLine?: number;
+      lineLimit?: number;
+    }): Promise<{
       content?: string;
       binary?: boolean;
       truncated?: boolean;
       totalLines?: number | null;
+      size?: number | null;
+      error?: string | null;
+      errorCode?: string | null;
     }>;
     /**
      * Ask whether the file under the panel moved on disk (preload.statFile；未接线时
@@ -775,11 +782,12 @@ export interface DaemonBridge {
    * file it never read. A platform that cannot show a binary's bytes is reported through
    * `binary`, which is the daemon's own judgement, not the client's.
    */
-  readFile(path: string): Promise<{
+  readFile(path: string, window?: { startLine?: number; lineLimit?: number }): Promise<{
     content: string;
     binary: boolean;
     truncated: boolean;
     totalLines: number | null;
+    size: number | null;
   } | null>;
   /**
    * Whether the file moved on disk since the panel read it.
@@ -1700,19 +1708,36 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
   }
 
   /** Read one file for the editor; `null` = this build has no channel for it. */
-  async function readFile(p: string): Promise<{
+  async function readFile(
+    p: string,
+    window?: { startLine?: number; lineLimit?: number },
+  ): Promise<{
     content: string;
     binary: boolean;
     truncated: boolean;
     totalLines: number | null;
+    size: number | null;
   } | null> {
     if (!emrg.readFile) return null;
-    const answer = await emrg.readFile({ path: p });
+    const params: { path: string; startLine?: number; lineLimit?: number } = { path: p };
+    if (window?.startLine !== undefined) params.startLine = window.startLine;
+    if (window?.lineLimit !== undefined) params.lineLimit = window.lineLimit;
+    const answer = await emrg.readFile(params);
+    // The channel hands a failure back as data, because a code attached to a thrown Error
+    // would not survive the IPC boundary. Re-throwing it *here*, inside the renderer,
+    // keeps the panel's contract — a read that failed throws — while carrying the code
+    // that the panel turns into a sentence (issue #3210).
+    if (answer?.error) {
+      const failure = new Error(answer.error) as Error & { errorCode?: string | null };
+      failure.errorCode = answer.errorCode ?? null;
+      throw failure;
+    }
     return {
       content: typeof answer?.content === "string" ? answer.content : "",
       binary: !!answer?.binary,
       truncated: !!answer?.truncated,
       totalLines: typeof answer?.totalLines === "number" ? answer.totalLines : null,
+      size: typeof answer?.size === "number" ? answer.size : null,
     };
   }
 
