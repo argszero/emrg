@@ -168,13 +168,27 @@ function certificateResult() {
 /**
  * What a download's save dialog is pre-filled with.
  *
- * Only the file's own name: the directory stays the dialog's to ask. `main.js` must never
- * call `setSavePath`, because calling it is what turns the dialog into a silent write; the
- * typing leaves the path unset, and Electron's own routine then shows the dialog.
+ * Only the file's own name: the directory stays the dialog's to ask. The name is not the
+ * dialog's, and it is not this app's either — `main.js` hands it `item.getFilename()`, which
+ * Electron derives from the response's `Content-Disposition`, and the remote page writes that
+ * header while the person clicking Save does not. So the name is read as what it is: a claim
+ * from elsewhere. Its last segment is what can be a file's own name, both separators count
+ * (`/` and `\` — the name crosses no filesystem boundary this code can see), and C0/DEL go,
+ * because no file name contains them and a newline is how one name is stored as two. A name
+ * with nothing left after that pre-fills nothing, which is this function's answer for "no
+ * name" and not a second policy.
+ *
+ * `main.js` must never call `setSavePath`, because calling it is what turns the dialog into a
+ * silent write; the typing leaves the path unset, and Electron's own routine then shows the
+ * dialog.
  */
 function saveDialogOptions(filename) {
-  const name = typeof filename === "string" ? filename.trim() : "";
-  return name.length > 0 ? { defaultPath: name } : {};
+  if (typeof filename !== "string") return {};
+  const lastSegment = filename.split(/[\\/]/).pop() ?? "";
+  const name = lastSegment.replace(/[\u0000-\u001f\u007f]/g, "").trim();
+  // `..` and `.` are directory references, not names; a row of dots is nothing to pre-fill.
+  if (name.length === 0 || /^\.+$/.test(name)) return {};
+  return { defaultPath: name };
 }
 
 /**
