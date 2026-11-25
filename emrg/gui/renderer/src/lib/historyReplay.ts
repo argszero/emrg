@@ -22,6 +22,7 @@
  */
 
 import { createTranscriptStore, type TranscriptStore } from "./transcript";
+import type { ImageAttach } from "./composer";
 import { t } from "./i18n";
 
 /** 落盘记录里的一条助手/用户消息（daemon `include_records` 的 `kind: "message"`）。 */
@@ -32,6 +33,12 @@ export interface HistoryMessageRecord {
   role?: string;
   content?: string;
   timestamp?: string;
+  /**
+   * 这条消息带的图。daemon 写记录时就带着它（`_run_tool_loop` 的 `user_record["images"]`），
+   * 而 `list_history` 的投影一度只取 content/timestamp，于是重开一个会话，图上一次是
+   * 在实时那一帧里见过的，这一次连元数据都没有（宿主 2026-11-25T18:17:18）。
+   */
+  images?: ImageAttach[];
   /**
    * `call_label` 不在落盘记录里：daemon 在 **`list_history` 读取时**把它算进每一项的副本
    * （`daemon._tool_call_labels`），所以这个字段只在「已被投影过的记录」上出现。类型放宽
@@ -79,7 +86,11 @@ export interface ReplaySink {
    * 原样交给 store，于是重开一个会话看到的时间与一直开着时同一条消息看到的一样 ——
    * 客户端的时钟从头到尾没有参与。
    */
-  addUserMessage(text: string, sid?: string | null, meta?: { requestId?: string; timestamp?: string }): void;
+  addUserMessage(
+    text: string,
+    sid?: string | null,
+    meta?: { requestId?: string; timestamp?: string; images?: ImageAttach[] },
+  ): void;
   handleDelta(chunks: Array<{ request_id?: string; content?: string }>, sid?: string | null): void;
   handleDone(
     data: { request_id?: string; content?: string; timestamp?: string },
@@ -192,8 +203,11 @@ export function replayHistoryRecords(
       // 用户行的时刻来自记录本身（此前 `timestamp` 类型上有、映射处被丢掉）。
       // meta 与实时那一路同形状：id 一定有，时刻有才写 —— 不塞 `timestamp: undefined`,
       // 否则同一个「还没有时刻」在两路上是两个不同的对象。
-      const meta: { requestId?: string; timestamp?: string } = { requestId: rid };
+      const meta: { requestId?: string; timestamp?: string; images?: ImageAttach[] } = { requestId: rid };
       if (r.timestamp) meta.timestamp = r.timestamp;
+      // 图与文本同一条规则：记录里有才写这个键，没有就不塞 `images: undefined` ——
+      // 否则「老记录」与「有图的消息」在同一个对象形状上又被混成一种。
+      if (r.images?.length) meta.images = r.images;
       sink.addUserMessage(r.content ?? "", sid, meta);
       continue;
     }

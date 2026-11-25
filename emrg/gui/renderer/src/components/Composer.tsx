@@ -880,7 +880,10 @@ export function Composer({
     // 「自有流」标；那是客户端自持的“谁的消息”判定，已按 rant 2026-09-29T15:52:49 要求 3
     // 移除：daemon 是唯一状态源，客户端只是渲染器。）
     const requestId = genRequestId();
-    store.addUserMessage(sentText, sid, { requestId });
+    // 图与文字一起交给气泡（宿主 2026-11-25T18:17:18）。此前 `images` 只发给 daemon，
+    // 气泡手上只有正文，于是刚发出去的那一条里 `[📷 …]` 就是一行字 —— 连「刷新之后
+    // 靠回放补上」都做不到，因为回放那一半同样没有图。
+    store.addUserMessage(sentText, sid, images.length ? { requestId, images } : { requestId });
     // 消息已发送 → 清输入（输入框内容即草稿，发送即清）
     applyText("", 0);
     if (wasBusy) {

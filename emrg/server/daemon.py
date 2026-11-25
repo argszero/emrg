@@ -4122,6 +4122,16 @@ class EmrgServer:
                             "content": r.get("content", "") or "",
                             "timestamp": r.get("timestamp", ""),
                         }
+                        # The record has carried `images` since attachments existed
+                        # (`user_record["images"]` on the write side), but this projection
+                        # dropped it, so a reopen replayed a message whose picture the
+                        # interface had nothing to draw (host 2026-11-25T18:17:18).
+                        # Written only when the record has them: a record from before
+                        # this projects exactly as it did — the #2980 rule.
+                        images = r.get("images")
+                        if images:
+                            item["images"] = images
+
                         tool_calls = r.get("tool_calls")
                         if tool_calls:
                             # Copies carrying the batch label, never a mutation of the

@@ -115,6 +115,10 @@ const EXPECTED_INVOKE_METHODS = [
   "pickSandboxRoot",
   "saveImage",
   "saveFile",
+  // 宿主 2026-11-25T18:17:18：聊天区里的图能点开看之后，「另存一份」与「在文件夹中显示」
+  // 两件事只能由 main 做（renderer 没有 file system，也没有 shell）。
+  "saveImageCopy",
+  "revealPath",
   "readClipboardImage",
   "log",
 ];

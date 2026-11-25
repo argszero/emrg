@@ -375,6 +375,36 @@ describe("the record shape the daemon actually sends", () => {
     expect(sink.handleDelta).toHaveBeenCalledWith([{ request_id: "hist-u", content: "a" }], SID);
     expect(sink.handleDone).toHaveBeenCalledWith({ request_id: "hist-u" }, SID);
   });
+
+  it("carries a message's images through, and writes no key when the record has none", () => {
+    // 宿主 2026-11-25T18:17:18：图在记录里，回放却传不出，于是重开会话连一张图都没有。
+    const sink = {
+      addUserMessage: vi.fn(),
+      handleDelta: vi.fn(),
+      handleDone: vi.fn(),
+      handleToolStart: vi.fn(),
+      handleToolEnd: vi.fn(),
+      addSystemMessage: vi.fn(),
+    };
+    const image = { path: "/tmp/shot.png", label: "[📷 shot]", mime: "image/png", position: 0 };
+    replayHistoryRecords(
+      [
+        { record_index: 0, kind: "message", role: "user", content: "[📷 shot] hi", images: [image] },
+        { record_index: 1, kind: "message", role: "assistant", content: "a" },
+        { record_index: 2, kind: "message", role: "user", content: "plain" },
+      ],
+      SID,
+      sink,
+    );
+    // 有图的那条：images 原样交给 store。
+    expect(sink.addUserMessage).toHaveBeenNthCalledWith(1, "[📷 shot] hi", SID, {
+      requestId: "hist-0",
+      images: [image],
+    });
+    // 没有图的那条：不塞 `images: undefined` —— 与 timestamp 同一条规矩，不然「老记录」
+    // 与「有图的消息」在对象形状上又被混成一种。
+    expect(sink.addUserMessage).toHaveBeenNthCalledWith(2, "plain", SID, { requestId: "hist-2" });
+  });
 });
 
 /**

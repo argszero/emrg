@@ -14,6 +14,10 @@ const api = {
   // issue #2920：任意文件附件落盘（同一条路径、另一个目录），返回绝对路径——
   // 图片走 vision，其它文件只把这行路径放进正文，由模型自己读。
   saveFile: (payload) => ipcRenderer.invoke("emrg:saveFile", payload),
+  // 宿主 2026-11-25T18:17:18：聊天区的缩略图点开之后，「另存一份」与「在文件夹中显示」。
+  // renderer 没有 file system 也没有 shell，这两步只能在有 dialog/shell 的一侧做。
+  saveImageCopy: (payload) => ipcRenderer.invoke("emrg:saveImageCopy", payload),
+  revealPath: (payload) => ipcRenderer.invoke("emrg:revealPath", payload),
   // rant 2026-09-30T09:35:04 要求 4：系统给的图不受白名单所限——粘贴收到的是 renderer
   // 解不了的格式（macOS 的 TIFF）时，向 main 要剪贴板里的图（NSImage 解码 → PNG）。
   readClipboardImage: () => ipcRenderer.invoke("emrg:readClipboardImage"),
