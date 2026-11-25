@@ -14,6 +14,7 @@ import {
   indentWidthFor,
   languageFor,
   languageSupportFor,
+  isHtmlPath,
   lineEndingFor,
   lineForRatio,
   minimapLines,
@@ -323,5 +324,21 @@ describe("formatBytes", () => {
     expect(formatBytes(Number.NaN)).toBe("");
     expect(formatBytes(Number.POSITIVE_INFINITY)).toBe("");
     expect(formatBytes(-1)).toBe("");
+  });
+});
+
+describe("isHtmlPath", () => {
+  it("只把 .html / .htm 当页面，长得像的不算", () => {
+    expect(isHtmlPath("/p/index.html")).toBe(true);
+    expect(isHtmlPath("/p/a.htm")).toBe(true);
+    // 大小写不改变它是哪一种文件
+    expect(isHtmlPath("/p/INDEX.HTML")).toBe(true);
+    // 逐条都是「看起来像」的那个邻居：xhtml 是另一种格式，名字里带 html 的是纯文本，
+    // 备份文件是 html 的上一版，以点结尾的没有扩展名。
+    expect(isHtmlPath("/p/a.xhtml")).toBe(false);
+    expect(isHtmlPath("/p/html-notes.txt")).toBe(false);
+    expect(isHtmlPath("/p/a.html.bak")).toBe(false);
+    expect(isHtmlPath("/p/a.")).toBe(false);
+    expect(isHtmlPath("/p/notes")).toBe(false);
   });
 });

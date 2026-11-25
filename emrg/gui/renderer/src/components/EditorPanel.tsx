@@ -32,6 +32,7 @@ import {
   diskChange,
   formatBytes,
   indentUnitFor,
+  isHtmlPath,
   languageFor,
   lineEndingFor,
   lineForRatio,
@@ -150,6 +151,31 @@ function messageOf(error: unknown): string {
   return "";
 }
 
+/**
+ * What browser mode needs from the preload bridge, and nothing else.
+ *
+ * Every member is optional because the panel is also rendered where the bridge does not
+ * exist — a jsdom test, a build without the main process. Browser mode then simply reports
+ * nowhere, rather than throwing on the click that turns it on.
+ */
+interface BrowserBridge {
+  showBrowser?: (payload: { path: string }) => Promise<{ ok: boolean; error?: string } | null>;
+  hideBrowser?: () => Promise<unknown>;
+  browserNavigate?: (
+    payload: { target: string },
+  ) => Promise<{ ok: boolean; error?: string } | null>;
+  browserBounds?: (payload: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }) => Promise<unknown>;
+}
+
+function browserBridge(): BrowserBridge | undefined {
+  return (window as unknown as { emrg?: BrowserBridge }).emrg;
+}
+
 export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(function EditorPanel(
   { sid = null, loadFile, saveFile, statFile },
   ref,
@@ -187,6 +213,17 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
     y: number;
   } | null>(null);
   const tabMenuRef = useRef<HTMLDivElement | null>(null);
+  // Browser mode: the one path whose tab shows the page rather than its source. One path and
+  // not a set, because the main process owns a single view — two tabs cannot both be the
+  // page. `null` therefore means every tab is showing source.
+  const [browserPath, setBrowserPath] = useState<string | null>(null);
+  // The address bar's text, and why its last attempt failed — `empty`, `scheme` or `invalid`
+  // in the policy module's own vocabulary.
+  const [address, setAddress] = useState("");
+  const [browserError, setBrowserError] = useState<string | null>(null);
+  // The cell the native view is placed over. The view is painted above the DOM, so the only
+  // thing that knows where the cell is, is the element the layout put there.
+  const browserCell = useRef<HTMLDivElement | null>(null);
   // The tab a drag started on, so the drop knows what it is moving.
   const dragFrom = useRef<string | null>(null);
   // Each path's CodeMirror state, kept across the remount a tab switch causes. Here rather
@@ -254,6 +291,10 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
   const activeText = activeFile ? textFor(activeFile.path) : "";
   const activeDirty = activeFile ? isDirty(activeFile.path) : false;
   const activeLanguage = useMemo(() => languageFor(activeFile?.path ?? ""), [activeFile?.path]);
+  // Whether this tab is showing its page, and whether it could: only a page has a second way
+  // to be read, so only a page gets a mode.
+  const browserOn = activeFile !== null && browserPath === activeFile.path;
+  const canBrowse = activeFile !== null && isHtmlPath(activeFile.path);
   const readOnlyWhy: ReadOnlyReason | null = activeContent
     ? readOnlyReason({
         binary: activeContent.binary,
@@ -641,6 +682,63 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
     };
   }, [tabMenu]);
 
+  // ── browser mode (issue #3214) ────────────────────────────────────────────────
+  //
+  // Turning it on shows this tab's page; leaving — another tab, the panel unmounting — hides
+  // it. Hidden and not destroyed: the main process keeps the view, so coming back finds the
+  // page where it was rather than reloaded.
+  useEffect(() => {
+    const api = browserBridge();
+    if (!browserOn || !activeFile) {
+      void api?.hideBrowser?.();
+      return;
+    }
+    const pending = api?.showBrowser?.({ path: activeFile.path });
+    if (pending) {
+      void pending.then((answer) => {
+        setBrowserError(answer?.ok === false ? answer.error ?? "invalid" : null);
+      });
+    }
+    return () => {
+      // A native view is painted above the DOM, so one left showing would float over
+      // whatever replaced this panel.
+      void api?.hideBrowser?.();
+    };
+  }, [browserOn, activeFile?.path]);
+
+  // The cell, reported as the renderer measured it. The main process cannot compute this:
+  // the view is painted above the DOM, so only the layout that placed the cell knows its box.
+  useLayoutEffect(() => {
+    if (!browserOn) return;
+    const cell = browserCell.current;
+    const api = browserBridge();
+    if (!cell || !api?.browserBounds) return;
+    const report = (): void => {
+      const box = cell.getBoundingClientRect();
+      void api.browserBounds?.({ x: box.left, y: box.top, width: box.width, height: box.height });
+    };
+    report();
+    // Three things move the cell without moving this component: the column's width, the
+    // column collapsing, and the window. The observer catches the first two, the listener
+    // the third — and a zero box is the collapse, which the main process reads as "hide".
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(report) : null;
+    observer?.observe(cell);
+    window.addEventListener("resize", report);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", report);
+    };
+  }, [browserOn, activeFile?.path]);
+
+  /** The address bar's Enter: the text goes through the policy module via the bridge, and a
+   *  refusal comes back as the reason the bar shows under itself. */
+  const goToAddress = useCallback(async (): Promise<void> => {
+    const pending = browserBridge()?.browserNavigate?.({ target: address });
+    if (!pending) return;
+    const answer = await pending;
+    setBrowserError(answer?.ok === false ? answer.error ?? "invalid" : null);
+  }, [address]);
+
   const toggle = useCallback(
     (patch: { wrap?: boolean; minimap?: boolean }): void => {
       prefs.current.set(sid, patch);
@@ -890,8 +988,62 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
             >
               {t("editor.minimap")}
             </button>
+            {/* The third toggle, and the only one that changes what the tab *is* rather than
+                how the text is drawn — so it exists only where there is a second thing to
+                show, which is a page. */}
+            {canBrowse ? (
+              <button
+                type="button"
+                className={`editor-toggle${browserOn ? " on" : ""}`}
+                data-testid="editor-toggle-browser"
+                aria-pressed={browserOn}
+                title={t("editor.browser")}
+                onClick={() => {
+                  setBrowserError(null);
+                  setBrowserPath((prev) => (prev === activeFile.path ? null : activeFile.path));
+                }}
+              >
+                {t("editor.browser")}
+              </button>
+            ) : null}
           </div>
         </div>
+      ) : null}
+      {/* The address bar: the one row browser mode adds. It sits above the page rather than
+          replacing the breadcrumb, so the tab strip, the breadcrumb and the status corner are
+          the same in both modes. */}
+      {activeFile && browserOn ? (
+        <div className="editor-browser-bar" data-testid="editor-browser-bar">
+          <input
+            className="editor-address"
+            data-testid="editor-address"
+            type="text"
+            value={address}
+            placeholder={t("editor.addressHint")}
+            aria-label={t("editor.address")}
+            spellCheck={false}
+            autoComplete="off"
+            onChange={(e) => setAddress(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter") return;
+              e.preventDefault();
+              void goToAddress();
+            }}
+          />
+          <button
+            type="button"
+            className="editor-toggle"
+            data-testid="editor-go"
+            onClick={() => void goToAddress()}
+          >
+            {t("editor.go")}
+          </button>
+        </div>
+      ) : null}
+      {activeFile && browserOn && browserError ? (
+        <p className="editor-note editor-note-error" data-testid="editor-browser-error">
+          {browserError === "empty" ? t("editor.addressEmpty") : t("editor.addressInvalid")}
+        </p>
       ) : null}
       {closeAsk ? (
         <div className="editor-ask" data-testid="editor-close-ask">
@@ -1024,8 +1176,15 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
           ) : null}
         </p>
       ) : null}
-      {activeFile && activeContent ? (
+      {activeFile && (browserOn || activeContent) ? (
         <div className="editor-body" data-testid="editor-code">
+          {/* Browser mode's cell. The page is a native view painted above the DOM, so this
+              element draws nothing and takes no click: it exists to be measured, and the view
+              is placed on exactly the box it reports. The source stays mounted underneath, so
+              leaving the mode returns to the same undo history and scroll position. */}
+          {browserOn ? (
+            <div className="editor-browser" data-testid="editor-browser" ref={browserCell} />
+          ) : null}
           <CodeEditor
             ref={editorApi}
             // One key per path. A tab switch therefore remounts the editor, and the mount

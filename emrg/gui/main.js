@@ -5,7 +5,7 @@
  * 安全：contextIsolation + nodeIntegration:false + sandbox:true（renderer 零网络权限）。
  */
 
-const { app, BrowserWindow, clipboard, dialog, ipcMain, shell, WebContentsView } = require("electron");
+const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, session, shell, WebContentsView } = require("electron");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -24,6 +24,18 @@ const {
   DEFAULT_CAP,
 } = require("./gui-state");
 const { externalNavPolicy } = require("./nav-policy");
+// 内嵌浏览器的每一项决定（rant 2026-11-25T11:10:45）：这个文件只被 `node --check` 和静态
+// 守卫看、不被单测执行，所以判断住在那个纯模块里，这里只把答案接到 Electron 上。
+const {
+  BROWSER_PARTITION,
+  addressTarget,
+  browserNavPolicy,
+  browserRect,
+  certificateResult,
+  newWindowTarget,
+  permissionGranted,
+  saveDialogOptions,
+} = require("./browser-policy");
 const { frameSessionId } = require("./frame-route");
 const { makeConfigPrivate } = require("./config_mode");
 // issue #2774：aitokenpool 的 GitHub 账号登录。协议与 config 合并全在这个纯模块里
@@ -137,6 +149,13 @@ function main() {
   let previewPath = null;       // 当前加载的预览文件绝对路径（null = 无）
   let previewVisible = false;   // 当前是否显示（激活 HTML tab）
   let previewLayout = { width: 280, collapsed: false, contentTop: 0 }; // renderer 上报的面板布局
+  // 内嵌浏览器：与预览视图各自一个 view。它有自己的分区（cookie/登录态独立、跨重启保留），
+  // 切换 tab 只隐藏、不销毁，所以切回来页面还在原处（要求 2）。
+  let browserView = null;
+  let browserAdded = false;
+  let browserVisible = false;
+  let browserUrl = null;        // 当前页面地址（同一个地址不重新 load）
+  let browserBox = null;        // renderer 量出的那一格（CSS px）
 
   // ── 窗口 ────────────────────────────────────────────────
 
@@ -172,7 +191,7 @@ function main() {
     });
     win.loadFile(path.join(__dirname, "renderer", "dist", "index.html"));
     // P2.3：窗口尺寸变化 → 预览 bounds 跟随（右对齐矩形）
-    win.on("resize", () => updatePreviewBounds());
+    win.on("resize", () => { updatePreviewBounds(); updateBrowserBounds(); });
     // G87：窗口状态持久化
     restoreWindowBounds(win);
     win.on("close", () => saveWindowBounds(win));
@@ -1101,6 +1120,21 @@ vision = false
     ipcMain.handle("emrg:getPreviewState", async () => ({
       path: previewVisible && previewPath ? previewPath : null,
     }));
+
+    // ── 内嵌浏览器（rant 2026-11-25T11:10:45）─────────────────────────
+    // 浏览器 tab 的四个通道：显示、隐藏、地址栏导航，以及 renderer 量出的那一格。
+    // 这一格由 renderer 给而不是由这里算：原生 view 盖在 DOM 上的位置，只有量过它的人知道。
+    ipcMain.handle("emrg:showBrowser", async (_e, { path: p, url } = {}) => showBrowser(p, url));
+    ipcMain.handle("emrg:hideBrowser", async () => {
+      hideBrowser();
+      return { ok: true };
+    });
+    ipcMain.handle("emrg:browserNavigate", async (_e, { target } = {}) => navigateBrowser(target));
+    ipcMain.handle("emrg:browserBounds", async (_e, box = {}) => {
+      browserBox = box;
+      updateBrowserBounds();
+      return { ok: true };
+    });
 
     ipcMain.handle("emrg:listSkills", async (_e, { sessionId } = {}) => {
       // GUI / 指令 P3：/skills — daemon 回答（list_skills → skills_list）。
@@ -2073,6 +2107,144 @@ vision = false
     }
   }
 
+  // ── 内嵌浏览器（rant 2026-11-25T11:10:45）──────────────────────────
+  //
+  // 预览视图只画本地文件，并显式拒掉一切新窗口与外链导航；这个视图正相反，它存在的理由就是
+  // 在应用里显示远程页面。挡住它变成 nav-policy 那条规则的漏洞的是两件事：它是一个**独立**
+  // 的 view（sandbox + contextIsolation + 无 preload，页面碰不到 window.emrg），以及下面
+  // 这些策略全部装在它自己的分区上，绝不落到默认 session。
+
+  /** 把浏览器的策略装到它自己的分区上。
+   *
+   *  三者都挂在 Session 上而不是 WebContents 上：装在默认 session 上就等于同时装了应用
+   *  自己的界面——放行一次权限会连界面一起放行，清一次数据会连列宽和语言一起清掉。 */
+  function applyBrowserPolicy(browserSession, contents) {
+    browserSession.setPermissionRequestHandler((_wc, permission, callback) => {
+      callback(permissionGranted(permission));
+    });
+    // 请求处理器只回答「问」的那一半；不设 check 处理器时，一部分 API 仍走 Chromium 默认。
+    browserSession.setPermissionCheckHandler(() => permissionGranted("check"));
+    // 下载只预填一个文件名，绝不调 setSavePath——调用它就是把保存框换成一次静默落盘；
+    // 不调用时 Electron 才走自己的例行程序弹出保存框。
+    browserSession.on("will-download", (_event, item) => {
+      item.setSaveDialogOptions(saveDialogOptions(item.getFilename()));
+    });
+    // -3 = 用 Chromium 自己的校验结论：有效证书照常打开，无效证书显示错误页，两端都不越权。
+    browserSession.setCertificateVerifyProc((_request, callback) => callback(certificateResult()));
+
+    // 要新窗口的链接在同一个 view 里打开；deny 掉的是「另开一个没有策略的窗口」。
+    contents.setWindowOpenHandler(({ url }) => {
+      const target = newWindowTarget(url);
+      if (target) void contents.loadURL(target);
+      return { action: "deny" };
+    });
+    contents.on("will-frame-navigate", (event, url, _isInPlace, isMainFrame) => {
+      if (isMainFrame && browserNavPolicy(url) !== "allow") event.preventDefault();
+    });
+    // 开发者工具：F12 与 ⌥⌘I（其它平台 Ctrl+Alt+I），右键菜单的 Inspect 走 inspectElement。
+    contents.on("before-input-event", (event, input) => {
+      if (input.type !== "keyDown") return;
+      const key = String(input.key || "").toLowerCase();
+      const inspector = key === "f12" || ((input.meta || input.control) && input.alt && key === "i");
+      if (!inspector) return;
+      event.preventDefault();
+      contents.openDevTools({ mode: "detach" });
+    });
+    contents.on("context-menu", (_event, params) => {
+      Menu.buildFromTemplate([
+        { label: "Inspect", click: () => contents.inspectElement(params.x, params.y) },
+      ]).popup();
+    });
+  }
+
+  /** 懒创建浏览器视图：第一次进浏览器模式才建，之后一直复用（页面因此不重新加载）。 */
+  function ensureBrowserView() {
+    if (browserView) return browserView;
+    const browserSession = session.fromPartition(BROWSER_PARTITION);
+    const view = new WebContentsView({
+      webPreferences: {
+        partition: BROWSER_PARTITION,
+        sandbox: true,
+        contextIsolation: true,
+        nodeIntegration: false,
+      },
+    });
+    applyBrowserPolicy(browserSession, view.webContents);
+    browserView = view;
+    return view;
+  }
+
+  /** 把视图挂进窗口（只挂一次）。 */
+  function attachBrowserView(view) {
+    if (browserAdded || !win || win.isDestroyed()) return;
+    win.contentView.addChildView(view);
+    browserAdded = true;
+  }
+
+  /** 让视图跟着 renderer 量出来的那一格走；量不出格子（栏收起、没有浏览器 tab）就隐藏。 */
+  function updateBrowserBounds() {
+    if (!browserView || !win || win.isDestroyed()) return;
+    const rect = browserVisible ? browserRect(browserBox) : null;
+    if (!rect) { browserView.setVisible(false); return; }
+    browserView.setBounds(rect);
+    browserView.setVisible(true);
+  }
+
+  /** 把同一个地址装进视图。地址没变就不重新 load——这就是「切回来页面还在原处」。 */
+  async function loadBrowserUrl(target) {
+    try {
+      const view = ensureBrowserView();
+      attachBrowserView(view);
+      if (browserUrl !== target) {
+        await view.webContents.loadURL(target);
+        browserUrl = target;
+      }
+      return { ok: true, url: target };
+    } catch (e) {
+      logger.warn(`[gui] browser load failed: ${e.message}`);
+      return { ok: false, error: String(e.message || "load_failed") };
+    }
+  }
+
+  /** 打开（或切回）浏览器 tab：`url` 优先，否则是这个 HTML 文件的 file:// 地址。 */
+  async function showBrowser(p, url) {
+    let target = null;
+    if (typeof url === "string" && url.trim()) {
+      const parsed = addressTarget(url);
+      if (!parsed.ok) return { ok: false, error: parsed.error };
+      target = parsed.url;
+    } else if (typeof p === "string" && p.trim()) {
+      const abs = path.resolve(p.trim());
+      if (!/\.html?$/i.test(abs)) return { ok: false, error: "not_html" };
+      if (!fs.existsSync(abs)) return { ok: false, error: "file_not_found" };
+      target = pathToFileURL(abs).href;
+    } else {
+      return { ok: false, error: "invalid" };
+    }
+    const loaded = await loadBrowserUrl(target);
+    if (!loaded.ok) return loaded;
+    browserVisible = true;
+    updateBrowserBounds();
+    return loaded;
+  }
+
+  /** 地址栏：把打进去的文本当成地址来读，读不出来就把理由交给界面。 */
+  async function navigateBrowser(raw) {
+    const parsed = addressTarget(raw);
+    if (!parsed.ok) return { ok: false, error: parsed.error };
+    const loaded = await loadBrowserUrl(parsed.url);
+    if (!loaded.ok) return loaded;
+    browserVisible = true;
+    updateBrowserBounds();
+    return loaded;
+  }
+
+  /** 切走 tab、收起栏、关标签：只隐藏。销毁会把页面连同滚动位置一起丢掉。 */
+  function hideBrowser() {
+    browserVisible = false;
+    updateBrowserBounds();
+  }
+
   // ── 应用生命周期 ────────────────────────────────────────
 
   app.on("second-instance", () => {
@@ -2135,6 +2307,11 @@ vision = false
     previewAdded = false;
     previewPath = null;
     previewVisible = false;
+    browserView = null;
+    browserAdded = false;
+    browserVisible = false;
+    browserUrl = null;
+    browserBox = null;
     if (process.platform !== "darwin") app.quit();
   });
 

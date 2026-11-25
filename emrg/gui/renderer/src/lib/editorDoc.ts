@@ -111,6 +111,16 @@ export async function languageSupportFor(choice: LanguageChoice): Promise<Extens
   return support ?? null;
 }
 
+/**
+ * Whether this path is a page rather than text.
+ *
+ * One kind of file the panel can show two ways — as the source it is, and as the page it
+ * draws — so it is the one kind that gets a mode toggle rather than a language name.
+ */
+export function isHtmlPath(path: string): boolean {
+  return /\.html?$/i.test(path);
+}
+
 /** Past this many bytes the editor opens the file read only. */
 export const LARGE_FILE_BYTES = 4 * 1024 * 1024;
 

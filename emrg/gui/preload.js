@@ -64,6 +64,12 @@ const api = {
   closePreview: (payload) => ipcRenderer.invoke("emrg:closePreview", payload), // P2.3：关闭/切走 HTML 预览
   panelResized: (payload) => ipcRenderer.invoke("emrg:panelResized", payload), // P2.3：面板布局上报 → bounds 同步
   getPreviewState: () => ipcRenderer.invoke("emrg:getPreviewState"), // P2.3：renderer 崩溃恢复拉取
+  // rant 2026-11-25T11:10:45：HTML tab 的浏览器模式。show/hide 是页面本身的生命（隐藏不销毁），
+  // navigate 是地址栏，bounds 是 renderer 量出的那一格——原生 view 盖在 DOM 上的位置只有它知道。
+  showBrowser: (payload) => ipcRenderer.invoke("emrg:showBrowser", payload),
+  hideBrowser: () => ipcRenderer.invoke("emrg:hideBrowser"),
+  browserNavigate: (payload) => ipcRenderer.invoke("emrg:browserNavigate", payload),
+  browserBounds: (payload) => ipcRenderer.invoke("emrg:browserBounds", payload),
   // `{ sessionId }` 决定 daemon 读哪个会话的技能树 —— 缺了参数，主进程只能当"没有会话"，
   // 于是每个会话看到的都是同一个根（issue #2569 判据 2）。
   listSkills: (p) => ipcRenderer.invoke("emrg:listSkills", p),

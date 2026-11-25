@@ -65,6 +65,11 @@ const EXPECTED_INVOKE_METHODS = [
   "closePreview",
   "panelResized",
   "getPreviewState",
+  // rant 2026-11-25T11:10:45：HTML tab 的浏览器模式——显示/隐藏、地址栏导航、视图那一格
+  "showBrowser",
+  "hideBrowser",
+  "browserNavigate",
+  "browserBounds",
   "listSkills",
   "listAgents",
   "listAgentSessions",

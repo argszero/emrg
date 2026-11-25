@@ -1447,10 +1447,43 @@ body.col-resizing * {
 }
 
 .editor-body {
+  position: relative;
   display: flex;
   flex: 1;
   min-height: 0;
   min-width: 0;
+}
+
+/* Browser mode's cell (issue #3214). The page is a native view painted above the DOM, so this
+   element draws nothing: it exists to be measured, and the view is placed on the box it
+   reports. `pointer-events: none` keeps it out of the way — the view above it takes input. */
+.editor-browser {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* The address bar: the one row browser mode adds. The tab strip, the breadcrumb and the
+   status corner stay as they are in both modes. */
+.editor-browser-bar {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 4px;
+  padding: 2px 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.editor-address {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+  color: var(--text-1);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--fs-small);
 }
 
 /* The editor itself fills what the minimap leaves. `.cm-scroller` is CodeMirror's own
