@@ -10,6 +10,7 @@
 
 const { test } = require("node:test");
 const assert = require("node:assert");
+const { fileURLToPath } = require("node:url");
 
 const {
   BROWSER_PARTITION,
@@ -112,6 +113,28 @@ test("a typed address is read as an address, not as a string to be parsed", () =
   // rather than navigated to and lost — the protocol-relative spelling included.
   assert.deepStrictEqual(url("///"), { ok: false, error: "invalid" });
   assert.deepStrictEqual(url("//example.com/x"), { ok: false, error: "invalid" });
+});
+
+test("a local path keeps the characters the URL syntax would otherwise eat", () => {
+  // The criterion is a round trip: the address the bar builds has to name the file that was
+  // typed. `#`, `?` and a bare `%` are URL syntax inside a path, and all three fail silently —
+  // `file:///tmp/re#1.html` is the address of a file called `re`, so the bar answered "ok" and
+  // the panel loaded a different file from the one the host asked for.
+  for (const name of ["report.html", "re#1.html", "a?b.html", "100%.html", "a b.html", "中文.html"]) {
+    const typed = `/tmp/${name}`;
+    const parsed = addressTarget(typed);
+    assert.strictEqual(parsed.ok, true, `${typed} is a path on this machine and has to be accepted`);
+    assert.strictEqual(
+      fileURLToPath(parsed.url),
+      typed,
+      `${typed} must come back as itself, not as a name the URL syntax cut short`,
+    );
+  }
+  // The drive shape stays what the test above pins, and its `%` is escaped too.
+  assert.deepStrictEqual(addressTarget("C:\\Users\\me\\100%.html"), {
+    ok: true,
+    url: "file:///C:/Users/me/100%25.html",
+  });
 });
 
 test("every permission is refused, the five named ones included", () => {

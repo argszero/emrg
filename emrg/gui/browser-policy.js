@@ -1,4 +1,5 @@
 "use strict";
+const { pathToFileURL } = require("node:url");
 /**
  * browser-policy.js — the embedded browser's decisions, as pure functions.
  *
@@ -126,9 +127,29 @@ function isLocalPath(text) {
   return /^[a-zA-Z]:[\\/]/.test(text);
 }
 
-/** The `file:` address of a local path, keeping the spaces and non-ASCII a path may carry. */
+/**
+ * The `file:` address of a local path, keeping what a path carries as data.
+ *
+ * `#`, `?` and a bare `%` are URL syntax, so inside a path they are data and not syntax: a file
+ * named `re#1.html` is not `re` with a fragment. Building the address by string concatenation
+ * read them as syntax, and the two ways that fails are both silent — `file:///tmp/re#1.html`
+ * names a file called `re`, so the bar reported success and opened a file the host never asked
+ * for, and a name holding `%` produced an address `fileURLToPath` refuses to decode at all.
+ *
+ * The criterion is a round trip: `fileURLToPath(fileUrlOf(p))` is `p`. `pathToFileURL` is the
+ * function that keeps it for a POSIX absolute path, on either host.
+ *
+ * A drive path is absolute on Windows only. Setting the path on the URL keeps its shape on a
+ * host where it names nothing, rather than letting `pathToFileURL` read it as relative and
+ * resolve it against the working directory. That setter escapes `#` and `?` and leaves `%`
+ * alone, so the one character it does not escape is escaped before it.
+ */
 function fileUrlOf(text) {
-  return new URL(`file://${text.replace(/\\/g, "/")}`).href;
+  const normalized = text.replace(/\\/g, "/");
+  if (normalized.startsWith("/")) return pathToFileURL(normalized).href;
+  const url = new URL("file:///");
+  url.pathname = `/${normalized.replace(/%/g, "%25")}`;
+  return url.href;
 }
 
 /**
