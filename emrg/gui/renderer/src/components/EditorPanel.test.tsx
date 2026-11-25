@@ -907,12 +907,18 @@ describe("EditorPanel's ten gaps (issue #3200)", () => {
  * reported as it was measured.
  */
 describe("HTML tab 的浏览器模式（issue #3214）", () => {
+  // Every stub states its parameter, even the ones whose answer ignores it. `tsc` reads
+  // `mock.calls` against the declared parameter list, so a stub declared with none has the
+  // call tuple `[]` — and a test that reads `calls[0][0]` then fails to compile while
+  // `vitest run` executes it happily. That is a red only CI sees (measured: run 45540474378).
   function stubBridge(answer: { ok: boolean; error?: string } = { ok: true }) {
     const calls = {
-      show: vi.fn(async () => answer),
-      hide: vi.fn(async () => ({ ok: true })),
-      navigate: vi.fn(async () => answer),
-      bounds: vi.fn(async () => ({ ok: true })),
+      show: vi.fn(async (_payload: { path: string }) => answer),
+      hide: vi.fn(async (_payload?: undefined) => ({ ok: true })),
+      navigate: vi.fn(async (_payload: { target: string }) => answer),
+      bounds: vi.fn(
+        async (_payload: { x: number; y: number; width: number; height: number }) => ({ ok: true }),
+      ),
     };
     (window as unknown as { emrg?: unknown }).emrg = {
       showBrowser: calls.show,
@@ -999,10 +1005,12 @@ describe("HTML tab 的浏览器模式（issue #3214）", () => {
     fireEvent.click(screen.getByTestId("editor-toggle-browser"));
 
     await waitFor(() => expect(calls.bounds).toHaveBeenCalled());
-    const box = calls.bounds.mock.calls[0][0] as Record<string, unknown>;
+    const box = calls.bounds.mock.calls[0][0];
     // 四个数字，来自 getBoundingClientRect()——主进程自己算不出来这一格在哪
     expect(Object.keys(box).sort()).toEqual(["height", "width", "x", "y"]);
-    for (const key of ["x", "y", "width", "height"]) expect(typeof box[key]).toBe("number");
+    for (const key of ["x", "y", "width", "height"] as const) {
+      expect(typeof box[key]).toBe("number");
+    }
   });
 
   it("没有这条通道的构建里，开关照样能点，面板不炸", async () => {
