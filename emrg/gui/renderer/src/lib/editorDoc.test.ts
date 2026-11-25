@@ -9,6 +9,7 @@ import {
   catalogueNames,
   cursorPositionAt,
   diskChange,
+  formatBytes,
   indentUnitFor,
   indentWidthFor,
   languageFor,
@@ -16,6 +17,7 @@ import {
   lineEndingFor,
   lineForRatio,
   minimapLines,
+  readFailureKey,
   readOnlyReason,
 } from "./editorDoc";
 import { EditorState } from "@codemirror/state";
@@ -109,6 +111,24 @@ describe("readOnlyReason (item 12)", () => {
     expect(
       readOnlyReason({ binary: true, truncated: true, size: LARGE_FILE_BYTES * 2 }),
     ).toBe("binary");
+  });
+
+  it("从中间开始的那一页总是只读，哪怕它已经是最后一页", () => {
+    // 最后一页的 truncated 是 false——确实没有下一页了——可它仍然只是文件的一段：
+    // 放它可编辑，存回去就把十万行写成一千行（issue #3210）
+    expect(readOnlyReason({ binary: false, truncated: false, size: 10, startLine: 2 })).toBe(
+      "truncated",
+    );
+    expect(readOnlyReason({ binary: false, truncated: false, size: 10, startLine: 99001 })).toBe(
+      "truncated",
+    );
+    // 第一行开始、也读完整了，才是可编辑的那一个
+    expect(readOnlyReason({ binary: false, truncated: false, size: 10, startLine: 1 })).toBeNull();
+    expect(readOnlyReason({ binary: false, truncated: false, size: 10 })).toBeNull();
+    // 二进制还是最根本的那个理由
+    expect(readOnlyReason({ binary: true, truncated: false, size: 10, startLine: 5 })).toBe(
+      "binary",
+    );
   });
 });
 
@@ -259,5 +279,49 @@ describe("lineForRatio", () => {
 
   it("空文档落在第一行", () => {
     expect(lineForRatio(0.5, 0)).toBe(1);
+  });
+});
+
+describe("readFailureKey", () => {
+  it("每个失败码有自己的那一句，而且互不相同：两码同句等于没分", () => {
+    const codes = ["not_found", "is_directory", "not_regular", "unreadable", "window_invalid"];
+    const keys = codes.map((code) => readFailureKey(code));
+    expect(keys).toEqual([
+      "editor.failed.notFound",
+      "editor.failed.isDirectory",
+      "editor.failed.notRegular",
+      "editor.failed.unreadable",
+      "editor.failed.window",
+    ]);
+    expect(new Set(keys).size).toBe(keys.length);
+    // 通用那一句不是其中任何一码的答案：否则分码就是分了个寂寞
+    expect(keys).not.toContain("editor.failed");
+  });
+
+  it("认不出的码与没有码都回落成通用那一句：新版本的服务端不该让这里读不出话", () => {
+    expect(readFailureKey("something_new")).toBe("editor.failed");
+    expect(readFailureKey(null)).toBe("editor.failed");
+    expect(readFailureKey(undefined)).toBe("editor.failed");
+    expect(readFailureKey("")).toBe("editor.failed");
+  });
+});
+
+describe("formatBytes", () => {
+  it("按读取者会扫的单位报，不是一长串数字", () => {
+    expect(formatBytes(0)).toBe("0 B");
+    expect(formatBytes(999)).toBe("999 B");
+    expect(formatBytes(1024)).toBe("1.0 KB");
+    expect(formatBytes(1536)).toBe("1.5 KB");
+    expect(formatBytes(4 * 1024 * 1024)).toBe("4.0 MB");
+    expect(formatBytes(54840525)).toBe("52.3 MB");
+    expect(formatBytes(3 * 1024 ** 4)).toBe("3.0 TB");
+    // 到顶之后不往上造单位：PB 也好，再大也好，都还在 TB 这一档里
+    expect(formatBytes(2048 * 1024 ** 4)).toBe("2048.0 TB");
+  });
+
+  it("量不出来的时候不给数字，也不给负号", () => {
+    expect(formatBytes(Number.NaN)).toBe("");
+    expect(formatBytes(Number.POSITIVE_INFINITY)).toBe("");
+    expect(formatBytes(-1)).toBe("");
   });
 });

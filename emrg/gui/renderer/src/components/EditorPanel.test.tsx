@@ -4,7 +4,12 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { EditorView } from "@codemirror/view";
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { I18nProvider } from "../lib/i18n";
-import { EditorPanel, type EditorPanelHandle } from "./EditorPanel";
+import {
+  EditorPanel,
+  type EditorPanelHandle,
+  type FileContent,
+  type ReadWindow,
+} from "./EditorPanel";
 import { LeftTrees } from "./LeftTrees";
 import { DEFAULT_FONT_SIZE } from "../lib/editorDoc";
 
@@ -31,7 +36,14 @@ const FILES: Record<string, string> = {
 interface PanelOptions {
   sid?: string | null;
   /** What the reader answers about one path: a binary frame, or a window instead of a file. */
-  shape?: Record<string, { binary?: boolean; truncated?: boolean }>;
+  shape?: Record<
+    string,
+    { binary?: boolean; truncated?: boolean; totalLines?: number | null; size?: number | null }
+  >;
+  /** Paths the reader refuses, and the daemon's own code for the refusal. */
+  fail?: Record<string, string>;
+  /** Answer the reader itself, when one file has to answer differently per page. */
+  loadFile?: (path: string, window?: ReadWindow) => Promise<FileContent>;
   saveFile?: (
     path: string,
     content: string,
@@ -44,12 +56,28 @@ interface PanelOptions {
 
 function renderPanel(options: PanelOptions = {}) {
   const ref = createRef<EditorPanelHandle>();
-  const loadFile = vi.fn(async (p: string) => ({
-    content: FILES[p] ?? "",
-    binary: options.shape?.[p]?.binary ?? false,
-    truncated: options.shape?.[p]?.truncated ?? false,
-    totalLines: null,
-  }));
+  const loadFile = vi.fn(async (p: string, window?: ReadWindow) => {
+    const code = options.fail?.[p];
+    if (code) {
+      // A failed read reaches the panel as a thrown error carrying the daemon's code: the
+      // bridge re-throws what the IPC channel hands back as data (issue #3210), because a
+      // property attached to an Error does not survive that boundary.
+      const failure = new Error("the daemon refused this read") as Error & {
+        errorCode?: string | null;
+      };
+      failure.errorCode = code;
+      throw failure;
+    }
+    if (options.loadFile) return options.loadFile(p, window);
+    const shape = options.shape?.[p];
+    return {
+      content: FILES[p] ?? "",
+      binary: shape?.binary ?? false,
+      truncated: shape?.truncated ?? false,
+      totalLines: shape?.totalLines ?? null,
+      size: shape?.size ?? null,
+    };
+  });
   const saveFile = options.saveFile ?? vi.fn(async () => ({ mtime: 200, size: 20 }));
   const statFile =
     options.statFile ?? vi.fn(async () => ({ exists: true, mtime: 100, size: 10 }));
@@ -428,6 +456,7 @@ describe("EditorPanel as an editor (rant 2026-11-20T18:01:52)", () => {
       binary: false,
       truncated: false,
       totalLines: null,
+      size: null,
     });
     mtime = 200;
     await act(async () => {
@@ -453,6 +482,7 @@ describe("EditorPanel as an editor (rant 2026-11-20T18:01:52)", () => {
       binary: false,
       truncated: false,
       totalLines: null,
+      size: null,
     });
     mtime = 200;
     await act(async () => {
@@ -488,6 +518,7 @@ describe("EditorPanel as an editor (rant 2026-11-20T18:01:52)", () => {
       binary: false,
       truncated: false,
       totalLines: null,
+      size: null,
     });
     mtime = 200;
     await act(async () => {
@@ -581,6 +612,86 @@ describe("EditorPanel as an editor (rant 2026-11-20T18:01:52)", () => {
 
     const note = await screen.findByTestId("editor-readonly-note");
     expect(note).toHaveTextContent("beginning");
+    expect(surface()).toHaveAttribute("data-readonly", "true");
+  });
+
+  it("超过页预算的大文件照样打得开：多大、共几行、显示开头几行，都写在界面上", async () => {
+    const big = 5 * 1024 * 1024;
+    const { open } = renderPanel({
+      shape: { "/p/emrg/a.txt": { truncated: true, totalLines: 120000, size: big } },
+      statFile: vi.fn(async () => ({ exists: true, mtime: 100, size: big })),
+    });
+    open("/p/emrg/a.txt", "/p/emrg", false);
+
+    // 打得开是第一步：拒绝读不再是一个选项（issue #3210）
+    const note = await screen.findByTestId("editor-readonly-note");
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+    expect(note).toHaveTextContent("5.0 MB");
+    expect(note).toHaveTextContent("120000 lines");
+    expect(note).toHaveTextContent("lines 1–3");
+    // 只读的理由还是那个：把这一页存回去会删掉后面 119997 行
+    expect(surface()).toHaveAttribute("data-readonly", "true");
+  });
+
+  it("没到编辑器阈值的长文件，说明里只有行数，不谈大小", async () => {
+    const { open } = renderPanel({
+      shape: { "/p/emrg/a.txt": { truncated: true, totalLines: 9000, size: 200 * 1024 } },
+    });
+    open("/p/emrg/a.txt", "/p/emrg", false);
+
+    const note = await screen.findByTestId("editor-readonly-note");
+    expect(note).toHaveTextContent("Lines 1–3 of 9000");
+    expect(note).not.toHaveTextContent("KB");
+    expect(note).not.toHaveTextContent("read-only");
+  });
+
+  it("读不出来时说得出是哪一种失败，不是全都一句「读不出这个文件」", async () => {
+    const { open } = renderPanel({
+      fail: { "/p/emrg/gone.txt": "not_found", "/p/emrg/dir": "is_directory" },
+    });
+    open("/p/emrg/gone.txt", "/p/emrg", false);
+    expect(await screen.findByTestId("editor-failed")).toHaveTextContent(
+      "That file does not exist",
+    );
+
+    open("/p/emrg/dir", "/p/emrg", false);
+    const second = await screen.findByTestId("editor-failed");
+    expect(second).toHaveTextContent("That is a directory, not a file");
+    expect(second).not.toHaveTextContent("That file does not exist");
+  });
+
+  it("分页往下走：按钮把下一页要回来，页码跟着走，中途那页照样只读", async () => {
+    const big = 5 * 1024 * 1024;
+    const pages: Record<number, string> = {
+      1: "line 1\nline 2\nline 3",
+      4: "line 4\nline 5\nline 6",
+    };
+    const loadFile = vi.fn(async (_p: string, window?: ReadWindow) => ({
+      content: pages[window?.startLine ?? 1] ?? "",
+      binary: false,
+      truncated: true,
+      totalLines: 10,
+      size: big,
+    }));
+    const { open } = renderPanel({
+      loadFile,
+      statFile: vi.fn(async () => ({ exists: true, mtime: 100, size: big })),
+    });
+    open("/p/emrg/a.txt", "/p/emrg", false);
+
+    expect(await screen.findByTestId("editor-readonly-note")).toHaveTextContent("lines 1–3");
+    fireEvent.click(screen.getByTestId("editor-next-page"));
+
+    // 第二次请求带的是上一页的下一页，不是从第一行重来一遍
+    await waitFor(() =>
+      expect(loadFile).toHaveBeenLastCalledWith("/p/emrg/a.txt", {
+        startLine: 4,
+        lineLimit: 2000,
+      }),
+    );
+    await waitFor(() => expect(surface()).toHaveTextContent("line 4"));
+    expect(screen.getByTestId("editor-readonly-note")).toHaveTextContent("lines 4–6");
+    // 中途那一页仍然只读：把这一页存回去会删掉文件其余部分
     expect(surface()).toHaveAttribute("data-readonly", "true");
   });
 

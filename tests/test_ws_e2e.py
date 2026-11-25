@@ -2627,9 +2627,150 @@ class TestWSWorkspacePanel:
                         assert resp["type"] == "file_content"
                         assert resp.get("binary") is True
                         assert not resp.get("content")
+                        # A file over the page budget is **answered**, not refused
+                        # (issue #3210). This assertion used to pin the opposite — that
+                        # the error mentioned 系统工具 — which made the wall itself the
+                        # tested behaviour.
                         resp2 = await self._cmd(ws, {"type": "read_file", "path": str(big_f)})
-                        assert "error" in resp2
-                        assert "系统工具" in resp2["error"]
+                        assert "error" not in resp2, resp2
+                        assert resp2["size"] == 1024 * 1024 + 1
+                        assert resp2["truncated"] is True
+                        # One line, no newline in the file at all: the page is that
+                        # line's prefix, and an empty answer would be the worst reading.
+                        assert resp2["total_lines"] == 1
+                        assert resp2["content"] == "0" * (1024 * 1024)
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_read_file_answers_a_window_for_a_large_file(self):
+        """A file past the page budget is read by window, with an exact line count.
+
+        The daemon used to refuse anything over 1 MB, and every `llm.jsonl` under
+        `~/.emrg` is over it (median 8.9 MB on the machine this was measured on), so the
+        editor could not open the files its own session tree lists.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                work = cwd / "work"
+                work.mkdir()
+                big = work / "big.txt"
+                big.write_text(
+                    "".join(f"line {i} of the big file\n" for i in range(100000)),
+                    encoding="utf-8",
+                )
+                assert big.stat().st_size > 1024 * 1024
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        first = await self._cmd(ws, {"type": "read_file", "path": str(big)})
+                        assert "error" not in first, first
+                        assert first["total_lines"] == 100000
+                        assert first["truncated"] is True
+                        assert first["size"] == big.stat().st_size
+                        page = first["content"].split("\n")
+                        assert len(page) == 2000
+                        assert page[0] == "line 0 of the big file"
+                        assert page[-1] == "line 1999 of the big file"
+                        # Paging reaches the rest, and the last page says so.
+                        second = await self._cmd(ws, {
+                            "type": "read_file", "path": str(big), "start_line": 2001,
+                        })
+                        assert second["content"].split("\n")[0] == "line 2000 of the big file"
+                        assert second["total_lines"] == 100000
+                        last = await self._cmd(ws, {
+                            "type": "read_file", "path": str(big), "start_line": 99001,
+                        })
+                        assert last["truncated"] is False
+                        assert last["content"].split("\n")[-1] == "line 99999 of the big file"
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_a_line_bigger_than_a_page_does_not_swallow_the_pages_after_it(self):
+        """A line too long to keep whole must not end the scan.
+
+        A page is bounded by bytes as well as lines, so one huge line fills a page on its
+        own and the reader answers its prefix. What it must not do is *stop reading there*:
+        a JSONL file with one enormous record would then answer an empty page for every
+        position after that line, with nothing on screen saying why.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                work = cwd / "work"
+                work.mkdir()
+                big = work / "one_huge_record.jsonl"
+                big.write_text(
+                    "x" * (1536 * 1024) + "\n" + "".join(f"row {i}\n" for i in range(3000)),
+                    encoding="utf-8",
+                )
+                assert big.stat().st_size > 1024 * 1024
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        first = await self._cmd(ws, {"type": "read_file", "path": str(big)})
+                        assert "error" not in first, first
+                        # One line, answered by its prefix, and the count still exact.
+                        assert first["total_lines"] == 3001
+                        assert first["truncated"] is True
+                        assert first["content"] == "x" * (1024 * 1024)
+                        # The page after it reaches the lines that follow, rather than
+                        # answering nothing: line 2 is "row 0", so line 2001 is "row 1999".
+                        second = await self._cmd(ws, {
+                            "type": "read_file", "path": str(big), "start_line": 2001,
+                        })
+                        rows = second["content"].split("\n")
+                        assert rows[0] == "row 1999", rows[0]
+                        assert len(rows) == 1001
+                        assert second["total_lines"] == 3001
+                        assert second["truncated"] is False
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_read_file_names_why_it_could_not_read(self):
+        """Four different failures carry four different codes, not one sentence.
+
+        The panel had one sentence for everything, so a missing file, a directory and a
+        FIFO read alike on screen (issue #3210).
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                work = cwd / "work"
+                work.mkdir()
+                (work / "a_dir").mkdir()
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        missing = await self._cmd(ws, {
+                            "type": "read_file", "path": str(work / "nope.txt"),
+                        })
+                        assert missing["error_code"] == "not_found", missing
+                        a_dir = await self._cmd(ws, {
+                            "type": "read_file", "path": str(work / "a_dir"),
+                        })
+                        assert a_dir["error_code"] == "is_directory", a_dir
+                        bad = await self._cmd(ws, {
+                            "type": "read_file", "path": str(work / "a.txt"),
+                            "line_limit": 0,
+                        })
+                        assert bad["error_code"] == "window_invalid", bad
+                        assert (
+                            missing["error_code"] != a_dir["error_code"]
+                            and a_dir["error_code"] != bad["error_code"]
+                        )
                     finally:
                         await ws.close()
                 finally:

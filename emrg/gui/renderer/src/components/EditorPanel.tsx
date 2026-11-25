@@ -24,15 +24,19 @@ import {
 import {
   DEFAULT_FONT_SIZE,
   EditorPrefsStore,
+  LARGE_FILE_BYTES,
   MAX_FONT_SIZE,
   MIN_FONT_SIZE,
+  PAGE_LINES,
   applyLineEnding,
   diskChange,
+  formatBytes,
   indentUnitFor,
   languageFor,
   lineEndingFor,
   lineForRatio,
   minimapLines,
+  readFailureKey,
   readOnlyReason,
   type CursorPosition,
   type DiskChange,
@@ -73,10 +77,18 @@ export interface FileContent {
   binary: boolean;
   truncated: boolean;
   totalLines: number | null;
+  /** The file's size on disk, as the daemon measured it. `null` = not reported. */
+  size: number | null;
 }
 
-/** Read one file; `null` = this build cannot read files, or the read failed. */
-export type LoadFile = (path: string) => Promise<FileContent | null>;
+/** One window of a file, as the daemon reads it. Both absent = the whole file. */
+export interface ReadWindow {
+  startLine?: number;
+  lineLimit?: number;
+}
+
+/** Read one file, or one page of it; `null` = this build cannot read files, or the read failed. */
+export type LoadFile = (path: string, window?: ReadWindow) => Promise<FileContent | null>;
 
 /** Write one file; `null` = this build cannot write, and a refusal throws with its reason. */
 export type SaveFile = (
@@ -108,6 +120,10 @@ export interface EditorPanelProps {
 interface Snapshot {
   content: FileContent | null;
   stamp: DiskStamp;
+  /** Why the read failed, when it did: the daemon's `error_code`, or `null`. */
+  reason?: string | null;
+  /** The 1-based line this snapshot starts at. `1` for a whole-file read. */
+  startLine: number;
 }
 
 /** The last path segment, for a tab's label. */
@@ -242,7 +258,10 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
     ? readOnlyReason({
         binary: activeContent.binary,
         truncated: activeContent.truncated,
-        size: activeSnapshot?.stamp.size ?? null,
+        // The reader's own size first: it comes with the content it belongs to, while the
+        // stamp is a separate probe a build may not have at all.
+        size: activeContent.size ?? activeSnapshot?.stamp.size ?? null,
+        startLine: activeSnapshot?.startLine ?? 1,
       })
     : null;
   const lineCount = useMemo(
@@ -268,7 +287,12 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
    * than as a change.
    */
   const recordRead = useCallback(
-    async (path: string, content: FileContent | null): Promise<void> => {
+    async (
+      path: string,
+      content: FileContent | null,
+      reason: string | null = null,
+      startLine = 1,
+    ): Promise<void> => {
       let stamp: DiskStamp = { mtime: null, size: null };
       if (statFile) {
         try {
@@ -278,7 +302,7 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
           /* an unmeasurable probe is not a change, and not a load failure either */
         }
       }
-      setDocs((prev) => ({ ...prev, [path]: { content, stamp } }));
+      setDocs((prev) => ({ ...prev, [path]: { content, stamp, reason, startLine } }));
       if (content) setBuffers((prev) => ({ ...prev, [path]: content.content }));
     },
     [statFile],
@@ -296,25 +320,65 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
     if (!loadFile) {
       setDocs((prev) => ({
         ...prev,
-        [path]: { content: null, stamp: { mtime: null, size: null } },
+        [path]: { content: null, stamp: { mtime: null, size: null }, startLine: 1 },
       }));
       return;
     }
     let cancelled = false;
     void (async () => {
       let answer: FileContent | null = null;
+      let reason: string | null = null;
       try {
         answer = await loadFile(path);
-      } catch {
+      } catch (error) {
+        // The reason is the whole point. This catch used to drop it into `null`, so a
+        // file too large, a path that does not exist, a directory and a FIFO all drew the
+        // same sentence (issue #3210).
+        reason = (error as { errorCode?: string | null } | null)?.errorCode ?? null;
         answer = null;
       }
       if (cancelled) return;
-      await recordRead(path, answer);
+      await recordRead(path, answer, reason, 1);
     })();
     return () => {
       cancelled = true;
     };
   }, [activeFile, loadFile, recordRead]);
+
+  /** How many lines one path's buffer holds — the span a page covers. */
+  const linesIn = useCallback((path: string): number => {
+    const text = buffersRef.current[path] ?? docsRef.current[path]?.content?.content ?? "";
+    return text === "" ? 1 : text.split("\n").length;
+  }, []);
+
+  /** The window to re-read a path at: its own page, or `undefined` when it holds the file. */
+  const windowFor = useCallback((path: string): ReadWindow | undefined => {
+    const from = docsRef.current[path]?.startLine ?? 1;
+    return from > 1 ? { startLine: from, lineLimit: PAGE_LINES } : undefined;
+  }, []);
+
+  /**
+   * Read the page after the one on screen.
+   *
+   * A window the panel cannot advance hides the file rather than degrading it: the daemon
+   * answers one page per request, so without this the first 2000 lines of a 100,000-line log
+   * would be all a host ever saw. The page starts where the buffer ends and `startLine`
+   * remembers that, which is also what keeps the buffer read only on the last page — there
+   * `truncated` is correctly false, and an editable buffer would save 1,000 lines over a
+   * 100,000-line file.
+   */
+  const nextPage = useCallback(async (): Promise<void> => {
+    const path = activeFile?.path;
+    if (!path || !loadFile) return;
+    const from = (docsRef.current[path]?.startLine ?? 1) + linesIn(path);
+    try {
+      const page = await loadFile(path, { startLine: from, lineLimit: PAGE_LINES });
+      await recordRead(path, page, null, from);
+    } catch (error) {
+      const reason = (error as { errorCode?: string | null } | null)?.errorCode ?? null;
+      await recordRead(path, null, reason, from);
+    }
+  }, [activeFile?.path, loadFile, recordRead, linesIn]);
 
   /**
    * Save one path.
@@ -343,6 +407,10 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
               // A whole-file save makes the snapshot exactly the buffer, and a buffer that
               // now holds the whole file is no longer truncated.
               content: { ...current.content, content: text, truncated: false },
+              // A save is only reachable while this is 1: a page that starts anywhere else
+              // is read only (editorDoc.readOnlyReason), so nothing here can write a
+              // fragment back over the file. Keeping the field keeps the snapshot whole.
+              startLine: current.startLine,
               // What the write itself reported. Without this the very next probe would
               // read the panel's own save as somebody else's change and prompt about it.
               stamp: { exists: true, mtime: written?.mtime ?? null, size: written?.size ?? null },
@@ -393,12 +461,13 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
       }
       const top = editorApi.current?.scrollTop() ?? 0;
       let reread: FileContent | null = null;
+      const from = docsRef.current[path]?.startLine ?? 1;
       try {
-        reread = loadFile ? await loadFile(path) : null;
+        reread = loadFile ? await loadFile(path, windowFor(path)) : null;
       } catch {
         reread = null;
       }
-      await recordRead(path, reread);
+      await recordRead(path, reread, null, from);
       // A reload replaces the document in place, and this puts the reader back where they
       // were: "未动过则静默重载并保持滚动位置" is the acceptance's own wording.
       scrollByTab.current.set(path, top);
@@ -436,12 +505,13 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
     async (path: string): Promise<void> => {
       const top = editorApi.current?.scrollTop() ?? 0;
       let reread: FileContent | null = null;
+      const from = docsRef.current[path]?.startLine ?? 1;
       try {
-        reread = loadFile ? await loadFile(path) : null;
+        reread = loadFile ? await loadFile(path, windowFor(path)) : null;
       } catch {
         reread = null;
       }
-      await recordRead(path, reread);
+      await recordRead(path, reread, null, from);
       scrollByTab.current.set(path, top);
       editorApi.current?.setScrollTop(top);
       setConflict((prev) => (prev?.path === path ? null : prev));
@@ -580,14 +650,30 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
   );
 
   const languageLabel = activeLanguage.name ?? t("editor.plainText");
-  const readOnlyNote =
-    readOnlyWhy === "large"
-      ? t("editor.readOnlyLarge")
-      : readOnlyWhy === "truncated"
-        ? t("editor.readOnlyTruncated")
-        : readOnlyWhy === "binary"
-          ? t("editor.readOnlyBinary")
-          : null;
+  // A window is a fact with numbers in it, and the numbers are what make the notice a
+  // fact rather than an apology: how large the file is, how many lines it has, how many
+  // are on screen. The sentence it replaces said only that the file was long.
+  const pageFrom = activeSnapshot?.startLine ?? 1;
+  const pageTo = pageFrom + lineCount - 1;
+  const total = activeContent?.totalLines ?? null;
+  // Whether a page follows this one: `truncated` is the daemon saying there is more, and the
+  // total is what turns that into the range the button offers.
+  const canPage = activeContent?.truncated === true && total !== null && pageTo < total;
+  const readOnlyNote = (() => {
+    if (readOnlyWhy === "binary") return t("editor.readOnlyBinary");
+    if (readOnlyWhy === "truncated") {
+      const size = activeContent?.size ?? activeSnapshot?.stamp.size ?? null;
+      if (total !== null && total > lineCount) {
+        const range = { from: String(pageFrom), to: String(pageTo), total: String(total) };
+        return size !== null && size > LARGE_FILE_BYTES
+          ? t("editor.largePage", { size: formatBytes(size), ...range })
+          : t("editor.showingFirst", range);
+      }
+      return t("editor.readOnlyTruncated");
+    }
+    if (readOnlyWhy === "large") return t("editor.readOnlyLarge");
+    return null;
+  })();
 
   return (
     <section className="editor" data-testid="editor-panel" data-sid={sid ?? ""}>
@@ -923,6 +1009,19 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
       {activeFile && readOnlyNote ? (
         <p className="editor-note" data-testid="editor-readonly-note">
           {readOnlyNote}
+          {canPage ? (
+            <button
+              type="button"
+              className="editor-page-next"
+              data-testid="editor-next-page"
+              onClick={() => void nextPage()}
+            >
+              {t("editor.nextPage", {
+                from: String(pageTo + 1),
+                to: String(Math.min(total ?? pageTo + PAGE_LINES, pageTo + PAGE_LINES)),
+              })}
+            </button>
+          ) : null}
         </p>
       ) : null}
       {activeFile && activeContent ? (
@@ -1000,7 +1099,7 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
       ) : null}
       {activeFile && activeSnapshot && activeSnapshot.content === null ? (
         <p className="editor-note editor-note-error" data-testid="editor-failed">
-          {t("editor.failed")}
+          {t(readFailureKey(activeSnapshot.reason))}
         </p>
       ) : null}
       {activeFile && activeContent ? (

@@ -1019,8 +1019,19 @@ vision = false
       if (startLine !== undefined) params.start_line = startLine;
       if (lineLimit !== undefined) params.line_limit = lineLimit;
       const frame = await requireConn().sendCommandAndWait("read_file", params, 10000);
-      if (frame.error) throw new Error(frame.error);
-      return { content: frame.content || "", binary: !!frame.binary, truncated: !!frame.truncated, totalLines: frame.total_lines };
+      // A failed read is **data here, not a throw**. `ipcRenderer.invoke` rebuilds an
+      // Error from its message alone, so a `error_code` attached to one would not survive
+      // the boundary — and that code is what lets the panel say *which* failure this is
+      // instead of one sentence for all of them (issue #3210).
+      return {
+        content: frame.content || "",
+        binary: !!frame.binary,
+        truncated: !!frame.truncated,
+        totalLines: typeof frame.total_lines === "number" ? frame.total_lines : null,
+        size: typeof frame.size === "number" ? frame.size : null,
+        error: frame.error || null,
+        errorCode: frame.error_code || null,
+      };
     });
 
     // ── P2.3 + P3.4（rant 12:20:35）：HTML 预览 WebContentsView ──────────

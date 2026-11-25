@@ -200,6 +200,16 @@ EXEMPT: dict[tuple[str, str, str], str] = {
         "with the FIFO still in place. An earlier revision of this row read the loop as an "
         "acknowledgement that something may be there; it is what removes the possibility."
     ),
+    ("emrg/server/daemon.py", "_read_line_window", "open"): (
+        "its only caller, `EmrgServer._handle_read_file`, asks `_non_regular_kind(path)` and "
+        "refuses a non-None kind with `special_file_refusal` **before** the size branch that "
+        "reaches this helper, so a FIFO, a socket or a device never arrives here -- which is "
+        "the blocking read this rule exists to prevent on the daemon's event loop. The ask "
+        "sits in the caller because this function answers a *window* of a file the caller has "
+        "already accepted; a second check inside it would be code no reading can reach, the "
+        "shape this table carries for `ensure_config`. Added with the windowed reader that "
+        "replaced the 1 MB refusal (issue #3210)."
+    ),
 }
 
 
