@@ -74,7 +74,9 @@ test("vendor ships Monaco editor (loader + editor.main js/css)", () => {
 test("every main.js/preload.js local require is covered by files whitelist", () => {
   const files = (PKG.build && PKG.build.files) || [];
   const localRequires = [];
-  for (const entry of ["main.js", "preload.js"]) {
+  // `config_fields.js` 也在扫：它 require 的 `config-fields.json` 是运行时读的数据文件，只扫
+  // main/preload 就看不见它——打包漏了那份 JSON，配置页一打开就抛 "Cannot find module"。
+  for (const entry of ["main.js", "preload.js", "config_fields.js"]) {
     const src = fs.readFileSync(path.join(GUI_ROOT, entry), "utf-8");
     // 收集 require("./xxx") 与 require("./xxx.js") 形态
     const re = /require\(\s*"(\.[^"]+)"\s*\)/g;

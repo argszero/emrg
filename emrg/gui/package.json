@@ -53,6 +53,8 @@
     "frame-route.js",
       "atp_login.js",
       "theme_setting.js",
+      "config_fields.js",
+      "config-fields.json",
       "package.json",
       "scripts/**"
     ],

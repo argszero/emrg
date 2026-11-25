@@ -1,0 +1,183 @@
+{
+  "version": 1,
+  "note": "The one list of config.toml fields and how the GUI covers each. main.js reads it to validate and write, the renderer renders every control:auto entry from it, and tests/test_config_field_coverage.py reddens when emrg/config.py grows a field this file does not name. default values are compared against the dataclass (not restated by hand): a drift fails that test.",
+  "fields": [
+    {
+      "section": "llm",
+      "field": "api_key",
+      "key": "api_key",
+      "ipc": "apiKey",
+      "control": "custom",
+      "widget": "api-key",
+      "default": "",
+      "tab": "model"
+    },
+    {
+      "section": "llm",
+      "field": "base_url",
+      "key": "base_url",
+      "ipc": "baseUrl",
+      "control": "custom",
+      "widget": "text",
+      "default": "https://api.openai.com/v1",
+      "tab": "model"
+    },
+    {
+      "section": "llm",
+      "field": "model",
+      "key": "model",
+      "ipc": "model",
+      "control": "custom",
+      "widget": "default-model",
+      "default": "gpt-4o-mini",
+      "tab": "model"
+    },
+    {
+      "section": "llm",
+      "field": "models",
+      "key": "models",
+      "ipc": "models",
+      "control": "custom",
+      "widget": "models",
+      "default": [],
+      "tab": "model"
+    },
+    {
+      "section": "llm",
+      "field": "max_tokens",
+      "key": "max_tokens",
+      "ipc": "maxTokens",
+      "control": "auto",
+      "kind": "int",
+      "min": 1,
+      "default": 8192,
+      "tab": "model"
+    },
+    {
+      "section": "llm",
+      "field": "temperature",
+      "key": "temperature",
+      "ipc": "temperature",
+      "control": "auto",
+      "kind": "float",
+      "min": 0,
+      "max": 2,
+      "default": 0.7,
+      "tab": "model"
+    },
+    {
+      "section": "llm",
+      "field": "max_tool_rounds",
+      "key": "max_tool_rounds",
+      "ipc": "maxToolRounds",
+      "control": "auto",
+      "kind": "int",
+      "min": 1,
+      "default": 270,
+      "tab": "model"
+    },
+    {
+      "section": "llm",
+      "field": "context_window",
+      "key": "context_window",
+      "ipc": "contextWindow",
+      "control": "auto",
+      "kind": "int",
+      "min": 1,
+      "default": 131072,
+      "tab": "model"
+    },
+    {
+      "section": "llm",
+      "field": "auto_compact_threshold",
+      "key": "auto_compact_threshold",
+      "ipc": "autoCompactThreshold",
+      "control": "auto",
+      "kind": "float",
+      "min": 0,
+      "max": 1,
+      "default": 0.0,
+      "tab": "model"
+    },
+    {
+      "section": "llm",
+      "field": "vision",
+      "key": "vision",
+      "ipc": "vision",
+      "control": "auto",
+      "kind": "bool",
+      "default": false,
+      "tab": "model"
+    },
+    {
+      "section": "llm",
+      "field": "vision_default",
+      "key": "vision",
+      "control": "covered",
+      "coveredBy": "vision",
+      "default": false
+    },
+    {
+      "section": "llm",
+      "field": "stream_options",
+      "key": "stream_options",
+      "ipc": "streamOptions",
+      "control": "auto",
+      "kind": "usage",
+      "default": { "include_usage": false },
+      "tab": "model"
+    },
+    {
+      "section": "llm",
+      "field": "context_refresh_interval_ms",
+      "key": "context_refresh_interval_ms",
+      "ipc": "contextRefreshIntervalMs",
+      "control": "auto",
+      "kind": "int",
+      "min": 0,
+      "default": 0,
+      "tab": "model"
+    },
+    {
+      "section": "update",
+      "field": "enabled",
+      "key": "enabled",
+      "ipc": "updateEnabled",
+      "control": "auto",
+      "kind": "bool",
+      "default": true,
+      "tab": "about"
+    },
+    {
+      "section": "update",
+      "field": "delay_minutes",
+      "key": "delay_minutes",
+      "ipc": "updateDelayMinutes",
+      "control": "auto",
+      "kind": "int",
+      "min": 0,
+      "default": 1440,
+      "tab": "about"
+    },
+    {
+      "section": "sandbox",
+      "field": "pwsh_path",
+      "key": "pwsh_path",
+      "ipc": "pwshPath",
+      "control": "auto",
+      "kind": "text",
+      "default": "",
+      "tab": "sandbox"
+    },
+    {
+      "section": "client",
+      "field": "theme",
+      "key": "theme",
+      "ipc": "theme",
+      "control": "custom",
+      "widget": "theme",
+      "default": "auto",
+      "tab": "appearance"
+    }
+  ]
+}

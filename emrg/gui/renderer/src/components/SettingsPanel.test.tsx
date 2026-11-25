@@ -940,3 +940,79 @@ describe("SettingsPanel — version reading (issue #3212)", () => {
     expect(screen.getByTestId("about-update").textContent).toContain("no such channel");
   });
 });
+
+// ── 配置字段的控件（issue #3221）──────────────────────────────────────────────
+describe("SettingsPanel — config fields (issue #3221)", () => {
+  // 主进程发来的是 `emrg/gui/config-fields.json` 那一份清单：界面照它画控件，不另存一份表。
+  // 这两条钉的是两头——清单里的值能改能存、主进程的拒绝会落回它点名的那个控件。
+
+  it("draws a control for every field the main process sends, and saves what was typed (issue #3221)", async () => {
+    const saveSettings = vi.fn().mockResolvedValue({ ok: true });
+    setup({
+      getSettings: vi.fn().mockResolvedValue({
+        apiKey: "sk-test",
+        baseUrl: "https://api.deepseek.com",
+        model: "deepseek-v3",
+        theme: "system",
+        modelDetails: [],
+        fields: [
+          { ipc: "maxTokens", section: "llm", field: "max_tokens", kind: "int", tab: "model", default: 8192, value: 8192 },
+          { ipc: "updateEnabled", section: "update", field: "enabled", kind: "bool", tab: "about", default: true, value: true },
+          { ipc: "pwshPath", section: "sandbox", field: "pwsh_path", kind: "text", tab: "sandbox", default: "", value: "" },
+        ],
+      }),
+      saveSettings,
+    });
+
+    await waitFor(() =>
+      expect((screen.getByTestId("set-field-maxTokens") as HTMLInputElement).value).toBe("8192"),
+    );
+    fireEvent.change(screen.getByTestId("set-field-maxTokens"), { target: { value: "4096" } });
+    fireEvent.click(screen.getByTestId("settings-save"));
+
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(1));
+    expect((saveSettings.mock.calls[0][0] as Record<string, unknown>).maxTokens).toBe("4096");
+
+    // 沙箱页原本一个控件都没有；pwsh_path 就落在这里
+    fireEvent.click(screen.getByTestId("settings-tab-sandbox"));
+    expect(screen.getByTestId("set-field-pwshPath")).toBeTruthy();
+    // 关于页：自动更新开关 + 那句"检查间隔不可配"
+    fireEvent.click(screen.getByTestId("settings-tab-about"));
+    expect((screen.getByTestId("set-field-updateEnabled") as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByTestId("settings-update-interval-note").textContent).toContain("5 minutes");
+  });
+
+  it("shows the main process's refusal beside the control it names, and drops it when that value changes (issue #3221)", async () => {
+    const saveSettings = vi.fn().mockResolvedValue({
+      ok: false,
+      field: "maxTokens",
+      message: "[llm] max_tokens wants a whole number, got \"abc\"",
+    });
+    setup({
+      getSettings: vi.fn().mockResolvedValue({
+        apiKey: "sk-test",
+        baseUrl: "https://api.deepseek.com",
+        model: "deepseek-v3",
+        theme: "system",
+        modelDetails: [],
+        fields: [
+          { ipc: "maxTokens", section: "llm", field: "max_tokens", kind: "int", tab: "model", default: 8192, value: 8192 },
+        ],
+      }),
+      saveSettings,
+    });
+
+    await waitFor(() => expect(screen.getByTestId("set-field-maxTokens")).toBeTruthy());
+    fireEvent.change(screen.getByTestId("set-field-maxTokens"), { target: { value: "abc" } });
+    fireEvent.click(screen.getByTestId("settings-save"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("set-field-maxTokens-error").textContent).toContain("wants a whole number"),
+    );
+    // 拒绝了就不能同时报"已保存"：那正是这条缺陷过去的样子
+    expect(screen.getByTestId("settings-msg").getAttribute("class")).toContain("err");
+    // 改掉这个值，那句拒绝要撤掉——它说的是上一个值
+    fireEvent.change(screen.getByTestId("set-field-maxTokens"), { target: { value: "4096" } });
+    expect(screen.queryByTestId("set-field-maxTokens-error")).toBeNull();
+  });
+});

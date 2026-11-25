@@ -51,6 +51,24 @@ interface TemplateRec {
   builtin?: boolean;
 }
 
+/**
+ * 一个配置字段（issue #3221）：主进程照 `emrg/gui/config-fields.json` 发来，界面照它画控件。
+ *
+ * 界面不另存一份字段表——那份表就在主进程读的 JSON 里，一处改动三处生效。
+ */
+interface ConfigFieldEntry {
+  ipc: string;
+  section: string;
+  field: string;
+  kind: "int" | "float" | "bool" | "text" | "usage";
+  tab: string;
+  default?: unknown;
+  min?: number;
+  max?: number;
+  /** 文件里的现值；文件没有该键时，主进程填的是声明的默认值。 */
+  value?: string | number | boolean;
+}
+
 interface GetSettingsResult {
   apiKey?: string;
   baseUrl?: string;
@@ -58,6 +76,8 @@ interface GetSettingsResult {
   modelDetails?: { name: string; model?: string; vision?: boolean }[];
   theme?: string;
   lang?: string;
+  /** 自动控件的清单与现值。缺省当空表——旧主进程不发这一项。 */
+  fields?: ConfigFieldEntry[];
 }
 
 interface DeviceFlow {
@@ -274,6 +294,82 @@ const TABS: { id: SettingsTab; labelKey: string }[] = [
   { id: "about", labelKey: "settings.tabAbout" },
 ];
 
+/** 勾选语义：`usage` 是一个对象里的一项，不是对象本身。 */
+function isChecked(entry: ConfigFieldEntry): boolean {
+  if (entry.kind === "usage") {
+    return Boolean((entry.value as { include_usage?: boolean } | undefined)?.include_usage);
+  }
+  return Boolean(entry.value);
+}
+
+/**
+ * 提示里那个"默认值"取自清单，不在这里手抄——手抄的那份会和 `emrg/config.py` 漂开，而
+ * `tests/test_config_field_coverage.py` 恰恰把清单钉在 dataclass 上。
+ */
+function defaultText(entry: ConfigFieldEntry): string {
+  if (entry.kind === "usage") {
+    return String(Boolean((entry.default as { include_usage?: boolean } | undefined)?.include_usage));
+  }
+  if (entry.kind === "bool") return String(Boolean(entry.default));
+  return String(entry.default ?? "");
+}
+
+/**
+ * 一个自动控件（issue #3221）：清单里的一条画成一个输入框或一个勾选，含义与默认值写在下面。
+ *
+ * `invalid` 非空时把拒绝原话贴在控件底下——不合法就地报错，而不是存完再看文件没动。
+ */
+function ConfigFieldControl({
+  entry,
+  invalid,
+  t,
+  onChange,
+}: {
+  entry: ConfigFieldEntry;
+  invalid: string;
+  t: (key: string, vars?: Record<string, string | number>) => string;
+  onChange: (ipc: string, value: string | boolean) => void;
+}) {
+  const label = t(`settings.f.${entry.field}`);
+  const hint = t(`settings.fh.${entry.field}`, { default: defaultText(entry) });
+  const testId = `set-field-${entry.ipc}`;
+  const refusal = invalid ? (
+    <div className="settings-msg err" data-testid={`${testId}-error`}>
+      {invalid}
+    </div>
+  ) : null;
+  if (entry.kind === "bool" || entry.kind === "usage") {
+    return (
+      <label>
+        <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input
+            type="checkbox"
+            data-testid={testId}
+            checked={isChecked(entry)}
+            onChange={(e) => onChange(entry.ipc, e.target.checked)}
+          />
+          {label}
+        </span>
+        <div className="hint">{hint}</div>
+        {refusal}
+      </label>
+    );
+  }
+  return (
+    <label>
+      <span>{label}</span>
+      <input
+        type="text"
+        data-testid={testId}
+        value={String(entry.value ?? "")}
+        onChange={(e) => onChange(entry.ipc, e.target.value)}
+      />
+      <div className="hint">{hint}</div>
+      {refusal}
+    </label>
+  );
+}
+
 export function SettingsPanel({
   version = "",
   latestRelease = null,
@@ -286,6 +382,11 @@ export function SettingsPanel({
   const [baseUrl, setBaseUrl] = useState("");
   const [defaultName, setDefaultName] = useState("");
   const [extraModels, setExtraModels] = useState<ModelRec[]>([]);
+  // 自动控件（issue #3221）：清单与现值放在一起，改一个值只替换那一条。控件是照清单画出来的，
+  // 所以"加一个配置字段"等于在 JSON 里加一条，而不是在这里再加一段表单。
+  const [fields, setFields] = useState<ConfigFieldEntry[]>([]);
+  // 主进程拒绝了哪个值：拒绝原话显示在那个控件下面（验收 3：就地报错、文件不变）。
+  const [badField, setBadField] = useState<{ field: string; message: string } | null>(null);
   // 主题 / GitHub 状态
   const [theme, setTheme] = useState<string>("system");
   const [github, setGithub] = useState<{ authenticated: boolean; user: string | null } | null>(null);
@@ -346,6 +447,7 @@ export function SettingsPanel({
             vision: Boolean(m.vision),
           })),
         );
+        setFields(Array.isArray(s.fields) ? s.fields : []);
         applyTheme(s.theme || "system");
         // 语言持久化（rant 22:22:50）：config.toml 有 lang → 应用；""（跟随系统/旧配置）→ 不动
         if (s.lang) setLocale(s.lang as "" | Locale);
@@ -477,6 +579,27 @@ export function SettingsPanel({
     setDefaultName(name);
   }
 
+  /** 改一个自动控件的值：只换那一条，并撤掉贴在它下面的旧拒绝（那句话说的是上一个值）。 */
+  function setFieldValue(ipc: string, value: string | boolean) {
+    setFields((prev) => prev.map((f) => (f.ipc === ipc ? { ...f, value } : f)));
+    setBadField((prev) => (prev && prev.field === ipc ? null : prev));
+  }
+
+  /** 某一页的自动控件，按清单顺序；没有就什么都不画。 */
+  function renderFields(tabId: string) {
+    return fields
+      .filter((f) => f.tab === tabId)
+      .map((f) => (
+        <ConfigFieldControl
+          key={f.ipc}
+          entry={f}
+          invalid={badField && badField.field === f.ipc ? badField.message : ""}
+          t={t}
+          onChange={setFieldValue}
+        />
+      ));
+  }
+
   async function saveSettings() {
     if (!apiKey.trim()) {
       setMsg({ kind: "err", text: t("app.authKeyRequired") });
@@ -489,7 +612,11 @@ export function SettingsPanel({
     }
     setBusy(true);
     try {
-      await b.saveSettings({
+      // 自动控件（issue #3221）：清单里每个值都随这次保存一起送，主进程照声明类型校验；任何
+      // 一个不合法就整份不落盘，拒绝原话回到这里，显示在出错的那个控件下面。
+      const auto: Record<string, unknown> = {};
+      for (const f of fields) auto[f.ipc] = f.value;
+      const res = (await b.saveSettings({
         apiKey: apiKey.trim(),
         baseUrl: baseUrl.trim(),
         model: defaultName,
@@ -500,7 +627,15 @@ export function SettingsPanel({
             : []),
           ...extraModels,
         ],
-      });
+        ...auto,
+      })) as { ok?: boolean; field?: string; message?: string } | undefined;
+      if (res && res.ok === false) {
+        const why = res.message || "";
+        setBadField({ field: res.field || "", message: why });
+        setMsg({ kind: "err", text: t("settings.fieldRefused", { msg: why }) });
+        return;
+      }
+      setBadField(null);
       setMsg({ kind: "ok", text: t("dlg.saved") });
     } catch (e: unknown) {
       setMsg({ kind: "err", text: t("settings.saveFailed", { msg: (e as Error).message }) });
@@ -978,6 +1113,19 @@ export function SettingsPanel({
                   onChange={(e) => setBaseUrl(e.target.value)}
                 />
               </label>
+              {/* 模型页的高级参数（issue #3221）：九项 [llm] 字段本来只能改文件 */}
+              {fields.some((f) => f.tab === "model") && (
+                <>
+                  <div
+                    className="settings-group-title"
+                    style={{ marginTop: 14 }}
+                    data-testid="settings-group-llm-advanced"
+                  >
+                    {t("settings.groupAdvanced")}
+                  </div>
+                  {renderFields("model")}
+                </>
+              )}
               <div className="settings-group-title" style={{ marginTop: 14 }}>
                 {t("settings.availableModels")}
               </div>
@@ -1079,6 +1227,19 @@ export function SettingsPanel({
                 </div>
               )}
               <div className="hint" style={{ marginTop: 8 }}>{t("settings.defaultHint")}</div>
+            </div>
+          </div>
+        )}
+
+        {/* ── 自动更新（issue #3221）：决定会不会自己装、装之前等多久 ── */}
+        {tab === "about" && (
+          <div className="panel-tab-body" data-settings-body="update" data-testid="settings-body-update">
+            <div className="settings-group">
+              <div className="settings-group-title">{t("settings.groupUpdate")}</div>
+              {renderFields("about")}
+              <div className="hint" data-testid="settings-update-interval-note">
+                {t("settings.updateIntervalNote")}
+              </div>
             </div>
           </div>
         )}
@@ -1366,6 +1527,8 @@ export function SettingsPanel({
                   <div className="hint" data-testid="settings-sandbox-hint">
                     {t("settings.sandboxBody")}
                   </div>
+                  {/* 这一页原本一个控件都没有（issue #3221）：[sandbox] pwsh_path 落在这里 */}
+                  {renderFields("sandbox")}
                 </div>
               </div>
             )}
