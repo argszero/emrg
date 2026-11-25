@@ -198,6 +198,14 @@ Exit codes
        tree that can no longer merge (a body naming no tree is not this, and a plan
        that cannot be computed is reported as unmeasurable rather than as a
        mismatch);
+       `no-tree-claim`: the body approves, names a revision this clone resolves to a
+       commit, and names no tree — the vote measured a merge and said nothing about
+       the tree it lands, so that merge would land a tree no vote named and the
+       post-merge audit would read it as `UNCHECKED`, "the landed tree was compared
+       to nothing", once the vote could no longer be written to say what it measured
+       (a body naming no revision at all is not this: it has measured no merge and is
+       the audit's "never about a landing tree"; a `❌ needs fix` is not this either,
+       however it is written, because a rejection licenses no merge);
        `gh-failed`: `gh` failed; `tool-failed`: this tool itself failed before it
        could reach a verdict — an exception left `main` rather than a refusal, and
        `_entry` reports it as unmeasurable (`2`) instead of letting Python exit `1`,
@@ -291,6 +299,7 @@ RC2_CAUSES = (
     "already-voted",     # this cycle already has a counted vote or a veto here
     "own-head-window",   # the head is this cycle's own, or its window cannot be decided
     "landing-tree",      # the body names a tree that is not the one this merge would land
+    "no-tree-claim",     # an approval names a revision and no tree: the merge would land unnamed
     "gh-failed",         # `gh pr review` itself failed
     "tool-failed",       # `main` raised: `_entry` reports it unmeasurable (rc 1 would mean "posted")
 )
@@ -525,9 +534,16 @@ def tree_claim_refusal(body: str, pr: int, repo: str) -> tuple[str | None, str]:
     """Refuse a body whose tree claim is not the tree this merge would land.
 
     Returns `(refusal, note)`, at most one of them non-empty: a body that names no
-    tree is not checked (the vote may be about something else, and this tool does
-    not decide what a vote is about), and a claim that cannot be checked is
+    tree is not checked **here** (the vote may be about something else, and this tool
+    does not decide what a vote is about), and a claim that cannot be checked is
     *reported* rather than passed in silence.
+
+    **One absence is asked about, and it is the sibling's question**:
+    :func:`revision_without_tree_refusal` refuses an approval that cites a revision
+    and names no tree, because such a vote did measure a merge and says nothing about
+    what it lands. The pair is split because their remedies differ — a wrong tree is
+    corrected by re-measuring, an absent one by measuring at all — and each `return 2`
+    in `main` declares a cause of its own.
     """
     claimed = named_trees(body)
     if not claimed:
@@ -550,6 +566,62 @@ def tree_claim_refusal(body: str, pr: int, repo: str) -> tuple[str | None, str]:
         "reports in the body, or name no tree at all if the vote is not about a "
         "landing tree.",
         "",
+    )
+
+
+def revision_without_tree_refusal(body: str, pr: int) -> str:
+    """The refusal for an approval that cites a revision where a tree was needed.
+
+    `""` means the vote may be posted; anything else is the reason it may not.
+
+    **What is refused.** A body the counter reads as an approval (`classify`) that
+    names at least one token this clone resolves to a **commit**, and names no tree.
+    That is the ordinary vote — "I re-read head `d4ce9c9d` against master `1cdc00e2`" —
+    and it measures a merge while saying nothing about the tree the merge lands, so
+    the merge it licenses lands a tree no vote named.
+
+    **What is not.** A body naming no revision at all: a vote about the code's intent
+    has measured no merge, and it is the audit's own "never about a landing tree"
+    state, counted against nothing. A `❌ needs fix` is not refused however it is
+    written, because a rejection licenses no merge and so leaves nothing to compare. A
+    token this clone cannot resolve is not refused either: it cannot tell a tree it
+    lacks from a CI run id that was never a git object (`token_kinds`), and refusing on
+    an answer it does not have is a guess wearing a refusal's clothes.
+
+    **Why here and not in the audit.** `check-merge-landed.py` reads such a merge as
+    `UNCHECKED` — "the landed tree was compared to nothing" — and it can only report
+    that after the merge, when the landed tree is known and the vote is spent. Writing
+    the tree into the body then would make the record certify itself: no later reading
+    could tell a merge that landed what the votes measured from one that did not.
+    Measured 2026-11-25 (`cyc20261125-163209`, landed `80de3c58`): #3230's vote named
+    head `d4ce9c9d` and master `1cdc00e2`, so the tree it landed (`baf88e0e7acf`) was
+    compared to nothing.
+
+    **Decided without the network.** `named_trees` and `token_kinds` are local
+    `git cat-file` reads, so a clone that cannot fetch still refuses rather than
+    posting a vote no later reading can check; `landing_tree` — which fetches, and
+    which the sibling calls — is deliberately not asked, because naming a tree the
+    body did not measure is not this tool's to invent.
+    """
+    if votes_counter().classify(body) != "approve":
+        return ""
+    if named_trees(body):
+        return ""
+    cited = [token for token, kind in token_kinds(body) if kind == "commit"]
+    if not cited:
+        return ""
+    named = ", ".join(f"`{token}`" for token in cited)
+    return (
+        f"the body approves, names the revision {named} and no tree: a revision is what "
+        "the review read, and a merge lands a tree, so this vote would leave that merge "
+        "with nothing to compare it to. `check-merge-landed.py` then reports it as "
+        "`UNCHECKED` — the landed tree was compared to nothing — after the merge, when "
+        "the vote is spent and writing the tree in afterwards would be the record "
+        "certifying itself.\n"
+        "\n"
+        f"Run `{RUNNER} scripts/check-merge-plan-suite.py {pr}` and name the tree it "
+        "reports beside the revision, or name no revision at all if the approval is not "
+        "about a landing tree.",
     )
 
 
@@ -1028,6 +1100,14 @@ def main(argv: list[str] | None = None) -> int:
     if claim_refusal:
         print(f"refusing to post: {claim_refusal}", file=sys.stderr)
         return 2  # cause: landing-tree
+
+    # After the claim check: a body naming a tree that would not land must hear the
+    # sentence about the tree it named, which also carries the one that would land.
+    # This clause is about a claim that was never made.
+    unclaimed = revision_without_tree_refusal(body, args.pr)
+    if unclaimed:
+        print(f"refusing to post: {unclaimed}", file=sys.stderr)
+        return 2  # cause: no-tree-claim
 
     if args.dry_run:
         print(f"dry run: would cast a review on #{args.pr} as {cycle}")
