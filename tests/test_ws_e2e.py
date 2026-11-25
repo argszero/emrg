@@ -2693,6 +2693,51 @@ class TestWSWorkspacePanel:
                     await cleanup()
         asyncio.run(_test())
 
+    def test_a_line_bigger_than_a_page_does_not_swallow_the_pages_after_it(self):
+        """A line too long to keep whole must not end the scan.
+
+        A page is bounded by bytes as well as lines, so one huge line fills a page on its
+        own and the reader answers its prefix. What it must not do is *stop reading there*:
+        a JSONL file with one enormous record would then answer an empty page for every
+        position after that line, with nothing on screen saying why.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                work = cwd / "work"
+                work.mkdir()
+                big = work / "one_huge_record.jsonl"
+                big.write_text(
+                    "x" * (1536 * 1024) + "\n" + "".join(f"row {i}\n" for i in range(3000)),
+                    encoding="utf-8",
+                )
+                assert big.stat().st_size > 1024 * 1024
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        first = await self._cmd(ws, {"type": "read_file", "path": str(big)})
+                        assert "error" not in first, first
+                        # One line, answered by its prefix, and the count still exact.
+                        assert first["total_lines"] == 3001
+                        assert first["truncated"] is True
+                        assert first["content"] == "x" * (1024 * 1024)
+                        # The page after it reaches the lines that follow, rather than
+                        # answering nothing: line 2 is "row 0", so line 2001 is "row 1999".
+                        second = await self._cmd(ws, {
+                            "type": "read_file", "path": str(big), "start_line": 2001,
+                        })
+                        rows = second["content"].split("\n")
+                        assert rows[0] == "row 1999", rows[0]
+                        assert len(rows) == 1001
+                        assert second["total_lines"] == 3001
+                        assert second["truncated"] is False
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
     def test_read_file_names_why_it_could_not_read(self):
         """Four different failures carry four different codes, not one sentence.
 

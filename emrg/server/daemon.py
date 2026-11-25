@@ -605,6 +605,11 @@ def _read_line_window(
     of a minified bundle is tens of megabytes, which is the frame size the old refusal
     existed to avoid.
 
+    A line longer than a page is answered as its own prefix, and the scan **continues past
+    it**: the bytes of that line are dropped, not the file. Stopping there would make every
+    later page empty for as long as the reader kept its position — and a JSONL file with one
+    huge record is exactly the population this reader exists for.
+
     Line endings are ``\\n``, with one trailing ``\\r`` removed per line by
     :func:`_decode_window_line`. The one reading that differs from ``read_text``'s
     universal newlines is a file whose lines end with a lone ``\\r``: it scans as a single
@@ -629,6 +634,10 @@ def _read_line_window(
     collecting = True
     cut = False
     tail = b""
+    # The first `max_bytes` of a line too long to keep whole, held while the rest of that
+    # line is skipped. Its newline is the only thing that ends it, and until then nothing
+    # more is held: a file of one enormous line must not become a buffer of the same size.
+    overlong = b""
     with path.open("rb") as fh:
         while True:
             chunk = fh.read(65536)
@@ -646,6 +655,20 @@ def _read_line_window(
                 nl = buf.find(b"\n", pos)
                 if nl < 0:
                     break
+                if overlong:
+                    # The over-budget line ends here. It is one line, so it counts; a page
+                    # that starts at it answers its prefix rather than nothing, and a page
+                    # that starts after it goes on to collect the lines that follow.
+                    pos = nl + 1
+                    seen += 1
+                    if seen < start:
+                        overlong = b""
+                        continue
+                    if not selected:
+                        selected.append(_decode_prefix(overlong))
+                    cut = True
+                    collecting = False
+                    break
                 raw = buf[pos:nl]
                 pos = nl + 1
                 seen += 1
@@ -658,18 +681,19 @@ def _read_line_window(
                 used += len(raw)
             if collecting:
                 tail = buf[pos:]
-                # A single line longer than a whole page. Answering nothing would be the
-                # worst reading of all — a file with no newline in it at all is *one*
-                # line — so the page is that line's prefix, and the answer says it is cut.
-                # Everything after it is still scanned, so `total_lines` stays exact.
-                if len(tail) > max_bytes:
-                    if not selected and seen + 1 >= start:
-                        selected.append(_decode_prefix(tail[:max_bytes]))
-                        used += max_bytes
-                        seen += 1
-                    cut = True
-                    collecting = False
-    if collecting and tail:
+                if overlong:
+                    # Still inside that line: its remaining bytes are dropped, not held.
+                    tail = b""
+                elif len(tail) > max_bytes:
+                    overlong = tail[:max_bytes]
+                    tail = b""
+    if collecting and overlong:
+        # The file ends inside the over-budget line, so it is the last line.
+        seen += 1
+        if seen >= start and not selected:
+            selected.append(_decode_prefix(overlong))
+            cut = True
+    elif collecting and tail:
         seen += 1
         if seen >= start and len(selected) < limit and used + len(tail) <= max_bytes:
             selected.append(_decode_window_line(tail))
