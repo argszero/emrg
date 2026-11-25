@@ -29,7 +29,7 @@ import asyncio
 import json
 
 from emrg.config import LlmConfig
-from emrg.server.daemon import EmrgServer
+from emrg.server.daemon import EmrgServer, _projected_images
 from emrg.session import Session
 
 IMAGE = {
@@ -111,24 +111,32 @@ def test_a_record_written_without_images_projects_without_the_key(tmp_path):
     )
 
 
-def test_the_projection_copies_the_images_instead_of_mutating_the_record(tmp_path):
-    """The projected list is a copy: a client that edits it cannot reach the disk."""
-    messages = _history_messages(tmp_path, [
-        {
-            "type": "message",
-            "role": "user",
-            "content": "[📷 shot] hi",
-            "timestamp": "2026-11-25T18:17:18",
-            "images": [IMAGE],
-        },
-    ])
+def test_the_projection_hands_out_a_copy_of_the_images():
+    """What a client is given is a copy of the record's list, entry by entry.
 
-    users = [m for m in messages if m.get("kind") == "message" and m.get("role") == "user"]
-    assert users[0]["images"] == [IMAGE]
-    # `[IMAGE]` above is module-level and shared with the record this test wrote; an
-    # in-place edit through the projection would show up here as well.
-    users[0]["images"][0]["label"] = "[📷 tampered]"
-    assert IMAGE["label"] == "[📷 shot]", (
-        "the projection handed out the record's own list, so a client can rewrite "
-        "a message's attachments in memory"
+    Read **before** serialisation, because after it there is nothing left to see: a
+    frame travels through `json.dumps`/`json.loads` in `_FakeWs`, which replaces every
+    object, so a mutation made through the frame can never reach the record however
+    the projection behaves. The earlier version of this test read the frame, made
+    exactly that edit, and passed with no copy in place — it was measuring the
+    round-trip. The subject is the projection's own return value.
+    """
+    sent = dict(IMAGE)
+    record = {"type": "message", "role": "user", "content": "[📷 shot] hi", "images": [sent]}
+    projected = _projected_images(record)
+
+    assert projected == [IMAGE], "the projection lost the pictures on the way out"
+    assert projected is not record["images"], (
+        "the projection handed out the record's own list, so a client can rewrite a "
+        "message's attachments in the session it is reading"
     )
+    projected[0]["label"] = "[📷 tampered]"
+    assert sent["label"] == "[📷 shot]", (
+        "an edit through the projection reached the record's own dict"
+    )
+
+
+def test_a_record_without_images_projects_no_images_through_the_helper():
+    """The helper answers `None`, which is what keeps the key absent for old records."""
+    assert _projected_images({"content": "no picture here"}) is None
+    assert _projected_images({"images": []}) is None
