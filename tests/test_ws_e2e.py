@@ -58,7 +58,7 @@ def _make_fake_chat_stream():
     """
     state = {"round": 0}
 
-    async def fake_chat_stream(messages, tools=None):
+    async def fake_chat_stream(messages, tools=None, exchange=None):
         state["round"] += 1
         if state["round"] == 1:
             yield {"content": "让我调用工具", "tool_calls": None, "finish_reason": None, "usage": None}
@@ -145,9 +145,6 @@ async def _boot_server(tmp: Path):
     )
     server.llm = AsyncMock()
     server.llm.config = _make_config()  # real config so _run_tool_loop reads thresholds
-    server.llm.last_payload = {}
-    server.llm.last_response_status = 200
-    server.llm.last_response_headers = {}
     server._scheduler = AsyncMock()  # no real scheduler / tasks.yml
 
     server.llm.chat_stream = _make_fake_chat_stream()
@@ -241,7 +238,7 @@ class TestWSVibeCheck:
             with tempfile.TemporaryDirectory() as tmp:
                 server, _, cleanup = await _boot_server(Path(tmp))
                 try:
-                    async def fake_chat(messages, tools=None):
+                    async def fake_chat(messages, tools=None, exchange=None):
                         # echo back a strict-JSON answer; fenced JSON tolerated
                         return {"content": '```json\n{"work": "分析了双实例根因，提交 PR #854", "recommend_slowdown": true, "slowdown_reason": "长期无产出"}\n```'}
                     server.llm.chat = fake_chat
@@ -297,7 +294,7 @@ class TestWSVibeCheck:
                 try:
                     seen = {}
 
-                    async def fake_chat(messages, tools=None):
+                    async def fake_chat(messages, tools=None, exchange=None):
                         seen["messages"] = messages
                         return {"content": '{"work": "fetch 上游 + 分析 PR + 写 memory", "recommend_slowdown": false, "slowdown_reason": ""}'
                                 }
@@ -370,7 +367,7 @@ class TestWSVibeCheck:
                 try:
                     seen = {}
 
-                    async def fake_chat(messages, tools=None):
+                    async def fake_chat(messages, tools=None, exchange=None):
                         seen["messages"] = messages
                         return {"content": '{"work": "voted", '
                                            '"recommend_slowdown": false, "slowdown_reason": ""}'}
@@ -441,7 +438,7 @@ class TestWSVibeCheck:
                 try:
                     seen = {}
 
-                    async def fake_chat(messages, tools=None):
+                    async def fake_chat(messages, tools=None, exchange=None):
                         seen["messages"] = messages
                         return {"content": '{"work": "", "recommend_slowdown": false, "slowdown_reason": "nt"}'}
                     server.llm.chat = fake_chat
@@ -479,7 +476,7 @@ class TestWSVibeCheck:
             with tempfile.TemporaryDirectory() as tmp:
                 server, _, cleanup = await _boot_server(Path(tmp))
                 try:
-                    async def fake_chat(messages, tools=None):
+                    async def fake_chat(messages, tools=None, exchange=None):
                         return {"content": '{"recommend_slowdown": false}'}
                     server.llm.chat = fake_chat
 
@@ -511,7 +508,7 @@ class TestWSVibeCheck:
             with tempfile.TemporaryDirectory() as tmp:
                 server, _, cleanup = await _boot_server(Path(tmp))
                 try:
-                    async def fake_chat(messages, tools=None):
+                    async def fake_chat(messages, tools=None, exchange=None):
                         return {"content": "not json at all"}
                     server.llm.chat = fake_chat
 
@@ -540,7 +537,7 @@ class TestWSVibeCheck:
             with tempfile.TemporaryDirectory() as tmp:
                 server, _, cleanup = await _boot_server(Path(tmp))
                 try:
-                    async def fake_chat(messages, tools=None):
+                    async def fake_chat(messages, tools=None, exchange=None):
                         raise RuntimeError("llm down")
                     server.llm.chat = fake_chat
 
@@ -664,7 +661,7 @@ class TestWSProtocol:
                 cwd = Path(tmp)
                 server, _, cleanup = await _boot_server(cwd)
                 try:
-                    async def slow_chat_stream(messages, tools=None):
+                    async def slow_chat_stream(messages, tools=None, exchange=None):
                         yield {"content": "处理中", "tool_calls": None, "finish_reason": None, "usage": None}
                         await asyncio.sleep(0.4)
                         yield {"content": "完成", "tool_calls": None, "finish_reason": "stop", "usage": None}
@@ -754,7 +751,7 @@ class TestWSProtocol:
                 cwd = Path(tmp)
                 server, _, cleanup = await _boot_server(cwd)
                 try:
-                    async def slow_chat_stream(messages, tools=None):
+                    async def slow_chat_stream(messages, tools=None, exchange=None):
                         yield {"content": "处理中", "tool_calls": None, "finish_reason": None, "usage": None}
                         await asyncio.sleep(0.5)
                         yield {"content": "完成", "tool_calls": None, "finish_reason": "stop", "usage": None}
@@ -849,7 +846,7 @@ class TestWSProtocol:
                     # _make_fake_chat_stream).
                     state = {"round": 0}
 
-                    async def fake_chat_stream(messages, tools=None):
+                    async def fake_chat_stream(messages, tools=None, exchange=None):
                         state["round"] += 1
                         if state["round"] == 1:
                             yield {"content": "先跑命令", "tool_calls": None, "finish_reason": None, "usage": None}
@@ -931,7 +928,7 @@ class TestWSProtocol:
                 cwd = Path(tmp)
                 server, _, cleanup = await _boot_server(cwd)
                 try:
-                    async def slow_chat_stream(messages, tools=None):
+                    async def slow_chat_stream(messages, tools=None, exchange=None):
                         yield {"content": "工作中", "tool_calls": None,
                                "finish_reason": None, "usage": None}
                         await asyncio.sleep(30)
@@ -980,7 +977,7 @@ class TestWSProtocol:
                 cwd = Path(tmp)
                 server, _, cleanup = await _boot_server(cwd)
                 try:
-                    async def slow_chat_stream(messages, tools=None):
+                    async def slow_chat_stream(messages, tools=None, exchange=None):
                         await asyncio.sleep(30)
                         yield {"content": "too late", "tool_calls": None,
                                "finish_reason": "stop", "usage": None}
@@ -1161,7 +1158,7 @@ class TestWSProtocol:
                     # Slow stream: the round is still in-flight when the
                     # cancel lands (mirrors test_turn_start_end_broadcast_lifecycle's
                     # slow_chat_stream pattern).
-                    async def slow_chat_stream(messages, tools=None):
+                    async def slow_chat_stream(messages, tools=None, exchange=None):
                         yield {"content": "处理中", "tool_calls": None,
                                "finish_reason": None, "usage": None}
                         await asyncio.sleep(0.5)
@@ -1434,7 +1431,7 @@ class TestWSBroadcast:
                 cwd = Path(tmp)
                 server, _, cleanup = await _boot_server(cwd)
                 try:
-                    async def slow_chat_stream(messages, tools=None):
+                    async def slow_chat_stream(messages, tools=None, exchange=None):
                         yield {"content": "处理中", "tool_calls": None, "finish_reason": None, "usage": None}
                         await asyncio.sleep(0.6)
                         yield {"content": "完成", "tool_calls": None, "finish_reason": "stop", "usage": None}
@@ -1490,7 +1487,7 @@ class TestWSBroadcast:
                 cwd = Path(tmp)
                 server, _, cleanup = await _boot_server(cwd)
                 try:
-                    async def slow_chat_stream(messages, tools=None):
+                    async def slow_chat_stream(messages, tools=None, exchange=None):
                         yield {"content": "处理中", "tool_calls": None, "finish_reason": None, "usage": None}
                         await asyncio.sleep(0.5)
                         yield {"content": "完成", "tool_calls": None, "finish_reason": "stop", "usage": None}
@@ -2014,7 +2011,7 @@ class TestWSQueueInjection:
                     orig_get = server.tools.get
                     server.tools.get = lambda name: _SlowShell() if name == _SHELL else orig_get(name)
 
-                    async def chat_stream(messages, tools=None):
+                    async def chat_stream(messages, tools=None, exchange=None):
                         user_texts = [m.get("content") for m in messages
                                       if m.get("role") == "user"]
                         if any("steer-mid" in str(t) for t in user_texts):
@@ -2104,7 +2101,7 @@ class TestWSQueueInjection:
                     orig_get = server.tools.get
                     server.tools.get = lambda name: _SlowShell() if name == _SHELL else orig_get(name)
 
-                    async def chat_stream(messages, tools=None):
+                    async def chat_stream(messages, tools=None, exchange=None):
                         user_texts = [m.get("content") for m in messages
                                       if m.get("role") == "user"]
                         if any("ask-me" in str(t) for t in user_texts):
@@ -2149,7 +2146,7 @@ class TestWSQueueInjection:
                 cwd = Path(tmp)
                 server, _, cleanup = await _boot_server(cwd)
                 try:
-                    async def long_stream(messages, tools=None):
+                    async def long_stream(messages, tools=None, exchange=None):
                         yield {"content": "工作中", "tool_calls": None,
                                "finish_reason": None, "usage": None}
                         await asyncio.sleep(5)
@@ -2194,7 +2191,7 @@ class TestWSQueueInjection:
                 cwd = Path(tmp)
                 server, _, cleanup = await _boot_server(cwd)
                 try:
-                    async def long_stream(messages, tools=None):
+                    async def long_stream(messages, tools=None, exchange=None):
                         yield {"content": "工作中", "tool_calls": None,
                                "finish_reason": None, "usage": None}
                         await asyncio.sleep(1.0)
@@ -2254,7 +2251,7 @@ class TestWSQueueInjection:
                     # build-release 44323342358 failed exactly there.
                     busy_gate = asyncio.Event()
 
-                    async def chat_stream(messages, tools=None):
+                    async def chat_stream(messages, tools=None, exchange=None):
                         user_texts = [m.get("content") for m in messages
                                       if m.get("role") == "user"]
                         if any("iso2" in str(t) for t in user_texts):

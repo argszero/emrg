@@ -57,7 +57,7 @@ def _make_server(tmp_path: Path) -> EmrgServer:
 def _run_a_round(server: EmrgServer, session: Session, usage: dict | None) -> None:
     """Drive one round that ends the loop, reporting `usage` the way a provider does."""
 
-    async def fake_stream(messages, tools=None):
+    async def fake_stream(messages, tools=None, exchange=None):
         yield {"content": "done", "tool_calls": None,
                "finish_reason": "stop", "usage": usage}
 

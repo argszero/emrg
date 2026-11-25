@@ -70,7 +70,7 @@ def _refusing_chat(failures: list, *, log: list | None = None):
     provider accepts the scrubbed history" gets asserted rather than assumed.
     """
 
-    async def fake_chat(messages, tools=None):
+    async def fake_chat(messages, tools=None, exchange=None):
         if log is not None:
             log.append(messages)
         blob = repr(messages)
@@ -225,7 +225,7 @@ def test_a_combination_trigger_removes_nothing(tmp_path):
     session._message_count = 4
     server = _make_server()
 
-    async def refuse_the_pair(messages, tools=None):
+    async def refuse_the_pair(messages, tools=None, exchange=None):
         blob = repr(messages)
         if "alpha" in blob and "beta" in blob:
             raise RuntimeError(f"400 {REFUSAL}")
@@ -252,7 +252,7 @@ def test_a_probe_that_cannot_answer_removes_nothing(tmp_path):
     session = _history_session(tmp_path, 8, trigger_at=3)
     server = _make_server()
 
-    async def broken(messages, tools=None):
+    async def broken(messages, tools=None, exchange=None):
         raise RuntimeError("502 Bad Gateway")
 
     server.llm.chat = broken
@@ -317,7 +317,7 @@ def test_a_refused_round_is_retracted_and_re_sent(tmp_path, monkeypatch):
 
     seen: list[str] = []
 
-    async def stream(messages, tools=None):
+    async def stream(messages, tools=None, exchange=None):
         blob = repr(messages)
         seen.append(blob)
         if TRIGGER in blob:
@@ -353,7 +353,7 @@ def test_a_round_whose_partial_text_reached_the_client_is_not_retried(
     server = _make_server()
     sends = 0
 
-    async def stream(messages, tools=None):
+    async def stream(messages, tools=None, exchange=None):
         nonlocal sends
         sends += 1
         yield {"content": "partial", "tool_calls": None,
@@ -388,7 +388,7 @@ def test_the_scrub_happens_once_per_turn(tmp_path, monkeypatch):
     server = _make_server()
     sends = 0
 
-    async def stream(messages, tools=None):
+    async def stream(messages, tools=None, exchange=None):
         nonlocal sends
         sends += 1
         raise RuntimeError(f"400 {REFUSAL}")
@@ -417,13 +417,13 @@ def test_a_scrub_does_not_touch_a_healthier_session(tmp_path, monkeypatch):
     server = _make_server()
     asked: list = []
 
-    async def never_asked(messages, tools=None):
+    async def never_asked(messages, tools=None, exchange=None):
         asked.append(messages)
         raise AssertionError("the probe must not ask anything here")
 
     server.llm.chat = never_asked
 
-    async def stream(messages, tools=None):
+    async def stream(messages, tools=None, exchange=None):
         raise RuntimeError("502 Bad Gateway")
         yield  # pragma: no cover — a generator that must never yield
 

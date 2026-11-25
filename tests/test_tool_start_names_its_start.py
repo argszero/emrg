@@ -73,7 +73,7 @@ def _drive_tool_loop(tmp_path, monkeypatch, calls: int) -> list[dict]:
 
     state = {"round": 0}
 
-    async def fake_stream(messages, tools=None):  # noqa: ANN001 - the LLM seam
+    async def fake_stream(messages, tools=None, exchange=None):  # noqa: ANN001 - the LLM seam
         state["round"] += 1
         if state["round"] == 1:
             yield {

@@ -74,13 +74,13 @@ def _server(tmp_path, monkeypatch) -> EmrgServer:
 def _stub_reply(server: EmrgServer, text: str) -> None:
     """The child's turn answers `text` and stops."""
 
-    async def fake_stream(messages, tools=None):
+    async def fake_stream(messages, tools=None, exchange=None):
         yield {"content": text, "tool_calls": None, "finish_reason": "stop",
                "usage": {"prompt_tokens": 5, "completion_tokens": 2}}
 
     server.llm.chat_stream = fake_stream
 
-    async def fake_chat(messages, tools=None):
+    async def fake_chat(messages, tools=None, exchange=None):
         return {"content": "", "tool_calls": None}
 
     server.llm.chat = fake_chat
@@ -185,7 +185,7 @@ def test_a_child_that_outlives_the_timeout_is_cancelled(tmp_path, monkeypatch):
     server = _server(tmp_path, monkeypatch)
     cancelled = {"stream": False}
 
-    async def hanging_stream(messages, tools=None):
+    async def hanging_stream(messages, tools=None, exchange=None):
         try:
             await asyncio.Event().wait()
             yield {"content": "", "tool_calls": None, "finish_reason": "stop",
@@ -196,7 +196,7 @@ def test_a_child_that_outlives_the_timeout_is_cancelled(tmp_path, monkeypatch):
 
     server.llm.chat_stream = hanging_stream
 
-    async def fake_chat(messages, tools=None):
+    async def fake_chat(messages, tools=None, exchange=None):
         return {"content": "", "tool_calls": None}
 
     server.llm.chat = fake_chat
@@ -226,14 +226,14 @@ def test_cancelling_the_parent_cancels_the_child_and_returns_the_slot(
 ):
     server = _server(tmp_path, monkeypatch)
 
-    async def hanging_stream(messages, tools=None):
+    async def hanging_stream(messages, tools=None, exchange=None):
         await asyncio.Event().wait()
         yield {"content": "", "tool_calls": None, "finish_reason": "stop",
                "usage": {}}
 
     server.llm.chat_stream = hanging_stream
 
-    async def fake_chat(messages, tools=None):
+    async def fake_chat(messages, tools=None, exchange=None):
         return {"content": "", "tool_calls": None}
 
     server.llm.chat = fake_chat
@@ -359,7 +359,7 @@ def test_the_slot_is_closed_only_after_the_childs_memory_was_written(
     parent = "parent-memory"
     reflection = {"finished_at": None, "seen": 0}
 
-    async def slow_reflection(messages, tools=None):
+    async def slow_reflection(messages, tools=None, exchange=None):
         text = json.dumps(messages, ensure_ascii=False).lower()
         if "memory" in text:
             await asyncio.sleep(0.2)

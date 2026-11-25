@@ -96,7 +96,7 @@ def _drive_tool_loop(tmp_path, monkeypatch, calls: int) -> list[dict]:
 
     state = {"round": 0}
 
-    async def fake_stream(messages, tools=None):
+    async def fake_stream(messages, tools=None, exchange=None):
         state["round"] += 1
         if state["round"] == 1:
             yield {"content": None, "tool_calls": [

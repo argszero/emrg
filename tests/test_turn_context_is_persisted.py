@@ -69,7 +69,7 @@ def _drive_turns(
     session = Session.create_with_id(SESSION_ID, tmp_path)
     requests: list[list[dict]] = []
 
-    async def fake_stream(messages, tools=None):
+    async def fake_stream(messages, tools=None, exchange=None):
         requests.append([dict(m) for m in messages])
         yield {
             "content": "the reply",

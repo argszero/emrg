@@ -5308,8 +5308,15 @@ class EmrgServer:
             final_finish = None
             final_usage: dict | None = None
 
+            # One record per round, owned by this call (issue #3225). The client is
+            # shared by every session in the server, so reading its state after the
+            # round is what wrote another session's request body into llm.jsonl.
+            exchange: dict = {}
+
             try:
-                async for delta in self.llm.chat_stream(request_messages, tools=tools_openai):
+                async for delta in self.llm.chat_stream(
+                    request_messages, tools=tools_openai, exchange=exchange
+                ):
                     # Check for cancellation mid-stream (ESC in client)
                     if cancel_event and cancel_event.is_set():
                         raise asyncio.CancelledError()
@@ -5532,6 +5539,7 @@ class EmrgServer:
                     session, [dict(m) for m in messages], tools_openai,
                     full_content, final_finish, final_usage,
                     reasoning=full_reasoning,
+                    exchange=exchange,
                 )
                 logger.error(
                     "%s; %d character(s) had already reached the client and the "
@@ -5574,6 +5582,7 @@ class EmrgServer:
                     session, [dict(m) for m in messages], tools_openai,
                     full_content, final_finish, final_usage,
                     reasoning=full_reasoning,
+                    exchange=exchange,
                 )
 
                 # Case 1a: the round arrived with nothing in it (issue #1723).
@@ -5676,6 +5685,7 @@ class EmrgServer:
                         for tc in tool_calls
                     ],
                     reasoning=full_reasoning,
+                    exchange=exchange,
                 )
 
                 # Build the assistant message with tool_calls
@@ -5891,6 +5901,7 @@ class EmrgServer:
                 session, [dict(m) for m in messages], tools_openai,
                 full_content, final_finish, final_usage,
                 reasoning=full_reasoning,
+                exchange=exchange,
             )
 
             # Persisted and framed from one stamp: the live row's time and the
@@ -5950,11 +5961,19 @@ class EmrgServer:
         content: str, finish_reason: str = "stop",
         usage=None, tool_calls=None,
         reasoning: str | None = None,
+        exchange: dict | None = None,
     ) -> None:
         """Log a complete LLM request/response exchange to the session.
 
         Centralizes the identical append_llm patterns from _run_tool_loop,
         ensuring consistent logging format.
+
+        ``exchange`` is the record the caller passed to the very call being
+        logged (``chat(..., exchange=…)`` / ``chat_stream(..., exchange=…)``).
+        It carries this request's body, HTTP status and response headers, and
+        nothing else can: the client is shared by every session, so its own
+        state describes whichever request wrote last (issue #3225). A call made
+        without one logs an empty payload rather than someone else's.
 
         ``reasoning`` (rant 2026-08-18T09:43:23) is written ONLY into the
         response record (when the model produced a think block); the request
@@ -5965,14 +5984,14 @@ class EmrgServer:
             "model": self.llm.config.model,
             "messages": messages,
             "tools": tools,
-            "payload": self.llm.last_payload,
+            "payload": (exchange or {}).get("payload", {}),
         })
         response: dict = {
             "type": "response",
             "content": content,
             "finish_reason": finish_reason,
-            "http_status": self.llm.last_response_status,
-            "response_headers": self.llm.last_response_headers,
+            "http_status": (exchange or {}).get("status", 0),
+            "response_headers": (exchange or {}).get("headers", {}),
         }
         if usage is not None:
             response["usage"] = usage
@@ -7055,7 +7074,8 @@ class EmrgServer:
         ]
         logger.info("compact: summarizing %d records (%d chars)", len(records), len(history_text))
 
-        msg = await self.llm.chat(compact_messages, tools=None)
+        exchange: dict = {}
+        msg = await self.llm.chat(compact_messages, tools=None, exchange=exchange)
         summary = msg.get("content", "Summary unavailable.")
 
         # Log compact LLM call
@@ -7065,14 +7085,14 @@ class EmrgServer:
             "messages": compact_messages,
             "tools": None,
             "compact": True,
-            "payload": self.llm.last_payload,
+            "payload": (exchange or {}).get("payload", {}),
         })
         session.append_llm({
             "type": "response",
             "content": summary,
             "compact": True,
-            "http_status": self.llm.last_response_status,
-            "response_headers": self.llm.last_response_headers,
+            "http_status": (exchange or {}).get("status", 0),
+            "response_headers": (exchange or {}).get("headers", {}),
         })
         return summary
 

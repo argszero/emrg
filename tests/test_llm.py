@@ -1117,13 +1117,16 @@ def test_chat_retries_with_escaped_astral_codepoints_first(monkeypatch, client):
     ])
     client._client = fake
     trigger = "\U0001F1E6"
-    msg = asyncio.run(client.chat([{"role": "user", "content": f"hi {trigger}"}]))
+    exchange: dict = {}
+    msg = asyncio.run(
+        client.chat([{"role": "user", "content": f"hi {trigger}"}], exchange=exchange)
+    )
     assert msg == {"content": "recovered"}
     assert len(fake.payloads) == 2
     assert fake.payloads[0]["messages"] == [{"role": "user", "content": f"hi {trigger}"}]
     assert fake.payloads[1]["messages"] == [{"role": "user", "content": "hi <U+1F1E6>"}]
     # The retried payload is what llm.jsonl records (it is what was sent).
-    assert client.last_payload["messages"] == [{"role": "user", "content": "hi <U+1F1E6>"}]
+    assert exchange["payload"]["messages"] == [{"role": "user", "content": "hi <U+1F1E6>"}]
 
 
 def test_chat_spaces_out_only_after_the_escape_rung_failed(monkeypatch, client):
@@ -1152,7 +1155,8 @@ def test_chat_spaces_out_only_after_the_escape_rung_failed(monkeypatch, client):
     client._client = fake
     trigger = "\U0001F1E6"
     original = f"A {trigger} x"
-    msg = asyncio.run(client.chat([{"role": "user", "content": original}]))
+    exchange: dict = {}
+    msg = asyncio.run(client.chat([{"role": "user", "content": original}], exchange=exchange))
     assert msg == {"content": "recovered"}
     assert len(fake.payloads) == 3
     assert fake.payloads[0]["messages"] == [{"role": "user", "content": original}]
@@ -1164,7 +1168,7 @@ def test_chat_spaces_out_only_after_the_escape_rung_failed(monkeypatch, client):
     assert "<" not in fake.payloads[2]["messages"][0]["content"], (
         "rung 2 was built on rung 1's output: the payload carries both transforms"
     )
-    assert client.last_payload["messages"] == [{"role": "user", "content": f"A   {trigger}   x"}]
+    assert exchange["payload"]["messages"] == [{"role": "user", "content": f"A   {trigger}   x"}]
 
 
 def test_chat_spends_the_escape_rung_even_when_it_is_the_identity_transform(
@@ -1334,13 +1338,14 @@ def test_chat_content_filter_finish_recovers_on_the_next_rung(monkeypatch, clien
                                  _FakeResponse(200, good)])
     client._client = fake
 
-    msg = asyncio.run(client.chat([{"role": "user", "content": "hi"}]))
+    exchange: dict = {}
+    msg = asyncio.run(client.chat([{"role": "user", "content": "hi"}], exchange=exchange))
 
     assert msg == {"content": "recovered"}
     assert len(fake.payloads) == 2
     assert fake.payloads[1]["messages"][-1]["content"] == CONTENT_FILTER_RETRY_INSTRUCTION
     # The retried payload is what llm.jsonl records (it is what was sent).
-    assert client.last_payload["messages"][-1]["content"] == (
+    assert exchange["payload"]["messages"][-1]["content"] == (
         CONTENT_FILTER_RETRY_INSTRUCTION
     )
 
@@ -1720,3 +1725,64 @@ def test_a_sentence_that_echoes_a_credential_is_redacted():
 
     assert "sk-livekey" not in out, f"a credential survived the extraction: {out!r}"
     assert out.startswith("denied for "), out
+
+
+class _GatedHttpClient:
+    """Answers the first request only after the second was recorded.
+
+    Models what the real server does: two sessions' requests are in flight
+    together, so a single "last request" slot on the client holds whichever one
+    wrote it last — not the request whose answer is being logged (issue #3225).
+    """
+
+    def __init__(self):
+        self.payloads: list[dict] = []
+        self.first_started = None  # created inside the loop, by post()
+
+    async def post(self, url, headers=None, json=None):
+        import asyncio
+        import json as jsonlib
+
+        if self.first_started is None:
+            self.first_started = asyncio.Event()
+        self.payloads.append(copy.deepcopy(json))
+        if len(self.payloads) == 1:
+            await self.first_started.wait()
+            text = "first"
+        else:
+            self.first_started.set()
+            text = "second"
+        body = jsonlib.dumps({"choices": [{"message": {"content": text}}]}).encode()
+        return _FakeResponse(200, body)
+
+
+def _run_two_interleaved(client, exchange_a, exchange_b):
+    """Drive two chat() calls through one client so their awaits overlap."""
+    import asyncio
+
+    async def run():
+        client._client = _GatedHttpClient()
+        await asyncio.gather(
+            client.chat([{"role": "user", "content": "from A"}], exchange=exchange_a),
+            client.chat([{"role": "user", "content": "from B"}], exchange=exchange_b),
+        )
+
+    asyncio.run(run())
+
+
+def test_interleaved_requests_each_keep_their_own_payload(client):
+    """Two requests in flight through one client: each record keeps its own body.
+
+    Issue #3225. The record belongs to the call, so this asserts the two
+    callers' dicts, which is what the logging sites read once the call returns.
+    With one shared slot — the shape this replaced — the call that returned
+    second overwrote the other's record and this assertion is what goes red.
+    """
+    a: dict = {}
+    b: dict = {}
+    _run_two_interleaved(client, a, b)
+
+    assert a is not b
+    assert a["payload"]["messages"] == [{"role": "user", "content": "from A"}]
+    assert b["payload"]["messages"] == [{"role": "user", "content": "from B"}]
+    assert a["status"] == 200 and b["status"] == 200

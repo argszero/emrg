@@ -1339,7 +1339,7 @@ def _chunker_server(first_error: str):
     server = _make_server()
     prompts: list[str] = []
 
-    async def _chat(messages, tools=None):
+    async def _chat(messages, tools=None, exchange=None):
         prompts.append(messages[0]["content"])
         if len(prompts) == 1:
             raise RuntimeError(first_error)
@@ -1416,14 +1416,14 @@ def _drive_tool_loop(tmp_path, monkeypatch, errors: list[str]):
     calls: list[list[dict]] = []
     frames: list[dict] = []
 
-    async def fake_stream(messages, tools=None):
+    async def fake_stream(messages, tools=None, exchange=None):
         calls.append(list(messages))
         if len(calls) <= len(errors):
             raise RuntimeError(errors[len(calls) - 1])
         yield {"content": "ok", "tool_calls": None, "finish_reason": "stop",
                "usage": {"prompt_tokens": 10, "completion_tokens": 1}}
 
-    async def fake_chat(messages, tools=None):
+    async def fake_chat(messages, tools=None, exchange=None):
         return {"content": "a compacted summary of the earlier turns"}
 
     async def fake_broadcast(session_id, payload):
@@ -4355,7 +4355,7 @@ def _drive_tool_loop_with_stream(tmp_path, monkeypatch, stream, abort_runs=None)
     session = Session.create_with_id("content-filter-test", tmp_path)
     frames: list[dict] = []
 
-    async def fake_chat(messages, tools=None):
+    async def fake_chat(messages, tools=None, exchange=None):
         return {"content": "a compacted summary of the earlier turns"}
 
     async def fake_broadcast(session_id, payload):
@@ -4376,7 +4376,7 @@ def test_a_content_filter_finish_is_reported_not_read_as_the_answer(tmp_path, mo
     fires — so the refusal is handed on as the round's finish_reason rather than
     retried (the client is already showing that text).
     """
-    async def stream(messages, tools=None):
+    async def stream(messages, tools=None, exchange=None):
         yield {"content": "partial answer", "tool_calls": None,
                "finish_reason": None, "usage": None}
         yield {"content": None, "tool_calls": None,
@@ -4410,7 +4410,7 @@ def test_a_refusal_that_states_its_reason_is_not_sent_to_the_config_file(
     """
     from emrg.server.llm import _with_provider_reason
 
-    async def stream(messages, tools=None):
+    async def stream(messages, tools=None, exchange=None):
         raise _with_provider_reason(
             RuntimeError("LLM stream request failed: 402 — the account is empty"),
             "the account is empty",
@@ -4434,7 +4434,7 @@ def test_a_refusal_without_a_reason_keeps_the_config_pointer(tmp_path, monkeypat
     to be told where the configuration lives, so this arm must stay green while
     the one above changes.
     """
-    async def stream(messages, tools=None):
+    async def stream(messages, tools=None, exchange=None):
         raise RuntimeError(
             "LLM stream request failed: 500 headers={} body=an opaque failure"
         )
@@ -4458,7 +4458,7 @@ def test_an_exhausted_content_filter_ladder_reports_once_with_one_terminal_frame
     the client's busy flag and the scheduler's recv loop both wait for `done`,
     so a turn that ends silently wedges them (PR #1669).
     """
-    async def stream(messages, tools=None):
+    async def stream(messages, tools=None, exchange=None):
         from emrg.server.llm import CONTENT_FILTER_ERROR
         raise RuntimeError(CONTENT_FILTER_ERROR)
         yield  # pragma: no cover - makes this an async generator
@@ -4488,7 +4488,7 @@ def test_an_exhausted_content_filter_ladder_reports_once_with_one_terminal_frame
 
 
 def _aborting_stream():
-    async def stream(messages, tools=None):
+    async def stream(messages, tools=None, exchange=None):
         from emrg.server.llm import CONTENT_FILTER_ERROR
         raise RuntimeError(CONTENT_FILTER_ERROR)
         yield  # pragma: no cover - makes this an async generator
@@ -4497,7 +4497,7 @@ def _aborting_stream():
 
 
 def _answering_stream():
-    async def stream(messages, tools=None):
+    async def stream(messages, tools=None, exchange=None):
         yield {"content": "an answer the filter allowed", "tool_calls": None,
                "finish_reason": "stop", "usage": None}
 
@@ -4568,7 +4568,7 @@ def test_an_empty_answer_is_reported_and_is_not_a_completed_round(tmp_path, monk
     The round must not be handed on as a finished turn: no assistant record, one
     explanation, one terminal frame — and above all no completed-round stamp.
     """
-    async def stream(messages, tools=None):
+    async def stream(messages, tools=None, exchange=None):
         yield {"content": None, "tool_calls": None,
                "finish_reason": "stop", "usage": None}
 
@@ -4595,7 +4595,7 @@ def test_an_answer_that_exists_still_stamps_the_completed_round(tmp_path, monkey
     if the loop had stopped stamping it at all — which is the defect the guard is
     supposed to *stop* rather than cause.
     """
-    async def stream(messages, tools=None):
+    async def stream(messages, tools=None, exchange=None):
         yield {"content": "here is the answer", "tool_calls": None,
                "finish_reason": "stop", "usage": None}
 
