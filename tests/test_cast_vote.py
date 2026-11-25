@@ -1760,15 +1760,28 @@ def test_a_body_naming_a_tree_the_merge_would_not_land_is_refused(
     )
 
 
-def test_a_body_that_names_no_tree_is_not_checked(mod, monkeypatch, capsys, body_file):
-    """A commit SHA is not a landing-tree claim, so the merge is never asked — the
-    negative control that makes the refusal above a finding about the tree and not
-    about the body having a hash in it.
+def test_an_approval_that_cites_a_revision_must_name_the_tree_it_lands(
+    mod, monkeypatch, capsys, body_file
+):
+    """The shape #3230 was merged on, refused where the vote is spent.
+
+    Its vote read "I re-read head `d4ce9c9d` against master `1cdc00e2`" — two
+    revisions and no tree — and `check-merge-landed.py 3230` answered `UNCHECKED`
+    after the merge: "1 review body/bodies of #3230 name a revision but no tree …
+    the landed tree was compared to nothing". The landed tree was knowable
+    (`baf88e0e7acf`); what was missing is a vote that named it while naming still
+    preceded the merge, so the refusal has to sit here. A body rewritten once the
+    merge exists would make the record certify itself, and no later reading could
+    tell that merge from one that landed a tree the votes never measured.
+
+    `landing_tree` is armed to raise: this clause is two *local* git reads
+    (`named_trees`, `token_kinds`), so it refuses in a clone that cannot fetch, and a
+    test that let the merge be measured would not notice the clause reaching for it.
     """
     head = _commit_of()
 
     def not_asked(pr, repo):
-        raise AssertionError("a body naming only commits claims no tree")
+        raise AssertionError("this refusal is decided without measuring the merge")
 
     monkeypatch.setattr(mod, "landing_tree", not_asked)
     gh = FakeGh()
@@ -1778,6 +1791,78 @@ def test_a_body_that_names_no_tree_is_not_checked(mod, monkeypatch, capsys, body
         _posting_counter(),
         gh,
         ["1255", "--body-file", body_file(f"{CYCLE} — ✅ LGTM at {head}")],
+    )
+    err = capsys.readouterr().err
+    assert rc == 2, err
+    assert gh.calls == [], "a vote that measures half a merge must not be posted"
+    assert head in err, "the refusal names the revision it read, not 'a token'"
+    assert "check-merge-plan-suite.py 1255" in err, "the remedy is one command"
+    assert "name no revision at all" in err, (
+        "an approval that is not about a landing tree must be told the way out"
+    )
+    # The return value is printed with an f-string, so its **type** is part of what the
+    # voter reads: a parenthesised return whose last line carries a trailing comma is a
+    # one-element tuple, and `print(f"refusing to post: {refusal}")` then hands the voter
+    # `('the body approves, …',)` — every substring assertion below still passes, because
+    # a substring of the sentence is a substring of its repr. Measured on this clause
+    # before this line existed: `revision_without_tree_refusal` answered a `tuple` while
+    # its annotation said `str`. The seam is the printed line, not the sentence.
+    assert "refusing to post: the body approves" in err, (
+        f"the refusal must print as one sentence, not a repr: {err.splitlines()[:2]!r}"
+    )
+
+
+def test_a_rejection_that_cites_a_revision_is_posted_without_a_tree(
+    mod, monkeypatch, capsys, body_file
+):
+    """A rejection licenses no merge, so there is nothing an audit could compare.
+
+    The exemption is the clause's boundary rather than a courtesy: refusing here
+    would spend a cycle's vote on a body whose subject is a defect, and the defect
+    does not depend on which tree would land. This is also the negative control for
+    the refusal above — both bodies carry a commit, and only the approval is refused.
+    """
+    head = _commit_of()
+
+    def not_asked(pr, repo):
+        raise AssertionError("a rejection claims nothing about a landing tree")
+
+    monkeypatch.setattr(mod, "landing_tree", not_asked)
+    gh = FakeGh()
+    rc = _run(
+        mod,
+        monkeypatch,
+        _posting_counter(),
+        gh,
+        [
+            "1255",
+            "--body-file",
+            body_file(f"{CYCLE} — ❌ Needs fix at {head}: the guard reads the wrong field"),
+        ],
+    )
+    assert rc == 0
+    assert len(gh.calls) == 1
+
+
+def test_an_approval_that_names_no_revision_is_posted(mod, monkeypatch, capsys, body_file):
+    """The other boundary: this clause keys on a *revision*, not on a missing tree.
+
+    A vote about the code's intent names neither a head nor a base, has measured no
+    merge, and is the state `check-merge-landed.py` reports as "never about a landing
+    tree" — counted against nothing rather than compared to anything.
+    """
+
+    def not_asked(pr, repo):
+        raise AssertionError("a body naming no revision asks no question about a merge")
+
+    monkeypatch.setattr(mod, "landing_tree", not_asked)
+    gh = FakeGh()
+    rc = _run(
+        mod,
+        monkeypatch,
+        _posting_counter(),
+        gh,
+        ["1255", "--body-file", body_file(f"{CYCLE} — ✅ LGTM, the guard reads the right field")],
     )
     assert rc == 0
     assert len(gh.calls) == 1
