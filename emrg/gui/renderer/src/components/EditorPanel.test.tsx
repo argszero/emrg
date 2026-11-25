@@ -1,5 +1,5 @@
 import { createRef } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { EditorView } from "@codemirror/view";
 import { EditorSelection, EditorState } from "@codemirror/state";
@@ -895,5 +895,130 @@ describe("EditorPanel's ten gaps (issue #3200)", () => {
     // 已经和磁盘一样了：再点不问
     fireEvent.click(screen.getByTestId("editor-action-discard"));
     expect(screen.queryByTestId("editor-discard-ask")).toBeNull();
+  });
+});
+
+/**
+ * Browser mode (issue #3214).
+ *
+ * The page is a native view that no jsdom can draw, so what is measured here is the panel's
+ * half of the contract: which tabs offer the mode, what turning it on tells the main process,
+ * what leaving tells it, what the address bar sends, and that the cell the view covers is
+ * reported as it was measured.
+ */
+describe("HTML tab 的浏览器模式（issue #3214）", () => {
+  // Every stub states its parameter, even the ones whose answer ignores it. `tsc` reads
+  // `mock.calls` against the declared parameter list, so a stub declared with none has the
+  // call tuple `[]` — and a test that reads `calls[0][0]` then fails to compile while
+  // `vitest run` executes it happily. That is a red only CI sees (measured: run 45540474378).
+  function stubBridge(answer: { ok: boolean; error?: string } = { ok: true }) {
+    const calls = {
+      show: vi.fn(async (_payload: { path: string }) => answer),
+      hide: vi.fn(async (_payload?: undefined) => ({ ok: true })),
+      navigate: vi.fn(async (_payload: { target: string }) => answer),
+      bounds: vi.fn(
+        async (_payload: { x: number; y: number; width: number; height: number }) => ({ ok: true }),
+      ),
+    };
+    (window as unknown as { emrg?: unknown }).emrg = {
+      showBrowser: calls.show,
+      hideBrowser: calls.hide,
+      browserNavigate: calls.navigate,
+      browserBounds: calls.bounds,
+    };
+    return calls;
+  }
+
+  afterEach(() => {
+    delete (window as unknown as { emrg?: unknown }).emrg;
+  });
+
+  it("只有页面文件带浏览器开关，别的文件没有", async () => {
+    stubBridge();
+    const { open } = renderPanel();
+    open("/p/emrg/index.html");
+    await waitFor(() => expect(screen.getByTestId("editor-toggle-browser")).toBeInTheDocument());
+    // 开关跟着文件走，不是面板的属性：换到另一个 tab 就没有了
+    open("/p/emrg/a.txt");
+    await waitFor(() => expect(screen.queryByTestId("editor-toggle-browser")).toBeNull());
+  });
+
+  it("打开这个模式，把这个 tab 的文件交给主进程，地址栏随之出现", async () => {
+    const calls = stubBridge();
+    const { open } = renderPanel();
+    open("/p/emrg/index.html");
+    await waitFor(() => expect(screen.getByTestId("editor-toggle-browser")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId("editor-toggle-browser"));
+
+    await waitFor(() => expect(calls.show).toHaveBeenCalledWith({ path: "/p/emrg/index.html" }));
+    expect(screen.getByTestId("editor-toggle-browser")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("editor-address")).toBeInTheDocument();
+    // 那一格是量出来的那块，页面盖在它上面
+    expect(screen.getByTestId("editor-browser")).toBeInTheDocument();
+  });
+
+  it("切到别的 tab 只隐藏，不销毁；切回来还在浏览器模式", async () => {
+    const calls = stubBridge();
+    const { open } = renderPanel();
+    open("/p/emrg/index.html", "/p/emrg", false);
+    await waitFor(() => expect(screen.getByTestId("editor-toggle-browser")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("editor-toggle-browser"));
+    await waitFor(() => expect(calls.show).toHaveBeenCalled());
+    calls.hide.mockClear();
+
+    open("/p/emrg/a.txt", "/p/emrg", false);
+    await waitFor(() => expect(calls.hide).toHaveBeenCalled());
+
+    open("/p/emrg/index.html", "/p/emrg", false);
+    await waitFor(() => expect(screen.getByTestId("editor-browser")).toBeInTheDocument());
+    expect(screen.getByTestId("editor-toggle-browser")).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("地址栏回车把文本原样交给主进程；打不开时把理由写在下面", async () => {
+    const calls = stubBridge();
+    const { open } = renderPanel();
+    open("/p/emrg/index.html");
+    await waitFor(() => expect(screen.getByTestId("editor-toggle-browser")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("editor-toggle-browser"));
+    await waitFor(() => expect(screen.getByTestId("editor-address")).toBeInTheDocument());
+
+    const bar = screen.getByTestId("editor-address");
+    fireEvent.change(bar, { target: { value: "example.com" } });
+    fireEvent.keyDown(bar, { key: "Enter" });
+    // 原样交出去：怎么读这段话是策略模块的事，面板不改写它
+    await waitFor(() => expect(calls.navigate).toHaveBeenCalledWith({ target: "example.com" }));
+
+    calls.navigate.mockResolvedValueOnce({ ok: false, error: "empty" });
+    fireEvent.change(bar, { target: { value: "  " } });
+    fireEvent.keyDown(bar, { key: "Enter" });
+    await waitFor(() =>
+      expect(screen.getByTestId("editor-browser-error")).toHaveTextContent("Type an address first"),
+    );
+  });
+
+  it("页面盖住的那一格，是渲染器量出来再报上去的", async () => {
+    const calls = stubBridge();
+    const { open } = renderPanel();
+    open("/p/emrg/index.html");
+    await waitFor(() => expect(screen.getByTestId("editor-toggle-browser")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("editor-toggle-browser"));
+
+    await waitFor(() => expect(calls.bounds).toHaveBeenCalled());
+    const box = calls.bounds.mock.calls[0][0];
+    // 四个数字，来自 getBoundingClientRect()——主进程自己算不出来这一格在哪
+    expect(Object.keys(box).sort()).toEqual(["height", "width", "x", "y"]);
+    for (const key of ["x", "y", "width", "height"] as const) {
+      expect(typeof box[key]).toBe("number");
+    }
+  });
+
+  it("没有这条通道的构建里，开关照样能点，面板不炸", async () => {
+    const { open } = renderPanel();
+    open("/p/emrg/index.html");
+    await waitFor(() => expect(screen.getByTestId("editor-toggle-browser")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("editor-toggle-browser"));
+    await waitFor(() => expect(screen.getByTestId("editor-browser")).toBeInTheDocument());
+    expect(screen.queryByTestId("editor-browser-error")).toBeNull();
   });
 });
