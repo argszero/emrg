@@ -110,6 +110,14 @@ level "fallback"  it could not be read, and §5's readings say so
   target word count: a list of three thin points is worse than one developed paragraph, and padding a
   single point to a fixed length is how a good observation becomes a bad piece.
 - Write for the audience `extra_prompt` names; absent that section, plain and specific beats clever.
+- **One piece, one language.** Every word a reader sees — heading, quotation, label, caption,
+  footer, and any text drawn inside a visual piece — is in the same language. A piece is never half
+  one language and half another, and this is not a matter of taste: a stitched artefact makes the
+  reader work to tell whose voice is whose. **A quotation is the case where two rules pull against
+  each other, and the quotation wins**: it stays verbatim, so the piece around it follows the
+  quotation's language rather than translating it — a translated quotation is not a quotation. The
+  criterion is checkable on the finished thing: take any two pieces of text in it, and they are in
+  the same language.
 - **Every field carries the source of its value.** A sentence, a figure or a property belongs in the
   draft because the round can name where it came from — a page it read this round, a document it
   opened, a statement the subject made about themselves. A field whose source cannot be named does
