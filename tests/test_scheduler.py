@@ -5454,6 +5454,37 @@ def test_self_media_template_carries_its_five_steps():
         assert phrase in flat, f"the self-media template must state that {why}; {phrase!r} is missing"
 
 
+def test_self_media_card_rule_is_stated_where_the_round_composes():
+    """§3's composition rule, pinned in §3's own region rather than by the field it feeds.
+
+    The readings field that receives the five numbers has its own guard, and this one exists
+    because the two failures differ: with the carrier pinned and the rule not, deleting the rule
+    leaves a field naming numbers nothing requires, and every test still passes. The region is
+    what makes the difference — once the carrier names those numbers too, the same phrases occur
+    in both sections, and a whole-file search cannot tell the rule from its carrier.
+
+    The parts asserted here are the ones the carrier cannot hold: the two numbers fixed before
+    composing, the ordering when room runs out, and the check made on the finished image.
+    """
+    flat = " ".join(_self_media_template_text().split())
+    draft = flat[flat.find("### 3. Draft"):flat.find("### 4. Publish")]
+    assert draft, "there is no §3 to hold the composition rule"
+
+    for phrase, why in (
+        ("composed for the size it will be read at, not the size it is drawn at",
+         "the reader's size governs, not the canvas the piece is drawn on"),
+        ("the canvas it draws on and the width the viewer displays that image at",
+         "two numbers are fixed before composing; with one of them the ratio is a guess"),
+        ("decide and state **five** things",
+         "the numbers to state follow from that ratio, and the round states them"),
+        ("one line fewer rather than a smaller type",
+         "the ordering when room runs out: a line costs a detail, the type costs the piece"),
+        ("scale the rendered image to the width it will be shown at and read it",
+         "the criterion is checked on the finished image, never on the canvas"),
+    ):
+        assert phrase in draft, f"§3 must state that {why}; {phrase!r} is missing from §3"
+
+
 def test_self_media_publish_reuses_the_hosts_session_and_never_touches_a_credential():
     """Both sides of §0's rule, because a guard that pins one side passes a wrong template.
 
