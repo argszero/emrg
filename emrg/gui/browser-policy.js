@@ -143,7 +143,9 @@ function escapePath(text) {
  * named `re#1.html` is not `re` with a fragment. Reading them as syntax fails silently —
  * `file:///tmp/re#1.html` names a file called `re`, so the bar reported success and opened a
  * file the host never asked for, and a name holding `%` produced an address `fileURLToPath`
- * refuses to decode at all.
+ * refuses to decode at all. The separator is the same mistake in the other direction: `\` splits
+ * a path on Windows and is an ordinary character in a name elsewhere, so it is read as a
+ * separator in the drive shape only, and `/tmp/a\b.html` keeps its backslash.
  *
  * The criterion is a round trip: the address's own path, decoded, is the path that was typed.
  * The escape is spelled out here, per character, rather than taken from `pathToFileURL` — that
@@ -157,8 +159,13 @@ function escapePath(text) {
  * before it.
  */
 function fileUrlOf(text) {
+  // A leading `/` is a POSIX absolute path, and there `\` is an ordinary character in a name
+  // rather than a separator: `/tmp/a\b.html` is one file in `/tmp`. The text is escaped as it
+  // stands — rewriting its backslash built the address of `/tmp/a/b.html`, a file in a
+  // directory nobody named, with the bar still answering `ok`.
+  if (text.startsWith("/")) return `file://${escapePath(text)}`;
+  // A drive path is absolute on Windows only, and there `\` really is the separator.
   const normalized = text.replace(/\\/g, "/");
-  if (normalized.startsWith("/")) return `file://${escapePath(normalized)}`;
   const url = new URL("file:///");
   url.pathname = `/${normalized.replace(/%/g, "%25")}`;
   return url.href;
