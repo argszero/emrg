@@ -124,7 +124,18 @@ test("a local path keeps the characters the URL syntax would otherwise eat", () 
   // answers in the host's separators and, on Windows, resolves `/tmp/x` against the working
   // directory's drive — so the same typed text would be judged by a different rule per platform,
   // and a Windows-only red would say nothing about the characters this test is about.
-  for (const name of ["report.html", "re#1.html", "a?b.html", "100%.html", "a b.html", "中文.html"]) {
+  // `a\b.html` is the separator's case, not the syntax's: on this host a backslash is an ordinary
+  // character in a name, so rewriting it as `/` addressed `/tmp/a/b.html` — a file in a directory
+  // that was never named, with the bar reporting success.
+  for (const name of [
+    "report.html",
+    "re#1.html",
+    "a?b.html",
+    "100%.html",
+    "a b.html",
+    "中文.html",
+    "a\\b.html",
+  ]) {
     const typed = `/tmp/${name}`;
     const parsed = addressTarget(typed);
     assert.strictEqual(parsed.ok, true, `${typed} is a path on this machine and has to be accepted`);
