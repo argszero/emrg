@@ -126,9 +126,42 @@ function isLocalPath(text) {
   return /^[a-zA-Z]:[\\/]/.test(text);
 }
 
-/** The `file:` address of a local path, keeping the spaces and non-ASCII a path may carry. */
+/** The characters a path may carry unescaped: RFC 3986's `pchar` set, plus the separator. */
+const PATH_SAFE = /[A-Za-z0-9\-._~!$&'()*+,;=:@/]/;
+
+/** Escape a path so a URL carries it as data — a space, a CJK name and a delimiter alike. */
+function escapePath(text) {
+  let out = "";
+  for (const ch of text) out += PATH_SAFE.test(ch) ? ch : encodeURIComponent(ch);
+  return out;
+}
+
+/**
+ * The `file:` address of a local path, keeping what a path carries as data.
+ *
+ * `#`, `?` and a bare `%` are URL syntax, so inside a path they are data and not syntax: a file
+ * named `re#1.html` is not `re` with a fragment. Reading them as syntax fails silently —
+ * `file:///tmp/re#1.html` names a file called `re`, so the bar reported success and opened a
+ * file the host never asked for, and a name holding `%` produced an address `fileURLToPath`
+ * refuses to decode at all.
+ *
+ * The criterion is a round trip: the address's own path, decoded, is the path that was typed.
+ * The escape is spelled out here, per character, rather than taken from `pathToFileURL` — that
+ * one resolves its argument first, so on Windows it reads `/tmp/a.html` against the working
+ * directory's drive and answers `file:///C:/tmp/a.html`: a different address for the same typed
+ * text, no round trip surviving it, and an address bar whose meaning changes with the host.
+ *
+ * A drive path is absolute on Windows only. Setting the path on the URL keeps its shape on a
+ * host where it names nothing, rather than letting the setter read it as relative. That setter
+ * escapes `#` and `?` and leaves `%` alone, so the one character it does not escape is escaped
+ * before it.
+ */
 function fileUrlOf(text) {
-  return new URL(`file://${text.replace(/\\/g, "/")}`).href;
+  const normalized = text.replace(/\\/g, "/");
+  if (normalized.startsWith("/")) return `file://${escapePath(normalized)}`;
+  const url = new URL("file:///");
+  url.pathname = `/${normalized.replace(/%/g, "%25")}`;
+  return url.href;
 }
 
 /**
