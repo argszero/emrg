@@ -307,6 +307,23 @@ describe("normalizeImageSrc：本地图片两种写法归一（issue #2638）", 
     expect(normalizeImageSrc("")).toBe("");
     expect(normalizeImageSrc(undefined)).toBe("");
   });
+
+  it("名字里的 #、?、%、\\ 是数据，地址解码回来还是它（issue #3243）", () => {
+    // 判据是往返：地址自己的 path 解出来，就是写进去的那条路径。这四者都是 URL 语法，
+    // 在这条路径里却是文件名的一部分 —— 读成语法不报错，只指向另一条路径。
+    for (const name of ["shot.png", "shot#1.png", "a?b.png", "100%.png", "a\\b.png", "中文.png"]) {
+      const typed = `/Users/me/${name}`;
+      expect(decodeURIComponent(new URL(normalizeImageSrc(typed)).pathname)).toBe(typed);
+    }
+    // 地址本身也钉住：往返之外，拼出来的就是这一种写法。
+    expect(normalizeImageSrc("/Users/me/shot#1.png")).toBe("file:///Users/me/shot%231.png");
+    expect(normalizeImageSrc("/Users/me/a?b.png")).toBe("file:///Users/me/a%3Fb.png");
+    expect(normalizeImageSrc("/Users/me/100%.png")).toBe("file:///Users/me/100%25.png");
+    expect(normalizeImageSrc("/Users/me/a\\b.png")).toBe("file:///Users/me/a%5Cb.png");
+    // 盘符分支同一套转义，而已有写法一个字节都没动。
+    expect(normalizeImageSrc("C:\\shots\\a#1.png")).toBe("file:///C:/shots/a%231.png");
+    expect(normalizeImageSrc("C:\\shots\\a.png")).toBe("file:///C:/shots/a.png");
+  });
 });
 
 describe("isLocalImageSrc：放行条件只认 img[src] 的 file:（issue #2638）", () => {

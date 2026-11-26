@@ -56,21 +56,43 @@ export interface HljsLike {
 }
 
 /**
+ * 路径里会被 URL 语法读走的字符：`%`、`#`、`?`、`\`（issue #3243）。
+ *
+ * 这四者在一条路径里都是数据，解析器却一律当语法读：`#` 开头是 fragment，`?` 开头是 query，
+ * `%` 开头是转义，`\` 在特殊 scheme 的 URL 里等同于分隔符。四种都**静默**出错 —— 地址照样
+ * 解析成功，只是指向了另一条没人写过的路径；`#` 与 `?` 甚至是有效解析，连报错都没有。
+ *
+ * 空格与 CJK 名不在这张表里：解析器自己会百分号编码它们，多编一次只是把一条本来就能用的
+ * 地址挪个位置。
+ */
+function escapeLocalPath(path: string): string {
+  return path
+    .replace(/%/g, "%25")
+    .replace(/#/g, "%23")
+    .replace(/\?/g, "%3F")
+    .replace(/\\/g, "%5C");
+}
+
+/**
  * 本地图片路径归一（issue #2638）。
  *
  * 渲染进程打包后是 `file://` 文档，`/Users/me/shot.png` 这种根绝对路径会被当成
  * **origin 根**解析（应用自己的 dist 目录），不是宿主文件系统 —— 所以在进 DOM 前
  * 改写成 `file:///Users/me/shot.png`。已有 scheme（`file:` / `http:` / `data:`…）、
  * 协议相对（`//host/a.png`）与相对路径原样返回，归一只管根绝对写法。
+ *
+ * 判据是往返：地址自己的 path 解回来，就是写进去的那条路径（issue #3243）。所以拼地址之前
+ * 先把语法字符转义，盘符分支与根绝对分支同一套 `escapeLocalPath`；`\` 改成 `/` 只发生在
+ * 盘符分支，那里它真的是分隔符，在 POSIX 名字里它只是普通字符（#3242）。
  */
 export function normalizeImageSrc(href: unknown): string {
   const src = String(href ?? "").trim();
   if (!src) return src;
   if (src.startsWith("//")) return src; // 协议相对：保留原意，不猜 scheme
   // 盘符路径 C:\x 或 C:/x —— 单字母"scheme"不是 scheme
-  if (/^[a-zA-Z]:[\\/]/.test(src)) return `file:///${src.replace(/\\/g, "/")}`;
+  if (/^[a-zA-Z]:[\\/]/.test(src)) return `file:///${escapeLocalPath(src.replace(/\\/g, "/"))}`;
   if (/^[a-zA-Z][a-zA-Z0-9+.\-]*:/.test(src)) return src;
-  if (src.startsWith("/")) return `file://${src}`;
+  if (src.startsWith("/")) return `file://${escapeLocalPath(src)}`;
   return src;
 }
 
