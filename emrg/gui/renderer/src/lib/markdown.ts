@@ -55,6 +55,32 @@ export interface HljsLike {
   highlightAuto(code: string): { value: string };
 }
 
+/** URL 路径里可以原样出现的 ASCII：RFC 3986 的 pchar 加分隔符 `/`，再加空格（见下）。 */
+const PATH_SAFE = /[A-Za-z0-9\-._~!$&'()*+,;=:@/ ]/;
+
+/**
+ * 要转义哪些字符，由**规则**给出，不是由记得住的那张表给出（issue #3243）：凡是 ASCII
+ * （0x00–0x7F）而又不在 `PATH_SAFE` 里的字符，一律百分号转义。
+ *
+ * 为什么不写一张 `#`、`?`、`%`、`\` 的表：解析器吃掉路径字符的方式不止一种。那四个是被
+ * 读成**语法**——`#` 开头是 fragment、`?` 开头是 query、`%` 开头是转义、`\` 在特殊 scheme
+ * 的 URL 里等同于分隔符；制表符、换行、回车则更彻底，解析前就被从整条输入里**删掉**，
+ * `/Users/me/a\tb.png` 的地址读回来是 `/Users/me/ab.png`。两种走法的后果一样：地址照样
+ * 解析成功，只是指向了另一条没人写过的路径——一声不响，所以漏掉的那个字符不会有任何东西
+ * 报错。表会漏，规则不会：不在字符集里就转义。
+ *
+ * 空格与非 ASCII（CJK 名等）原样留着：解析器自己会百分号编码它们，多编一次只是把一条本来
+ * 就能用的地址换个写法。`\` 改成 `/` 只发生在盘符分支，那里它真的是分隔符（#3242）。
+ *
+ * 一遍扫过原字符，所以不依赖替换的先后（链式写法里 `%` 必须排第一，否则会把刚写进去的
+ * `%` 再转义一次）。
+ */
+function escapeLocalPath(path: string): string {
+  return path.replace(/[\x00-\x7F]/g, (ch) =>
+    PATH_SAFE.test(ch) ? ch : `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`,
+  );
+}
+
 /**
  * 本地图片路径归一（issue #2638）。
  *
@@ -62,15 +88,19 @@ export interface HljsLike {
  * **origin 根**解析（应用自己的 dist 目录），不是宿主文件系统 —— 所以在进 DOM 前
  * 改写成 `file:///Users/me/shot.png`。已有 scheme（`file:` / `http:` / `data:`…）、
  * 协议相对（`//host/a.png`）与相对路径原样返回，归一只管根绝对写法。
+ *
+ * 判据是往返：地址自己的 path 解回来，就是写进去的那条路径（issue #3243）。所以拼地址之前
+ * 先把语法字符转义，盘符分支与根绝对分支同一套 `escapeLocalPath`；`\` 改成 `/` 只发生在
+ * 盘符分支，那里它真的是分隔符，在 POSIX 名字里它只是普通字符（#3242）。
  */
 export function normalizeImageSrc(href: unknown): string {
   const src = String(href ?? "").trim();
   if (!src) return src;
   if (src.startsWith("//")) return src; // 协议相对：保留原意，不猜 scheme
   // 盘符路径 C:\x 或 C:/x —— 单字母"scheme"不是 scheme
-  if (/^[a-zA-Z]:[\\/]/.test(src)) return `file:///${src.replace(/\\/g, "/")}`;
+  if (/^[a-zA-Z]:[\\/]/.test(src)) return `file:///${escapeLocalPath(src.replace(/\\/g, "/"))}`;
   if (/^[a-zA-Z][a-zA-Z0-9+.\-]*:/.test(src)) return src;
-  if (src.startsWith("/")) return `file://${src}`;
+  if (src.startsWith("/")) return `file://${escapeLocalPath(src)}`;
   return src;
 }
 

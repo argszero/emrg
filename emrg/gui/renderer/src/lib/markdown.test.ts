@@ -307,6 +307,49 @@ describe("normalizeImageSrc：本地图片两种写法归一（issue #2638）", 
     expect(normalizeImageSrc("")).toBe("");
     expect(normalizeImageSrc(undefined)).toBe("");
   });
+
+  it("名字里的 #、?、%、\\ 与制表/换行是数据，地址解码回来还是它（issue #3243）", () => {
+    // 判据是往返：地址自己的 path 解出来，就是写进去的那条路径。前四者都是 URL 语法，
+    // 在这条路径里却是文件名的一部分 —— 读成语法不报错，只指向另一条路径；制表符、换行、
+    // 回车则被解析器直接从输入里删掉，往返会少一个字符。
+    for (const name of [
+      "shot.png",
+      "shot#1.png",
+      "a?b.png",
+      "100%.png",
+      "a\\b.png",
+      "a\tb.png",
+      "a\nb.png",
+      "a\rb.png",
+      "中文.png",
+    ]) {
+      const typed = `/Users/me/${name}`;
+      expect(decodeURIComponent(new URL(normalizeImageSrc(typed)).pathname)).toBe(typed);
+    }
+    // 地址本身也钉住：往返之外，拼出来的就是这一种写法。
+    expect(normalizeImageSrc("/Users/me/shot#1.png")).toBe("file:///Users/me/shot%231.png");
+    expect(normalizeImageSrc("/Users/me/a?b.png")).toBe("file:///Users/me/a%3Fb.png");
+    expect(normalizeImageSrc("/Users/me/100%.png")).toBe("file:///Users/me/100%25.png");
+    expect(normalizeImageSrc("/Users/me/a\\b.png")).toBe("file:///Users/me/a%5Cb.png");
+    expect(normalizeImageSrc("/Users/me/a\tb.png")).toBe("file:///Users/me/a%09b.png");
+    expect(normalizeImageSrc("/Users/me/a\nb.png")).toBe("file:///Users/me/a%0Ab.png");
+    expect(normalizeImageSrc("/Users/me/a\rb.png")).toBe("file:///Users/me/a%0Db.png");
+    // 盘符分支同一套转义，而已有写法一个字节都没动。
+    expect(normalizeImageSrc("C:\\shots\\a#1.png")).toBe("file:///C:/shots/a%231.png");
+    expect(normalizeImageSrc("C:\\shots\\a.png")).toBe("file:///C:/shots/a.png");
+  });
+
+  it("ASCII 全表按编码规则往返，一个字符都不例外（issue #3243）", () => {
+    // 按规则枚举，不按想得到的例子枚举：0x00–0x7F 每个字符各进出一次。上面那个用例举的是
+    // 名字，这条是本类缺陷的边界——表会漏（制表、换行、回车就漏过一次），规则不该漏。
+    const broken: string[] = [];
+    for (let cp = 0x00; cp <= 0x7f; cp++) {
+      const typed = `/Users/me/a${String.fromCharCode(cp)}b.png`;
+      const back = decodeURIComponent(new URL(normalizeImageSrc(typed)).pathname);
+      if (back !== typed) broken.push(`0x${cp.toString(16).padStart(2, "0")}`);
+    }
+    expect(broken).toEqual([]);
+  });
 });
 
 describe("isLocalImageSrc：放行条件只认 img[src] 的 file:（issue #2638）", () => {
