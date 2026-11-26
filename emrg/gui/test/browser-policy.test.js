@@ -10,7 +10,6 @@
 
 const { test } = require("node:test");
 const assert = require("node:assert");
-const { fileURLToPath } = require("node:url");
 
 const {
   BROWSER_PARTITION,
@@ -120,16 +119,27 @@ test("a local path keeps the characters the URL syntax would otherwise eat", () 
   // typed. `#`, `?` and a bare `%` are URL syntax inside a path, and all three fail silently —
   // `file:///tmp/re#1.html` is the address of a file called `re`, so the bar answered "ok" and
   // the panel loaded a different file from the one the host asked for.
+  //
+  // The round trip is read off the address's own path, never through `fileURLToPath`: that one
+  // answers in the host's separators and, on Windows, resolves `/tmp/x` against the working
+  // directory's drive — so the same typed text would be judged by a different rule per platform,
+  // and a Windows-only red would say nothing about the characters this test is about.
   for (const name of ["report.html", "re#1.html", "a?b.html", "100%.html", "a b.html", "中文.html"]) {
     const typed = `/tmp/${name}`;
     const parsed = addressTarget(typed);
     assert.strictEqual(parsed.ok, true, `${typed} is a path on this machine and has to be accepted`);
     assert.strictEqual(
-      fileURLToPath(parsed.url),
+      decodeURIComponent(new URL(parsed.url).pathname),
       typed,
       `${typed} must come back as itself, not as a name the URL syntax cut short`,
     );
   }
+  // The address is spelled the same on every host: no drive is invented for a path typed with a
+  // leading `/`, which is what `pathToFileURL` adds on Windows.
+  assert.deepStrictEqual(addressTarget("/tmp/re#1.html"), {
+    ok: true,
+    url: "file:///tmp/re%231.html",
+  });
   // The drive shape stays what the test above pins, and its `%` is escaped too.
   assert.deepStrictEqual(addressTarget("C:\\Users\\me\\100%.html"), {
     ok: true,
