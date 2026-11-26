@@ -137,6 +137,21 @@ level "fallback"  it could not be read, and §5's readings say so
   renderer is available, the publish reading is `not attempted` and names the blocked step, as §5's
   table already provides: an image described in words and a placeholder file are both an image that
   does not exist, and the sourcing rule above applies to a picture as squarely as to a sentence.
+- **A picture is composed for the size it will be read at, not the size it is drawn at.** Where the
+  piece's form is an image, the round fixes two numbers before composing — the canvas it draws on and
+  the width the viewer displays that image at — because the two are rarely equal and everything a
+  reader sees passes through the ratio between them. A reader receives the canvas size multiplied by
+  `display ÷ canvas`, so a type size is a claim about that reader-side number and never about what read
+  well on the canvas.
+  From it, decide and state **five** things in the piece's readings (§5): the canvas width, a
+  body-type floor, a floor for small annotations, a heading range, and a cap on how much text one
+  panel may carry. Where the room runs out, the ordering is fixed — **one line fewer rather than a
+  smaller type**, because the line costs a detail while the type costs the whole piece. The layout
+  follows from the same ratio: at a scale that shrinks type to a fraction of itself, several narrow
+  columns of small print do not survive it and one column does. The criterion is checkable on the
+  finished thing: **scale the rendered image to the width it will be shown at and read it** — a line
+  that cannot be read there is not small, it is absent, and the failure is silent on the canvas, which
+  is exactly why the round checks the reader's view instead of its own.
 - **A reader who is not its author is asked twice before the piece ships.** Once on the plan, before
   the piece is produced, and once on the draft, before it is published: the second is the one that
   catches what the first cannot, because the drafted piece is what a reader can actually judge. Ask
