@@ -210,6 +210,7 @@ level "fallback"  it could not be read, and §5's readings say so
 | `topic_source` | §2's answer — where the topic came from |
 | `structure` | the one chosen in §3, and the reason it was chosen |
 | `word_count` | the draft's own count, **measured** with a tool — never estimated |
+| `composition` | for a piece whose form is an image, the five numbers §3 fixed before composing — the canvas width, a body-type floor, a floor for small annotations, a heading range, and a cap on how much text one panel may carry — each stated as the reader-side value the piece was checked at; for a piece that is not an image, `not an image piece`, so the field says which case this round is instead of going missing |
 | `trend_data` | `live` (with what was read and when) or `no real-time data was obtained` (with why) |
 | `publish` | §4's outcome — `posted` with the platform, the posting time and the post's id or link; `failed` with the reason; `not attempted` with the reason |
 | `unread` | the fields §3 kept out of the piece because no source could be named, each with its reason (page unreadable, list not public, nothing stated by the subject) — an absence belongs in these readings, and never in the piece |

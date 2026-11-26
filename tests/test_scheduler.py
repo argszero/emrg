@@ -5516,6 +5516,33 @@ def test_self_media_readings_block_carries_the_publish_outcome():
     )
 
 
+def test_self_media_readings_block_carries_the_composition_numbers():
+    """§3 sends five numbers to §5, so §5 must own a field that receives them.
+
+    The assertion is made inside §5's own region on purpose: all five phrases also occur in
+    §3, so a whole-file search passes on the file that has the gap — the failure this pins
+    was exactly that, a rule whose carrier was never built.
+    """
+    flat = " ".join(_self_media_template_text().split())
+    archive = flat[flat.find("### 5. Archive"):flat.find("### Closing summary")]
+    assert archive, "there is no §5 to hold the readings block"
+
+    assert "| `composition` |" in archive, (
+        "§5's readings block must name the field that carries §3's composition numbers; "
+        "without it a round that follows §3 has nowhere in its archive to write them"
+    )
+    for phrase in ("canvas width", "body-type floor", "floor for small annotations",
+                   "heading range", "cap on how much text one panel may carry"):
+        assert phrase in archive, (
+            f"§5's composition field must name {phrase!r}: a field listing four of the five "
+            f"leaves the fifth unrecorded, and §3 requires all five"
+        )
+    assert "not an image piece" in archive, (
+        "a piece that is not an image must record which case it is, so the field is never "
+        "silently absent from an archive that should carry it"
+    )
+
+
 def test_self_media_template_no_longer_forbids_publishing():
     """The abolished prohibitions, asserted absent, over a subject that is really there.
 
