@@ -163,7 +163,9 @@ Scope, named rather than implied
   issue #1606's measured divergence - so the path form is not a convenience but
   the way to reach it.
 * A row's target file **is** checked, and this is the third reading: a row link
-  that resolves to no file beside the index. The rule is the one this agent
+  that resolves to no file beside the index - under either base a store writes
+  its rows in, the index's own directory or the `ref/` its files moved to
+  (issue #3263). The rule is the one this agent
   already asserts in three other carriers - `tests/test_agent_context_paths.py`
   for the paths `Agent.md`/`MANIFESTO.md` name, `check-citation-resolves.py` for
   test node ids, `check-rant-citations.py` for the files a rant names - and the
@@ -498,16 +500,32 @@ class Reading(NamedTuple):
             if length > bound
         ]
 
+    def bases(self) -> tuple[Path, ...]:
+        """The directories a row target is resolved against, the index's own first.
+
+        The index's own directory comes first because that is what a relative
+        target in one of these files means: the rows are written next to the
+        detail files they name, so `- [x](cycle-20260926-140150.md)` is a
+        sibling of the index, not of the caller's cwd.
+
+        The detail directory follows, because a store that has migrated keeps its
+        detail files under `ref/` while its index keeps naming them, and this
+        host holds indexes in both spellings - one naming `x.md`, one naming
+        `ref/x.md`. Resolving against a single base turned the second spelling
+        into `ref/ref/x.md` and reported a file that is present as missing
+        (issue #3263, measured on a migrated store).
+        """
+        own = self.path.parent
+        detail = self.detail_dir or own
+        return (own,) if detail == own else (own, detail)
+
     def unresolved(self) -> list[tuple[int, str]]:
         """The row links that name no file, as `(file line number, target)`.
 
-        Resolved against the index's own directory, which is what a relative
-        target in one of these files means: the rows are written next to the
-        detail files they name, so `- [x](cycle-20260926-140150.md)` is a
-        sibling of the index, not of the caller's cwd. A target that is still
-        missing once resolved is reported - a row whose file is gone is a
-        pointer the reader follows into nothing, and the index is the only map
-        of the store.
+        A target resolves when it exists under any of `bases()` - the index's own
+        directory, or the detail directory the store reads. A target that exists
+        under neither is reported: a row whose file is gone is a pointer the
+        reader follows into nothing, and the index is the only map of the store.
 
         Resolution is `os.path.exists` on the joined path: a symlink that
         resolves is a file for this purpose, and a broken one is not (a broken
@@ -515,10 +533,10 @@ class Reading(NamedTuple):
 
         :returns: one pair per unresolved link, in file order.
         """
-        base = self.detail_dir or self.path.parent
+        bases = self.bases()
         out: list[tuple[int, str]] = []
         for line, target in self.row_targets:
-            if not os.path.exists(os.path.join(base, target)):
+            if not any(os.path.exists(os.path.join(base, target)) for base in bases):
                 out.append((line, target))
         return out
 
@@ -796,10 +814,13 @@ def _report(reading: Reading) -> list[str]:
             f"opening the store once (any memory command, which is what constructs it) "
             f"moves them into {MEMORY_REF_DIRNAME}/ for the listing to show them"
         )
+    # Both bases, because the finding is the claim that the file is under neither:
+    # naming only the detail directory sent a reader to look in `ref/` for a target
+    # the index itself was the base of (issue #3263).
     where = (
         f"beside {reading.path.name}"
         if detail_base == reading.path.parent
-        else f"in {detail_base}"
+        else f"beside {reading.path.name} or in {detail_base}"
     )
     for number, target in unresolved:
         out.append(
