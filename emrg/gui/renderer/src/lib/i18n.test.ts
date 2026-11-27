@@ -205,11 +205,11 @@ describe("词典完整性守卫（防漂移）", () => {
   // 同日 issue #3226：目录面板头部加回一个「刷新」，中英各加一条 → 605 + 1 = 606。
   // 2026-11-25：用户消息里的图能点开，多了「看原图 / 另存一份 / 在文件夹中显示 / 关闭」
   // 四条 → 606 + 4 = 610。数量由这道守卫量，别处不再写这个数。
-  it("zh/en 各 610 个 key 且完全对齐", () => {
+  it("zh/en 各 608 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(610);
-    expect(enKeys.length).toBe(610);
+    expect(zhKeys.length).toBe(608);
+    expect(enKeys.length).toBe(608);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);

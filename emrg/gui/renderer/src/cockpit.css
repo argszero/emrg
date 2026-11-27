@@ -1374,9 +1374,11 @@ body.col-resizing * {
   border-bottom: 1px solid var(--border);
 }
 
-/* The breadcrumb gives way to the toggles: a deep path is long, a toggle is two glyphs. */
+/* The path wins the row. It is the only cell up here carrying something the reader cannot
+   guess, so it takes the free space while the controls beside it are sized to a glyph
+   rather than allowed to grow — a breadcrumb is where you are, a toggle is one bit. */
 .editor-head .editor-crumbs {
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
   border-bottom: none;
 }
@@ -1387,6 +1389,28 @@ body.col-resizing * {
   align-items: center;
   gap: 2px;
   padding: 0 4px;
+}
+
+/* A glyph, not a word: each control is one 20px box, so five of them cost less width than a
+   single label did. The stroke settings are the rail's and the status band's, and `currentColor`
+   is what carries the on state — `.on` still recolours the glyph, it just no longer needs a
+   border to say so. */
+.editor-head .editor-toggle {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+}
+
+.editor-head .editor-toggle svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7px;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 /* The two acts that had no button sit apart from the two display toggles: saving and
