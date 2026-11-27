@@ -29,6 +29,7 @@ Two readings this file is written around:
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 import pytest
@@ -256,6 +257,68 @@ def test_a_directory_the_host_does_not_have_is_absent_not_an_error(pin_default_m
         "the withdrawal path reads the table, not the disk — a name that is not "
         "there yet is still a default a host may withdraw"
     )
+
+
+def _invent_a_protected_file(monkeypatch, home):
+    """Put ``home/.emrg/global/config.toml`` in the protected list, and answer it.
+
+    ``protected_paths()`` derives from the real home, and no test here touches
+    that: the list is patched on the module both the fence and the derivation ask,
+    which is also what proves the two ask one predicate.
+    """
+    from emrg.tools import file_policy
+
+    (home / ".emrg" / "global").mkdir(parents=True)
+    victim = home / ".emrg" / "global" / "config.toml"
+    victim.write_text("host state", encoding="utf-8")
+    monkeypatch.setattr(
+        file_policy, "protected_paths", lambda: [os.path.realpath(str(victim))]
+    )
+    return victim
+
+
+def test_a_default_that_would_reach_a_protected_daemon_file_is_not_granted(
+    pin_default_manifest, tmp_path, monkeypatch
+):
+    """One rule, two callers: a shipped row may not name what a typed root is refused.
+
+    ``emrg/sandbox/roots.py`` rule 5 refuses ``/sandbox add ~/.emrg`` because that
+    directory sits above ``config.toml``. The derivation used to ask only whether
+    the directory exists, so one path had two verdicts — refused to a host who
+    typed it, granted to an installation that shipped it — and the two are not
+    interchangeable: the kernel profile allows a whole subtree, while the five
+    protected files are refused by an in-process fence a spawned command never
+    asks.
+    """
+    home = tmp_path / "home"
+    _invent_a_protected_file(monkeypatch, home)
+    pin_default_manifest(home / ".emrg")
+
+    assert default_grants() == []
+    assert manifest_targets() == [str(home / ".emrg")], (
+        "a refused row is still a row the host may be shown, and withdraw"
+    )
+
+
+def test_a_default_beside_a_protected_file_is_still_granted(
+    pin_default_manifest, tmp_path, monkeypatch
+):
+    """The rule is "above", not "nearby", and this half is what says so.
+
+    Without it the test above passes for a derivation that refuses every
+    directory under a home, or every directory holding a dot-file — a much larger
+    rule wearing this one's name.
+    """
+    home = tmp_path / "home"
+    _invent_a_protected_file(monkeypatch, home)
+    beside = home / ".emrg" / "sessions"
+    beside.mkdir()
+    pin_default_manifest(beside)
+
+    granted = default_grants()
+
+    assert [grant.target for grant in granted] == [str(beside)], granted
+    assert [grant.source for grant in granted] == [SOURCE_DEFAULT], granted
 
 
 # ── §3 the manifest is visible and withdrawable ────────────────────────────
