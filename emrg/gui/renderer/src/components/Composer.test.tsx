@@ -410,11 +410,45 @@ describe("Composer — 发送流", () => {
     await waitFor(() => expect(s.value()).toBe("will fail"));
   });
 
-  it("无会话时提示 app.needSession 且不发送", async () => {
+  it("无会话时先开一条，再把消息发给开出来的那个会话（issue #3251）", async () => {
+    const store = createTranscriptStore();
+    // `SendOptions.sessionId` 允许 null（没有会话时的老路径），所以这里也照它的类型来。
+    const sent: Array<string | null> = [];
+    let asked = 0;
+    const s = setup(store, {
+      sid: null,
+      onEnsureSession: async () => {
+        asked++;
+        return "s-new";
+      },
+      sendMessage: async (p: SendOptions) => {
+        sent.push(p.sessionId);
+        return {};
+      },
+    });
+    s.setText("hello");
+    s.press("Enter");
+    // 开一条发生在 await 之后，所以断言要等微任务。
+    await waitFor(() => expect(sent).toEqual(["s-new"]));
+    // 只问一次：开不开是父级的判断，输入框不自己重试。
+    expect(asked).toBe(1);
+    // 宿主那句话落在新会话里 —— 落进 null 切片就是「发了但看不见」。
+    expect(store.getEntries("s-new").some((e) => e.kind === "user" && e.text === "hello")).toBe(true);
+    // 没有「请先创建一个对话」那一行：那正是这条 issue 要拆的墙。
+    for (const slice of [null, "s-new"]) {
+      expect(store.getEntries(slice).some((e) => e.kind === "system")).toBe(false);
+    }
+    // 输入框照常清空：这句话确实发出去了。
+    expect(s.value()).toBe("");
+  });
+
+  it("开不出会话时照旧提示 app.needSession，且一条都不发（issue #3251）", async () => {
     const store = createTranscriptStore();
     let sent = 0;
     const s = setup(store, {
       sid: null,
+      // 主进程拒绝、或这个构建的桥没有那条通道 —— 在输入框这头是同一件事。
+      onEnsureSession: async () => null,
       sendMessage: async () => {
         sent++;
         return {};
@@ -422,8 +456,34 @@ describe("Composer — 发送流", () => {
     });
     s.setText("orphan");
     s.press("Enter");
-    await waitFor(() => expect(sent).toBe(0));
-    expect(store.getEntries(null).some((e) => e.kind === "system" && e.text === "请先创建一个对话。")).toBe(true);
+    await waitFor(() =>
+      expect(store.getEntries(null).some((e) => e.kind === "system" && e.text === "请先创建一个对话。")).toBe(true),
+    );
+    expect(sent).toBe(0);
+    // 说不出发给谁的时候，这句话也不被吃掉 —— 宿主还能重试。
+    expect(s.value()).toBe("orphan");
+  });
+
+  it("父级抛错等同于开不出来：提示，不发送（issue #3251）", async () => {
+    const store = createTranscriptStore();
+    let sent = 0;
+    const s = setup(store, {
+      sid: null,
+      onEnsureSession: async () => {
+        throw new Error("no channel");
+      },
+      sendMessage: async () => {
+        sent++;
+        return {};
+      },
+    });
+    s.setText("orphan");
+    s.press("Enter");
+    await waitFor(() =>
+      expect(store.getEntries(null).some((e) => e.kind === "system" && e.text === "请先创建一个对话。")).toBe(true),
+    );
+    expect(sent).toBe(0);
+    expect(s.value()).toBe("orphan");
   });
 
   it("/ 指令不进发送流，走 onCommand 路由（vanilla rant 19:44 P1）", async () => {

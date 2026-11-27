@@ -69,6 +69,8 @@ function mockEmrg() {
   const setSandboxRoots = vi.fn().mockResolvedValue({ ok: true });
   const triggerTask = vi.fn().mockResolvedValue({ ok: true });
   const switchSession = vi.fn().mockResolvedValue({ ok: true });
+  // issue #3251：没有会话时发送要先开一条 —— 主进程本地生成 id，不问 daemon。
+  const newSession = vi.fn().mockResolvedValue({ session_id: "s-new" });
   // Rant 2026-11-18T18:41:06 item 8: closing an open session is a channel of its own —
   // the main process disconnects it and keeps the data on disk.
   const closeSession = vi.fn().mockResolvedValue({ ok: true });
@@ -109,6 +111,7 @@ function mockEmrg() {
     reorderOpenSessions,
     cancel,
     renameSession,
+    newSession,
   };
   return {
     listeners,
@@ -140,6 +143,7 @@ function mockEmrg() {
     reorderOpenSessions,
     cancel,
     renameSession,
+    newSession,
     emit: (evt: DaemonEventFrame) => listeners.forEach((cb) => cb(evt)),
   };
 }
@@ -1407,6 +1411,23 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
     await waitFor(() => expect(composerText()).toBe("hello there"));
     pressInComposer("ArrowUp");
     await waitFor(() => expect(composerText()).toBe("second"));
+  });
+
+  it("没有会话时发送：先开一条，再把这句话发给它（issue #3251）", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    // 一条会话都没开 —— 新装机器就是这个样子：按钮可用，却没有可发往的会话。
+    await typeIntoComposer("hello");
+    pressInComposer("Enter");
+    await waitFor(() => expect(m.newSession).toHaveBeenCalledWith({}));
+    await waitFor(() => expect(m.sendMessage).toHaveBeenCalledTimes(1));
+    // ① 发给开出来的那个会话，不是某个空 id：这一条就是「发了但没人收」的反面。
+    const sent = m.sendMessage.mock.calls[0][0] as { sessionId: string; text: string };
+    expect(sent.sessionId).toBe("s-new");
+    expect(sent.text).toBe("hello");
+    // ② 屏幕上是那句话，不是「请先创建一个对话」——后者正是这条 issue 要拆的墙。
+    expect(screen.queryByText("Start a conversation first.")).toBeNull();
   });
 
   it("发送途中切会话：这条 prompt 记进它发出去的那个会话，不进宿主切过去的会话（veto cyc20261019-023629，issue #2349）", async () => {

@@ -180,6 +180,18 @@ export interface ComposerProps {
    */
   onPromptSent?: (sid: string, text: string) => void;
   /**
+   * 没有会话时发送：由父级开一条，把这个会话的 id 交回来（issue #3251）。
+   *
+   * 新装后的第一句话不该撞墙。发送按钮在「有字」时一直可用，所以「没有会话」只回一句
+   * 提示，读起来是「按了没反应」。开一条会话不需要 daemon 任何东西，但**要不要开、开在
+   * 哪里、开完是不是当前会话**是父级的权威——本组件不持这个知识，只要一个 id。
+   *
+   * 交回 `null`（旧 preload 没有这条通道、或主进程拒绝）时退回原来那句提示：说不出发给
+   * 了谁的时候，不能假装已经发了。不传 = 维持原样（单挂载/单测），与 `onSandboxChange`
+   * 的约定一致。
+   */
+  onEnsureSession?: () => Promise<string | null>;
+  /**
    * 父级接管「额外可写根」入口时传入：点击只上报意图（打开管理对话框）。
    * 不传 = 不渲染入口（单挂载/单测），与 `onSandboxChange` 的约定一致。
    */
@@ -272,6 +284,7 @@ export function Composer({
   sandboxRoots = null,
   inputHistory = null,
   onPromptSent,
+  onEnsureSession,
   onManageSandboxRoots,
   modelChip,
   insertRequest = null,
@@ -358,6 +371,9 @@ export function Composer({
   // 那一刻要用的是最新的父级实现。
   const onPromptSentRef = useRef(onPromptSent);
   onPromptSentRef.current = onPromptSent;
+  // 同一个理由，同一层桥接：开一条会话发生在 submit 的 await 之后，那一刻要用最新实现。
+  const onEnsureSessionRef = useRef(onEnsureSession);
+  onEnsureSessionRef.current = onEnsureSession;
   /** 插入后把光标放回去（渲染之后才能设：受控 textarea 的值在这一帧才更新） */
   const caretAfterRenderRef = useRef<number | null>(null);
 
@@ -868,9 +884,21 @@ export function Composer({
       });
       return;
     }
-    if (!sid) {
-      store.addSystemMessage(t("app.needSession"), sid);
-      return;
+    // 没有会话就先开一条（issue #3251）：按钮在「有字」时一直可用，只回一句话等于
+    // 「按了没反应」，而新装后的第一句话正是这么撞墙的。开一条由父级负责（见
+    // `onEnsureSession`）；这里拿到 id 之后，这条消息的每一步都用它，而不是等 prop 传
+    // 下来——prop 要到下一帧才变，消息不能等。开不出来才退回原来那句提示。
+    let targetSid = sid;
+    if (!targetSid) {
+      try {
+        targetSid = (await onEnsureSessionRef.current?.()) ?? null;
+      } catch {
+        targetSid = null;
+      }
+      if (!targetSid) {
+        store.addSystemMessage(t("app.needSession"), sid);
+        return;
+      }
     }
     // P2 queue-injection（#655）：busy 不再拦截——daemon 排队注入（task_queued），
     // 回合结束未注入则 queued_requeue 以原 requestId 重发。busy 时记录待重发条目。
@@ -883,15 +911,15 @@ export function Composer({
     // 图与文字一起交给气泡（宿主 2026-11-25T18:17:18）。此前 `images` 只发给 daemon，
     // 气泡手上只有正文，于是刚发出去的那一条里 `[📷 …]` 就是一行字 —— 连「刷新之后
     // 靠回放补上」都做不到，因为回放那一半同样没有图。
-    store.addUserMessage(sentText, sid, images.length ? { requestId, images } : { requestId });
+    store.addUserMessage(sentText, targetSid, images.length ? { requestId, images } : { requestId });
     // 消息已发送 → 清输入（输入框内容即草稿，发送即清）
     applyText("", 0);
     if (wasBusy) {
-      queueSend(queuedRef.current, sid, { requestId, text: sentText, sandbox: tier, images });
+      queueSend(queuedRef.current, targetSid, { requestId, text: sentText, sandbox: tier, images });
     }
     try {
       await sendFn({
-        sessionId: sid,
+        sessionId: targetSid,
         text: sentText,
         requestId,
         sandbox: tier,
@@ -904,11 +932,11 @@ export function Composer({
       // 召回列表跟上这一条（issue #2349 part 2/2）：daemon 刚接受了它，所以它的文件
       // 现在以这段文字结尾。只报**成功**的发送——失败时 daemon 什么都没收下，也就
       // 没有可翻回来的东西；列表的权威副本仍是 daemon 的，下次会话切换整份替换。
-      onPromptSentRef.current?.(sid, sentText);
+      onPromptSentRef.current?.(targetSid, sentText);
     } catch {
       setInternalBusy(false);
       // G49：失败恢复输入框，文案不责怪用户（copy.sendFailed）；原文回填
-      store.addSystemMessage(t("copy.sendFailed"), sid);
+      store.addSystemMessage(t("copy.sendFailed"), targetSid);
       applyText(value, value.length);
     }
   }

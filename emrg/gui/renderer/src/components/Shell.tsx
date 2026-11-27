@@ -104,6 +104,14 @@ interface WorkspaceBridge {
   listRants(p: { status?: string }): Promise<RantRec[]>;
   switchSession(p: { sessionId: string; projectPath?: string }): Promise<unknown>;
   /**
+   * 开一条新会话（`emrg:newSession`；issue #3251）。id 由主进程本地生成、记成当前会话
+   * 并落盘 —— 不问 daemon 要件何事，所以「没有会话时发送」不必先让宿主自己去建一条。
+   *
+   * 可选：这条消息比某些已装客户端新，未接线时「没有会话时发送」退回原来那句提示，
+   * 而不是把消息发给一个说不出来的会话。
+   */
+  newSession?(p?: { projectPath?: string }): Promise<{ session_id: string }>;
+  /**
    * 关掉一条打开的会话（`emrg:closeSession`；磁盘数据保留）。
    *
    * 可选：这条消息比某些已装客户端新，未接线时 Shell 退回「什么都不做」而不是清屏 ——
@@ -808,6 +816,35 @@ export function Shell() {
   }
 
   /**
+   * 没有会话时发送，先开一条（issue #3251）。
+   *
+   * 开一条会话不问 daemon 要件何事：主进程自己生成 id、把它记成当前会话、落盘并广播
+   * （`emrg:newSession`）。所以「新装后第一句话撞墙」不是设计所限，是没有人替宿主走这
+   * 一步。要不要开、开在哪儿由这一层决定，`Composer` 只要一个 id。
+   *
+   * 交回 `null` 表示开不出来（这个构建的桥没有这条通道、或主进程拒绝）：输入框那头照旧
+   * 只回一句提示，绝不假装消息已经发出去。
+   */
+  async function ensureSessionForSend(): Promise<string | null> {
+    const create = wsBridge()?.newSession;
+    if (!create) return null;
+    let sid: string | null = null;
+    try {
+      sid = (await create({}))?.session_id ?? null;
+    } catch {
+      return null;
+    }
+    if (!sid) return null;
+    // 主进程已经把它记成当前会话（`currentSessionId`），这里只把屏幕换过去。不再发一次
+    // `switchSession`：那是对同一个事实写第二遍，两条通道打架的样子就是「屏幕在 A、
+    // 后台在 B」—— rant 2026-11-18T18:41:06 报的那一类。
+    setSwitchError(null);
+    setActiveSid(sid);
+    setActiveView("sessions");
+    return sid;
+  }
+
+  /**
    * 选择会话：对话区、输入框、**后台当前会话**在同一次操作里换过去
    * （rant 2026-11-18T18:41:06 清单 1「三处同一」）。
    *
@@ -1321,6 +1358,9 @@ export function Shell() {
                 // 它，所以它的文件现在就以这段文字结尾；不跟上，↑ 在「刚打完五句话的新
                 // 会话」里就只能翻到会话打开那一刻为止——而那正是宿主最常按 ↑ 的时候。
                 onPromptSent={(sid, text) => bridge.notePromptSubmitted(sid, text)}
+                // 没有会话时发送先开一条（issue #3251）：怎么开是这一层的事，输入框只要
+                // 一个 id —— 拿到就把这条消息发给它，而不是先回一句「请先创建一个对话」。
+                onEnsureSession={ensureSessionForSend}
                 onManageSandboxRoots={() => dialogHost.current?.openSandbox([])}
                 // /rewind 的选中结果（issue #2384）：文本由 DialogHost 交上来，这里只
                 // 负责给它一个新 id——同一个 id 只应用一次，宿主之后打的字不会被盖掉。
