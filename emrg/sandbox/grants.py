@@ -325,6 +325,22 @@ class RootGrant(NamedTuple):
         return cls(kind=GRANT_DIRECTORY if is_dir else GRANT_FILE, target=target, source=source)
 
 
+def _covers_protected_state(target: str) -> bool:
+    """Whether granting ``target`` as a tree would reach a protected daemon file.
+
+    The predicate is imported at call time for the reason
+    :func:`emrg.sandbox.roots.judge_extra_root` gives at the same point: the tool
+    package sits beside this one, and ``emrg.config`` is reached through it, so a
+    module-scope import would close a cycle.
+
+    :param target: the expanded manifest target, already known to exist.
+    :returns: True when the directory is, or is above, a protected daemon file.
+    """
+    from emrg.tools.file_policy import protected_hit  # noqa: PLC0415
+
+    return protected_hit(os.path.realpath(target), as_directory=True) is not None
+
+
 def default_grants(platform: str | None = None) -> list[RootGrant]:
     """The manifest's entries for this platform, as grants that really apply here.
 
@@ -333,6 +349,17 @@ def default_grants(platform: str | None = None) -> list[RootGrant]:
     answer, never an error. ``lark-cli`` may never have run here, and a boundary
     that refused to be computed over a tool nobody installed would take a working
     sandbox down with it.
+
+    A row is absent for a second reason too: when granting it would reach a
+    protected daemon state file. That is the question rule 5 of
+    :func:`emrg.sandbox.roots.judge_extra_root` asks of a path a host **types**,
+    and this is the row the installation **ships** — one rule, so both callers
+    answer alike. The two readers are not interchangeable, and that is why the row
+    cannot simply be trusted: a grant becomes a ``subpath`` clause in the kernel
+    profile, which allows the whole tree and cannot subtract a file inside it,
+    while the five protected files are refused by the in-process fence a spawned
+    command never asks. A row here would therefore hand ``bash`` the reach rule 5
+    keeps unreachable.
 
     The ``source`` is :data:`SOURCE_DEFAULT` for every entry: that is what lets
     a host tell a grant they typed from one the installation supplied, which is
@@ -359,6 +386,11 @@ def default_grants(platform: str | None = None) -> list[RootGrant]:
             except OSError:  # pragma: no cover - both calls swallow their own errors
                 exists = False
         if not exists:
+            continue
+        if kind == GRANT_DIRECTORY and _covers_protected_state(target):
+            # Absent, not an error, and not silently either: ``manifest_targets``
+            # still answers the row, so a host who asks what the installation
+            # shipped is shown it and can still withdraw it.
             continue
         out.append(RootGrant(kind=kind, target=target, source=SOURCE_DEFAULT))
     return out
