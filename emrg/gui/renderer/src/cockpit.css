@@ -1023,6 +1023,21 @@ body.col-resizing * {
   display: inline-flex;
   gap: 4px;
   align-items: center;
+  /* The group asks for roughly three times the width of the button it replaces, so
+   * it is the first thing a tight row tries to take it out of. A shrink here reaches
+   * the labels: they break, one character per line. It refuses to shrink, and the
+   * row's own content is what gives way. */
+  flex: none;
+  white-space: nowrap;
+  /* Its own surface, because on a rant row the group is wider than the 50px action
+   * column it sits in and leaves that column towards the content. The columns do not
+   * move — `.rant-row` keeps the header's six, by test — so what the group covers has
+   * to be its own background rather than whatever text it happens to lie across.
+   * No vertical padding: the agent row is a fixed 23px and must not grow. */
+  background: var(--bg-1);
+  border-radius: 6px;
+  position: relative;
+  z-index: 2;
 }
 
 .row-confirm-btn.danger {
@@ -1036,6 +1051,7 @@ body.col-resizing * {
   flex: none;
   display: inline-flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 4px;
 }
 
