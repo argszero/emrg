@@ -49,6 +49,31 @@ import { ContextMenu } from "./ContextMenu";
 import type { EditorState as CodeMirrorState } from "@codemirror/state";
 
 /**
+ * The toolbar's glyphs, drawn rather than written (rant 2026-11-27T17:55:15).
+ *
+ * Six words — Save, Reload, Discard, Wrap, Minimap, Browser — filled the row the path needs,
+ * and the path is the only thing up there a reader cannot guess. Each control is now a 24×24
+ * stroke drawing in the shape the rail and the status band already use, with its word moved
+ * into `aria-label` and `title`: read out when someone asks for it, no width when nobody
+ * does. Every path below is drawn for its own meaning rather than reused from another one.
+ */
+const TOOL_PATHS = {
+  save: ["M5 4h11l3 3v13H5z", "M8 4v5h7V4", "M8 14h8v6H8z"],
+  reload: ["M20 12a8 8 0 1 1-2.4-5.7", "M20 4v4h-4"],
+  wrap: ["M3 6h18", "M3 12h12a3 3 0 0 1 0 6H9", "M11 15l-3 3 3 3"],
+  minimap: ["M4 5h16v14H4z", "M15 5v14", "M7 9h5M7 12h5M7 16h3"],
+  browser: ["M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z", "M3 12h18", "M12 3a14 14 0 0 1 0 18", "M12 3a14 14 0 0 0 0 18"],
+} as const;
+
+const toolIcon = (paths: readonly string[]) => (
+  <svg viewBox="0 0 24 24" aria-hidden="true">
+    {paths.map((d) => (
+      <path key={d} d={d} />
+    ))}
+  </svg>
+);
+
+/**
  * EditorPanel — the cockpit's right-hand column, an editor rather than a tabbed reader
  * (issues #3068, #3095).
  *
@@ -201,11 +226,9 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
   // A close request held back by unsaved changes. The three answers are save / discard /
   // cancel, and cancel is the one that must leave the tab and its text exactly as they are.
   const [closeAsk, setCloseAsk] = useState<string | null>(null);
-  // Two more questions with the same shape as the close one and different sentences: "reload
-  // from disk, losing your edits" and "revert to disk, losing your edits" are the same act
-  // reached from two buttons, so each asks in its own words rather than sharing a kind.
+  // One question with the shape of the close one, for the single act the toolbar offers:
+  // the copy on disk replaces the buffer.
   const [reloadAsk, setReloadAsk] = useState<string | null>(null);
-  const [discardAsk, setDiscardAsk] = useState<string | null>(null);
   // The open tab menu: which tab it was opened on, and where the pointer was.
   const [tabMenu, setTabMenu] = useState<{
     id: string;
@@ -605,28 +628,21 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
   );
 
   /**
-   * The toolbar's reload: a question only when there is something to lose.
+   * The toolbar's one act on what the buffer holds: the copy on disk replaces it.
    *
-   * An untouched buffer is reloaded straight away — asking "reload and lose your edits?" over
-   * a file with no edits is a dialog that trains the reader to click through the one that
-   * matters.
+   * A question only when there is something to lose. An untouched buffer is reloaded straight
+   * away — asking "reload and lose your edits?" over a file with no edits is a dialog that
+   * trains the reader to click through the one that matters.
+   *
+   * "Reload" and "discard my changes" were two buttons for this one act: both called
+   * `reloadFromDisk`, and the only difference was which sentence asked. So there is one
+   * entry and one sentence, the one that says what happens to the buffer rather than which
+   * of two words the reader clicked (rant 2026-11-27T17:55:15).
    */
   const requestReload = useCallback(
     (path: string): void => {
       if (isDirty(path)) {
         setReloadAsk(path);
-        return;
-      }
-      void reloadFromDisk(path);
-    },
-    [isDirty, reloadFromDisk],
-  );
-
-  /** Discard is the same act as a reload: the disk copy replaces both buffer and snapshot. */
-  const requestDiscard = useCallback(
-    (path: string): void => {
-      if (isDirty(path)) {
-        setDiscardAsk(path);
         return;
       }
       void reloadFromDisk(path);
@@ -936,7 +952,8 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
       ) : null}
       {/* The breadcrumb follows the active tab, not the read: which file this is is known
           the moment the tab exists, and waiting for the text would make the header flicker
-          in after the code. The two toggles sit at its right end. */}
+          in after the code. The path takes whatever width is going, and the controls beside
+          it are each one glyph wide, so what a deep path loses here is nothing. */}
       {activeFile ? (
         <div className="editor-head" data-testid="editor-head">
           <nav className="editor-crumbs" data-testid="editor-breadcrumb">
@@ -948,34 +965,31 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
             ))}
           </nav>
           <div className="editor-actions" data-testid="editor-actions">
-            {/* The two acts that had no button. A mouse-only reader can save and can pick up
-                a file that changed underneath them; the keyboard paths are unchanged. */}
+            {/* The two acts that touch the file on disk. A mouse-only reader can save and can
+                pick up a file that changed underneath them; the keyboard paths are unchanged.
+                Save is live only while there is something to save: writing back the bytes
+                that are already there has no outcome but a failure, so the button waits
+                until the buffer differs from the snapshot (rant 2026-11-27T17:55:15). */}
             <button
               type="button"
               className="editor-toggle"
               data-testid="editor-action-save"
+              aria-label={t("editor.save")}
               title={t("editor.save")}
+              disabled={!activeDirty}
               onClick={() => void save(activeFile.path)}
             >
-              {t("editor.save")}
+              {toolIcon(TOOL_PATHS.save)}
             </button>
             <button
               type="button"
               className="editor-toggle"
               data-testid="editor-action-reload"
+              aria-label={t("editor.reload")}
               title={t("editor.reload")}
               onClick={() => requestReload(activeFile.path)}
             >
-              {t("editor.reload")}
-            </button>
-            <button
-              type="button"
-              className="editor-toggle"
-              data-testid="editor-action-discard"
-              title={t("editor.discard")}
-              onClick={() => requestDiscard(activeFile.path)}
-            >
-              {t("editor.discard")}
+              {toolIcon(TOOL_PATHS.reload)}
             </button>
           </div>
           <div className="editor-toggles">
@@ -984,20 +998,22 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
               className={`editor-toggle${display.wrap ? " on" : ""}`}
               data-testid="editor-toggle-wrap"
               aria-pressed={display.wrap}
+              aria-label={t("editor.wrap")}
               title={t("editor.wrap")}
               onClick={() => toggle({ wrap: !display.wrap })}
             >
-              {t("editor.wrap")}
+              {toolIcon(TOOL_PATHS.wrap)}
             </button>
             <button
               type="button"
               className={`editor-toggle${display.minimap ? " on" : ""}`}
               data-testid="editor-toggle-minimap"
               aria-pressed={display.minimap}
+              aria-label={t("editor.minimap")}
               title={t("editor.minimap")}
               onClick={() => toggle({ minimap: !display.minimap })}
             >
-              {t("editor.minimap")}
+              {toolIcon(TOOL_PATHS.minimap)}
             </button>
             {/* The third toggle, and the only one that changes what the tab *is* rather than
                 how the text is drawn — so it exists only where there is a second thing to
@@ -1008,13 +1024,14 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
                 className={`editor-toggle${browserOn ? " on" : ""}`}
                 data-testid="editor-toggle-browser"
                 aria-pressed={browserOn}
+                aria-label={t("editor.browser")}
                 title={t("editor.browser")}
                 onClick={() => {
                   setBrowserError(null);
                   setBrowserPath((prev) => (prev === activeFile.path ? null : activeFile.path));
                 }}
               >
-                {t("editor.browser")}
+                {toolIcon(TOOL_PATHS.browser)}
               </button>
             ) : null}
           </div>
@@ -1121,33 +1138,6 @@ export const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(funct
             className="editor-ask-btn"
             data-testid="editor-reload-cancel"
             onClick={() => setReloadAsk(null)}
-          >
-            {t("editor.cancel")}
-          </button>
-        </div>
-      ) : null}
-      {discardAsk ? (
-        <div className="editor-ask" data-testid="editor-discard-ask">
-          <span className="editor-ask-text">
-            {t("editor.discardUnsaved", { name: baseName(discardAsk) })}
-          </span>
-          <button
-            type="button"
-            className="editor-ask-btn primary"
-            data-testid="editor-discard-confirm"
-            onClick={() => {
-              const path = discardAsk;
-              setDiscardAsk(null);
-              void reloadFromDisk(path);
-            }}
-          >
-            {t("editor.discard")}
-          </button>
-          <button
-            type="button"
-            className="editor-ask-btn"
-            data-testid="editor-discard-cancel"
-            onClick={() => setDiscardAsk(null)}
           >
             {t("editor.cancel")}
           </button>

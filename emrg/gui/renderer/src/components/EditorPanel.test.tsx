@@ -879,22 +879,63 @@ describe("EditorPanel's ten gaps (issue #3200)", () => {
     expect(size()).toBe(DEFAULT_FONT_SIZE + 1);
   });
 
-  it("10. 放弃改动是自己的入口：先问，确认后回到磁盘那份；没改动时不问", async () => {
+  it("10. 放弃改动没有第二个入口：它就是重载，一次问、一条路径", async () => {
     const { open } = renderPanel();
     open("/p/emrg/a.txt", "/p/emrg", false);
     await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
     typeInto("!");
     expect(surface()).toHaveTextContent("gamma!");
 
-    fireEvent.click(screen.getByTestId("editor-action-discard"));
-    expect(screen.getByTestId("editor-discard-ask")).toBeInTheDocument();
-    fireEvent.click(screen.getByTestId("editor-discard-confirm"));
+    // 「重载」和「放弃改动」是同一个动作的两个按钮，工具栏上只留一个（rant 2026-11-27T17:55:15）
+    expect(screen.queryByTestId("editor-action-discard")).toBeNull();
+    expect(screen.queryByTestId("editor-discard-ask")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("editor-action-reload"));
+    expect(screen.getByTestId("editor-reload-ask")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("editor-reload-confirm"));
     await waitFor(() => expect(surface()).not.toHaveTextContent("gamma!"));
     expect(surface()).toHaveTextContent("alpha");
 
     // 已经和磁盘一样了：再点不问
-    fireEvent.click(screen.getByTestId("editor-action-discard"));
-    expect(screen.queryByTestId("editor-discard-ask")).toBeNull();
+    fireEvent.click(screen.getByTestId("editor-action-reload"));
+    expect(screen.queryByTestId("editor-reload-ask")).toBeNull();
+  });
+
+  it("11. 保存按钮在没有改动时点不动，有改动才亮，写完之后又回到点不动", async () => {
+    const saveFile = vi.fn(
+      async (_path: string, _content: string, _sid: string) => ({ mtime: 200, size: 20 }),
+    );
+    const { open } = renderPanel({ saveFile });
+    open("/p/emrg/a.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+
+    // 缓冲区与磁盘上的字节相同：此刻保存只能写出同样的内容
+    expect(screen.getByTestId("editor-action-save")).toBeDisabled();
+
+    typeInto("?");
+    await waitFor(() => expect(screen.getByTestId("editor-action-save")).not.toBeDisabled());
+    fireEvent.click(screen.getByTestId("editor-action-save"));
+    await waitFor(() => expect(saveFile).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByTestId("editor-action-save")).toBeDisabled());
+  });
+
+  it("12. 工具栏上是图标不是词：每个按钮只装一张图，词在 aria-label 里", async () => {
+    const { open } = renderPanel();
+    open("/p/emrg/a.txt", "/p/emrg", false);
+    await waitFor(() => expect(surface()).toHaveTextContent("alpha"));
+    // 缩略图先打开，让第三个显示开关也在场上
+    fireEvent.click(screen.getByTestId("editor-toggle-minimap"));
+
+    const head = screen.getByTestId("editor-head");
+    const buttons = within(head).getAllByRole("button");
+    // 保存、重载、折行、缩略图 —— 浏览器的按钮只有页面能开，不在这一行
+    expect(buttons.length).toBeGreaterThanOrEqual(4);
+    for (const button of buttons) {
+      expect(button.querySelector("svg")).not.toBeNull();
+      // 可见文本为空：词搬进了 aria-label，宽度还给了路径
+      expect(button.textContent).toBe("");
+      expect(button.getAttribute("aria-label")).toBeTruthy();
+    }
   });
 });
 
