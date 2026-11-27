@@ -1,6 +1,6 @@
 # EMRG — Agent.md
 
-> **Principles and conventions only** — what to obey and how to decide. History lives in docstrings, `--help`, commits and records.
+> **Principles and conventions only** — what to obey and how to decide. History lives in docstrings, commits and records.
 
 ## Project Overview
 
@@ -8,14 +8,14 @@ EMRG is a self-evolving AI agent architecture experiment: a **micro-kernel** —
 
 ## Architecture
 
-**The server is the living core; a client is only the interface.** Task understanding, tool scheduling, capability growth and self-evolution live there; one server serves many clients and outlives them.
+**The server is the living core; a client is only the interface.** Task understanding, tool scheduling, and self-evolution live there; one server serves many clients and outlives them.
 
-- `emrg/` — core: `__main__.py` (CLI), `protocol.py`, `config.py`, `connect.py` (WebSocket over loopback, token auth)
+- `emrg/` — core: `__main__.py` (CLI), `protocol.py`, `config.py`, `connect.py` (WebSocket, token auth)
 - `emrg/server/` — the daemon: `daemon.py` (messages, the evolution thread, the tool loop), `llm.py`, `tool_types.py`, task templates
 - `emrg/tools/` — bash, read, write, edit, glob, grep, base + registry
 - `emrg/skills/` — skills from `.emrg/skills/` (progressive disclosure) + the installable-skill catalog
 - `emrg/client/` — TUI: `daemon_manager.py` (daemon lifecycle + protocol client, shared with the GUI), `app.py`
-- `emrg/gui/` — Electron GUI (non-developer entry point): the main process owns the daemon connection, the renderer is sandboxed
+- `emrg/gui/` — Electron GUI (non-developer entry): the main process owns the connection, the renderer is sandboxed
 - `scripts/` — the guards · `tests/` — pytest suite · `packaging/` — installers
 
 ## Key Conventions
@@ -34,12 +34,13 @@ EMRG is a self-evolving AI agent architecture experiment: a **micro-kernel** —
 - Every sentence has someone doing something. A clause crushed into a noun phrase (`名字撞上它赢`) is not speech, nor is a clipped fragment.
 - Never say what the reader saw or thought.
 - The test, for a reply, a doc line and a comment alike: a person in a novel could say it, and the reader learns one new thing.
+- Be short. A long answer is not what a person says either. When length is truly needed: the point first, then its parts, each as long as it earns.
 
 ## Terminology
 
-The execution model, in this repo's own terms (`emrg/server/daemon.py`):
+The execution model, in this repo's terms (`emrg/server/daemon.py`):
 
-- **Tool loop** — the whole process triggered by one user message: LLM requests and tool calls repeat until a round brings no new tool calls (`_run_tool_loop`).
+- **Tool loop** — everything one user message triggers: LLM requests and tool calls repeat until a round brings no new tool calls (`_run_tool_loop`).
 - **Round** — one iteration inside a tool loop: one LLM request + zero or more tool calls + their execution (`round_num`, bounded by `max_tool_rounds`).
 - **Evolution cycle** — one full self-evolution run (Preparation → Look → Think → Act → Record). Never call it a "round".
 
@@ -47,11 +48,11 @@ The execution model, in this repo's own terms (`emrg/server/daemon.py`):
 
 What EMRG does today — capabilities, not a changelog.
 
-- **TUI client** — markdown/diffs, slash commands, autocomplete, pickers, clipboard images (`vision` per model), ESC interrupt, CJK-aware input
+- **TUI client** — markdown/diffs, slash commands, autocomplete, pickers, clipboard images (`vision` per model), ESC interrupt, CJK input
 - **Electron GUI** — streaming chat, tool-status cards, sessions, models, settings, onboarding, reconnect, daemon respawn
-- **Scheduled tasks** — `TaskHandler` for any registered project: builtin and custom types, CRUD, hot reload, `when` early wake
+- **Scheduled tasks** — `TaskHandler` per registered project: builtin and custom types, CRUD, hot reload, `when` early wake
 - **Rant-driven evolution** — host feedback through `/rant` drives the cycles
-- **Memory** — project and session memory (YAML frontmatter + a Markdown index), compact/clear, capped prompt footprint
+- **Memory** — project and session memory (frontmatter + a Markdown index), compact/clear, capped prompt footprint
 - **Skills** — `.emrg/skills/` with progressive disclosure + an installable-skill catalog
 - **Operational** — config hot-reload, project tracking, headless GitHub auth
 
@@ -63,7 +64,7 @@ Foreground daemon: `python -m emrg`.
 GUI: `cd emrg/gui && npm test` (258: 107 daemon_client + 22 conn-manager + 7 integration + 7 nav-policy + 11 gui-state + 9 build-config + 10 config_fields + 13 boot-contract + 3 preload-api + 2 theme-guard + 2 image-hash + 8 switch-session + 19 atp_login + 4 gui-op-log + 9 theme-setting + 5 window-title + 4 frame-route + 11 browser-policy + 5 browser-wiring) — syntax: `node --check main.js preload.js daemon_client.js`
 Renderer: `cd emrg/gui/renderer && npm run typecheck && npm test` (1230: 5 snapshot-store + 13 utils + 3 ErrorBoundary + 2 App + 12 commands + 4 copywriting + 14 i18n + 33 markdown + 22 selection + 37 transcript + 11 conversationType + 4 MarkdownText + 62 TranscriptView + 22 history + 30 historyReplay + 8 userImages + 43 composer + 96 Composer + 14 sidebar + 32 workspaceView + 18 WorkspaceView + 10 dialog + 6 Dialog + 9 ConfirmDialog + 9 RenameDialog + 13 dialogLists + 3 HelpDialog + 9 MemoryDialog + 8 SkillsDialog + 8 openSession + 6 WelcomeDialog + 20 OpenSessionDialog + 14 NewSessionDialog + 7 rewind + 8 RewindDialog + 7 GithubDeviceDialog + 80 daemonBridge + 13 DaemonBridgeProvider + 68 Shell + 19 page + 51 EditorPanel + 25 DialogHost + 48 SettingsPanel + 18 TaskFormDialog + 5 RantDialog + 8 vendorMarkdown + 10 highlightTheme + 6 ApprovalDialog + 20 SandboxRootsDialog + 42 cockpit + 4 editorSelectionCascade + 9 fileTree + 24 FileTree + 5 contextMenu + 1 residue + 24 StatusBand + 24 UsageRanking + 9 usageRanking + 6 SearchOverlay + 5 ResizeHandle + 8 IconRail + 6 SessionColumn + 5 EmrgMark + 38 editorDoc + 27 CodeEditor)
 - CI: pytest on ubuntu **and windows-2025**, the GUI suites, and an actionlint gate over `.github/workflows/`; re-trigger a dropped push with `scripts/re-trigger-ci.sh <branch>`, never an empty commit
-- Merge gates, run before merging — each asks what no other gate asks: `uv run --no-sync python3 scripts/check-vote-count.py` · `scripts/check-pr-base.py` · `scripts/check-merge-freshness.py` · `scripts/check-merge-order.py` · `scripts/check-merge-landing-diff.py` · `scripts/check-merge-pairs.py` / `scripts/check-merge-sequence.py` · `scripts/check-merge-tree-health.py` · `scripts/check-merge-plan-suite.py` — all under `uv run --no-sync python3`
+- Merge gates, run before merging — `uv run --no-sync python3 scripts/check-vote-count.py` · `scripts/check-pr-base.py` · `scripts/check-merge-freshness.py` · `scripts/check-merge-order.py` · `scripts/check-merge-landing-diff.py` · `scripts/check-merge-pairs.py` / `scripts/check-merge-sequence.py` · `scripts/check-merge-tree-health.py` · `scripts/check-merge-plan-suite.py` — all under `uv run --no-sync python3`
 - Post-merge audit: `uv run --no-sync python3 scripts/check-merge-landed.py <N>` (did it land the reviewed tree)
 - Other tools: `uv run --no-sync python3 scripts/check-node-test-count.py --write`, `scripts/check-memory-index.py`, `scripts/check-patch-files.py`, `scripts/check-staged-inverse.py`, `scripts/check-memory-rotation.py`, `scripts/cast-vote.py`, `scripts/feishu-gate.py`, `bump-version.py`, `classify-conflict.py`, `sync-master-from-api.py`, `push-branch-from-api.py`
 
@@ -79,7 +80,7 @@ Every guard names the tree it reads; what it cannot answer is unmeasurable, neve
 
 ## Packaging
 
-Only `icon.svg` is committed; generated icon products are gitignored, built by CI (`bash packaging/gen-assets.sh` first; `.icns` needs macOS `iconutil`).
+Only `icon.svg` is committed; generated icons are gitignored, built by CI (`bash packaging/gen-assets.sh` first; `.icns` needs macOS `iconutil`).
 
 ## Configuration
 
