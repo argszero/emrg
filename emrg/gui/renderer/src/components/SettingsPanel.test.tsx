@@ -399,6 +399,25 @@ describe("SettingsPanel", () => {
     });
   });
 
+  it("语言按钮显示当前选中的那个，点完就跟着走（issue #3255）", async () => {
+    const { calls } = setup();
+    // 与上一支同一个理由：这里量的是按钮的选中态，不需要真的写存储、真的换语言。
+    vi.spyOn(i18n, "setLocale").mockImplementation((l): i18n.Locale => (l === "" ? "en" : l));
+    await screen.findByTestId("settings-tab-appearance");
+    fireEvent.click(screen.getByTestId("settings-tab-appearance"));
+    // 没存过语言 → 「跟随系统」就是选中的那个
+    expect(screen.getByTestId("lang-system").className).toContain("active");
+    expect(screen.getByTestId("lang-zh").className).not.toContain("active");
+    fireEvent.click(screen.getByTestId("lang-zh"));
+    // 点完就换过去，且只有一个亮着
+    expect(screen.getByTestId("lang-zh").className).toContain("active");
+    expect(screen.getByTestId("lang-system").className).not.toContain("active");
+    await waitFor(() => {
+      const last = calls.saveSettings[calls.saveSettings.length - 1]?.[0] as { lang?: string };
+      expect(last.lang).toBe("zh");
+    });
+  });
+
   it("reopen reads persisted theme/lang and does not reset to system", async () => {
     const { calls } = setup({
       getSettings: vi.fn().mockResolvedValue({

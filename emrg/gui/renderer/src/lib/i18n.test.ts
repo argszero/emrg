@@ -1,5 +1,18 @@
-import { describe, expect, it, beforeEach } from "vitest";
-import { DICTS, EN_DICT, ZH_DICT, detectLocale, getLocale, setLocale, t, LOCALE_KEY } from "./i18n";
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { createElement } from "react";
+import { act, render, screen } from "@testing-library/react";
+import {
+  DICTS,
+  EN_DICT,
+  ZH_DICT,
+  I18nProvider,
+  detectLocale,
+  getLocale,
+  setLocale,
+  t,
+  useI18n,
+  LOCALE_KEY,
+} from "./i18n";
 
 /**
  * i18n.test.ts — 完整词典 + 原生逻辑移植测试（Batch 1 remainder）。
@@ -69,6 +82,58 @@ describe("getLocale / setLocale（localStorage 覆盖）", () => {
     setLocale("");
     const l = getLocale();
     expect(["zh", "en"]).toContain(l);
+  });
+});
+
+/**
+ * 这条守卫量的是**屏幕**，不是数据面（issue #3255）：上面那组只断言 getLocale() 的值，
+ * SettingsPanel 那支又把 setLocale 整个替成 spy，所以「存储写对了、界面不动」这个接缝
+ * 两边都抓不到。这里挂真 Provider、调真 setter、读渲染出来的字。
+ */
+describe("I18nProvider 跟着存储换语言（issue #3255）", () => {
+  // 这个测试环境没有 localStorage（实测 `typeof localStorage === "undefined"`），真 Electron 有。
+  // 装上内存版：要量的是 Provider 那一次重读问的是谁，不是宿主有没有存储——没有存储时
+  // 两层都会退回 navigator，那种两难是环境造成的，量不出接缝。
+  const mem = new Map<string, string>();
+  const memStorage = {
+    getItem: (k: string) => (mem.has(k) ? (mem.get(k) as string) : null),
+    setItem: (k: string, v: string) => void mem.set(k, String(v)),
+    removeItem: (k: string) => void mem.delete(k),
+    clear: () => mem.clear(),
+    key: (i: number) => Array.from(mem.keys())[i] ?? null,
+    get length() {
+      return mem.size;
+    },
+  } as unknown as Storage;
+
+  beforeEach(() => {
+    mem.clear();
+    (globalThis as unknown as { localStorage: Storage }).localStorage = memStorage;
+  });
+  afterEach(() => {
+    delete (globalThis as unknown as { localStorage?: Storage }).localStorage;
+  });
+
+  /** 探针：只经 useI18n() 取词，屏幕上的字就是 Provider 此刻的语言 */
+  function Probe() {
+    const { t: tr } = useI18n();
+    return createElement("span", { "data-testid": "locale-probe" }, tr("sidebar.newChat"));
+  }
+
+  it("真实 Provider + 真实 setLocale：屏幕上的文字跟着存储换", () => {
+    render(createElement(I18nProvider, { lang: "en-US", children: createElement(Probe) }));
+    // 系统语言英文、存储里没有覆盖 → 英文
+    expect(screen.getByTestId("locale-probe").textContent).toBe("＋ New chat");
+    act(() => {
+      setLocale("zh");
+    });
+    // 存储写了 zh，屏幕必须跟着换。只问 navigator 的那版实现到这里仍读英文。
+    expect(screen.getByTestId("locale-probe").textContent).toBe("＋ 新对话");
+    act(() => {
+      setLocale("");
+    });
+    // 跟随系统 → 回到 navigator（en-US → 英文）
+    expect(screen.getByTestId("locale-probe").textContent).toBe("＋ New chat");
   });
 });
 
