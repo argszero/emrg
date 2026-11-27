@@ -48,8 +48,12 @@ export function detectLocale(lang?: string): Locale {
   }
 }
 
-/** localStorage 手动覆盖（""=跟随系统）；不可用时回退系统检测 */
-export function getLocale(): Locale {
+/**
+ * 生效语言：存储的覆盖优先（"zh"/"en"），否则 lang 提示 / navigator（issue #3255）。
+ * Provider 的初始状态、广播重读与无 Provider 兜底都必须走这里。只问 navigator 的话，
+ * 设置里选了语言、存储也写对了，屏幕仍然不动——因为系统语言没变，而它问的是系统。
+ */
+function resolveLocale(lang?: string): Locale {
   let saved: string | null = null;
   try {
     if (typeof localStorage !== "undefined") saved = localStorage.getItem(LOCALE_KEY);
@@ -57,7 +61,12 @@ export function getLocale(): Locale {
     /* ignore */
   }
   if (saved === "zh" || saved === "en") return saved;
-  return detectLocale();
+  return detectLocale(lang);
+}
+
+/** localStorage 手动覆盖（""=跟随系统）；不可用时回退系统检测 */
+export function getLocale(): Locale {
+  return resolveLocale();
 }
 
 /** 手动覆盖语言：""=跟随系统 / "zh" / "en"；返回生效的 locale */
@@ -110,11 +119,11 @@ export function I18nProvider({
   dicts?: Record<string, Record<string, string>>;
   children: ReactNode;
 }) {
-  const [locale, setLocaleState] = useState<Locale>(() => detectLocale(lang));
+  const [locale, setLocaleState] = useState<Locale>(() => resolveLocale(lang));
   // 外部 setLocale（SettingsPanel 直接调用模块函数）→ 广播 LOCALE_CHANGED_EVENT →
   // 本 provider 重读生效（React 化后 localStorage 写入本身不触发重渲染）
   useEffect(() => {
-    const onChange = () => setLocaleState(detectLocale(lang));
+    const onChange = () => setLocaleState(resolveLocale(lang));
     window.addEventListener(LOCALE_CHANGED_EVENT, onChange);
     return () => window.removeEventListener(LOCALE_CHANGED_EVENT, onChange);
   }, [lang]);
@@ -132,7 +141,7 @@ export function I18nProvider({
 export function useI18n(): I18nContextValue {
   const ctx = useContext(I18nContext);
   if (ctx) return ctx;
-  const l = detectLocale();
+  const l = getLocale();
   const dict = DEFAULT_DICTS[l] ?? DEFAULT_DICTS.en;
   return {
     lang: l,

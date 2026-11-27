@@ -389,6 +389,9 @@ export function SettingsPanel({
   const [badField, setBadField] = useState<{ field: string; message: string } | null>(null);
   // 主题 / GitHub 状态
   const [theme, setTheme] = useState<string>("system");
+  // 语言三选里存的是哪个（""=跟随系统）。**只**给按钮的选中态用：真正的显示语言归 i18n，
+  // 而「跟随系统」时生效语言可能是 zh 也可能是 en，拿生效语言画选中态会把两个都点亮（issue #3255）。
+  const [lang, setLang] = useState<string>("");
   const [github, setGithub] = useState<{ authenticated: boolean; user: string | null } | null>(null);
   const [githubToken, setGithubToken] = useState("");
   const [device, setDevice] = useState<DeviceFlow | null>(null);
@@ -440,6 +443,7 @@ export function SettingsPanel({
         setBaseUrl(s.baseUrl || "");
         setDefaultName(s.model || "");
         setTheme(s.theme || "system");
+        setLang(s.lang || "");
         setExtraModels(
           (s.modelDetails || []).map((m) => ({
             name: m.name || "",
@@ -1339,10 +1343,11 @@ export function SettingsPanel({
                     <button
                       key={loc || "system"}
                       type="button"
-                      className="theme-option"
+                      className={`theme-option${lang === loc ? " active" : ""}`}
                       data-lang={loc}
                       data-testid={`lang-${loc || "system"}`}
                       onClick={() => {
+                        setLang(loc);
                         setLocale(loc);
                         void persistAppearance({ lang: loc });
                       }}
