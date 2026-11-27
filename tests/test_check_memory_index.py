@@ -464,6 +464,55 @@ def test_a_cross_directory_target_resolves_where_it_points(mod, tmp_path, capsys
     assert mod.main([str(path)]) == 0, capsys.readouterr().out
 
 
+def test_a_row_naming_the_ref_prefix_resolves_on_a_migrated_store(
+    mod, tmp_path, capsys
+) -> None:
+    """Both spellings a store writes its rows in, measured against one store.
+
+    `_detail_dir` answers `ref/` the moment that directory exists, so a single base
+    turned a row that already says `ref/x.md` into `ref/ref/x.md` and reported a
+    present file as missing (issue #3263). The two spellings are asserted together
+    because the fix adds a base without moving the old one: the bare row is this
+    repository's own shape, the prefixed row is a migrated store's.
+    """
+    ref = tmp_path / mod.MEMORY_REF_DIRNAME
+    ref.mkdir()
+    (ref / "prefixed.md").write_text("# prefixed\n", encoding="utf-8")
+    (ref / "bare.md").write_text("# bare\n", encoding="utf-8")
+    _detail(tmp_path, "beside.md")
+    path = _index(
+        tmp_path,
+        "links.md",
+        [
+            f"- [a]({mod.MEMORY_REF_DIRNAME}/prefixed.md)",
+            "- [b](bare.md)",
+            "- [c](beside.md)",
+        ],
+    )
+    code = mod.main([str(path)])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "row links 3, unresolved: 0" in out
+
+
+def test_a_missing_row_is_still_reported_on_a_migrated_store(
+    mod, tmp_path, capsys
+) -> None:
+    """The failing half, on the store the fix is about: `ref/` exists, the row names nothing.
+
+    Without this the wider base could pass by resolving everything - the reading
+    has to still say no, and say where it looked.
+    """
+    (tmp_path / mod.MEMORY_REF_DIRNAME).mkdir()
+    path = _index(tmp_path, "links.md", ["- [a](gone.md)"])
+    code = mod.main([str(path)])
+    out = capsys.readouterr().out
+    assert code == 1, out
+    assert "row links 1, unresolved: 1" in out
+    assert "row at line 1 names gone.md" in out
+    assert "which is not beside links.md or in " in out, out
+
+
 def test_a_url_and_an_anchor_are_not_rows_that_point_nowhere(
     mod, tmp_path, capsys
 ) -> None:
