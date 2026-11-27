@@ -7,6 +7,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import componentsCss from "../../css/components.css?raw";
+import cockpitCss from "../cockpit.css?raw";
 import { I18nProvider } from "../lib/i18n";
 import { WorkspaceView, type WorkspaceViewProps } from "./WorkspaceView";
 import type { MarkdownRenderer } from "../lib/markdown";
@@ -346,5 +348,93 @@ describe("WorkspaceView", () => {
       </I18nProvider>,
     );
     expect(screen.getByTestId("agent-sessions-error")).toHaveTextContent("boom");
+  });
+});
+
+/* ── The delete confirmation's layout (issue #3265) ─────────────
+ * A confirmation that cannot fit used to take the difference out of its own labels:
+ * two characters stacked onto two lines, and the row two lines of text tall. Nothing
+ * in this suite renders layout, so the constraints are read off the stylesheets the
+ * app actually loads — and the reader is first proved able to say no, because a
+ * reader that has only ever answered "fine" has measured nothing.
+ */
+
+type Sheets = { components: string; cockpit: string };
+
+/** One selector's declaration body, or `null` when no such rule exists. */
+function ruleBody(sheet: string, selector: string): string | null {
+  const at = sheet.indexOf(`${selector} {`);
+  if (at < 0) return null;
+  const open = sheet.indexOf("{", at);
+  const close = sheet.indexOf("}", open);
+  if (open < 0 || close < 0) return null;
+  return sheet.slice(open + 1, close);
+}
+
+/** A rule's declarations, normalised, with the prose comments in them dropped. */
+function declarations(body: string | null): Set<string> {
+  if (body === null) return new Set();
+  return new Set(
+    body
+      .split(";")
+      .map((d) => d.replace(/\/\*[\s\S]*?\*\//g, "").trim().replace(/\s+/g, " "))
+      .filter(Boolean),
+  );
+}
+
+/** Rewrite one rule's body with a declaration removed — the fixture arm's only move. */
+function without(sheet: string, selector: string, declaration: string): string {
+  const at = sheet.indexOf(`${selector} {`);
+  if (at < 0) return sheet;
+  const open = sheet.indexOf("{", at);
+  const close = sheet.indexOf("}", open);
+  const body = sheet.slice(open + 1, close);
+  return `${sheet.slice(0, open + 1)}${body.replace(declaration, "")}${sheet.slice(close)}`;
+}
+
+/** Every rule the confirmation depends on, and what each must declare. */
+const CONFIRM_RULES: Array<[keyof Sheets, string, string[]]> = [
+  ["components", ".model-action-btn", ["white-space: nowrap", "flex: none"]],
+  ["cockpit", ".row-confirm", ["white-space: nowrap", "flex: none"]],
+  // The columns do not move (that much `cockpit.test.ts` already pins), so the wider
+  // group leaves the 50px action cell. Which side it leaves on is this declaration:
+  // aligned to the end, it spills towards the content it covers; aligned to the start
+  // it spills out of the row altogether.
+  ["cockpit", ".rant-col-actions", ["justify-content: flex-end"]],
+];
+
+function confirmViolations(sheets: Sheets, rules = CONFIRM_RULES): string[] {
+  const out: string[] = [];
+  for (const [sheet, selector, needs] of rules) {
+    const got = declarations(ruleBody(sheets[sheet], selector));
+    for (const need of needs) {
+      if (!got.has(need)) out.push(`${selector} is missing \`${need}\``);
+    }
+  }
+  return out;
+}
+
+describe("delete confirmation: layout constraints", () => {
+  const real: Sheets = { components: componentsCss, cockpit: cockpitCss };
+
+  it("行内动作按钮的标签不折行，也不许被压到文字宽度以下", () => {
+    const modelBtn = CONFIRM_RULES.filter(([, selector]) => selector === ".model-action-btn");
+    expect(confirmViolations(real, modelBtn)).toEqual([]);
+  });
+
+  it("确认区域同样不折行、不收缩，并从正文那一侧越出动作列", () => {
+    const group = CONFIRM_RULES.filter(([, selector]) => selector !== ".model-action-btn");
+    expect(confirmViolations(real, group)).toEqual([]);
+  });
+
+  it("任意一条约束被删掉，上面两条读数就报出来 —— 否则它们只是在读空气", () => {
+    for (const [sheet, selector, needs] of CONFIRM_RULES) {
+      for (const need of needs) {
+        const broken: Sheets = { ...real, [sheet]: without(real[sheet], selector, need) };
+        expect(confirmViolations(broken), `${selector} 少了 ${need} 应当被报出`).toContain(
+          `${selector} is missing \`${need}\``,
+        );
+      }
+    }
   });
 });

@@ -831,6 +831,13 @@ dialog::backdrop {
   color: var(--text-2);
   padding: 4px 8px;
   border-radius: 6px;
+  /* The label *is* the control: a two-character word split over two lines turns a
+   * button into a column of glyphs, and a row of buttons into two lines of text —
+   * worst of all on the confirmation for a delete, which cannot be undone. Every row
+   * that carries one of these is a flex or grid item that would otherwise shrink it
+   * below the width its text needs. */
+  white-space: nowrap;
+  flex: none;
 }
 .model-action-btn:hover {
   background: var(--bg-soft);
@@ -955,6 +962,12 @@ dialog::backdrop {
 }
 .rant-row {
   display: grid;
+  /* The six columns are the header's, unchanged: `tests` pin `.rant-head` and
+   * `.rant-row` to one identical set, because a column that starts in two places is
+   * what made this table unreadable. So the confirmation that replaces the 50px
+   * delete button is not given room here — it keeps its own width and leaves the
+   * track on the content side (`.row-confirm`, `cockpit.css`), rather than the track
+   * growing and the labels being squeezed into one character per line (issue #3265). */
   grid-template-columns: 92px 64px 58px 106px 1fr 50px;
   gap: 10px;
   align-items: center;
