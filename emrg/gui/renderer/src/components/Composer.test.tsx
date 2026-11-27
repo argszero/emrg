@@ -486,6 +486,41 @@ describe("Composer — 发送流", () => {
     expect(s.value()).toBe("orphan");
   });
 
+  it("开一条会话在途时再按一次回车：不再开第二条，也不发第二遍（issue #3253）", async () => {
+    const store = createTranscriptStore();
+    const sent: Array<string | null> = [];
+    let asked = 0;
+    let release: (sid: string | null) => void = () => {};
+    // 开一条要真的「还没回来」：只有停在这里，第二次回车才落在 await 里面。
+    const pending = new Promise<string | null>((resolve) => {
+      release = resolve;
+    });
+    const s = setup(store, {
+      sid: null,
+      onEnsureSession: () => {
+        asked++;
+        return pending;
+      },
+      sendMessage: async (p: SendOptions) => {
+        sent.push(p.sessionId);
+        return {};
+      },
+    });
+    s.setText("hello");
+    s.press("Enter");
+    // 第一次还停在 await 里，文字还在框里 —— 宿主的按键重复就是这个形状。
+    s.press("Enter");
+    // 判据在 await 里就已经分得开：没有守卫时这里会是 2，第二次自己又去开了一条。
+    expect(asked).toBe(1);
+    release("s-new");
+    await waitFor(() => expect(sent).toEqual(["s-new"]));
+    // 一句话只发一次、只落一条会话：两条会话各一条消息正是这条 issue 要拆的。
+    expect(asked).toBe(1);
+    expect(store.getEntries("s-new").filter((e) => e.kind === "user" && e.text === "hello")).toHaveLength(1);
+    // 被让开的那一次不吞字：真正发出去的那一次才清输入框。
+    expect(s.value()).toBe("");
+  });
+
   it("/ 指令不进发送流，走 onCommand 路由（vanilla rant 19:44 P1）", async () => {
     let sent = 0;
     const routed: Array<{ cmd: string; args?: string[] }> = [];

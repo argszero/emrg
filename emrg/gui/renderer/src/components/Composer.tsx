@@ -374,6 +374,10 @@ export function Composer({
   // 同一个理由，同一层桥接：开一条会话发生在 submit 的 await 之后，那一刻要用最新实现。
   const onEnsureSessionRef = useRef(onEnsureSession);
   onEnsureSessionRef.current = onEnsureSession;
+  // 「正在开一条会话」的在途标记（issue #3253）：这段 await 期间输入框里的文字还在，而
+  // submit 没有别的在途守卫（`setInternalBusy` 也在 await 之后），所以第二次回车会把同一
+  // 段文字再发一遍、并开出第二条会话。只挡这一小段——有会话时那条路照旧，busy 排队也不变。
+  const ensuringSessionRef = useRef(false);
   /** 插入后把光标放回去（渲染之后才能设：受控 textarea 的值在这一帧才更新） */
   const caretAfterRenderRef = useRef<number | null>(null);
 
@@ -890,10 +894,17 @@ export function Composer({
     // 下来——prop 要到下一帧才变，消息不能等。开不出来才退回原来那句提示。
     let targetSid = sid;
     if (!targetSid) {
+      // 已经有一次「开一条会话」在途：那一句正在发出去，这一次让开（issue #3253）。再走一遍
+      // 会再问一次父级、开出第二条会话，并把同一段文字也发给它——一次按键，两条会话。
+      if (ensuringSessionRef.current) return;
+      ensuringSessionRef.current = true;
       try {
         targetSid = (await onEnsureSessionRef.current?.()) ?? null;
       } catch {
         targetSid = null;
+      } finally {
+        // 三种出路都要放开：开出来了、回了 null、抛了错。留着不放，之后再也开不出会话。
+        ensuringSessionRef.current = false;
       }
       if (!targetSid) {
         store.addSystemMessage(t("app.needSession"), sid);
